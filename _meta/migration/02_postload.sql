@@ -128,7 +128,12 @@ INSERT INTO mlm.person (
 )
 SELECT p.idperson,
        p.firstname, p.lastname, p.alias, lower(p.email),
-       p.idcountryphone, p.phonenumber, p.birthday, p.idcountrybirthday,
+       p.idcountryphone, p.phonenumber,
+       -- Saneo inline: el CHECK de mlm.person dispara durante el INSERT,
+       -- así que las fechas basura (año 203, 5024…) se anulan aquí.
+       CASE WHEN p.birthday BETWEEN DATE '1900-01-01' AND CURRENT_DATE
+            THEN p.birthday ELSE NULL END,
+       p.idcountrybirthday,
        CASE p.idstatus
          WHEN 1 THEN 'active'::mlm.person_status
          WHEN 2 THEN 'pending'::mlm.person_status
@@ -177,7 +182,14 @@ INSERT INTO mlm.affiliate (
 )
 SELECT v.idvicionario,
        p.id,
-       v.invitationlink,
+       -- invitation_link es UNIQUE: blancos → NULL y duplicados legacy →
+       -- solo el más antiguo conserva el link (el resto NULL, regenerable).
+       CASE WHEN row_number() OVER (
+                  PARTITION BY NULLIF(trim(v.invitationlink), '')
+                  ORDER BY v.creationtime NULLS LAST, v.idvicionario
+                ) = 1
+            THEN NULLIF(trim(v.invitationlink), '')
+            ELSE NULL END,
        NULL::bigint, NULL::mlm.tree_position,  -- filled in step 3c
        NULL::bigint,                            -- sponsor_id filled in step 3d
        NULL::ltree, NULL::int,                  -- path/depth filled in step 3e
@@ -203,18 +215,53 @@ CREATE TEMP TABLE map_aff AS
   SELECT id, legacy_id_vicionario FROM mlm.affiliate;
 CREATE INDEX ON map_aff (legacy_id_vicionario);
 
--- Step 3c: backfill parent_id + position
+-- Step 3c: backfill parent_id + position.
+-- Solo cuando los punteros L/R del padre confirman al hijo; los que el padre
+-- NO referencia (corrupción legacy, 3 casos detectados) se resuelven en 3c-bis.
 UPDATE mlm.affiliate a
    SET parent_id = mp.id,
        position = CASE
          WHEN sv.idvicionarioleft  = a.legacy_id_vicionario THEN 'L'::mlm.tree_position
          WHEN sv.idvicionarioright = a.legacy_id_vicionario THEN 'R'::mlm.tree_position
-         ELSE NULL
        END
   FROM staging.vicionario v
-  LEFT JOIN map_aff mp ON mp.legacy_id_vicionario = v.idvicionarioparent
-  LEFT JOIN staging.vicionario sv ON sv.idvicionario = v.idvicionarioparent
- WHERE a.legacy_id_vicionario = v.idvicionario;
+  JOIN map_aff mp ON mp.legacy_id_vicionario = v.idvicionarioparent
+  JOIN staging.vicionario sv ON sv.idvicionario = v.idvicionarioparent
+ WHERE a.legacy_id_vicionario = v.idvicionario
+   AND a.legacy_id_vicionario IN (sv.idvicionarioleft, sv.idvicionarioright);
+
+-- Step 3c-bis: hijos huérfanos de puntero (claim de parent sin L/R que los
+-- respalde). Se colocan uno a uno en el lado libre del padre reclamado; si no
+-- hay lado libre quedan detached (raíz aislada) y se registra WARNING.
+DO $$
+DECLARE
+  rec record;
+  v_parent bigint;
+  v_side mlm.tree_position;
+BEGIN
+  FOR rec IN
+    SELECT a.id AS aff_id, mp.id AS parent_aff_id, v.idvicionario AS legacy_id
+      FROM mlm.affiliate a
+      JOIN staging.vicionario v ON v.idvicionario = a.legacy_id_vicionario
+      JOIN map_aff mp ON mp.legacy_id_vicionario = v.idvicionarioparent
+     WHERE a.parent_id IS NULL
+       AND v.idvicionarioparent IS NOT NULL
+     ORDER BY v.idvicionario
+  LOOP
+    v_parent := rec.parent_aff_id;
+    SELECT CASE
+             WHEN NOT EXISTS (SELECT 1 FROM mlm.affiliate c WHERE c.parent_id = v_parent AND c.position = 'L') THEN 'L'::mlm.tree_position
+             WHEN NOT EXISTS (SELECT 1 FROM mlm.affiliate c WHERE c.parent_id = v_parent AND c.position = 'R') THEN 'R'::mlm.tree_position
+           END INTO v_side;
+
+    IF v_side IS NULL THEN
+      RAISE WARNING 'legacy % sin lado libre bajo parent aff %; queda detached', rec.legacy_id, v_parent;
+    ELSE
+      UPDATE mlm.affiliate SET parent_id = v_parent, position = v_side WHERE id = rec.aff_id;
+      RAISE NOTICE 'legacy % colocado en lado % bajo parent aff % (reparacion 3c-bis)', rec.legacy_id, v_side, v_parent;
+    END IF;
+  END LOOP;
+END $$;
 
 -- Step 3d: backfill sponsor_id
 UPDATE mlm.affiliate a
