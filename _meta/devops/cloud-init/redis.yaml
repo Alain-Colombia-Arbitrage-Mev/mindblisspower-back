@@ -1,0 +1,51 @@
+#cloud-config
+# Cloud-init for redis-01 (CX22, Ubuntu 24.04).
+
+hostname: vp-redis
+users:
+  - name: deploy
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA... ops@vicionpower
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - redis-server
+  - ufw
+  - fail2ban
+  - prometheus-node-exporter
+
+write_files:
+  - path: /etc/redis/redis.conf.d/00-vicionpower.conf
+    content: |
+      bind 10.0.1.30                         # private IP only
+      protected-mode yes
+      port 6379
+      tcp-keepalive 60
+      maxmemory 1gb
+      maxmemory-policy allkeys-lru
+      appendonly yes
+      appendfsync everysec
+      requirepass CHANGEME-strong-password
+      # Sessions are short-lived; AOF + RDB on every 5 min is enough
+      save 300 10
+
+runcmd:
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow from 10.0.0.0/16 to any port 6379 proto tcp
+  - ufw allow from 10.0.0.0/16 to any port 9100 proto tcp
+  - ufw allow 22/tcp
+  - ufw --force enable
+
+  - sed -i 's|^bind .*|# bind moved to conf.d|' /etc/redis/redis.conf
+  - echo 'include /etc/redis/redis.conf.d/00-vicionpower.conf' >> /etc/redis/redis.conf
+
+  - systemctl restart redis-server
+  - systemctl enable --now redis-server
+  - systemctl enable --now prometheus-node-exporter
+  - systemctl enable --now fail2ban

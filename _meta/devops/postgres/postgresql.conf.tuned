@@ -1,0 +1,115 @@
+# Postgres 17 — tuned for Hetzner AX52 (Ryzen 7950X3D, 64 GB RAM, NVMe)
+# Drop into /etc/postgresql/17/main/conf.d/00-vicionpower.conf
+
+# ─── Listen + identity ───────────────────────────────────────────────────────
+listen_addresses = '*'
+port = 5432
+cluster_name = 'vicionpower-primary'
+
+# ─── Memory ──────────────────────────────────────────────────────────────────
+shared_buffers              = 16GB
+effective_cache_size        = 48GB
+work_mem                    = 64MB
+maintenance_work_mem        = 2GB
+hash_mem_multiplier         = 2.0
+huge_pages                  = try
+temp_buffers                = 16MB
+
+# ─── Checkpoints + WAL ───────────────────────────────────────────────────────
+wal_level                   = replica
+max_wal_size                = 16GB
+min_wal_size                = 2GB
+checkpoint_completion_target = 0.9
+checkpoint_timeout          = 15min
+wal_compression             = on
+wal_buffers                 = 64MB
+synchronous_commit          = on            # remote_apply later if you need 2-DC consistency
+archive_mode                = on
+archive_command             = 'pgbackrest --stanza=vicionpower archive-push %p'
+archive_timeout             = 300s
+
+# ─── Replication ─────────────────────────────────────────────────────────────
+max_wal_senders             = 5
+max_replication_slots       = 5
+wal_keep_size               = 4GB
+hot_standby                 = on
+hot_standby_feedback        = on            # set on db-02 only
+
+# ─── Planner + I/O ───────────────────────────────────────────────────────────
+random_page_cost            = 1.1
+seq_page_cost               = 1.0
+effective_io_concurrency    = 200
+maintenance_io_concurrency  = 100
+default_statistics_target   = 200
+
+# ─── Parallelism ─────────────────────────────────────────────────────────────
+max_worker_processes              = 16
+max_parallel_workers              = 8
+max_parallel_workers_per_gather   = 4
+max_parallel_maintenance_workers  = 4
+# TimescaleDB workers (compression, continuous aggregates, retention) usan
+# background workers; subir el cap si hay muchas hypertables / policies
+# (por ahora 3 hypertables × 2 jobs c/u = 6, encaja en max_worker_processes=16)
+
+# ─── Connections ─────────────────────────────────────────────────────────────
+max_connections                   = 200       # PgBouncer fronts the app
+superuser_reserved_connections    = 5
+idle_in_transaction_session_timeout = '5min'
+statement_timeout                 = '30s'     # app workloads; raise per-session for backfills
+lock_timeout                      = '5s'
+deadlock_timeout                  = '1s'
+
+# ─── Autovacuum ──────────────────────────────────────────────────────────────
+autovacuum                        = on
+autovacuum_max_workers            = 6
+autovacuum_naptime                = '15s'
+autovacuum_vacuum_cost_limit      = 2000
+autovacuum_vacuum_scale_factor    = 0.05
+autovacuum_analyze_scale_factor   = 0.025
+# Aggressive on the large hot tables
+# (set per-table via ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.01))
+# wallet_movement, tree_event, transaction
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+logging_collector            = on
+log_directory                = 'log'
+log_filename                 = 'postgresql-%Y-%m-%d.log'
+log_rotation_age             = 1d
+log_rotation_size            = 0
+log_min_duration_statement   = 250ms
+log_checkpoints              = on
+log_connections              = on
+log_disconnections           = on
+log_lock_waits               = on
+log_temp_files               = 10MB
+log_autovacuum_min_duration  = 1s
+log_line_prefix              = '%m [%p] %q%u@%d/%a '
+
+# ─── Extensions / shared_preload_libraries ───────────────────────────────────
+# IMPORTANT: timescaledb must be FIRST in shared_preload_libraries.
+shared_preload_libraries = 'timescaledb, pg_stat_statements, auto_explain'
+
+# TimescaleDB
+timescaledb.max_background_workers = 8
+# El telemetry off por privacidad; cambiar a 'basic' si quiere reportes upstream
+timescaledb.telemetry_level = 'off'
+
+pg_stat_statements.track       = all
+pg_stat_statements.max         = 10000
+pg_stat_statements.save        = on
+
+auto_explain.log_min_duration  = '500ms'
+auto_explain.log_analyze       = on
+auto_explain.log_buffers       = on
+auto_explain.log_format        = json
+
+# ─── Locale + TZ ─────────────────────────────────────────────────────────────
+timezone               = 'UTC'             # store UTC; convert in queries
+log_timezone           = 'UTC'
+datestyle              = 'iso, mdy'
+default_text_search_config = 'pg_catalog.spanish'
+
+# ─── TLS (optional, defense-in-depth on private network) ─────────────────────
+# ssl = on
+# ssl_cert_file = '/etc/postgresql/17/main/server.crt'
+# ssl_key_file  = '/etc/postgresql/17/main/server.key'

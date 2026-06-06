@@ -1,0 +1,57 @@
+# Stack local para dev. NO para producción (producción es systemd en Hetzner).
+# Run: docker compose -f deployments/docker-compose.yml up -d
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg17
+    environment:
+      POSTGRES_DB: vicionpower
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: localdev
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vicionpower"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    command:
+      - "--jetstream"
+      - "--store_dir=/data"
+      - "--http_port=8222"
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring
+    volumes:
+      - natsdata:/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+
+  # vp-engine se levanta separado con `make run` para iteración rápida.
+  # Si querés correrlo en compose:
+  # vp-engine:
+  #   build:
+  #     context: ..
+  #     dockerfile: deployments/Dockerfile
+  #   environment:
+  #     DATABASE_URL: postgres://engine_write:CHANGEME@postgres:5432/vicionpower
+  #     NATS_URL: nats://nats:4222
+  #     ENV: development
+  #   ports: ["50051:50051", "9090:9090"]
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     nats:     { condition: service_started }
+
+volumes:
+  pgdata:
+  natsdata:
+  redisdata:

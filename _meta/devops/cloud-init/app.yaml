@@ -1,0 +1,96 @@
+#cloud-config
+# Cloud-init for app-0X / worker-0X (CCX23, Ubuntu 24.04).
+# Boots a hardened host running Bun apps as systemd unit, ready to deploy.
+
+hostname: vp-app
+users:
+  - name: deploy
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA... ops@vicionpower
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ufw
+  - fail2ban
+  - unzip
+  - curl
+  - ca-certificates
+  - gnupg
+  - htop
+  - prometheus-node-exporter
+
+write_files:
+  - path: /etc/systemd/system/vicionpower-app.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=VicionPower app
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=deploy
+      WorkingDirectory=/opt/vicionpower
+      EnvironmentFile=/etc/vicionpower/app.env
+      ExecStart=/home/deploy/.bun/bin/bun src/server.ts
+      Restart=always
+      RestartSec=3
+      LimitNOFILE=65536
+      # Hardening
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ReadWritePaths=/opt/vicionpower /var/log/vicionpower
+      ProtectHome=true
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/ufw/applications.d/vicionpower
+    content: |
+      [vicionpower-app]
+      title=VicionPower API
+      description=Bun app on port 3000
+      ports=3000/tcp
+
+runcmd:
+  # Firewall — only LB/private network can reach app port; SSH only from ops bastion.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow from 10.0.0.0/16 to any port 3000 proto tcp
+  - ufw allow from 10.0.0.0/16 to any port 9100 proto tcp   # node_exporter
+  - ufw allow 22/tcp
+  - ufw --force enable
+
+  # fail2ban
+  - systemctl enable --now fail2ban
+
+  # Bun runtime
+  - sudo -u deploy bash -lc 'curl -fsSL https://bun.sh/install | bash'
+
+  # App directory
+  - mkdir -p /opt/vicionpower /var/log/vicionpower /etc/vicionpower
+  - chown -R deploy:deploy /opt/vicionpower /var/log/vicionpower
+
+  # Pull initial app code (the deploy pipeline takes over from here)
+  - sudo -u deploy bash -lc 'cd /opt/vicionpower && git clone https://github.com/vicionpower/app.git . || true'
+
+  # Render env from secrets manager (placeholder — wire to your vault of choice)
+  - touch /etc/vicionpower/app.env
+  - chmod 600 /etc/vicionpower/app.env
+  - chown deploy:deploy /etc/vicionpower/app.env
+
+  - systemctl daemon-reload
+  - systemctl enable --now prometheus-node-exporter
+  # systemctl enable --now vicionpower-app    # uncommented after first deploy lands code
+
+power_state:
+  mode: reboot
+  delay: now
+  message: cloud-init complete

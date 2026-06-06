@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package vicionpower.v1;
+
+option go_package = "github.com/vicionpower/vp-engine/proto/gen/go/vicionpower/v1;vicionpowerv1";
+
+// ActorContext identifica al usuario humano que originó la operación.
+// Pasado por vp-api en CADA request gRPC para audit. vp-engine confía
+// vía mTLS pero loguea explícitamente quién originó. Ver ADR 0002 §4.
+message ActorContext {
+  int64  person_id   = 1;   // mlm.person.id
+  string user_id     = 2;   // auth.user.id
+  bool   is_admin    = 3;
+  string ip_address  = 4;
+  string user_agent  = 5;
+  string trace_id    = 6;   // OTel propagation
+}
+
+// Money: amount como string decimal (no float), asset code (USD, USDT, etc).
+message Money {
+  string amount = 1;        // e.g. "100.00", parseable a decimal.Decimal
+  string asset  = 2;        // e.g. "USD", "USDT"
+}
+
+// Paginación cursor-based.
+message PageRequest {
+  string cursor = 1;        // opaque, devuelto por server
+  int32  limit  = 2;        // 1..200
+}
+
+message PageResponse {
+  string next_cursor = 1;   // empty si no hay más
+}

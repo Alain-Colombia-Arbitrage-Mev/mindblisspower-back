@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package vicionpower.v1;
+
+option go_package = "github.com/vicionpower/vp-engine/proto/gen/go/vicionpower/v1;vicionpowerv1";
+
+import "google/protobuf/timestamp.proto";
+import "vicionpower/v1/common.proto";
+
+// LedgerService — único módulo que escribe mlm.wallet_movement y mlm.transaction.
+// vp-api delega TODA escritura del ledger aquí.
+service LedgerService {
+  // PostTransaction crea una transacción multi-movimiento atómica.
+  // Idempotente por external_ref (UNIQUE en DB).
+  rpc PostTransaction(PostTransactionRequest) returns (PostTransactionResponse);
+
+  // ReverseTransaction crea una nueva transacción que netea otra existente.
+  // Solo callable con approval_request aprobado (ADR 0010).
+  rpc ReverseTransaction(ReverseTransactionRequest) returns (ReverseTransactionResponse);
+
+  // GetWalletBalance lee el balance materializado.
+  rpc GetWalletBalance(GetWalletBalanceRequest) returns (GetWalletBalanceResponse);
+
+  // GetMovements lista movements con cursor pagination.
+  rpc GetMovements(GetMovementsRequest) returns (GetMovementsResponse);
+}
+
+message Movement {
+  int64  wallet_id     = 1;
+  int64  affiliate_id  = 2;
+  int32  concept_id    = 3;
+  string amount        = 4;     // signed decimal; sign debe coincidir con concept.factor
+  string reference     = 5;
+  google.protobuf.Timestamp posted_at = 6;
+  google.protobuf.Timestamp available_at = 7;
+}
+
+message PostTransactionRequest {
+  string         external_ref = 1;     // idempotency key, UNIQUE en DB
+  string         description  = 2;
+  ActorContext   actor        = 3;
+  repeated Movement movements = 4;
+}
+
+message PostTransactionResponse {
+  string transaction_id = 1;           // uuid
+  google.protobuf.Timestamp posted_at = 2;
+  bool   was_idempotent_replay = 3;    // true si external_ref ya existía
+}
+
+message ReverseTransactionRequest {
+  string original_transaction_id = 1;  // uuid
+  string approval_request_id     = 2;  // mlm.approval_request.id (ADR 0010)
+  string reason                  = 3;
+  ActorContext actor             = 4;
+}
+
+message ReverseTransactionResponse {
+  string reversal_transaction_id = 1;
+}
+
+message GetWalletBalanceRequest {
+  int64 wallet_id = 1;
+}
+
+message GetWalletBalanceResponse {
+  int64  wallet_id     = 1;
+  int64  affiliate_id  = 2;
+  int32  asset_id      = 3;
+  string balance       = 4;
+  google.protobuf.Timestamp last_movement_at = 5;
+}
+
+message GetMovementsRequest {
+  int64       wallet_id = 1;
+  PageRequest page      = 2;
+  google.protobuf.Timestamp from = 3;
+  google.protobuf.Timestamp to   = 4;
+}
+
+message MovementSummary {
+  int64  id          = 1;
+  string transaction_id = 2;
+  int32  concept_id  = 3;
+  string amount      = 4;
+  string reference   = 5;
+  google.protobuf.Timestamp posted_at = 6;
+}
+
+message GetMovementsResponse {
+  repeated MovementSummary movements = 1;
+  PageResponse page = 2;
+}

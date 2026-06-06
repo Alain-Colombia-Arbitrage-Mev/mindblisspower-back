@@ -1,0 +1,20 @@
+version: v2
+plugins:
+  # Go: vp-engine handler side
+  - remote: buf.build/protocolbuffers/go:v1.35.1
+    out: gen/go
+    opt:
+      - paths=source_relative
+  - remote: buf.build/connectrpc/go:v1.17.0
+    out: gen/go
+    opt:
+      - paths=source_relative
+
+  # TypeScript: emit directly into vp-api (app/) so @bufbuild/protobuf resolves
+  # from app/node_modules. When proto/ is later split into its own package,
+  # move this back to gen/ts.
+  - remote: buf.build/bufbuild/es:v2.2.2
+    out: ../../app/src/gen/proto
+    opt:
+      - target=ts
+      - import_extension=.js

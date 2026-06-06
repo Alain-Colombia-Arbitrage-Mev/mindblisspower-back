@@ -1,0 +1,28 @@
+# Dependencies / build artifacts
+node_modules/
+app/node_modules/
+vp-engine/bin/
+*.exe
+*.test
+
+# Legacy snapshot (30 GB — never in git)
+legacy/
+
+# Secrets — only *.example files belong in the repo
+*.env
+!*.env.example
+!**/production.env.example
+secrets.yaml
+
+# PII exports — user data must never reach GitHub
+_meta/users_*
+_meta/*.csv
+
+# Local analysis outputs
+_meta/*.out
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

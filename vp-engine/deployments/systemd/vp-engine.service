@@ -1,0 +1,44 @@
+[Unit]
+Description=VicionPower Engine (Go)
+Documentation=https://github.com/vicionpower/vp-engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/vp-engine
+
+# Decifra secrets sops → /etc/vp-engine/app.env antes de cada start
+ExecStartPre=/usr/local/bin/decrypt-env.sh
+
+EnvironmentFile=/etc/vp-engine/app.env
+
+# Container ya construido y taggeado por CI; aquí solo lo corre.
+ExecStart=/usr/bin/docker run --rm \
+  --name vp-engine \
+  --network host \
+  --env-file /etc/vp-engine/app.env \
+  -v /etc/vp-engine/tls:/etc/vp-engine/tls:ro \
+  ghcr.io/vicionpower/vp-engine:current
+
+ExecStop=/usr/bin/docker stop --time=30 vp-engine
+
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/vp-engine
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+# Graceful shutdown — vp-engine maneja SIGTERM con context cancel propagation.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,109 @@
+# VicionPower — Prometheus alerting rules
+#
+# Severity:
+#   critical = page on-call inmediato (P0). Riesgo financiero o de solvencia.
+#   warning  = ticket en horario hábil (P1). Degradación operativa.
+#
+# Aplicar con: kubectl apply -f alerts.yml  (si Prometheus operator)
+# o cargar en prometheus.yml vía rule_files.
+groups:
+  - name: vp-invariants
+    interval: 30s
+    rules:
+      - alert: VPInvariantBreach
+        expr: vp_invariant_status < 1
+        for: 60s
+        labels:
+          severity: critical
+          component: bonusengine
+          page: oncall
+        annotations:
+          summary: "Invariante {{ $labels.name }} en FAIL"
+          description: |
+            La invariante {{ $labels.name }} está reportando FAIL durante más
+            de 60 s. Esto significa que el motor pagó (o permitió pagar) más
+            de lo que el plan financiero permite. Acción inmediata:
+              1. Detener apertura de nuevos períodos (kill scheduler).
+              2. SELECT * FROM mlm.fn_check_payout_invariants();
+              3. Investigar root cause antes de re-abrir.
+            Runbook: _meta/devops/PLAYBOOK.md#invariant-breach
+
+  - name: vp-binary-engine
+    interval: 30s
+    rules:
+      - alert: VPBinaryCloseStale
+        expr: time() - bonus_run_last_completed_binary_seconds > 90000
+        for: 5m
+        labels:
+          severity: critical
+          component: bonusengine
+          page: oncall
+        annotations:
+          summary: "El cierre binario semanal no corre hace > 25 h"
+          description: |
+            El job binary-period-cycle no ha completado un cierre exitoso en
+            más de 25 horas (esperado: cada 168 h). Causas comunes:
+              - vp-engine caído o degradado.
+              - DB lock atascado.
+              - Plan config no vigente.
+            Acción: revisar logs del scheduler, status de mlm.binary_period.
+
+      - alert: VPBinarySolvencyBreach
+        expr: increase(binary_close_solvency_breaches_total[1h]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          component: bonusengine
+          page: oncall
+        annotations:
+          summary: "T1 violado durante un cierre"
+          description: |
+            CloseBinaryPeriod abortó porque total_paid > alpha × inflows.
+            Esto NO debería ocurrir nunca (theta protege). Si pasa indica
+            bug en el cálculo o race condition. Revisar logs del último
+            cierre y bloquear nuevos cierres hasta análisis.
+
+      - alert: VPThetaSustainedThrottle
+        expr: avg_over_time(binary_close_theta[28d]) < 0.7
+        for: 24h
+        labels:
+          severity: warning
+          component: bonusengine
+        annotations:
+          summary: "Theta promedio < 0.7 sostenido 4 semanas"
+          description: |
+            El sistema está throttling pagos consistentemente. Indica
+            presión sobre el pool > 30 %. Revisar parámetros de plan_config
+            (subir alpha si treasury lo permite, o reducir bonus_per_block,
+            previo ADR + approval_request).
+
+      - alert: VPPackageCapsBurningOut
+        expr: |
+          sum(rate(binary_package_caps_reached_total[7d]))
+            / sum(mlm_active_packages) > 0.05
+        for: 2h
+        labels:
+          severity: warning
+          component: bonusengine
+        annotations:
+          summary: "> 5 % de paquetes alcanzando lifetime cap por semana"
+          description: |
+            Si la tasa de cap-hit es alta, los afiliados perciben "el sistema
+            no paga". Considerar revisión de K_pkg o reestructuración del
+            plan. NO subir K_pkg por reacción — requiere análisis financiero.
+
+  - name: vp-readiness
+    interval: 15s
+    rules:
+      - alert: VPNotReady
+        expr: probe_success{job="vp-engine-ready"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: vp-engine
+          page: oncall
+        annotations:
+          summary: "vp-engine /ready devuelve 503"
+          description: |
+            El probe de readiness está fallando. Puede ser DB ping, NATS, o
+            invariante en FAIL. Logs: kubectl logs deploy/vp-engine.

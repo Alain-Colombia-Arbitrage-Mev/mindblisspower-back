@@ -1,0 +1,11 @@
+bin/
+dist/
+.git/
+.github/
+.idea/
+.vscode/
+*.md
+!README.md
+.env*
+tests/
+*.log

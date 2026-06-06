@@ -1,0 +1,73 @@
+/* =============================================================================
+   pgloader script: SQL Server viciongroup -> Postgres staging.*
+   Run: pgloader 01_pgloader.load
+   Pre-req:
+     - Postgres 17 target with empty staging schema:
+         psql -c "DROP SCHEMA IF EXISTS staging CASCADE; CREATE SCHEMA staging;"
+     - Source SQL Server reachable (FreeTDS configured if running on Linux)
+     - Connection strings updated below
+   ============================================================================= */
+
+LOAD DATABASE
+     FROM mssql://migrator:CHANGEME@sqlserver-host:1433/viciongroup
+     INTO postgresql://migrator:CHANGEME@postgres-host:5432/vicionpower
+
+WITH include drop, create tables, create indexes, reset sequences,
+     foreign keys, downcase identifiers,
+     workers = 4, concurrency = 2,
+     multiple readers per thread, rows per range = 50000,
+     batch rows = 25000, batch size = 50 MB,
+     prefetch rows = 100000
+
+SET work_mem to '256MB',
+    maintenance_work_mem to '1GB',
+    search_path to 'staging,public'
+
+CAST type bit            to boolean        drop typemod,
+     type datetime       to "timestamp"    drop typemod,    -- staged as naive timestamp; postload converts to timestamptz
+     type uniqueidentifier to uuid         drop typemod,
+     type "varchar(max)" to text           drop typemod,
+     type "nvarchar(max)" to text          drop typemod,
+     type money          to "numeric(20,4)" drop typemod,
+     type smallmoney     to "numeric(14,4)" drop typemod
+
+ALTER SCHEMA 'dbo' RENAME TO 'staging'
+
+INCLUDING ONLY TABLE NAMES MATCHING
+     ~/asset/, ~/bank/, ~/bank_country/, ~/bankAccount/,
+     ~/blackList/, ~/businessAddress/, ~/businessProfile/,
+     ~/catalog/, ~/concept/, ~/country/,
+     ~/coupon/, ~/couponPackage/, ~/document/,
+     ~/legalDocument/, ~/legalDocumentField/,
+     ~/loan/, ~/loanRequest/, ~/logActivity/,
+     ~/logDeleteInactivePerson/, ~/logDetailVicionarioNetwork/,
+     ~/logPersonHistory/, ~/logPersonStatus/, ~/logRoi/,
+     ~/logVicionarioKycHistory/, ~/logVicionarioKycStatus/,
+     ~/logVicionarioNetwork/, ~/logVicionarioNetworkSystem/,
+     ~/logVicionarioPointsHistory/,
+     ~/mediaResource/, ~/message/, ~/messageDetail/,
+     ~/module/, ~/moduleAction/, ~/moduleActionPermission/,
+     ~/modulePermission/,
+     ~/movement/, ~/news/, ~/notification/, ~/notificationDetail/,
+     ~/package/, ~/parameter/, ~/person/, ~/rank/,
+     ~/role/, ~/roleModule/,
+     ~/testimonial/, ~/ticket/, ~/ticketAssignmentTracking/, ~/ticketTracker/,
+     ~/validationRules/,
+     ~/vicionario$/, ~/vicionarioAddress/, ~/vicionarioDocument/,
+     ~/vicionarioKyc/, ~/vicionarioKycInfoMatched/,
+     ~/vicionarioLeadershipBonusRecord/, ~/vicionarioLegalDocument/,
+     ~/vicionarioMoneyAccount/, ~/vicionarioNewUserMigracion/,
+     ~/vicionarioPackage/, ~/vicionarioPackageAvailableMovement/,
+     ~/vicionarioPackagePermission/, ~/vicionarioRankRecord/,
+     ~/wallet/, ~/watchedNews/, ~/withdrawalRequest/
+
+BEFORE LOAD DO
+  $$ DROP SCHEMA IF EXISTS staging CASCADE; $$,
+  $$ CREATE SCHEMA staging; $$
+
+AFTER LOAD DO
+  $$ ANALYZE staging.movement; $$,
+  $$ ANALYZE staging.vicionario; $$,
+  $$ ANALYZE staging.vicionarioPackage; $$,
+  $$ ANALYZE staging.wallet; $$,
+  $$ ANALYZE staging.person; $$;

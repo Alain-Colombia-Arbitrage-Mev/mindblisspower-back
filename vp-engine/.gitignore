@@ -1,0 +1,12 @@
+/bin/
+/dist/
+*.test
+*.out
+.env
+.env.local
+coverage.html
+sqlc/generated/*.go
+proto/gen/
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,46 @@
+version: "2"
+
+# sqlc lee schema_mlm.sql + schema_governance.sql + schema_payouts.sql
+# como source of truth y genera tipos Go desde queries SQL crudas en queries/.
+#
+# Run: cd sqlc && sqlc generate
+sql:
+  - engine: postgresql
+    schema:
+      - "../../_meta/schema_mlm.sql"
+      - "../../_meta/schema_governance.sql"
+      - "../../_meta/schema_payouts.sql"
+      - "../../_meta/schema_payouts_v1.1.sql"
+      - "../../_meta/schema_payouts_v1.2.sql"
+      - "../../_meta/schema_ranks.sql"
+      - "../../_meta/schema_payouts_v1.3.sql"
+    queries: "queries/"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "generated"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_db_tags: true
+        emit_prepared_queries: false
+        emit_interface: true
+        emit_exact_table_names: false
+        emit_json_tags: false
+        emit_result_struct_pointers: false
+        omit_unused_structs: true
+        overrides:
+          # numeric → decimal.Decimal (no perdemos precisión)
+          - db_type: "pg_catalog.numeric"
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
+          - db_type: "pg_catalog.numeric"
+            nullable: true
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "NullDecimal"
+          # uuid → google/uuid
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"

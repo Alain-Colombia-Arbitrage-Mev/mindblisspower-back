@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package vicionpower.v1;
+
+option go_package = "github.com/vicionpower/vp-engine/proto/gen/go/vicionpower/v1;vicionpowerv1";
+
+import "google/protobuf/timestamp.proto";
+import "vicionpower/v1/common.proto";
+
+// BonusEngineService — disparo manual de runs (ROI, binario, liderazgo).
+// Normalmente los runs se programan internamente con gocron; este service
+// existe para que admin dispare runs de emergencia o para shadow mode.
+service BonusEngineService {
+  // RunBinaryClose cierra un período binario específico.
+  // Idempotente: si el período ya está closed, devuelve snapshot existente.
+  rpc RunBinaryClose(RunBinaryCloseRequest) returns (RunBinaryCloseResponse);
+
+  // RunROIDaily distribuye ROI sobre paquetes activos para una fecha.
+  rpc RunROIDaily(RunROIDailyRequest) returns (RunROIDailyResponse);
+
+  // GetRunStatus consulta el estado de un run (pending, running, completed, failed).
+  rpc GetRunStatus(GetRunStatusRequest) returns (GetRunStatusResponse);
+
+  // ListRuns para dashboard.
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+}
+
+message RunBinaryCloseRequest {
+  int64        period_id = 1;
+  bool         dry_run   = 2;     // true = calcula pero no escribe (shadow mode)
+  ActorContext actor     = 3;
+}
+
+message RunBinaryCloseResponse {
+  int64  period_id          = 1;
+  string status             = 2;   // 'closed' | 'aborted'
+  string inflows_total      = 3;   // decimal
+  string projected_outflows = 4;
+  string theta              = 5;
+  string total_paid         = 6;
+  int32  candidates_count   = 7;
+  google.protobuf.Timestamp closed_at = 8;
+}
+
+message RunROIDailyRequest {
+  string       date    = 1;        // YYYY-MM-DD en BONUS_ENGINE_TIMEZONE
+  bool         dry_run = 2;
+  ActorContext actor   = 3;
+}
+
+message RunROIDailyResponse {
+  string total_paid   = 1;
+  int32  payouts_count = 2;
+  google.protobuf.Timestamp completed_at = 3;
+}
+
+message GetRunStatusRequest {
+  string run_id = 1;
+}
+
+message GetRunStatusResponse {
+  string run_id     = 1;
+  string kind       = 2;           // 'binary' | 'roi' | 'leadership' | 'direct'
+  string status     = 3;
+  string total_paid = 4;
+  google.protobuf.Timestamp started_at  = 5;
+  google.protobuf.Timestamp finished_at = 6;
+  string error_message = 7;
+}
+
+message ListRunsRequest {
+  string      kind      = 1;
+  string      status    = 2;
+  PageRequest page      = 3;
+}
+
+message ListRunsResponse {
+  repeated GetRunStatusResponse runs = 1;
+  PageResponse page = 2;
+}
