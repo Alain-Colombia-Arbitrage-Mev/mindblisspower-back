@@ -400,86 +400,20 @@ SELECT vp.idvicionariopackage, mp.id, vp.idpackage,
   JOIN map_aff mp ON mp.legacy_id_vicionario = vp.idvicionario;
 
 -- ---------------------------------------------------------------------------
--- 6. Wallet movements — the largest and most defensive step
---    Strategy: every legacy movement becomes a single-side movement wrapped
---    in its own transaction with external_ref = 'legacy:<idMovement>'.
---    Real double-entry pairing only enforced for NEW transactions going forward.
+-- 6. ARRANQUE EN CERO (directiva 2026-06-06, confirmada por negocio):
+--    NADIE migra balance ni movimientos. Solo rango y posición.
+--    · mlm.transaction y mlm.wallet_movement quedan VACÍAS para la era 2.0
+--    · mlm.wallet.balance queda en 0 (default) para los 237k wallets
+--    · El histórico monetario completo (31.6M movements) permanece como
+--      archivo forense en staging.movement — consultable, nunca operativo.
+--    Drift checks (v_wallet_balance_truth) pasan trivialmente: 0 = 0.
 -- ---------------------------------------------------------------------------
-
--- 6a. Quarantine corrupted dates BEFORE insertion to avoid CHECK violations.
--- staging.movement NO se modifica (es la copia forense — 04_reconcile C1
--- compara contra el conteo original); los pasos 6b/6c excluyen la cuarentena
--- vía NOT EXISTS. Idempotente en re-runs.
-CREATE TABLE IF NOT EXISTS staging.movement_quarantine (LIKE staging.movement INCLUDING ALL);
-
-INSERT INTO staging.movement_quarantine
-SELECT * FROM staging.movement m
- WHERE (m.datemovement IS NULL
-    OR m.datemovement < '2015-01-01'
-    OR m.datemovement > CURRENT_DATE + interval '7 days'
-    OR m.timecreation < '2015-01-01'
-    OR m.timecreation > CURRENT_TIMESTAMP + interval '7 days')
-   AND NOT EXISTS (SELECT 1 FROM staging.movement_quarantine q WHERE q.idmovement = m.idmovement);
-
--- 6b. Generate one transaction per legacy movement (idempotency_key = legacy id)
-INSERT INTO mlm.transaction (id, external_ref, description, status, posted_at, created_at)
-SELECT gen_random_uuid(),
-       'legacy:movement:' || m.idmovement::text,
-       'migrated legacy movement ' || m.idmovement::text,
-       'posted',
-       (m.timecreation AT TIME ZONE 'America/Bogota'),
-       (m.timecreation AT TIME ZONE 'America/Bogota')
-  FROM staging.movement m
- WHERE NOT EXISTS (SELECT 1 FROM staging.movement_quarantine q WHERE q.idmovement = m.idmovement);
-
--- 6c. Insert movements with affiliate_id backfilled from wallet (closes the NULL gap)
--- Disable validate trigger temporarily — legacy data may have sign mismatches we
--- consciously accept for forensic preservation.
-ALTER TABLE mlm.wallet_movement DISABLE TRIGGER trg_validate_movement;
--- También trg_wallet_balance: dispararía 31.6M updates por fila a wallet.balance
--- (pathológico). El balance se recalcula set-based en 6d → resultado idéntico,
--- minutos en vez de horas.
-ALTER TABLE mlm.wallet_movement DISABLE TRIGGER trg_wallet_balance;
-
-INSERT INTO mlm.wallet_movement (
-  legacy_id_movement, transaction_id, wallet_id, affiliate_id,
-  concept_id, vicionario_package_id, vicionario_package_origin_id,
-  rank_id, amount, reference, posted_at, available_at, is_frozen, created_at
-)
-SELECT m.idmovement,
-       t.id,
-       w.id,
-       w.affiliate_id,                              -- backfilled NOT NULL
-       m.idconcept,
-       ap.id, ap_origin.id,
-       rm.new_rank_id,                              -- rango legacy → 1-14 vía rank_map (NULL si sin mapear)
-       (m.import * coalesce(c.factor, 1))::numeric(20,8),  -- apply factor to get signed amount
-       m.reference,
-       (m.timecreation AT TIME ZONE 'America/Bogota'),
-       m.dateavailable,
-       coalesce(m.frozen, false),
-       (m.timecreation AT TIME ZONE 'America/Bogota')
-  FROM staging.movement m
-  JOIN mlm.transaction t       ON t.external_ref = 'legacy:movement:' || m.idmovement::text
-  JOIN mlm.wallet w            ON w.legacy_id_wallet = m.idwallet
-  JOIN staging.concept c       ON c.idconcept = m.idconcept
-  LEFT JOIN staging.rank_map rm ON rm.legacy_id_rank = m.idrank
-  LEFT JOIN mlm.affiliate_package ap        ON ap.legacy_id_vp = m.idvicionariopackage
-  LEFT JOIN mlm.affiliate_package ap_origin ON ap_origin.legacy_id_vp = m.idvicionariopackageorigin
- WHERE NOT EXISTS (SELECT 1 FROM staging.movement_quarantine q WHERE q.idmovement = m.idmovement);
-
-ALTER TABLE mlm.wallet_movement ENABLE TRIGGER trg_validate_movement;
-ALTER TABLE mlm.wallet_movement ENABLE TRIGGER trg_wallet_balance;
-
--- 6d. Recompute wallet.balance from movements set-based (los triggers per-row
--- estuvieron desactivados durante el INSERT — esta es la versión audit-friendly)
-UPDATE mlm.wallet w
-   SET balance = sub.s
-  FROM (SELECT wallet_id, sum(amount) AS s FROM mlm.wallet_movement GROUP BY wallet_id) sub
- WHERE w.id = sub.wallet_id;
+\echo '=== Sección 6: arranque en cero — sin transacciones, sin movements, balance=0 ==='
 
 -- ---------------------------------------------------------------------------
--- 7. Money accounts + withdrawals
+-- 7. Money accounts (datos de destino de pago — NO son dinero) se conservan.
+--    El histórico de retiros NO migra (es historia monetaria → solo forense
+--    en staging.withdrawalrequest).
 -- ---------------------------------------------------------------------------
 INSERT INTO mlm.money_account (
   affiliate_id, account_type, bank_id, asset_id, account_number, clabe, account_name, address, created_at
@@ -491,43 +425,6 @@ SELECT mp.id,
        coalesce(ma.creationtime, '2020-01-01'::timestamp) AT TIME ZONE 'America/Bogota'
   FROM staging.vicionariomoneyaccount ma
   JOIN map_aff mp ON mp.legacy_id_vicionario = ma.idvicionario;
-
-INSERT INTO mlm.withdrawal_request (
-  affiliate_id, wallet_id, money_account_id, amount_usd, status,
-  txn_id, comments, remark, approved_by_person_id, created_at, updated_at
-)
-SELECT mp.id,
-       wlt.id,
-       NULL,  -- vicionarioMoneyAccount id not directly mappable without extra join; refine if needed
-       wr.importrequest,
-       CASE wr.idstatus
-         WHEN 1 THEN 'requested'::mlm.withdrawal_status
-         WHEN 2 THEN 'approved'::mlm.withdrawal_status
-         WHEN 3 THEN 'paid'::mlm.withdrawal_status
-         WHEN 4 THEN 'rejected'::mlm.withdrawal_status
-         WHEN 5 THEN 'cancelled'::mlm.withdrawal_status
-         ELSE 'requested'::mlm.withdrawal_status
-       END,
-       (SELECT id FROM mlm.transaction WHERE external_ref = 'legacy:movement:' || wr.idmovement::text),
-       wr.comments, wr.remark,
-       (SELECT id FROM mlm.person WHERE legacy_id_person = wr.idpersonupdate),
-       wr.creationtime AT TIME ZONE 'America/Bogota',
-       coalesce(wr.updatetime, wr.creationtime) AT TIME ZONE 'America/Bogota'
-  FROM staging.withdrawalrequest wr
-  JOIN map_aff mp ON mp.legacy_id_vicionario = wr.idvicionario
-  LEFT JOIN mlm.wallet wlt ON wlt.legacy_id_wallet = wr.idwallet;
-
--- ---------------------------------------------------------------------------
--- 8. Audit trail of mega-transactions for ops review
--- ---------------------------------------------------------------------------
-INSERT INTO audit.activity_log (entity_type, entity_id, action, after_data, occurred_at)
-SELECT 'wallet_movement',
-       wm.id::text,
-       'flagged_mega_transaction',
-       jsonb_build_object('amount', wm.amount, 'concept_id', wm.concept_id, 'reference', wm.reference),
-       wm.posted_at
-  FROM mlm.wallet_movement wm
- WHERE abs(wm.amount) >= 1000000;
 
 COMMIT;
 

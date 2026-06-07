@@ -37,54 +37,25 @@ SELECT 'count.wallet',
   FROM (SELECT count(*) AS c FROM staging.wallet) s,
        (SELECT count(*) AS c FROM mlm.wallet)    t;
 
+-- ARRANQUE EN CERO (2026-06-06): el histórico monetario NO migra a mlm.*.
+-- El gate correcto es que wallet_movement esté VACÍA y staging conserve todo.
 INSERT INTO staging.reconcile_results (check_name, status, source_value, target_value, drift, offending_rows)
-SELECT 'count.movement',
-       CASE WHEN (s.c - q.c) = t.c THEN 'PASS' ELSE 'FAIL' END,
-       s.c - q.c, t.c, t.c - (s.c - q.c), abs(t.c - (s.c - q.c))
+SELECT 'count.movement_zero_start',
+       CASE WHEN t.c = 0 AND s.c > 0 THEN 'PASS' ELSE 'FAIL' END,
+       s.c, t.c, t.c, t.c
   FROM (SELECT count(*) AS c FROM staging.movement) s,
-       (SELECT count(*) AS c FROM staging.movement_quarantine) q,
-       (SELECT count(*) AS c FROM mlm.wallet_movement)         t;
+       (SELECT count(*) AS c FROM mlm.wallet_movement) t;
 
 -- ---------------------------------------------------------------------------
--- C2: total amount per concept × month
+-- C2 (arranque en cero): suma monetaria en mlm.* debe ser exactamente $0.00
+--    y todos los balances de wallet en 0.
 -- ---------------------------------------------------------------------------
-WITH src AS (
-  SELECT m.idconcept,
-         to_char(m.timecreation, 'YYYY-MM') AS ym,
-         sum(m.import * coalesce(c.factor, 1)) AS total
-    FROM staging.movement m
-    JOIN staging.concept c ON c.idconcept = m.idconcept
-   WHERE NOT EXISTS (SELECT 1 FROM staging.movement_quarantine q WHERE q.idmovement = m.idmovement)
-   GROUP BY 1, 2
-), tgt AS (
-  SELECT wm.concept_id AS idconcept,
-         to_char(wm.posted_at AT TIME ZONE 'America/Bogota', 'YYYY-MM') AS ym,
-         sum(wm.amount) AS total
-    FROM mlm.wallet_movement wm
-   GROUP BY 1, 2
-), diff AS (
-  SELECT coalesce(s.idconcept, t.idconcept) AS concept_id,
-         coalesce(s.ym, t.ym)               AS ym,
-         coalesce(s.total, 0)               AS source_total,
-         coalesce(t.total, 0)               AS target_total,
-         coalesce(t.total, 0) - coalesce(s.total, 0) AS drift
-    FROM src s FULL OUTER JOIN tgt t ON s.idconcept = t.idconcept AND s.ym = t.ym
-)
-INSERT INTO staging.reconcile_results (check_name, status, source_value, target_value, drift, offending_rows, details)
-SELECT 'amount.concept_x_month',
-       CASE WHEN sum(CASE WHEN abs(drift) > 0.01 THEN 1 ELSE 0 END) = 0 THEN 'PASS' ELSE 'FAIL' END,
-       sum(source_total),
-       sum(target_total),
-       sum(target_total) - sum(source_total),
-       sum(CASE WHEN abs(drift) > 0.01 THEN 1 ELSE 0 END),
-       jsonb_build_object(
-         'top_drifts', (
-           SELECT jsonb_agg(row_to_json(d))
-             FROM (SELECT * FROM diff WHERE abs(drift) > 0.01
-                   ORDER BY abs(drift) DESC LIMIT 20) d
-         )
-       )
-  FROM diff;
+INSERT INTO staging.reconcile_results (check_name, status, source_value, target_value, drift, offending_rows)
+SELECT 'amount.zero_start',
+       CASE WHEN coalesce(mv.total,0) = 0 AND w.nonzero = 0 THEN 'PASS' ELSE 'FAIL' END,
+       0, coalesce(mv.total,0), coalesce(mv.total,0), w.nonzero
+  FROM (SELECT sum(amount) AS total FROM mlm.wallet_movement) mv,
+       (SELECT count(*) AS nonzero FROM mlm.wallet WHERE balance <> 0) w;
 
 -- ---------------------------------------------------------------------------
 -- C3: wallet balance drift (materialized vs computed)
@@ -174,6 +145,7 @@ SELECT 'legacy.unpaired_amount',
 -- ---------------------------------------------------------------------------
 -- C9: quarantined movements (data quality)
 -- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS staging.movement_quarantine (LIKE staging.movement INCLUDING ALL);
 INSERT INTO staging.reconcile_results (check_name, status, source_value, target_value, drift, offending_rows, details)
 SELECT 'data_quality.quarantined_movements',
        CASE WHEN count(*) = 0 THEN 'PASS' ELSE 'WARN' END,
