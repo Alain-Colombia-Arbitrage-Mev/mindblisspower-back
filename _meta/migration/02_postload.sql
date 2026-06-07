@@ -436,6 +436,10 @@ SELECT gen_random_uuid(),
 -- Disable validate trigger temporarily — legacy data may have sign mismatches we
 -- consciously accept for forensic preservation.
 ALTER TABLE mlm.wallet_movement DISABLE TRIGGER trg_validate_movement;
+-- También trg_wallet_balance: dispararía 31.6M updates por fila a wallet.balance
+-- (pathológico). El balance se recalcula set-based en 6d → resultado idéntico,
+-- minutos en vez de horas.
+ALTER TABLE mlm.wallet_movement DISABLE TRIGGER trg_wallet_balance;
 
 INSERT INTO mlm.wallet_movement (
   legacy_id_movement, transaction_id, wallet_id, affiliate_id,
@@ -465,9 +469,10 @@ SELECT m.idmovement,
  WHERE NOT EXISTS (SELECT 1 FROM staging.movement_quarantine q WHERE q.idmovement = m.idmovement);
 
 ALTER TABLE mlm.wallet_movement ENABLE TRIGGER trg_validate_movement;
+ALTER TABLE mlm.wallet_movement ENABLE TRIGGER trg_wallet_balance;
 
--- 6d. Recompute wallet.balance from movements (trigger was active during INSERT
--- but a single set-based recompute is the audit-friendly version)
+-- 6d. Recompute wallet.balance from movements set-based (los triggers per-row
+-- estuvieron desactivados durante el INSERT — esta es la versión audit-friendly)
 UPDATE mlm.wallet w
    SET balance = sub.s
   FROM (SELECT wallet_id, sum(amount) AS s FROM mlm.wallet_movement GROUP BY wallet_id) sub
