@@ -133,7 +133,7 @@ func (c *OpenRouterClient) call(ctx context.Context, model string, req AnalysisR
 	}
 
 	var analysis AnalysisResponse
-	content := decoded.Choices[0].Message.Content
+	content := extractJSON(decoded.Choices[0].Message.Content)
 	if err := json.Unmarshal([]byte(content), &analysis); err != nil {
 		return AnalysisResponse{}, fmt.Errorf("openrouter invalid analysis json: %w", err)
 	}
@@ -162,6 +162,19 @@ func (c *OpenRouterClient) call(ctx context.Context, model string, req AnalysisR
 		}
 	}
 	return analysis, nil
+}
+
+// extractJSON desenvuelve el objeto JSON cuando el modelo lo rodea de texto o
+// de cercas markdown (```json ... ```). Toma desde el primer '{' hasta el
+// último '}', que es robusto para respuestas de LLM con preámbulo o fences.
+func extractJSON(raw string) string {
+	s := strings.TrimSpace(raw)
+	start := strings.IndexByte(s, '{')
+	end := strings.LastIndexByte(s, '}')
+	if start >= 0 && end > start {
+		return s[start : end+1]
+	}
+	return s
 }
 
 func systemPrompt() string {
