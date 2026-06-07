@@ -271,6 +271,11 @@ UPDATE mlm.affiliate a
  WHERE a.legacy_id_vicionario = v.idvicionario
    AND v.idsponsor IS NOT NULL;
 
+-- El índice GiST de ltree no soporta paths de árboles profundos (item > 2.7KB
+-- por página; el árbol legacy llega a depth 369 ⇒ path ~4KB). Las consultas
+-- de ancestro/descendiente usan CTE recursivo por parent_id (indexado btree).
+DROP INDEX IF EXISTS mlm.affiliate_path_gist;
+
 -- Step 3e: rebuild path + depth recursively from root
 WITH RECURSIVE tree(id, parent_id, position, path, depth) AS (
   SELECT id, parent_id, position,
@@ -385,7 +390,10 @@ SELECT vp.idvicionariopackage, mp.id, vp.idpackage,
          ELSE 'active'::mlm.package_status
        END,
        vp.idpaymentmethod::text, vp.paymentproofpublicurl, vp.transactionhash,
-       vp.currentperioddate, vp.idperiodicity::smallint,
+       vp.currentperioddate,
+       -- legacy trae sentinel 35003 (7,913 filas) fuera de smallint → NULL
+       CASE WHEN vp.idperiodicity BETWEEN -32768 AND 32767
+            THEN vp.idperiodicity::smallint ELSE NULL END,
        coalesce(vp.creationtime, '2020-01-01'::timestamp) AT TIME ZONE 'America/Bogota',
        vp.updatetime AT TIME ZONE 'America/Bogota'
   FROM staging.vicionariopackage vp
