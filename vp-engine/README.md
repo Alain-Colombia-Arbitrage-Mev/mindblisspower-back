@@ -155,6 +155,19 @@ stream y por período.
 | treewriter | Pendiente | Bulk placement / recompute |
 | ROI diario/CD | Pendiente | `RunROIDaily()` aún retorna error |
 
+## Treewriter pendiente
+
+Cuando `internal/treewriter` se implemente, debe separar activacion nueva de
+reconciliacion de raices:
+
+- Activacion: placement transaccional, `tree_event=enrollment`, sin volumen.
+- Reconciliacion: job admin con dry-run, mueve subarboles heredados, recalcula
+  paths/conteos y emite `tree_event=position_move`.
+
+El asesor IA (`internal/networkintel`) puede recomendar acciones sobre pierna
+debil y sanidad, pero no debe ejecutar mutaciones de arbol ni pagos. Ver
+`../docs/tree-activation-reconciliation.md`.
+
 Ver [BACKEND_PLAN §3.5](../_meta/BACKEND_PLAN.md),
 [`_meta/binary_spec.md`](../_meta/binary_spec.md) y
 [`docs/liquidacion_y_ciclo_de_pago.md`](../../docs/liquidacion_y_ciclo_de_pago.md).

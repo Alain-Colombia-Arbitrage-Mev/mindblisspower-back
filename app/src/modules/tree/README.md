@@ -15,6 +15,18 @@ cuando se extraiga a `modules/tree`. Los endpoints expuestos hoy están en
   es la llave de idempotencia.
 - `mlm.rank`: catálogo de rangos; los ascensos se calculan en `vp-engine`.
 
+## Separacion obligatoria
+
+`tree` tiene dos caminos de escritura que no deben compartir handler:
+
+- **Activacion nueva:** crea una posicion nueva para una persona nueva o ya
+  autenticada. Solo puede insertar `mlm.affiliate` y `tree_event=enrollment`.
+- **Reconciliacion de raices:** job admin/migracion. Puede mover subarboles y
+  recalcular `path/depth/left_count/right_count`, pero no crea usuarios ni
+  acredita volumen.
+
+Detalle operativo: `../../../../docs/tree-activation-reconciliation.md`.
+
 ## Escrituras implementadas
 
 | Operación | Endpoint actual | Implementación | Estado |
@@ -44,6 +56,10 @@ por sponsor con `pg_advisory_xact_lock(sponsorAffiliateId)` y aplica weak-leg:
 La base de datos refuerza la estructura con
 `UNIQUE(parent_id, position) WHERE parent_id IS NOT NULL` y
 `fn_compute_affiliate_path()`, que calcula `path` y `depth` antes del insert.
+
+Los codigos de referido deben resolverse antes de este paso: codigo publico
+estable -> `sponsorAffiliateId`. El codigo no es el `parent_id`; el slot final
+lo decide `placeAffiliate` o `autoPlaceAffiliate`.
 
 ## Derrame de PV
 
@@ -93,6 +109,9 @@ enumerar candidatos pagables.
 
 - [ ] Mover `placeAffiliate`, `autoPlaceAffiliate` y `registerPvCredit` a
   `modules/tree`.
+- [ ] Formalizar `generateReferralCode` y `resolveReferralCode` sobre
+  `mlm.affiliate.invitation_link` o una columna dedicada.
 - [ ] Implementar endpoints de traversal y snapshot.
-- [ ] Implementar reconciliación programada de agregados.
+- [ ] Implementar reconciliacion programada de agregados.
+- [ ] Implementar reconciliacion separada de raices migradas con dry-run.
 - [ ] Documentar payloads JSON definitivos de `/api/affiliate/*`.
