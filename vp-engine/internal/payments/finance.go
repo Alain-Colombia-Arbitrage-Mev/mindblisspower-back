@@ -56,7 +56,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	}
 
 	// Entrante real (nuestro endpoint Stripe).
-	if err := s.db.QueryRow(ctx, `
+	if err := s.reader().QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount_usd + fee_usd),0)::text,
 		       COALESCE(count(*),0),
 		       COALESCE(SUM(fee_usd),0)::text
@@ -68,7 +68,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 
 	// Distribuido / pendiente (ledger). SOLO bonos/ROI a miembros: se EXCLUYEN
 	// inflows y fees (package_purchase/platform_fee/inter_platform).
-	if err := s.db.QueryRow(ctx, `
+	if err := s.reader().QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (WHERE wm.amount > 0),0)::text,                                   -- distribuido (créditos)
 		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen),0)::text,                                -- balance vivo (neto)
@@ -81,7 +81,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	}
 
 	// Rangos alcanzados + dinero pagado por rangos.
-	if err := s.db.QueryRow(ctx, `
+	if err := s.reader().QueryRow(ctx, `
 		SELECT COALESCE(count(*),0), COALESCE(SUM(net_amount_usd),0)::text
 		  FROM mlm.affiliate_rank_achieved
 	`).Scan(&f.RanksAchieved, &f.RanksBonusUSD); err != nil {
@@ -89,7 +89,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	}
 
 	// Retiros.
-	if err := s.db.QueryRow(ctx, `
+	if err := s.reader().QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(amount_usd) FILTER (WHERE status='paid'),0)::text,
 		  COALESCE(SUM(amount_usd) FILTER (WHERE status IN ('requested','approved')),0)::text
@@ -99,7 +99,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	}
 
 	// Tesorería ≈ entrante − comisiones distribuidas − retiros pagados.
-	if err := s.db.QueryRow(ctx, `
+	if err := s.reader().QueryRow(ctx, `
 		SELECT (
 		  (SELECT COALESCE(SUM(amount_usd+fee_usd),0) FROM payments.purchase_intent WHERE status IN ('paid','activated'))
 		  - (SELECT COALESCE(SUM(wm.amount),0) FROM mlm.wallet_movement wm JOIN mlm.concept c ON c.id=wm.concept_id
@@ -111,7 +111,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	}
 
 	// Moneyflow por concepto (neto con signo del concepto).
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.reader().Query(ctx, `
 		SELECT c.kind::text,
 		       COALESCE(SUM(wm.amount * c.factor),0)::text,
 		       count(*)
@@ -137,6 +137,14 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	}
 	s.cache.set(ctx, "fin:admin", f, financeCacheTTL)
 	return f, nil
+}
+
+// RecentActivity devuelve el feed de eventos de dominio recientes (Redis Stream).
+func (s *Store) RecentActivity(ctx context.Context, n int64) ([]DomainEvent, error) {
+	if n <= 0 || n > 200 {
+		n = 50
+	}
+	return s.cache.RecentEvents(ctx, n)
 }
 
 // SolvencyPeriod es una fila de la vista de solvencia (v_period_solvency).
@@ -175,7 +183,7 @@ func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 	out.Recent = []SolvencyPeriod{}
 
 	// α vigente del plan activo.
-	_ = s.db.QueryRow(ctx, `
+	_ = s.reader().QueryRow(ctx, `
 		SELECT treasury_alpha::text FROM mlm.plan_config
 		 WHERE effective_from <= now() AND (effective_to IS NULL OR effective_to > now())
 		 ORDER BY effective_from DESC LIMIT 1
@@ -186,7 +194,7 @@ func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 
 	scan := func(sql string, args ...any) (*SolvencyPeriod, error) {
 		var p SolvencyPeriod
-		err := s.db.QueryRow(ctx, sql, args...).Scan(
+		err := s.reader().QueryRow(ctx, sql, args...).Scan(
 			&p.PeriodID, &p.PeriodStart, &p.PeriodEnd, &p.Status,
 			&p.InflowsUSD, &p.ProjectedUSD, &p.Theta, &p.TotalPaidUSD,
 			&p.MaxPayoutUSD, &p.SolvencyStatus, &p.PayoutPctInflows)
@@ -241,7 +249,7 @@ func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 	}
 
 	// Tendencia: últimos 8 cerrados.
-	rows, err := s.db.Query(ctx, `SELECT `+cols+`
+	rows, err := s.reader().Query(ctx, `SELECT `+cols+`
 		FROM mlm.v_period_solvency WHERE status='closed'
 		ORDER BY period_start DESC LIMIT 8`)
 	if err != nil {

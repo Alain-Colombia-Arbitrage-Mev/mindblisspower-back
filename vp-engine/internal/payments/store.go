@@ -20,7 +20,8 @@ var (
 // EngineURL (opcional): base del motor vp-engine para el simulador canónico de
 // θ (POST /simulate). Vacío ⇒ el lock usa solo la proyección forward.
 type Store struct {
-	db        *pgxpool.Pool
+	db        *pgxpool.Pool // PRIMARY (writes + reads si no hay réplica)
+	dbRead    *pgxpool.Pool // réplica de lectura (opcional); nil ⇒ usa db
 	EngineURL string
 	cache     *Cache // nil ⇒ sin caché (degrada a DB)
 }
@@ -29,6 +30,20 @@ func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
 // SetCache inyecta la caché Redis (cache-aside). nil = deshabilitada.
 func (s *Store) SetCache(c *Cache) { s.cache = c }
+
+// SetReadPool inyecta la réplica de lectura (READ_DATABASE_URL). Los métodos de
+// SOLO LECTURA (finance/solvency/member) la usan vía reader(); las escrituras
+// siempre van al primary. nil = todo al primary.
+func (s *Store) SetReadPool(p *pgxpool.Pool) { s.dbRead = p }
+
+// reader devuelve la réplica si está configurada, si no el primary. Lag de
+// réplica aceptable: los reads calientes ya van cacheados 15-20s.
+func (s *Store) reader() *pgxpool.Pool {
+	if s.dbRead != nil {
+		return s.dbRead
+	}
+	return s.db
+}
 
 // Buyer es la identidad MLM resuelta desde el user_id de Cognito.
 type Buyer struct {

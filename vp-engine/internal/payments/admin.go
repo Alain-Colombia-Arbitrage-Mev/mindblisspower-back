@@ -290,6 +290,8 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	if err != nil {
 		return fmt.Errorf("set withdrawal status: %w", err)
 	}
+	s.cache.del(ctx, "fin:admin")
+	s.cache.PublishEvent(ctx, "withdrawal."+status, map[string]any{"withdrawal_id": id, "by": adminEmail})
 	return nil
 }
 

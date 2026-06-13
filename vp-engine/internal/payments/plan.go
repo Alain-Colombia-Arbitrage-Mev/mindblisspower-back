@@ -417,6 +417,7 @@ func (s *Store) DecidePlanProposal(ctx context.Context, adminEmail string, reqID
 	}
 	if status == "executed" {
 		s.cache.del(ctx, "fin:admin", "solvency") // la config cambió → invalidar agregados
+		s.cache.PublishEvent(ctx, "plan.published", map[string]any{"request_id": reqID, "by": adminEmail})
 	}
 	return status, nil
 }

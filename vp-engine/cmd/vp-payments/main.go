@@ -56,6 +56,16 @@ func run() error {
 	// Activación inline y atómica: el servicio solo necesita DB + Stripe (sin NATS).
 	store := payments.NewStore(pool)
 	store.EngineURL = cfg.EngineURL // simulador canónico de θ (lock de solvencia)
+	if cfg.ReadDatabaseURL != "" {
+		readPool, rerr := db.Open(rootCtx, cfg.ReadDatabaseURL, cfg.DBMaxConns, cfg.DBConnLifetime)
+		if rerr != nil {
+			logger.Warn().Err(rerr).Msg("réplica de lectura inalcanzable; reads van al primary")
+		} else {
+			defer readPool.Close()
+			store.SetReadPool(readPool)
+			logger.Info().Msg("réplica de lectura habilitada (reads → replica)")
+		}
+	}
 	if cache := payments.NewCache(cfg.RedisAddr, cfg.RedisPassword); cache != nil {
 		if err := cache.Ping(rootCtx); err != nil {
 			logger.Warn().Err(err).Str("addr", cfg.RedisAddr).Msg("Redis inalcanzable; caché deshabilitada (degrada a DB)")

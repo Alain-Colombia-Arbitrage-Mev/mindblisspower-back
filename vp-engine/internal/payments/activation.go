@@ -193,6 +193,10 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 	// Nueva compra/activación → cambian inflows, packs y el período → invalidar
 	// los agregados cacheados (el resumen del miembro se refresca por TTL).
 	s.cache.del(ctx, "fin:admin", "solvency")
+	// Evento de dominio (fan-out async vía Redis Stream): notif/analytics/feed.
+	s.cache.PublishEvent(ctx, "payment.activated", map[string]any{
+		"affiliate_id": affID, "package_id": packageID, "pv": pv, "session": sessionID,
+	})
 	return ActivationResult{Status: "activated", AffiliateID: affID}, nil
 }
 

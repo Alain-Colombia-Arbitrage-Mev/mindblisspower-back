@@ -24,8 +24,12 @@ type Config struct {
 	HTTPListenAddr string
 
 	DatabaseURL    string
-	DBMaxConns     int32
-	DBConnLifetime time.Duration
+	// ReadDatabaseURL: réplica de lectura RDS (opcional). Vacío ⇒ los reads van al
+	// primary. Los métodos read-only de payments la usan; las escrituras siempre
+	// al primary.
+	ReadDatabaseURL string
+	DBMaxConns      int32
+	DBConnLifetime  time.Duration
 
 	NATSURL      string
 	NATSUser     string
@@ -74,8 +78,9 @@ func LoadConfig() (*Config, error) {
 		// DATABASE_URL preferido; fallback al nombre que ya usa el .env del repo.
 		// OJO: requiere rol con escritura (payments.purchase_intent), no el rol
 		// read-only de MEMBER_DATABASE_URL.
-		DatabaseURL:    firstEnv("DATABASE_URL", "VP_ENGINE_DATABASE_URL"),
-		DBMaxConns:     int32(envInt("PAYMENTS_DB_MAX_CONNS", 10)),
+		DatabaseURL:     firstEnv("DATABASE_URL", "VP_ENGINE_DATABASE_URL"),
+		ReadDatabaseURL: env("READ_DATABASE_URL", ""),
+		DBMaxConns:      int32(envInt("PAYMENTS_DB_MAX_CONNS", 10)),
 		DBConnLifetime: 30 * time.Minute,
 		NATSURL:        env("NATS_URL", ""),
 		NATSUser:       env("NATS_USER", ""),

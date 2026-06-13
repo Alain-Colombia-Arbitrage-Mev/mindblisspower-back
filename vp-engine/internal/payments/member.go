@@ -56,7 +56,7 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 	var fn, ln string
 	var affID *int64
 	var inv *string
-	err = s.db.QueryRow(ctx, `
+	err = s.reader().QueryRow(ctx, `
 		SELECT trim(p.first_name), trim(p.last_name), a.id, a.invitation_link
 		  FROM mlm.person p
 		  LEFT JOIN mlm.affiliate a ON a.person_id = p.id
@@ -94,7 +94,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	// Identidad → person + affiliate + rango + perfil + fecha de ingreso.
 	var personID int64
 	var affiliateID *int64
-	err := s.db.QueryRow(ctx, `
+	err := s.reader().QueryRow(ctx, `
 		SELECT p.id, a.id,
 		       COALESCE(r.name_es, '—') AS rank,
 		       p.profile::text AS plan,
@@ -115,7 +115,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	out.Positioned = affiliateID != nil
 
 	// Pagos del miembro (por email; user_id guarda el email).
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.reader().Query(ctx, `
 		SELECT id::text, package_id, amount_usd::text, fee_usd::text,
 		       (amount_usd + fee_usd)::text, status,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'),
@@ -158,7 +158,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	}
 
 	// Paquetes activos.
-	if err := s.db.QueryRow(ctx, `
+	if err := s.reader().QueryRow(ctx, `
 		SELECT count(*) FROM mlm.affiliate_package
 		 WHERE affiliate_id = $1 AND status = 'active'
 	`, *affiliateID).Scan(&out.ActivePackages); err != nil {
@@ -174,7 +174,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	// Balances del miembro = SOLO sus ganancias (bonos/ROI) y débitos (retiros).
 	// Se EXCLUYEN inflows y fees (package_purchase/platform_fee/inter_platform):
 	// son asientos de la compra, no dinero retirable del comprador.
-	err = s.db.QueryRow(ctx, `
+	err = s.reader().QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (
 		     WHERE NOT wm.is_frozen AND (wm.available_at IS NULL OR wm.available_at <= current_date)
@@ -193,7 +193,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	}
 
 	// Retiros del miembro + disponible neto de pendientes.
-	wrows, err := s.db.Query(ctx, `
+	wrows, err := s.reader().Query(ctx, `
 		SELECT id, amount_usd::text, status::text,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
 		  FROM mlm.withdrawal_request

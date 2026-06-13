@@ -67,7 +67,23 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/propose", h.handleAdminPlanPropose)
 	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
 	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
+	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
 	return h.rateLimit(mux)
+}
+
+// handleAdminActivity: feed de eventos de dominio recientes (Redis Stream).
+func (h *Handler) handleAdminActivity(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	n := int64(atoiDefault(r.URL.Query().Get("limit"), 50))
+	events, err := h.store.RecentActivity(r.Context(), n)
+	if err != nil {
+		h.log.Error().Err(err).Msg("recent activity")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
 // rateLimit: backstop por-endpoint (ventana fija 1 min) contra loops/abuso que

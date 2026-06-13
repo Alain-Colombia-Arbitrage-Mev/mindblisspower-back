@@ -70,6 +70,85 @@ func (c *Cache) del(ctx context.Context, keys ...string) {
 	_ = c.rdb.Del(ctx, keys...).Err()
 }
 
+// --- Eventos de dominio (Redis Stream `vp:events`) ---------------------------
+// Event log + hook para consumidores async (notif/analytics) vía consumer groups
+// (XREADGROUP). Hoy el consumidor es el feed de actividad del admin (pull).
+
+const eventStream = "vp:events"
+
+// DomainEvent es un evento del stream para el feed/consumo.
+type DomainEvent struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Payload string `json:"payload"` // JSON
+	AtMs    int64  `json:"at_ms"`   // timestamp ms (del ID del stream)
+}
+
+// PublishEvent agrega un evento al stream (cap ~5000, aprox). nil-safe y
+// best-effort: nunca rompe el camino de negocio.
+func (c *Cache) PublishEvent(ctx context.Context, eventType string, payload map[string]any) {
+	if c == nil {
+		return
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_ = c.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: eventStream,
+		MaxLen: 5000,
+		Approx: true,
+		Values: map[string]any{"type": eventType, "payload": string(b)},
+	}).Err()
+}
+
+// RecentEvents devuelve los últimos n eventos (más reciente primero).
+func (c *Cache) RecentEvents(ctx context.Context, n int64) ([]DomainEvent, error) {
+	if c == nil {
+		return []DomainEvent{}, nil
+	}
+	msgs, err := c.rdb.XRevRangeN(ctx, eventStream, "+", "-", n).Result()
+	if err != nil {
+		return []DomainEvent{}, nil // sin stream aún ⇒ vacío
+	}
+	out := make([]DomainEvent, 0, len(msgs))
+	for _, m := range msgs {
+		e := DomainEvent{ID: m.ID}
+		if v, ok := m.Values["type"].(string); ok {
+			e.Type = v
+		}
+		if v, ok := m.Values["payload"].(string); ok {
+			e.Payload = v
+		}
+		// El ID del stream es "<ms>-<seq>"; el prefijo es el timestamp en ms.
+		if i := indexByte(m.ID, '-'); i > 0 {
+			e.AtMs = parseInt64(m.ID[:i])
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseInt64(s string) int64 {
+	var n int64
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return n
+		}
+		n = n*10 + int64(s[i]-'0')
+	}
+	return n
+}
+
 // allow implementa rate-limit por ventana fija: ≤ limit hits por window para la
 // clave dada. Devuelve true si se permite. Nil/fallo de Redis ⇒ permite (no
 // bloquea tráfico por una caída de caché).
