@@ -191,8 +191,33 @@ func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 		solvency_status,
 		payout_pct_of_inflow::text`
 
-	// Período vigente: el más reciente (abierto o el último cerrado).
-	cur, err := scan(`SELECT `+cols+` FROM mlm.v_period_solvency ORDER BY period_start DESC LIMIT 1`)
+	// Período vigente: el más reciente. Para un período ABIERTO la vista deja
+	// inflows_total en NULL (se congela al cerrar) → computamos inflows EN VIVO
+	// del ledger (package_purchase en la ventana) y el techo α×inflows vigente.
+	cur, err := scan(`
+		SELECT bp.id,
+		       to_char(bp.period_start,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		       to_char(bp.period_end,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		       bp.status::text,
+		       COALESCE(bp.inflows_total, live.inflows, 0)::text,
+		       COALESCE(bp.projected_outflows,0)::text,
+		       bp.theta::text,
+		       bp.total_paid::text,
+		       (pc.treasury_alpha * COALESCE(bp.inflows_total, live.inflows, 0))::text,
+		       CASE WHEN bp.total_paid IS NULL THEN 'pending'
+		            WHEN bp.total_paid <= pc.treasury_alpha * COALESCE(bp.inflows_total,0) + 0.01 THEN 'OK'
+		            ELSE 'BREACH' END,
+		       CASE WHEN COALESCE(bp.inflows_total, live.inflows, 0) > 0 AND bp.total_paid IS NOT NULL
+		            THEN ROUND(100.0 * bp.total_paid / COALESCE(bp.inflows_total, live.inflows), 2)::text
+		            ELSE NULL END
+		  FROM mlm.binary_period bp
+		  JOIN mlm.plan_config pc ON pc.id = bp.plan_config_id
+		  LEFT JOIN LATERAL (
+		    SELECT SUM(wm.amount) AS inflows
+		      FROM mlm.wallet_movement wm JOIN mlm.concept c ON c.id = wm.concept_id
+		     WHERE c.kind = 'package_purchase'
+		       AND wm.posted_at >= bp.period_start AND wm.posted_at < bp.period_end) live ON true
+		 ORDER BY bp.period_start DESC LIMIT 1`)
 	if err == nil {
 		out.Current = cur
 	}
