@@ -43,6 +43,39 @@ type MemberSummary struct {
 	Withdrawals           []MemberWithdrawal `json:"withdrawals"`
 }
 
+// GetReferralCode devuelve el código de referido REAL del miembro
+// (mlm.affiliate.invitation_link, único). Si el afiliado existe pero no tiene
+// código, genera uno único ("MP"+affiliate_id) y lo persiste. Si el usuario aún
+// no está colocado en el árbol, devuelve "" (no tiene código todavía).
+func (s *Store) GetReferralCode(ctx context.Context, email string) (string, error) {
+	var affID *int64
+	var code *string
+	err := s.db.QueryRow(ctx, `
+		SELECT a.id, a.invitation_link
+		  FROM mlm.person p
+		  JOIN mlm.affiliate a ON a.person_id = p.id
+		 WHERE lower(p.email) = lower($1)
+		 LIMIT 1
+	`, email).Scan(&affID, &code)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("referral lookup: %w", err)
+	}
+	if code != nil && *code != "" {
+		return *code, nil
+	}
+	// Generar y persistir (único por affiliate id).
+	newCode := fmt.Sprintf("MP%d", *affID)
+	if _, err := s.db.Exec(ctx,
+		`UPDATE mlm.affiliate SET invitation_link=$2 WHERE id=$1 AND invitation_link IS NULL`,
+		*affID, newCode); err != nil {
+		return newCode, nil // best-effort: igual devolvemos el código
+	}
+	return newCode, nil
+}
+
 // GetMemberSummary arma el resumen para el miembro identificado por email.
 func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSummary, error) {
 	var out MemberSummary

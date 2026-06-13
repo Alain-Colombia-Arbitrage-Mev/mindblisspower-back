@@ -48,6 +48,7 @@ func (h *Handler) Routes() http.Handler {
 	})
 	mux.HandleFunc("/api/payments/checkout", h.handleCheckout)
 	mux.HandleFunc("/api/payments/me", h.handleMe)
+	mux.HandleFunc("/api/member/referral", h.handleMemberReferral)
 	mux.HandleFunc("/api/payments/withdraw", h.handleWithdraw)
 	mux.HandleFunc("/api/webhooks/stripe", h.handleWebhook)
 	mux.HandleFunc("/api/admin/check", h.handleAdminCheck)
@@ -284,6 +285,25 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 
 // handleMe devuelve los pagos + posición + comisiones del miembro. Lo llama el
 // BFF Next (token de servicio) pasando el email autenticado por Cognito.
+// handleMemberReferral devuelve el código de referido real del miembro (por email).
+func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
+	if !h.svcAuth(w, r) {
+		return
+	}
+	email := r.URL.Query().Get("email")
+	if email == "" {
+		writeErr(w, http.StatusBadRequest, "missing email")
+		return
+	}
+	code, err := h.store.GetReferralCode(r.Context(), email)
+	if err != nil {
+		h.log.Error().Err(err).Msg("referral code")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"referral_code": code})
+}
+
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
