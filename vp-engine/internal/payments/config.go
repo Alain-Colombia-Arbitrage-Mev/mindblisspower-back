@@ -47,6 +47,10 @@ type Config struct {
 	// Afiliado raíz de la empresa: si un comprador no tiene sponsor (sin ?ref ni
 	// afiliado previo), se coloca bajo este root (la activación derrama). 0 = desactivado.
 	CompanyRootAffiliateID int64
+
+	// EngineURL: base del motor vp-engine para el simulador canónico de θ
+	// (POST /simulate). Vacío ⇒ el lock de solvencia usa solo la proyección forward.
+	EngineURL string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -88,6 +92,7 @@ func LoadConfig() (*Config, error) {
 		PaymentMethods:      splitCSV(env("PAYMENTS_METHODS", "card,crypto")),
 		AdminEmails:            splitCSV(env("PAYMENTS_ADMIN_EMAILS", "")),
 		CompanyRootAffiliateID: int64(envInt("PAYMENTS_COMPANY_ROOT_AFFILIATE_ID", 0)),
+		EngineURL:              env("VP_ENGINE_URL", "http://127.0.0.1:9090"),
 	}
 
 	if c.DatabaseURL == "" {

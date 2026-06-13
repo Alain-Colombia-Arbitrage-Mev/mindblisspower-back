@@ -17,7 +17,12 @@ var (
 )
 
 // Store encapsula el acceso a Postgres del servicio de pagos.
-type Store struct{ db *pgxpool.Pool }
+// EngineURL (opcional): base del motor vp-engine para el simulador canónico de
+// θ (POST /simulate). Vacío ⇒ el lock usa solo la proyección forward.
+type Store struct {
+	db        *pgxpool.Pool
+	EngineURL string
+}
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 

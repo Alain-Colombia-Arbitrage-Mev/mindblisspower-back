@@ -1,14 +1,72 @@
 package payments
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// simKeyMap traduce campos del editor (columnas plan_config) a las claves de
+// override que entiende el simulador Monte Carlo del motor (internal/simulate).
+// Lo que no esté aquí no lo modela el simulador binario (lo cubre la proyección
+// forward: ROI/referido/regalía).
+var simKeyMap = map[string]string{
+	"treasury_alpha":              "treasury_alpha",
+	"lifetime_cap_factor":         "lifetime_cap_factor",
+	"daily_cap_factor":            "daily_cap_factor",
+	"founder_binary_matched_rate": "founder_rate",
+	"rank_installments":           "rank_installments",
+	"rank_installment_cadence":    "rank_cadence",
+}
+
+// engineSimulateTheta llama al simulador canónico del motor (POST /simulate) con
+// los overrides propuestos que el simulador binario modela. Devuelve el peor θ
+// observado + si es solvente, y ran=false si el motor no aplica/está inalcanzable
+// (en cuyo caso NO se bloquea por el canónico — el forward sigue gobernando).
+func (s *Store) engineSimulateTheta(ctx context.Context, changes map[string]any) (worstTheta float64, solvent, ran bool) {
+	if s.EngineURL == "" {
+		return 0, true, false
+	}
+	ov := map[string]string{}
+	for editorKey, simKey := range simKeyMap {
+		if v, ok := changes[editorKey]; ok {
+			ov[simKey] = fmt.Sprintf("%v", v)
+		}
+	}
+	if len(ov) == 0 {
+		return 0, true, false // el cambio no toca nada que el simulador binario modele
+	}
+	body, _ := json.Marshal(map[string]any{"overrides": ov, "periods": 52, "seed": 42})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.EngineURL, "/")+"/simulate", bytes.NewReader(body))
+	if err != nil {
+		return 0, true, false
+	}
+	req.Header.Set("content-type", "application/json")
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, true, false // motor inalcanzable → no bloquear por el canónico
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, true, false
+	}
+	var out struct {
+		WorstTheta float64 `json:"worst_theta"`
+		Solvent    bool    `json:"solvent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, true, false
+	}
+	return out.WorstTheta, out.Solvent && out.WorstTheta >= SolvencyThetaFloor, true
+}
 
 // planEditableFields: campos de mlm.plan_config que un admin puede cambiar por
 // four-eyes, con su tipo de cast SQL (para overridear desde el payload jsonb).
@@ -141,8 +199,13 @@ type PlanSimulation struct {
 	BonusObligationUSD float64 `json:"bonus_obligation_usd"` // referido+regalía sobre inflows de la ventana
 	ProjectedOutflows float64 `json:"projected_outflows_usd"`
 	Floor             float64 `json:"floor"`
-	Solvent           bool    `json:"solvent"` // theta >= floor
+	Solvent           bool    `json:"solvent"` // forward Y canónico (si corrió) ≥ floor
 	Note              string  `json:"note"`
+	// Canónico: simulador Monte Carlo del plan binario (motor). Solo corre si el
+	// cambio toca α/caps/fundador y el motor está accesible.
+	CanonicalRan     bool    `json:"canonical_ran"`
+	CanonicalTheta   float64 `json:"canonical_worst_theta"`
+	CanonicalSolvent bool    `json:"canonical_solvent"`
 }
 
 // SimulatePlanTheta proyecta θ bajo la config resultante de aplicar `changes`
@@ -233,6 +296,17 @@ func (s *Store) SimulatePlanTheta(ctx context.Context, changes map[string]any) (
 		sim.Note = fmt.Sprintf("θ proyectado bajo el modelo CD; piso de publicación %.2f", SolvencyThetaFloor)
 	}
 	sim.Solvent = sim.Theta >= SolvencyThetaFloor
+
+	// Capa canónica: simulador Monte Carlo del plan binario (motor). Puede vetar.
+	if ct, cs, ran := s.engineSimulateTheta(ctx, changes); ran {
+		sim.CanonicalRan = true
+		sim.CanonicalTheta = ct
+		sim.CanonicalSolvent = cs
+		if !cs {
+			sim.Solvent = false
+		}
+		sim.Note += fmt.Sprintf(" · canónico (motor): peor θ=%.4f %s", ct, map[bool]string{true: "✓", false: "✗"}[cs])
+	}
 	return sim, nil
 }
 
