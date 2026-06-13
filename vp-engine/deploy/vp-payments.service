@@ -1,0 +1,32 @@
+# /etc/systemd/system/vp-payments.service
+# Servicio de cobros Stripe (Go). Go NO lee .env → las variables van por
+# EnvironmentFile. Build:
+#   cd backend/vp-engine && go build -o /opt/vicion/bin/vp-payments ./cmd/vp-payments
+# Instalar:
+#   sudo cp deploy/vp-payments.service /etc/systemd/system/
+#   sudo cp deploy/vp-payments.env.example /etc/vicion/vp-payments.env   # y editar
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vp-payments
+#   journalctl -u vp-payments -f
+
+[Unit]
+Description=vp-payments (Stripe checkout + webhook + activación)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vicion
+Group=vicion
+EnvironmentFile=/etc/vicion/vp-payments.env
+ExecStart=/opt/vicion/bin/vp-payments
+Restart=always
+RestartSec=3
+# Hardening básico
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vicion
+
+[Install]
+WantedBy=multi-user.target

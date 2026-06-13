@@ -1,11 +1,14 @@
 import { Hono } from 'hono';
 import { auth } from './auth';
 import { autoPlaceAffiliate, placeAffiliate, postTransaction } from './server/affiliate';
+import { requireAdmin } from './server/admin-gate';
+import { commandCenterSummary, commandCenterHealth, commandCenterAlerts, commandCenterAckAlert } from './server/command-center';
 
 type Session = Awaited<ReturnType<typeof auth.api.getSession>>;
 
 type Variables = {
   session: Session;
+  personIsAdmin?: boolean;
 };
 
 const app = new Hono<{ Variables: Variables }>();
@@ -71,6 +74,31 @@ app.post('/api/transaction/post', async (c) => {
     wasIdempotentReplay: result.wasIdempotentReplay,
     postedAt: result.postedAt?.toISOString() ?? null,
   });
+});
+
+app.get('/api/admin/command-center/summary', requireAdmin, async (c) => {
+  const to = c.req.query('to') ?? new Date().toISOString().slice(0, 10);
+  const from = c.req.query('from') ?? '2026-01-01';
+  return c.json(await commandCenterSummary(from, to));
+});
+
+app.get('/api/admin/command-center/health', requireAdmin, async (c) => {
+  return c.json(await commandCenterHealth());
+});
+
+app.get('/api/admin/command-center/alerts', requireAdmin, async (c) => {
+  return c.json(await commandCenterAlerts());
+});
+
+app.post('/api/admin/command-center/alerts/:id/ack', requireAdmin, async (c) => {
+  const id = c.req.param('id') ?? '';
+  const session = c.get('session');
+  const { db } = await import('./db/client');
+  const { sql } = await import('drizzle-orm');
+  const rows = await db.execute<{ id: string }>(sql`
+    SELECT id::text FROM mlm.person WHERE user_id = ${session?.user?.id ?? ''} LIMIT 1`);
+  if (rows.length === 0) return c.json({ error: 'person_not_found' }, 404);
+  return c.json(await commandCenterAckAlert(id, BigInt(String(rows[0]!.id))));
 });
 
 app.get('/health', (c) => c.text('ok'));
