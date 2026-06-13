@@ -295,13 +295,13 @@ func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing email")
 		return
 	}
-	code, err := h.store.GetReferralCode(r.Context(), email)
+	name, code, err := h.store.GetMemberContext(r.Context(), email)
 	if err != nil {
-		h.log.Error().Err(err).Msg("referral code")
+		h.log.Error().Err(err).Msg("member context")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"referral_code": code})
+	writeJSON(w, http.StatusOK, map[string]string{"referral_code": code, "name": name})
 }
 
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -43,37 +44,39 @@ type MemberSummary struct {
 	Withdrawals           []MemberWithdrawal `json:"withdrawals"`
 }
 
-// GetReferralCode devuelve el código de referido REAL del miembro
-// (mlm.affiliate.invitation_link, único). Si el afiliado existe pero no tiene
-// código, genera uno único ("MP"+affiliate_id) y lo persiste. Si el usuario aún
-// no está colocado en el árbol, devuelve "" (no tiene código todavía).
-func (s *Store) GetReferralCode(ctx context.Context, email string) (string, error) {
+// GetMemberContext devuelve el nombre real (mlm.person) y el código de referido
+// real (mlm.affiliate.invitation_link) del miembro por email — la fuente
+// autoritativa para los 117k migrados (cuyo id token de Cognito puede no traer
+// el nombre). Genera+persiste el código si el afiliado no tiene uno.
+func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code string, err error) {
+	var fn, ln string
 	var affID *int64
-	var code *string
-	err := s.db.QueryRow(ctx, `
-		SELECT a.id, a.invitation_link
+	var inv *string
+	err = s.db.QueryRow(ctx, `
+		SELECT trim(p.first_name), trim(p.last_name), a.id, a.invitation_link
 		  FROM mlm.person p
-		  JOIN mlm.affiliate a ON a.person_id = p.id
+		  LEFT JOIN mlm.affiliate a ON a.person_id = p.id
 		 WHERE lower(p.email) = lower($1)
 		 LIMIT 1
-	`, email).Scan(&affID, &code)
+	`, email).Scan(&fn, &ln, &affID, &inv)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("referral lookup: %w", err)
+		return "", "", fmt.Errorf("member context: %w", err)
 	}
-	if code != nil && *code != "" {
-		return *code, nil
+	name = strings.TrimSpace(fn + " " + ln)
+	if inv != nil && *inv != "" {
+		return name, *inv, nil
 	}
-	// Generar y persistir (único por affiliate id).
+	if affID == nil {
+		return name, "", nil // registrado, aún sin colocar en el árbol
+	}
 	newCode := fmt.Sprintf("MP%d", *affID)
-	if _, err := s.db.Exec(ctx,
+	_, _ = s.db.Exec(ctx,
 		`UPDATE mlm.affiliate SET invitation_link=$2 WHERE id=$1 AND invitation_link IS NULL`,
-		*affID, newCode); err != nil {
-		return newCode, nil // best-effort: igual devolvemos el código
-	}
-	return newCode, nil
+		*affID, newCode)
+	return name, newCode, nil
 }
 
 // GetMemberSummary arma el resumen para el miembro identificado por email.
