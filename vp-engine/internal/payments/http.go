@@ -55,9 +55,27 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/users", h.handleAdminUsers)
 	mux.HandleFunc("/api/admin/summary", h.handleAdminSummary)
 	mux.HandleFunc("/api/admin/block", h.handleAdminBlock)
+	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
 	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
 	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
 	return mux
+}
+
+func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	status := r.URL.Query().Get("status")
+	q := r.URL.Query().Get("q")
+	limit := atoiDefault(r.URL.Query().Get("limit"), 25)
+	offset := atoiDefault(r.URL.Query().Get("offset"), 0)
+	items, total, err := h.store.ListPayments(r.Context(), status, q, limit, offset)
+	if err != nil {
+		h.log.Error().Err(err).Msg("list payments")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payments": items, "total": total, "limit": limit, "offset": offset})
 }
 
 func (h *Handler) handleAdminWithdrawals(w http.ResponseWriter, r *http.Request) {
@@ -336,6 +354,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 type checkoutRequest struct {
 	Email     string `json:"email"`
 	PackageID int    `json:"package_id"`
+	Ref       string `json:"ref"` // código de referido (?ref=CODE) → sponsor para colocar
 }
 
 type checkoutResponse struct {
@@ -391,11 +410,20 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sponsor: el del afiliado existente; si es comprador nuevo (sin sponsor) y
+	// vino con ?ref=CODE, resolvemos el código de referido → afiliado referidor.
+	sponsor := buyer.SponsorAffiliateID
+	if sponsor == nil && req.Ref != "" {
+		if s, rerr := h.store.ResolveSponsorByCode(ctx, req.Ref); rerr == nil && s != nil {
+			sponsor = s
+		}
+	}
+
 	intentID, err := h.store.CreatePurchaseIntent(ctx, PurchaseIntent{
 		UserID:             req.Email, // traceability: identificador externo del comprador
 		PersonID:           buyer.PersonID,
 		AffiliateID:        buyer.AffiliateID,
-		SponsorAffiliateID: buyer.SponsorAffiliateID,
+		SponsorAffiliateID: sponsor,
 		PackageID:          pack.ID,
 		PV:                 pack.PV,
 		AmountUSD:          pack.AmountUSD,

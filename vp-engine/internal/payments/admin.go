@@ -146,6 +146,80 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	return sum, nil
 }
 
+// AdminPayment es un pago de NUESTRO endpoint (payments.purchase_intent).
+type AdminPayment struct {
+	ID              string `json:"id"`
+	Email           string `json:"email"`
+	Name            string `json:"name"`
+	PackageID       int    `json:"package_id"`
+	AmountUSD       string `json:"amount_usd"`
+	FeeUSD          string `json:"fee_usd"`
+	TotalUSD        string `json:"total_usd"`
+	Status          string `json:"status"`
+	PaymentIntentID string `json:"payment_intent_id"`
+	CreatedAt       string `json:"created_at"`
+	PaidAt          string `json:"paid_at"`
+}
+
+// ListPayments lista los pagos hechos por NUESTRO checkout/webhook
+// (tabla payments.purchase_intent) — no incluye otros endpoints de Stripe.
+func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offset int) ([]AdminPayment, int64, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	var total int64
+	if err := s.db.QueryRow(ctx, `
+		SELECT count(*) FROM payments.purchase_intent
+		 WHERE ($1='' OR status=$1) AND ($2='' OR lower(user_id) ILIKE '%'||lower($2)||'%')
+	`, status, q).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count payments: %w", err)
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT pi.id::text, pi.user_id,
+		       COALESCE((SELECT trim(p.first_name||' '||p.last_name) FROM mlm.person p WHERE p.id=pi.person_id),''),
+		       pi.package_id, pi.amount_usd::text, pi.fee_usd::text, (pi.amount_usd+pi.fee_usd)::text,
+		       pi.status, COALESCE(pi.stripe_payment_intent_id,''),
+		       to_char(pi.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),'')
+		  FROM payments.purchase_intent pi
+		 WHERE ($1='' OR pi.status=$1) AND ($2='' OR lower(pi.user_id) ILIKE '%'||lower($2)||'%')
+		 ORDER BY pi.created_at DESC
+		 LIMIT $3 OFFSET $4
+	`, status, q, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list payments: %w", err)
+	}
+	defer rows.Close()
+	out := []AdminPayment{}
+	for rows.Next() {
+		var p AdminPayment
+		if err := rows.Scan(&p.ID, &p.Email, &p.Name, &p.PackageID, &p.AmountUSD, &p.FeeUSD, &p.TotalUSD,
+			&p.Status, &p.PaymentIntentID, &p.CreatedAt, &p.PaidAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, p)
+	}
+	return out, total, rows.Err()
+}
+
+// ResolveSponsorByCode mapea un código de referido (invitation_link) al
+// affiliate_id del referidor. Devuelve nil si no existe.
+func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, error) {
+	if code == "" {
+		return nil, nil
+	}
+	var id int64
+	err := s.db.QueryRow(ctx,
+		`SELECT id FROM mlm.affiliate WHERE invitation_link = $1 LIMIT 1`, code).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve sponsor by code: %w", err)
+	}
+	return &id, nil
+}
+
 // AdminWithdrawal es una solicitud de retiro para el panel.
 type AdminWithdrawal struct {
 	ID        int64  `json:"id"`
