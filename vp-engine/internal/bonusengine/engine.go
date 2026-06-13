@@ -100,11 +100,21 @@ func New(db *pgxpool.Pool, nc *nats.Conn, log zerolog.Logger) *Engine {
 
 // CloseBinaryPeriod vive en binary_close.go.
 //
-// RunROIDaily distribuye ROI sobre paquetes activos.
-// TODO(fase 2): leer mlm.affiliate_package WHERE status='active', calcular ROI
-// según plan_config, postear via ledger.PostTransaction (vía service interno).
-func (e *Engine) RunROIDaily(_ context.Context) error {
-	return errors.New("RunROIDaily not yet implemented")
+// RunROIDaily devenga el ROI diario de los CDs de inversión (concept 1006),
+// por tier y calificación (ver AccrueCDROIDaily). Corre aunque el cierre binario
+// esté apagado: es el mecanismo de ROI de la red (CD para todos).
+func (e *Engine) RunROIDaily(ctx context.Context) error {
+	res, err := e.AccrueCDROIDaily(ctx)
+	if err != nil {
+		return err
+	}
+	e.log.Info().
+		Int("cds", res.CDsProcessed).
+		Int("posted", res.Posted).
+		Int("matured", res.Matured).
+		Str("total_usd", res.TotalUSD.StringFixed(2)).
+		Msg("CD ROI daily accrual complete")
+	return nil
 }
 
 // RunLeadershipBonus mensual.

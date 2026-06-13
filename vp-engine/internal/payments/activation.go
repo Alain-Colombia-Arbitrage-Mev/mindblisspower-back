@@ -107,6 +107,47 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		return ActivationResult{}, fmt.Errorf("activate package: %w", err)
 	}
 
+	// 2b. Abrir el CD de inversión: ROI diario por tier (25% base → tasa calificada
+	//     con 2 directos), principal bloqueado cd_lock_days (365). El tier se
+	//     resuelve por el monto del paquete; matures_at = now + cd_lock_days del
+	//     plan activo. Idempotente por affiliate_package (NOT EXISTS). El devengo
+	//     diario lo hace el motor (bonusengine.AccrueCDROIDaily, concepto 1006).
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO mlm.investment_cd (affiliate_id, affiliate_package_id, principal_usd, roi_tier_id, matures_at)
+		SELECT $1, ap.id, p.amount_usd,
+		       (SELECT id FROM mlm.cd_roi_tier
+		         WHERE min_amount_usd <= p.amount_usd
+		           AND (max_amount_usd IS NULL OR p.amount_usd < max_amount_usd)
+		           AND active
+		         ORDER BY id DESC LIMIT 1),
+		       now() + (COALESCE((
+		           SELECT cd_lock_days FROM mlm.plan_config
+		            WHERE effective_from <= now() AND (effective_to IS NULL OR effective_to > now())
+		            ORDER BY effective_from DESC LIMIT 1), 365) || ' days')::interval
+		  FROM mlm.affiliate_package ap
+		  JOIN mlm.package p ON p.id = ap.package_id
+		 WHERE ap.affiliate_id = $1 AND ap.transaction_hash = $2
+		   AND NOT EXISTS (SELECT 1 FROM mlm.investment_cd cd WHERE cd.affiliate_package_id = ap.id)
+		   AND EXISTS (SELECT 1 FROM mlm.cd_roi_tier
+		                WHERE min_amount_usd <= p.amount_usd
+		                  AND (max_amount_usd IS NULL OR p.amount_usd < max_amount_usd) AND active)
+	`, affID, paymentIntentID); err != nil {
+		return ActivationResult{}, fmt.Errorf("open investment_cd: %w", err)
+	}
+
+	// 2c. Asegurar wallet USD del afiliado (para que el ROI/comisiones tengan dónde
+	//     postearse). Idempotente.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		SELECT $1, (SELECT id FROM mlm.asset WHERE symbol='USD' LIMIT 1), $2, 0
+		 WHERE EXISTS (SELECT 1 FROM mlm.asset WHERE symbol='USD')
+		   AND NOT EXISTS (
+		       SELECT 1 FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
+		        WHERE w.affiliate_id = $1 AND s.symbol='USD')
+	`, affID, fmt.Sprintf("ledger:%d", affID)); err != nil {
+		return ActivationResult{}, fmt.Errorf("ensure usd wallet: %w", err)
+	}
+
 	// 3. Acreditar PV (idempotente por external_ref). El trigger fn_apply_tree_event
 	//    lo propaga a la pierna correcta de cada ancestro.
 	if _, err := tx.Exec(ctx, `

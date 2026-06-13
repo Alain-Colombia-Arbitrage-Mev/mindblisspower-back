@@ -60,6 +60,13 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	root := findRepoRoot(t)
 	for _, f := range []string{
 		"_meta/schema_mlm.sql",
+		"_meta/schema_governance.sql",
+		"_meta/migration/05_timescaledb.sql",
+		"_meta/schema_payouts.sql",
+		"_meta/schema_payouts_v1.1.sql",
+		"_meta/schema_payouts_v1.2.sql",
+		"_meta/schema_ranks.sql",
+		"_meta/schema_payouts_v1.3.sql",
 		"_meta/migration/30_payments.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))

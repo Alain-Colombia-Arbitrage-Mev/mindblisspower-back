@@ -82,6 +82,25 @@ func TestActivatePaidPurchase_Integration(t *testing.T) {
 		t.Fatalf("package = %s/%s/%s/%d", pkgStatus, method, hash, pvRem)
 	}
 
+	// 2b) CD de inversión abierto (ROI por tier) + wallet USD asegurada.
+	var cdTier int
+	var cdStatus string
+	if err := pool.QueryRow(ctx, `
+		SELECT roi_tier_id, status::text FROM mlm.investment_cd WHERE affiliate_id=$1`, res.AffiliateID).
+		Scan(&cdTier, &cdStatus); err != nil {
+		t.Fatalf("investment_cd no creado en activación: %v", err)
+	}
+	if cdTier < 1 || cdStatus != "active" {
+		t.Fatalf("investment_cd = tier %d / %s, want tier≥1 / active", cdTier, cdStatus)
+	}
+	var wallets int
+	_ = pool.QueryRow(ctx, `
+		SELECT count(*) FROM mlm.wallet w JOIN mlm.asset s ON s.id=w.asset_id
+		 WHERE w.affiliate_id=$1 AND s.symbol='USD'`, res.AffiliateID).Scan(&wallets)
+	if wallets != 1 {
+		t.Fatalf("esperaba 1 wallet USD, got %d", wallets)
+	}
+
 	// 3) PV acreditado.
 	var pvLeft int
 	if err := pool.QueryRow(ctx, `

@@ -83,12 +83,36 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return fmt.Errorf("register invariant-check: %w", err)
 	}
 
+	// Job 3: devengo diario de ROI de CDs — 00:30 Bogota. Independiente del ciclo
+	// binario: el ROI (CD para todos) corre aunque el cierre binario esté apagado.
+	_, err = s.sched.NewJob(
+		gocron.CronJob("30 0 * * *", false),
+		gocron.NewTask(func(jobCtx context.Context) {
+			s.runCDROI(jobCtx)
+		}, ctx),
+		gocron.WithName("cd-roi-daily"),
+		gocron.WithSingletonMode(gocron.LimitModeReschedule),
+	)
+	if err != nil {
+		return fmt.Errorf("register cd-roi-daily: %w", err)
+	}
+
 	s.sched.Start()
 	s.log.Info().Msg("scheduler started")
 
 	<-ctx.Done()
 	s.log.Info().Msg("scheduler shutting down")
 	return s.sched.Shutdown()
+}
+
+// runCDROI ejecuta el devengo diario de ROI de los CDs activos.
+func (s *Scheduler) runCDROI(ctx context.Context) {
+	log := s.log.With().Str("job", "cd-roi-daily").Logger()
+	if err := s.engine.RunROIDaily(ctx); err != nil {
+		log.Error().Err(err).Msg("CD ROI daily accrual failed")
+		return
+	}
+	s.engine.lastROIRun.SetToCurrentTime()
 }
 
 // runBinaryCycle: cierra el período abierto (si lo hay) y abre el siguiente.
