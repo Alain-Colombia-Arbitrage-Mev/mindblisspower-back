@@ -1,0 +1,22 @@
+# Bloque Caddy para app.mindblisspower.com
+#
+# REGLA DE ROUTING (importante):
+#   - SOLO /api/webhooks/stripe va al servicio Go (lo llama Stripe; se autentica
+#     por firma, no por Cognito).
+#   - /api/payments/checkout y /api/payments/me los sirve el NEXT (BFF): valida
+#     Cognito y llama a Go por loopback (VP_PAYMENTS_URL=http://127.0.0.1:9095).
+#     => NO enrutar esos paths a Go en Caddy, o te saltarías la auth del BFF.
+#
+# Insertar dentro del bloque del sitio, ANTES del reverse_proxy general al Next.
+
+app.mindblisspower.com {
+    # 1) Webhook de Stripe → servicio Go (público vía CloudFront)
+    handle /api/webhooks/stripe {
+        reverse_proxy 127.0.0.1:9095
+    }
+
+    # 2) Todo lo demás → app Next (incluye el BFF /api/payments/checkout y /me)
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+}

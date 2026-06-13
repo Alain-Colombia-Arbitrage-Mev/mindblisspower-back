@@ -10,8 +10,11 @@ legacy/
 
 # Secrets — only *.example files belong in the repo
 *.env
+.env
+.env.*
 !*.env.example
 !**/production.env.example
+!.env.example
 secrets.yaml
 
 # PII exports — user data must never reach GitHub

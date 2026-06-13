@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/vicionpower/vp-engine/internal/shared/metrics"
+	"github.com/vicionpower/vp-engine/internal/simulate"
 )
 
 // ReadinessProbe valida que el proceso está listo para servir tráfico.
@@ -57,6 +58,10 @@ func NewHTTP(addr string, ready ReadinessProbe, log zerolog.Logger, opts ...HTTP
 		mux.Handle("/network/analyze", s.networkAnalysis)
 		mux.Handle("/api/network/analyze", s.networkAnalysis)
 	}
+
+	simHandler := simulate.NewHandler(s.log)
+	mux.Handle("/simulate", simHandler)
+	mux.Handle("/api/simulate", simHandler)
 
 	s.srv = &http.Server{
 		Addr:              addr,
