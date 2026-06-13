@@ -59,7 +59,39 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
 	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
 	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
+	mux.HandleFunc("/api/admin/finance", h.handleAdminFinance)
+	mux.HandleFunc("/api/admin/solvency", h.handleAdminSolvency)
 	return mux
+}
+
+// handleAdminFinance: tablero financiero de la red (entrante, distribuido,
+// pendiente, rangos, tesorería, moneyflow).
+func (h *Handler) handleAdminFinance(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	fin, err := h.store.GetAdminFinance(r.Context())
+	if err != nil {
+		h.log.Error().Err(err).Msg("admin finance")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, fin)
+}
+
+// handleAdminSolvency: monitor de salud (θ histórico + período vigente + alerta
+// de "árbol por romperse").
+func (h *Handler) handleAdminSolvency(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	sv, err := h.store.GetSolvency(r.Context())
+	if err != nil {
+		h.log.Error().Err(err).Msg("admin solvency")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, sv)
 }
 
 func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {

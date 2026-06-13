@@ -1,0 +1,241 @@
+package payments
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+)
+
+// MoneyflowRow es un agregado del ledger por tipo de concepto (kind).
+type MoneyflowRow struct {
+	Kind     string `json:"kind"`      // binary_bonus | roi | r2_yield | rank_bonus | royalty | withdrawal | package_purchase | platform_fee | ...
+	TotalUSD string `json:"total_usd"` // SUM(amount * factor) — neto con signo del concepto
+	Count    int64  `json:"count"`
+}
+
+// AdminFinance es el tablero financiero de la red: todo el dinero en un vistazo.
+type AdminFinance struct {
+	// Entrante (caja real vía nuestro checkout Stripe).
+	InflowsUSD string `json:"inflows_usd"`     // Σ(amount+fee) de compras paid|activated
+	PacksPaid  int64  `json:"packs_paid"`      // # de packs pagados
+	FeesUSD    string `json:"fees_usd"`        // Σ del 1% de manejo
+
+	// Distribuido a la red (ledger).
+	CommissionsDistributedUSD string `json:"commissions_distributed_usd"` // Σ créditos a miembros (todos los bonos)
+	PendingPayoutUSD          string `json:"pending_payout_usd"`          // balance vivo en wallets (lo que se debe, no retirado)
+	MaturingUSD               string `json:"maturing_usd"`                // créditos aún no madurados (no retirables)
+
+	// Rangos.
+	RanksAchieved int64  `json:"ranks_achieved"`  // # de hitos de rango alcanzados
+	RanksBonusUSD string `json:"ranks_bonus_usd"` // Σ neto pagado por rangos
+
+	// Retiros.
+	WithdrawalsPaidUSD    string `json:"withdrawals_paid_usd"`
+	WithdrawalsPendingUSD string `json:"withdrawals_pending_usd"` // solicitados|aprobados sin pagar
+
+	// Dinero de la empresa (retenido) ≈ entrante − comisiones − retiros pagados.
+	TreasuryUSD string `json:"treasury_usd"`
+
+	// Desglose del flujo por concepto.
+	Moneyflow []MoneyflowRow `json:"moneyflow"`
+}
+
+// GetAdminFinance arma el tablero financiero agregando ledger + compras + rangos.
+func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
+	var f AdminFinance
+
+	// Entrante real (nuestro endpoint Stripe).
+	if err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_usd + fee_usd),0)::text,
+		       COALESCE(count(*),0),
+		       COALESCE(SUM(fee_usd),0)::text
+		  FROM payments.purchase_intent
+		 WHERE status IN ('paid','activated')
+	`).Scan(&f.InflowsUSD, &f.PacksPaid, &f.FeesUSD); err != nil {
+		return f, fmt.Errorf("inflows: %w", err)
+	}
+
+	// Distribuido / pendiente (ledger). wallet_movement es la verdad contable.
+	if err := s.db.QueryRow(ctx, `
+		SELECT
+		  COALESCE(SUM(amount) FILTER (WHERE amount > 0),0)::text,                                   -- distribuido (créditos)
+		  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen),0)::text,                                -- balance vivo (neto)
+		  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen AND amount > 0 AND available_at > current_date),0)::text -- madurando
+		  FROM mlm.wallet_movement
+	`).Scan(&f.CommissionsDistributedUSD, &f.PendingPayoutUSD, &f.MaturingUSD); err != nil {
+		return f, fmt.Errorf("ledger totals: %w", err)
+	}
+
+	// Rangos alcanzados + dinero pagado por rangos.
+	if err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(count(*),0), COALESCE(SUM(net_amount_usd),0)::text
+		  FROM mlm.affiliate_rank_achieved
+	`).Scan(&f.RanksAchieved, &f.RanksBonusUSD); err != nil {
+		return f, fmt.Errorf("ranks: %w", err)
+	}
+
+	// Retiros.
+	if err := s.db.QueryRow(ctx, `
+		SELECT
+		  COALESCE(SUM(amount_usd) FILTER (WHERE status='paid'),0)::text,
+		  COALESCE(SUM(amount_usd) FILTER (WHERE status IN ('requested','approved')),0)::text
+		  FROM mlm.withdrawal_request
+	`).Scan(&f.WithdrawalsPaidUSD, &f.WithdrawalsPendingUSD); err != nil {
+		return f, fmt.Errorf("withdrawals: %w", err)
+	}
+
+	// Tesorería ≈ entrante − comisiones distribuidas − retiros pagados.
+	if err := s.db.QueryRow(ctx, `
+		SELECT (
+		  (SELECT COALESCE(SUM(amount_usd+fee_usd),0) FROM payments.purchase_intent WHERE status IN ('paid','activated'))
+		  - (SELECT COALESCE(SUM(amount),0) FROM mlm.wallet_movement WHERE amount > 0)
+		  - (SELECT COALESCE(SUM(amount_usd),0) FROM mlm.withdrawal_request WHERE status='paid')
+		)::text
+	`).Scan(&f.TreasuryUSD); err != nil {
+		return f, fmt.Errorf("treasury: %w", err)
+	}
+
+	// Moneyflow por concepto (neto con signo del concepto).
+	rows, err := s.db.Query(ctx, `
+		SELECT c.kind::text,
+		       COALESCE(SUM(wm.amount * c.factor),0)::text,
+		       count(*)
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		 GROUP BY c.kind
+		 ORDER BY SUM(ABS(wm.amount)) DESC
+	`)
+	if err != nil {
+		return f, fmt.Errorf("moneyflow: %w", err)
+	}
+	defer rows.Close()
+	f.Moneyflow = []MoneyflowRow{}
+	for rows.Next() {
+		var m MoneyflowRow
+		if err := rows.Scan(&m.Kind, &m.TotalUSD, &m.Count); err != nil {
+			return f, err
+		}
+		f.Moneyflow = append(f.Moneyflow, m)
+	}
+	return f, rows.Err()
+}
+
+// SolvencyPeriod es una fila de la vista de solvencia (v_period_solvency).
+type SolvencyPeriod struct {
+	PeriodID         int64   `json:"period_id"`
+	PeriodStart      string  `json:"period_start"`
+	PeriodEnd        string  `json:"period_end"`
+	Status           string  `json:"status"`            // open | closing | closed | aborted
+	InflowsUSD       string  `json:"inflows_usd"`
+	ProjectedUSD     string  `json:"projected_outflows_usd"`
+	Theta            *string `json:"theta,omitempty"`   // null si no cerrado
+	TotalPaidUSD     *string `json:"total_paid_usd,omitempty"`
+	MaxPayoutUSD     string  `json:"max_payout_allowed_usd"`
+	SolvencyStatus   string  `json:"solvency_status"`   // pending | OK | BREACH
+	PayoutPctInflows *string `json:"payout_pct_of_inflow,omitempty"`
+}
+
+// Solvency es el monitor de salud de la red: ¿el árbol está por romperse?
+type Solvency struct {
+	Health        string           `json:"health"`         // OK | WARN | BREACH | UNKNOWN
+	Alert         string           `json:"alert"`          // mensaje legible para el admin
+	TreasuryAlpha string           `json:"treasury_alpha"` // α vigente (ej 0.45)
+	Current       *SolvencyPeriod  `json:"current"`        // período abierto/más reciente
+	Recent        []SolvencyPeriod `json:"recent"`         // últimos cerrados (tendencia de θ)
+}
+
+// GetSolvency lee v_period_solvency y deriva un semáforo de salud. La proyección
+// continua del período abierto (shadow close en vivo) es la Capa 2; aquí se
+// expone θ histórico real + el período vigente con su techo de pago (α×inflows).
+func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
+	var out Solvency
+	out.Health = "UNKNOWN"
+	out.Recent = []SolvencyPeriod{}
+
+	// α vigente del plan activo.
+	_ = s.db.QueryRow(ctx, `
+		SELECT treasury_alpha::text FROM mlm.plan_config
+		 WHERE effective_from <= now() AND (effective_to IS NULL OR effective_to > now())
+		 ORDER BY effective_from DESC LIMIT 1
+	`).Scan(&out.TreasuryAlpha)
+	if out.TreasuryAlpha == "" {
+		out.TreasuryAlpha = "0.45"
+	}
+
+	scan := func(sql string, args ...any) (*SolvencyPeriod, error) {
+		var p SolvencyPeriod
+		err := s.db.QueryRow(ctx, sql, args...).Scan(
+			&p.PeriodID, &p.PeriodStart, &p.PeriodEnd, &p.Status,
+			&p.InflowsUSD, &p.ProjectedUSD, &p.Theta, &p.TotalPaidUSD,
+			&p.MaxPayoutUSD, &p.SolvencyStatus, &p.PayoutPctInflows)
+		if err != nil {
+			return nil, err
+		}
+		return &p, nil
+	}
+
+	const cols = `
+		id,
+		to_char(period_start,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		to_char(period_end,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		status::text,
+		COALESCE(inflows_total,0)::text,
+		COALESCE(projected_outflows,0)::text,
+		theta::text,
+		total_paid::text,
+		COALESCE(max_payout_allowed,0)::text,
+		solvency_status,
+		payout_pct_of_inflow::text`
+
+	// Período vigente: el más reciente (abierto o el último cerrado).
+	cur, err := scan(`SELECT `+cols+` FROM mlm.v_period_solvency ORDER BY period_start DESC LIMIT 1`)
+	if err == nil {
+		out.Current = cur
+	}
+
+	// Tendencia: últimos 8 cerrados.
+	rows, err := s.db.Query(ctx, `SELECT `+cols+`
+		FROM mlm.v_period_solvency WHERE status='closed'
+		ORDER BY period_start DESC LIMIT 8`)
+	if err != nil {
+		return out, fmt.Errorf("solvency recent: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p SolvencyPeriod
+		if err := rows.Scan(&p.PeriodID, &p.PeriodStart, &p.PeriodEnd, &p.Status,
+			&p.InflowsUSD, &p.ProjectedUSD, &p.Theta, &p.TotalPaidUSD,
+			&p.MaxPayoutUSD, &p.SolvencyStatus, &p.PayoutPctInflows); err != nil {
+			return out, err
+		}
+		out.Recent = append(out.Recent, p)
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+
+	// Semáforo de salud:
+	//   BREACH  → algún período cerrado superó α×inflows (T1 roto: no debería pasar).
+	//   WARN    → θ < 0.60 en el último cerrado (throttle alto: red tensionada).
+	//   OK      → θ ≥ 0.60 o sin throttle.
+	out.Health = "OK"
+	out.Alert = "Red estable: los pagos caben en el techo α×inflows."
+	for _, p := range out.Recent {
+		if p.SolvencyStatus == "BREACH" {
+			out.Health = "BREACH"
+			out.Alert = fmt.Sprintf("¡T1 ROTO en período %d! Pagos > α×inflows. Revisar de inmediato.", p.PeriodID)
+			return out, nil
+		}
+	}
+	if len(out.Recent) > 0 && out.Recent[0].Theta != nil {
+		if t, perr := strconv.ParseFloat(*out.Recent[0].Theta, 64); perr == nil && t < 0.60 {
+			out.Health = "WARN"
+			out.Alert = fmt.Sprintf("θ=%.4f en el último cierre: la red está tensionada (throttle alto). El árbol no quiebra (T1 protege) pero los bonos se prorratean fuerte.", t)
+		}
+	}
+	if len(out.Recent) == 0 {
+		out.Health = "UNKNOWN"
+		out.Alert = "Aún no hay períodos cerrados. θ se calculará en el primer cierre."
+	}
+	return out, nil
+}

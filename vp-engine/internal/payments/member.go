@@ -35,6 +35,10 @@ type MemberWithdrawal struct {
 type MemberSummary struct {
 	Positioned            bool               `json:"positioned"`
 	AffiliateID           *int64             `json:"affiliate_id,omitempty"`
+	Rank                  string             `json:"rank"`                  // nombre del rango actual (mlm.rank.name_es) o '—'
+	Plan                  string             `json:"plan"`                  // perfil: passive_investor | network
+	JoinedAt              string             `json:"joined_at"`             // fecha de ingreso (affiliate.created_at, o person.created_at si no posicionado)
+	WalletBalanceUSD      string             `json:"wallet_balance_usd"`    // balance total del ledger (no congelado): disponible + madurando
 	ActivePackages        int                `json:"active_packages"`
 	Payments              []MemberPayment    `json:"payments"`
 	CommissionAvailable   string             `json:"commission_available_usd"`    // madurado, no congelado
@@ -83,16 +87,20 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSummary, error) {
 	var out MemberSummary
 
-	// Identidad → person + affiliate.
+	// Identidad → person + affiliate + rango + perfil + fecha de ingreso.
 	var personID int64
 	var affiliateID *int64
 	err := s.db.QueryRow(ctx, `
-		SELECT p.id, a.id
+		SELECT p.id, a.id,
+		       COALESCE(r.name_es, '—') AS rank,
+		       p.profile::text AS plan,
+		       to_char(COALESCE(a.created_at, p.created_at), 'YYYY-MM-DD') AS joined_at
 		  FROM mlm.person p
 		  LEFT JOIN mlm.affiliate a ON a.person_id = p.id
+		  LEFT JOIN mlm.rank r      ON r.id = a.current_rank_id
 		 WHERE lower(p.email) = lower($1)
 		 LIMIT 1
-	`, email).Scan(&personID, &affiliateID)
+	`, email).Scan(&personID, &affiliateID, &out.Rank, &out.Plan, &out.JoinedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MemberSummary{}, ErrBuyerNotFound
 	}
@@ -137,6 +145,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	out.CommissionAvailable = "0.00"
 	out.CommissionMaturing = "0.00"
 	out.AvailableForWithdrawal = "0.00"
+	out.WalletBalanceUSD = "0.00"
 	out.MinWithdrawalUSD = MinWithdrawalUSD
 	out.Withdrawals = []MemberWithdrawal{}
 	if affiliateID == nil {
@@ -164,10 +173,11 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 		  ), 0)::text,
 		  COALESCE(SUM(amount) FILTER (
 		     WHERE NOT is_frozen AND available_at > current_date AND amount > 0
-		  ), 0)::text
+		  ), 0)::text,
+		  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen), 0)::text
 		  FROM mlm.wallet_movement
 		 WHERE affiliate_id = $1
-	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing)
+	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing, &out.WalletBalanceUSD)
 	if err != nil {
 		return MemberSummary{}, fmt.Errorf("commissions: %w", err)
 	}
