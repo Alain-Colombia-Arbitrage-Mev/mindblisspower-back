@@ -23,10 +23,11 @@ type Handler struct {
 	log          zerolog.Logger
 	serviceToken string
 	adminEmails  []string
+	companyRoot  int64
 }
 
-func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, log zerolog.Logger) *Handler {
-	return &Handler{store: store, gw: gw, serviceToken: serviceToken, adminEmails: adminEmails, log: log.With().Str("component", "payments").Logger()}
+func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
+	return &Handler{store: store, gw: gw, serviceToken: serviceToken, adminEmails: adminEmails, companyRoot: companyRoot, log: log.With().Str("component", "payments").Logger()}
 }
 
 // isAdminEmail: true si el email está en el allowlist por env o es is_admin en mlm.person.
@@ -417,6 +418,12 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		if s, rerr := h.store.ResolveSponsorByCode(ctx, req.Ref); rerr == nil && s != nil {
 			sponsor = s
 		}
+	}
+	// Sin sponsor (sin ?ref ni afiliado previo) → root de empresa (la activación
+	// derrama bajo él). Así nadie queda huérfano y el pago nunca se bloquea.
+	if sponsor == nil && h.companyRoot > 0 {
+		cr := h.companyRoot
+		sponsor = &cr
 	}
 
 	intentID, err := h.store.CreatePurchaseIntent(ctx, PurchaseIntent{

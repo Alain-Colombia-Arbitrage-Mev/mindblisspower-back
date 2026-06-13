@@ -44,6 +44,9 @@ type Config struct {
 	CancelURL      string
 	PaymentMethods []string // p.ej. ["card","crypto"]
 	AdminEmails    []string // allowlist de super-admin por env (además de mlm.person.is_admin)
+	// Afiliado raíz de la empresa: si un comprador no tiene sponsor (sin ?ref ni
+	// afiliado previo), se coloca bajo este root (la activación derrama). 0 = desactivado.
+	CompanyRootAffiliateID int64
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -83,7 +86,8 @@ func LoadConfig() (*Config, error) {
 		SuccessURL:          env("PAYMENTS_SUCCESS_URL", "https://app.mindblisspower.com/dashboard/packages?paid=1&session_id={CHECKOUT_SESSION_ID}"),
 		CancelURL:           env("PAYMENTS_CANCEL_URL", "https://app.mindblisspower.com/dashboard/packages?canceled=1"),
 		PaymentMethods:      splitCSV(env("PAYMENTS_METHODS", "card,crypto")),
-		AdminEmails:         splitCSV(env("PAYMENTS_ADMIN_EMAILS", "")),
+		AdminEmails:            splitCSV(env("PAYMENTS_ADMIN_EMAILS", "")),
+		CompanyRootAffiliateID: int64(envInt("PAYMENTS_COMPANY_ROOT_AFFILIATE_ID", 0)),
 	}
 
 	if c.DatabaseURL == "" {
