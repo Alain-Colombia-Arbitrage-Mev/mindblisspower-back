@@ -148,6 +148,26 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		return ActivationResult{}, fmt.Errorf("ensure usd wallet: %w", err)
 	}
 
+	// 2d. Registrar el INFLOW en el ledger (concepto 1004 package_purchase, +monto)
+	//     en la wallet USD del comprador. Esto es lo que el motor binario suma como
+	//     inflows del período (α×inflows = techo de bonos / θ). Idempotente por
+	//     external_ref. NO es ganancia del miembro: member.go/finance.go excluyen
+	//     package_purchase de los balances retirables.
+	if _, err := tx.Exec(ctx, `
+		WITH txn AS (
+		  INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
+		  VALUES ('pkgbuy:'||$2, 'Compra de pack (inflow)', 'posted', now())
+		  ON CONFLICT (external_ref) DO NOTHING
+		  RETURNING id)
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at)
+		SELECT t.id, w.id, $1, 1004, pi.amount_usd, now()
+		  FROM txn t
+		  JOIN mlm.wallet w ON w.affiliate_id = $1 AND w.asset_id = (SELECT id FROM mlm.asset WHERE symbol='USD')
+		  JOIN payments.purchase_intent pi ON pi.stripe_session_id = $3
+	`, affID, paymentIntentID, sessionID); err != nil {
+		return ActivationResult{}, fmt.Errorf("post inflow: %w", err)
+	}
+
 	// 3. Acreditar PV (idempotente por external_ref). El trigger fn_apply_tree_event
 	//    lo propaga a la pierna correcta de cada ancestro.
 	if _, err := tx.Exec(ctx, `

@@ -166,17 +166,22 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	//   madurando  = créditos con available_at futuro.
 	// Nota: la elegibilidad final de retiro la gobierna el motor de bonos/liquidación;
 	// esto es la vista contable del wallet del miembro.
+	// Balances del miembro = SOLO sus ganancias (bonos/ROI) y débitos (retiros).
+	// Se EXCLUYEN inflows y fees (package_purchase/platform_fee/inter_platform):
+	// son asientos de la compra, no dinero retirable del comprador.
 	err = s.db.QueryRow(ctx, `
 		SELECT
-		  COALESCE(SUM(amount) FILTER (
-		     WHERE NOT is_frozen AND (available_at IS NULL OR available_at <= current_date)
+		  COALESCE(SUM(wm.amount) FILTER (
+		     WHERE NOT wm.is_frozen AND (wm.available_at IS NULL OR wm.available_at <= current_date)
 		  ), 0)::text,
-		  COALESCE(SUM(amount) FILTER (
-		     WHERE NOT is_frozen AND available_at > current_date AND amount > 0
+		  COALESCE(SUM(wm.amount) FILTER (
+		     WHERE NOT wm.is_frozen AND wm.available_at > current_date AND wm.amount > 0
 		  ), 0)::text,
-		  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen), 0)::text
-		  FROM mlm.wallet_movement
-		 WHERE affiliate_id = $1
+		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen), 0)::text
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		 WHERE wm.affiliate_id = $1
+		   AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform')
 	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing, &out.WalletBalanceUSD)
 	if err != nil {
 		return MemberSummary{}, fmt.Errorf("commissions: %w", err)

@@ -55,13 +55,16 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 		return f, fmt.Errorf("inflows: %w", err)
 	}
 
-	// Distribuido / pendiente (ledger). wallet_movement es la verdad contable.
+	// Distribuido / pendiente (ledger). SOLO bonos/ROI a miembros: se EXCLUYEN
+	// inflows y fees (package_purchase/platform_fee/inter_platform).
 	if err := s.db.QueryRow(ctx, `
 		SELECT
-		  COALESCE(SUM(amount) FILTER (WHERE amount > 0),0)::text,                                   -- distribuido (créditos)
-		  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen),0)::text,                                -- balance vivo (neto)
-		  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen AND amount > 0 AND available_at > current_date),0)::text -- madurando
-		  FROM mlm.wallet_movement
+		  COALESCE(SUM(wm.amount) FILTER (WHERE wm.amount > 0),0)::text,                                   -- distribuido (créditos)
+		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen),0)::text,                                -- balance vivo (neto)
+		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen AND wm.amount > 0 AND wm.available_at > current_date),0)::text -- madurando
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		 WHERE c.kind NOT IN ('package_purchase','platform_fee','inter_platform')
 	`).Scan(&f.CommissionsDistributedUSD, &f.PendingPayoutUSD, &f.MaturingUSD); err != nil {
 		return f, fmt.Errorf("ledger totals: %w", err)
 	}
@@ -88,7 +91,8 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	if err := s.db.QueryRow(ctx, `
 		SELECT (
 		  (SELECT COALESCE(SUM(amount_usd+fee_usd),0) FROM payments.purchase_intent WHERE status IN ('paid','activated'))
-		  - (SELECT COALESCE(SUM(amount),0) FROM mlm.wallet_movement WHERE amount > 0)
+		  - (SELECT COALESCE(SUM(wm.amount),0) FROM mlm.wallet_movement wm JOIN mlm.concept c ON c.id=wm.concept_id
+		      WHERE wm.amount > 0 AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform'))
 		  - (SELECT COALESCE(SUM(amount_usd),0) FROM mlm.withdrawal_request WHERE status='paid')
 		)::text
 	`).Scan(&f.TreasuryUSD); err != nil {

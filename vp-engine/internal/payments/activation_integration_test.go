@@ -3,6 +3,8 @@ package payments
 import (
 	"context"
 	"testing"
+
+	"github.com/shopspring/decimal"
 )
 
 // Valida el flujo pago→activación de punta a punta contra Postgres real:
@@ -99,6 +101,28 @@ func TestActivatePaidPurchase_Integration(t *testing.T) {
 		 WHERE w.affiliate_id=$1 AND s.symbol='USD'`, res.AffiliateID).Scan(&wallets)
 	if wallets != 1 {
 		t.Fatalf("esperaba 1 wallet USD, got %d", wallets)
+	}
+
+	// 2e) Inflow posteado al ledger (package_purchase) PERO NO infla el balance
+	//     retirable del comprador.
+	var inflowAmt string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(wm.amount),0)::text FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id=wm.concept_id
+		 WHERE wm.affiliate_id=$1 AND c.kind='package_purchase'`, res.AffiliateID).Scan(&inflowAmt); err != nil {
+		t.Fatalf("inflow: %v", err)
+	}
+	if inflowAmt == "0" {
+		t.Fatal("esperaba un inflow package_purchase posteado")
+	}
+	// El balance del miembro debe seguir en 0 (la compra no es ganancia).
+	sum, err := store.GetMemberSummary(ctx, "buyer@t.local")
+	if err == nil {
+		bal, _ := decimal.NewFromString(sum.WalletBalanceUSD)
+		av, _ := decimal.NewFromString(sum.CommissionAvailable)
+		if !bal.IsZero() || !av.IsZero() {
+			t.Fatalf("la compra NO debe inflar el balance: balance=%s avail=%s", sum.WalletBalanceUSD, sum.CommissionAvailable)
+		}
 	}
 
 	// 3) PV acreditado.
