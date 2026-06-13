@@ -144,7 +144,9 @@ func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int6
 	currentID := sponsorID
 	const preferred = "L"
 
-	for safety := 0; safety < 64; safety++ {
+	// Tope de descenso: el árbol real llega a ~191 niveles (bosque migrado), así
+	// que 512 da margen amplio sin permitir un loop infinito.
+	for safety := 0; safety < 512; safety++ {
 		// Pierna débil del nodo actual (calculada en SQL para no escanear numeric).
 		var side string
 		err := tx.QueryRow(ctx, `
