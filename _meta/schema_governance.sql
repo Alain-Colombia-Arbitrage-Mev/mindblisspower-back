@@ -27,7 +27,8 @@ CREATE TYPE mlm.approval_operation_type AS ENUM (
   'crypto_whitelist',
   'bulk_operation',
   'ddl_production',
-  'secret_rotation'
+  'secret_rotation',
+  'plan_config_publish'  -- ADR-0010 + Capa 3: publicar config de comisiones (editor four-eyes)
 );
 
 CREATE TABLE mlm.approval_request (
