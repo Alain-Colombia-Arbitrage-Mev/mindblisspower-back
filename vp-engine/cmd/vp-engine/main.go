@@ -72,15 +72,19 @@ func run() error {
 	defer pool.Close()
 	logger.Info().Int32("max_conns", cfg.DBMaxConns).Msg("postgres pool ready")
 
-	// NATS (optional in dev: empty NATS_URL skips connection, events become no-op)
+	// NATS opcional: si está vacío o inalcanzable, el motor sigue SIN NATS
+	// (walletbridge queda no-op y los eventos se deshabilitan). No es fatal:
+	// el devengo de ROI y los invariantes no dependen de NATS.
 	var nc *nats.Conn
 	if cfg.NATSURL != "" {
 		nc, err = connectNATS(cfg)
 		if err != nil {
-			return err
+			logger.Warn().Err(err).Str("url", cfg.NATSURL).Msg("NATS inalcanzable; el motor continúa sin NATS (walletbridge no-op)")
+			nc = nil
+		} else {
+			defer nc.Drain()
+			logger.Info().Str("url", cfg.NATSURL).Msg("nats connected")
 		}
-		defer nc.Drain()
-		logger.Info().Str("url", cfg.NATSURL).Msg("nats connected")
 	} else {
 		logger.Warn().Msg("NATS_URL empty; running without NATS (events disabled)")
 	}
