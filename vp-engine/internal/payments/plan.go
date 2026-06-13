@@ -52,7 +52,16 @@ var (
 	ErrPlanFieldOutOfBounds = errors.New("valor fuera de rango")
 	ErrApproverIsInitiator  = errors.New("el aprobador no puede ser el proponente (four-eyes)")
 	ErrProposalNotPending   = errors.New("la propuesta no está pendiente")
+	ErrSolvencyLock         = errors.New("lock de solvencia: θ proyectado < 0.85, el cambio dejaría la red insolvente")
 )
+
+// SolvencyThetaFloor: piso de θ para publicar un cambio de comisiones. Si la
+// simulación proyecta θ por debajo, el publish se bloquea (ADR-0012: la red no
+// debe poder configurarse hacia la insolvencia).
+const SolvencyThetaFloor = 0.85
+
+// inflowsWindowDays: ventana para anualizar inflows reales en la simulación.
+const inflowsWindowDays = 30
 
 func planFieldEditable(k string) bool {
 	for _, f := range planEditableFields {
@@ -121,6 +130,110 @@ func (s *Store) ProposePlanChange(ctx context.Context, adminEmail string, change
 		return 0, fmt.Errorf("create approval request: %w", err)
 	}
 	return reqID, nil
+}
+
+// PlanSimulation es el resultado de proyectar θ bajo una config propuesta.
+type PlanSimulation struct {
+	Theta             float64 `json:"theta"`
+	TreasuryAlpha     float64 `json:"treasury_alpha"`
+	InflowsWindowUSD  float64 `json:"inflows_window_usd"`
+	RoiObligationUSD  float64 `json:"roi_obligation_usd"`   // ROI de CDs activos, prorrateado a la ventana
+	BonusObligationUSD float64 `json:"bonus_obligation_usd"` // referido+regalía sobre inflows de la ventana
+	ProjectedOutflows float64 `json:"projected_outflows_usd"`
+	Floor             float64 `json:"floor"`
+	Solvent           bool    `json:"solvent"` // theta >= floor
+	Note              string  `json:"note"`
+}
+
+// SimulatePlanTheta proyecta θ bajo la config resultante de aplicar `changes`
+// sobre la activa. Modelo (aprox., "CD para todos", binary close OFF):
+//
+//	θ = clamp( α × inflows_ventana / (roi_obligación + bonos_obligación) , 0, 1 )
+//
+// inflows  = compras reales (payments.purchase_intent paid|activated) en la ventana.
+// roi_obl  = Σ principal × tasa_efectiva (calificada/base) de CDs activos × ventana/365.
+// bono_obl = inflows × (max(referral,founder_referral) + royalty)  — referido+regalía.
+// El binario se omite del estimado (lo acotan θ/T2/T3 cuando corra). Es un guard
+// de solvencia sobre la generosidad del plan, no el θ canónico del cierre binario.
+func (s *Store) SimulatePlanTheta(ctx context.Context, changes map[string]any) (PlanSimulation, error) {
+	sim := PlanSimulation{Floor: SolvencyThetaFloor}
+
+	// Rates de la config activa (con override de los cambios propuestos).
+	var alpha, refRate, founderRef, royalty float64
+	err := s.db.QueryRow(ctx, `
+		SELECT treasury_alpha::float8, referral_rate::float8, founder_referral_rate::float8, royalty_rate::float8
+		  FROM mlm.plan_config
+		 WHERE effective_to IS NULL OR effective_to > now()
+		 ORDER BY effective_from DESC LIMIT 1`).Scan(&alpha, &refRate, &founderRef, &royalty)
+	if errors.Is(err, pgx.ErrNoRows) {
+		sim.Theta = 1
+		sim.Note = "no hay config activa; simulación no concluyente"
+		sim.Solvent = true
+		return sim, nil
+	}
+	if err != nil {
+		return sim, fmt.Errorf("active rates: %w", err)
+	}
+	if v, ok := toFloat(changes["treasury_alpha"]); ok {
+		alpha = v
+	}
+	if v, ok := toFloat(changes["referral_rate"]); ok {
+		refRate = v
+	}
+	if v, ok := toFloat(changes["founder_referral_rate"]); ok {
+		founderRef = v
+	}
+	if v, ok := toFloat(changes["royalty_rate"]); ok {
+		royalty = v
+	}
+	sim.TreasuryAlpha = alpha
+
+	// Inflows reales en la ventana.
+	if err := s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(amount_usd),0)::float8
+		  FROM payments.purchase_intent
+		 WHERE status IN ('paid','activated')
+		   AND created_at >= now() - interval '%d days'`, inflowsWindowDays)).Scan(&sim.InflowsWindowUSD); err != nil {
+		return sim, fmt.Errorf("inflows: %w", err)
+	}
+
+	// Obligación ROI: CDs activos × tasa efectiva, prorrateada a la ventana.
+	if err := s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(
+		         cd.principal_usd *
+		         CASE WHEN COALESCE(q.qualifies_uplift,false) THEN t.qualified_annual_rate ELSE t.base_annual_rate END
+		       ),0)::float8 * (%d.0/365.0)
+		  FROM mlm.investment_cd cd
+		  JOIN mlm.cd_roi_tier t ON t.id = cd.roi_tier_id
+		  LEFT JOIN mlm.v_cd_qualification q ON q.investment_cd_id = cd.id
+		 WHERE cd.status='active'`, inflowsWindowDays)).Scan(&sim.RoiObligationUSD); err != nil {
+		return sim, fmt.Errorf("roi obligation: %w", err)
+	}
+
+	refComponent := refRate
+	if founderRef > refComponent {
+		refComponent = founderRef
+	}
+	sim.BonusObligationUSD = sim.InflowsWindowUSD * (refComponent + royalty)
+	sim.ProjectedOutflows = sim.RoiObligationUSD + sim.BonusObligationUSD
+
+	switch {
+	case sim.InflowsWindowUSD <= 0:
+		sim.Theta = 1
+		sim.Note = fmt.Sprintf("sin inflows en los últimos %d días; simulación no concluyente (cambio permitido)", inflowsWindowDays)
+	case sim.ProjectedOutflows <= 0:
+		sim.Theta = 1
+		sim.Note = "sin obligaciones proyectadas; θ=1"
+	default:
+		t := alpha * sim.InflowsWindowUSD / sim.ProjectedOutflows
+		if t > 1 {
+			t = 1
+		}
+		sim.Theta = t
+		sim.Note = fmt.Sprintf("θ proyectado bajo el modelo CD; piso de publicación %.2f", SolvencyThetaFloor)
+	}
+	sim.Solvent = sim.Theta >= SolvencyThetaFloor
+	return sim, nil
 }
 
 // PlanProposal es una fila del listado de propuestas de cambio de plan.
@@ -202,6 +315,21 @@ func (s *Store) DecidePlanProposal(ctx context.Context, adminEmail string, reqID
 	}
 
 	if status == "approved" && approve {
+		// Lock de solvencia: simular θ bajo la config propuesta antes de publicar.
+		var payload map[string]any
+		var raw []byte
+		if err := tx.QueryRow(ctx, `SELECT payload FROM mlm.approval_request WHERE id=$1`, reqID).Scan(&raw); err != nil {
+			return "", fmt.Errorf("read payload: %w", err)
+		}
+		_ = json.Unmarshal(raw, &payload)
+		sim, serr := s.SimulatePlanTheta(ctx, payload)
+		if serr != nil {
+			return "", fmt.Errorf("simulate: %w", serr)
+		}
+		if !sim.Solvent {
+			return "", fmt.Errorf("%w (θ=%.4f < %.2f, inflows=%.2f, obligaciones=%.2f)",
+				ErrSolvencyLock, sim.Theta, sim.Floor, sim.InflowsWindowUSD, sim.ProjectedOutflows)
+		}
 		if err := executePlanPublish(ctx, tx, reqID, approverID); err != nil {
 			return "", fmt.Errorf("publish: %w", err)
 		}

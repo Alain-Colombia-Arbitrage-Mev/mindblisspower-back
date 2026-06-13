@@ -109,6 +109,73 @@ penalidad del 10% del monto retirado.
 10. **Fundadores v2.0** (registran + compran en v2) → 10% referido + 10% binario.
 11. **Rango líder eliminado; T3 (tercera generación legacy) madura en v2 y ya no existe.**
 
-## 6. Pendiente de validar contra DB / simulador
-- ROI por tiers: hoy el motor usa `YieldAnnualRate` plano 25%; los tiers están diseñados, falta cablearlos a `plan_config` por pack.
-- Correr el simulador en **estado estacionario (growth = 0)** con estos parámetros para confirmar margen ≥ 55% (línea roja #7: si necesita reclutar para pagar, es Ponzi).
+## 6. Carrera de rangos (14 niveles)
+
+Bono **fijo de una sola vez** al cruzar el hito de puntos en la **pierna débil** (T1: paga
+una vez por afiliado y rango). Pagado en cuotas (Mitigación B) × θ del período. Valores
+reales de `mlm.rank` (RDS):
+
+| # | Rango | Puntos pierna débil | Bono (USD) |
+|---|---|---:|---:|
+| 1 | Bronce | 1,000 | $100 |
+| 2 | Plata | 2,500 | $200 |
+| 3 | Oro | 5,000 | $500 |
+| 4 | Platino | 10,000 | $750 |
+| 5 | Zafiro | 25,000 | $1,000 |
+| 6 | Rubí | 50,000 | $2,500 |
+| 7 | Esmeralda | 100,000 | $5,000 |
+| 8 | Diamante | 250,000 | $10,000 |
+| 9 | Diamante Azul | 500,000 | $15,000 |
+| 10 | Diamante Negro | 750,000 | $20,000 |
+| 11 | Embajador | 1,000,000 | $25,000 |
+| 12 | Corona | 5,000,000 | $50,000 |
+| 13 | Royal | 10,000,000 | $75,000 |
+| 14 | King | 25,000,000 | $100,000 |
+
+Total exposición si un afiliado alcanza los 14 ≈ **$305,050**. El "rango líder" del
+sistema legacy se eliminó; la 3ª generación (T3 legacy) madura en la migración y no
+existe en v2.
+
+## 7. Estructura del árbol y dónde cae cada comisión
+
+```mermaid
+flowchart TD
+    subgraph T["Árbol binario (forest: 18,600 raíces; sin-referido → root empresa 117475)"]
+      A["Patrocinador (sponsor)"]
+      A -->|pierna L| L1["Directo izq"]
+      A -->|pierna R| R1["Directo der"]
+      L1 --> L2["…derrame weak-leg…"]
+      R1 --> R2["…derrame weak-leg…"]
+      L2 --> Lk["nivel +10 ✅ último que cobra binario"]
+      Lk -.->|"D=10 corta"| Lx["nivel +11 ❌"]
+    end
+    NEW["Compra de pack"] -->|coloca pierna débil| A
+    NEW -->|abre| CD["investment_cd (ROI diario por tier, 365d)"]
+    A -->|"binario weak-leg"| BON["Bonos (× θ, ≤45% inflows)"]
+    A -->|"referido gen-1"| BON
+    A -->|"regalía gen-2"| BON
+    A -->|"rango (hito puntos)"| BON
+```
+
+Reglas de colocación y cobro:
+- **Colocación:** pierna débil (menor PV; desempate por conteo, luego L) descendiendo hasta el primer hueco (derrame/spillover). Sin `?ref` → root de empresa `117475`.
+- **Binario:** sube por la pierna débil hasta **10 niveles** (`DepthCap`); más arriba no cobra de esa compra (breakage = margen).
+- **ROI/CD:** propio del comprador, diario por tier, bloqueado 365d (no sube el árbol).
+- **Referido gen-1 / Regalía gen-2 / Rango:** al patrocinador / patrocinador-del-patrocinador / al que cruza el hito.
+- **θ** sella todo: ningún período paga más de `α=45%` de inflows.
+
+## 8. Lock de solvencia al editar comisiones (four-eyes)
+
+Cambiar `plan_config` (admin propone → 2º admin aprueba) corre una **simulación de θ**
+antes de publicar; si θ proyectado **< 0.85** el publish se **bloquea**:
+
+```
+θ_sim = clamp( α_propuesto × inflows_30d / (ROI_CDs_30d + inflows_30d×(referido+regalía)) , 0, 1 )
+```
+
+(aproximación del modelo "CD para todos"; el θ canónico del cierre binario aplica cuando ese
+motor corra). Endpoint `POST /api/admin/plan/simulate` da el preview en el panel.
+
+## 9. Pendiente de validar contra DB / simulador
+- Correr el simulador en **estado estacionario (growth = 0)** para confirmar margen ≥ 55% (línea roja #7: si necesita reclutar para pagar, es Ponzi).
+- Lock de simulación con el **θ canónico** del cierre binario (hoy es la proyección forward del modelo CD).

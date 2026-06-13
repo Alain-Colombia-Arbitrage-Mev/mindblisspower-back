@@ -65,7 +65,41 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/proposals", h.handleAdminPlanProposals)
 	mux.HandleFunc("/api/admin/plan/propose", h.handleAdminPlanPropose)
 	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
+	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
 	return mux
+}
+
+type planSimulateReq struct {
+	Email   string         `json:"email"`
+	Changes map[string]any `json:"changes"`
+}
+
+// handleAdminPlanSimulate: proyecta θ bajo los cambios propuestos (preview del
+// lock de solvencia, sin persistir nada).
+func (h *Handler) handleAdminPlanSimulate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	var req planSimulateReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
+		writeErr(w, http.StatusForbidden, "not_admin")
+		return
+	}
+	sim, err := h.store.SimulatePlanTheta(r.Context(), req.Changes)
+	if err != nil {
+		h.log.Error().Err(err).Msg("simulate plan")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, sim)
 }
 
 // handleAdminPlan: config de comisiones vigente + lista de campos editables.
@@ -171,6 +205,8 @@ func (h *Handler) handleAdminPlanDecide(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, http.StatusForbidden, "approver_is_initiator")
 		case errors.Is(err, ErrProposalNotPending):
 			writeErr(w, http.StatusConflict, "not_pending")
+		case errors.Is(err, ErrSolvencyLock):
+			writeErr(w, http.StatusConflict, err.Error())
 		default:
 			h.log.Error().Err(err).Msg("decide plan proposal")
 			writeErr(w, http.StatusInternalServerError, "internal")

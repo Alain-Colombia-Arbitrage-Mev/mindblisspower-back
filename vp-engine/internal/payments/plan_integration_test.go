@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -135,6 +136,43 @@ func TestPlanFourEyes_RejectsOutOfBounds(t *testing.T) {
 	if _, err := store.ProposePlanChange(ctx, "b1@t.local",
 		map[string]any{"version_label": "hack"}, "campo prohibido"); err == nil {
 		t.Fatal("esperaba rechazo por campo no editable")
+	}
+}
+
+// TestPlanFourEyes_SolvencyLock: con inflows reales, una propuesta demasiado
+// generosa (referido+regalía altos) proyecta θ < 0.85 y el publish se bloquea.
+func TestPlanFourEyes_SolvencyLock(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	store := NewStore(pool)
+
+	a1 := seedAdmin(t, ctx, pool, "lock1@t.local")
+	_ = seedAdmin(t, ctx, pool, "lock2@t.local")
+	seedActivePlan(t, ctx, pool, a1)
+
+	// Inflows reales en la ventana: $1000 activados.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO payments.purchase_intent (user_id, person_id, package_id, pv, amount_usd, fee_usd, total_cents, status)
+		VALUES ('buyer@t.local', $1, 1001, 100, 1000, 10, 101000, 'activated')`, a1); err != nil {
+		t.Fatalf("seed inflow: %v", err)
+	}
+
+	// Propuesta generosa: referido 0.5 + regalía 0.5 → bonos=1000, θ=0.45·1000/1000=0.45 < 0.85.
+	reqID, err := store.ProposePlanChange(ctx, "lock1@t.local",
+		map[string]any{"referral_rate": 0.5, "royalty_rate": 0.5}, "config demasiado generosa")
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	_, err = store.DecidePlanProposal(ctx, "lock2@t.local", reqID, true, "aprobar pese al riesgo")
+	if err == nil || !strings.Contains(err.Error(), "solvencia") {
+		t.Fatalf("esperaba lock de solvencia, got err=%v", err)
+	}
+	// No se publicó: sigue habiendo solo la config base.
+	var nConfigs int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM mlm.plan_config`).Scan(&nConfigs)
+	if nConfigs != 1 {
+		t.Fatalf("no debió publicar; configs=%d", nConfigs)
 	}
 }
 
