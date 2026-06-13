@@ -4,6 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
+)
+
+// TTLs de caché para lecturas calientes.
+const (
+	financeCacheTTL  = 20 * time.Second
+	solvencyCacheTTL = 20 * time.Second
+	memberCacheTTL   = 15 * time.Second
 )
 
 // MoneyflowRow es un agregado del ledger por tipo de concepto (kind).
@@ -43,6 +51,9 @@ type AdminFinance struct {
 // GetAdminFinance arma el tablero financiero agregando ledger + compras + rangos.
 func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	var f AdminFinance
+	if s.cache.get(ctx, "fin:admin", &f) {
+		return f, nil
+	}
 
 	// Entrante real (nuestro endpoint Stripe).
 	if err := s.db.QueryRow(ctx, `
@@ -121,7 +132,11 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 		}
 		f.Moneyflow = append(f.Moneyflow, m)
 	}
-	return f, rows.Err()
+	if err := rows.Err(); err != nil {
+		return f, err
+	}
+	s.cache.set(ctx, "fin:admin", f, financeCacheTTL)
+	return f, nil
 }
 
 // SolvencyPeriod es una fila de la vista de solvencia (v_period_solvency).
@@ -153,6 +168,9 @@ type Solvency struct {
 // expone θ histórico real + el período vigente con su techo de pago (α×inflows).
 func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 	var out Solvency
+	if s.cache.get(ctx, "solvency", &out) {
+		return out, nil
+	}
 	out.Health = "UNKNOWN"
 	out.Recent = []SolvencyPeriod{}
 
@@ -253,6 +271,7 @@ func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 		if p.SolvencyStatus == "BREACH" {
 			out.Health = "BREACH"
 			out.Alert = fmt.Sprintf("¡T1 ROTO en período %d! Pagos > α×inflows. Revisar de inmediato.", p.PeriodID)
+			s.cache.set(ctx, "solvency", out, solvencyCacheTTL)
 			return out, nil
 		}
 	}
@@ -266,5 +285,6 @@ func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
 		out.Health = "UNKNOWN"
 		out.Alert = "Aún no hay períodos cerrados. θ se calculará en el primer cierre."
 	}
+	s.cache.set(ctx, "solvency", out, solvencyCacheTTL)
 	return out, nil
 }

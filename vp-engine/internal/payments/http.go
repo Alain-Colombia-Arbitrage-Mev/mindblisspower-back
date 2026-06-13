@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	stripe "github.com/stripe/stripe-go/v85"
@@ -66,7 +67,26 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/propose", h.handleAdminPlanPropose)
 	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
 	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
-	return mux
+	return h.rateLimit(mux)
+}
+
+// rateLimit: backstop por-endpoint (ventana fija 1 min) contra loops/abuso que
+// saturen la DB. Generoso (la caché ya absorbe la carga normal). Nil cache o
+// Redis caído ⇒ permite (no bloquea tráfico legítimo). Excluye webhook y health.
+func (h *Handler) rateLimit(next http.Handler) http.Handler {
+	const perPathPerMinute = 3000
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/webhooks/stripe" || r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := "rl:" + r.Method + ":" + r.URL.Path
+		if !h.store.cache.allow(r.Context(), key, perPathPerMinute, time.Minute) {
+			writeErr(w, http.StatusTooManyRequests, "rate_limited")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type planSimulateReq struct {

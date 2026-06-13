@@ -22,9 +22,13 @@ var (
 type Store struct {
 	db        *pgxpool.Pool
 	EngineURL string
+	cache     *Cache // nil ⇒ sin caché (degrada a DB)
 }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+
+// SetCache inyecta la caché Redis (cache-aside). nil = deshabilitada.
+func (s *Store) SetCache(c *Cache) { s.cache = c }
 
 // Buyer es la identidad MLM resuelta desde el user_id de Cognito.
 type Buyer struct {

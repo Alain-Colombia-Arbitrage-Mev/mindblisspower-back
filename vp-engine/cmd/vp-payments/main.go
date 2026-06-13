@@ -56,6 +56,14 @@ func run() error {
 	// Activación inline y atómica: el servicio solo necesita DB + Stripe (sin NATS).
 	store := payments.NewStore(pool)
 	store.EngineURL = cfg.EngineURL // simulador canónico de θ (lock de solvencia)
+	if cache := payments.NewCache(cfg.RedisAddr, cfg.RedisPassword); cache != nil {
+		if err := cache.Ping(rootCtx); err != nil {
+			logger.Warn().Err(err).Str("addr", cfg.RedisAddr).Msg("Redis inalcanzable; caché deshabilitada (degrada a DB)")
+		} else {
+			store.SetCache(cache)
+			logger.Info().Str("addr", cfg.RedisAddr).Msg("Redis cache-aside habilitado")
+		}
+	}
 	gw := payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 

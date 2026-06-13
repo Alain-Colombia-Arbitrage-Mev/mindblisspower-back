@@ -51,6 +51,10 @@ type Config struct {
 	// EngineURL: base del motor vp-engine para el simulador canónico de θ
 	// (POST /simulate). Vacío ⇒ el lock de solvencia usa solo la proyección forward.
 	EngineURL string
+
+	// Redis (cache-aside + rate-limit). RedisAddr vacío ⇒ caché deshabilitada.
+	RedisAddr     string
+	RedisPassword string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -93,6 +97,8 @@ func LoadConfig() (*Config, error) {
 		AdminEmails:            splitCSV(env("PAYMENTS_ADMIN_EMAILS", "")),
 		CompanyRootAffiliateID: int64(envInt("PAYMENTS_COMPANY_ROOT_AFFILIATE_ID", 0)),
 		EngineURL:              env("VP_ENGINE_URL", "http://127.0.0.1:9090"),
+		RedisAddr:              env("REDIS_ADDR", ""),
+		RedisPassword:          env("REDIS_PASSWORD", ""),
 	}
 
 	if c.DatabaseURL == "" {

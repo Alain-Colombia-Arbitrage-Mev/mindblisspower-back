@@ -190,6 +190,9 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 	if err := tx.Commit(ctx); err != nil {
 		return ActivationResult{}, fmt.Errorf("commit: %w", err)
 	}
+	// Nueva compra/activación → cambian inflows, packs y el período → invalidar
+	// los agregados cacheados (el resumen del miembro se refresca por TTL).
+	s.cache.del(ctx, "fin:admin", "solvency")
 	return ActivationResult{Status: "activated", AffiliateID: affID}, nil
 }
 

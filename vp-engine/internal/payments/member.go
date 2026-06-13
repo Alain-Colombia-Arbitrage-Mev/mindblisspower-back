@@ -86,6 +86,10 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 // GetMemberSummary arma el resumen para el miembro identificado por email.
 func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSummary, error) {
 	var out MemberSummary
+	ckey := "member:" + strings.ToLower(strings.TrimSpace(email))
+	if s.cache.get(ctx, ckey, &out) {
+		return out, nil
+	}
 
 	// Identidad → person + affiliate + rango + perfil + fecha de ingreso.
 	var personID int64
@@ -149,6 +153,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	out.MinWithdrawalUSD = MinWithdrawalUSD
 	out.Withdrawals = []MemberWithdrawal{}
 	if affiliateID == nil {
+		s.cache.set(ctx, ckey, out, memberCacheTTL)
 		return out, nil
 	}
 
@@ -226,5 +231,6 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	}
 	out.AvailableForWithdrawal = forWd.StringFixed(2)
 
+	s.cache.set(ctx, ckey, out, memberCacheTTL)
 	return out, nil
 }
