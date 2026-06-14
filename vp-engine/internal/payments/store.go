@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -95,6 +96,55 @@ func (s *Store) ResolveBuyer(ctx context.Context, email string) (Buyer, error) {
 		return Buyer{}, fmt.Errorf("resolve buyer: %w", err)
 	}
 	return b, nil
+}
+
+// EnsurePerson garantiza que exista mlm.person para el email (auto-provisión de
+// usuarios nuevos de Cognito que aún no tienen fila en RDS). Idempotente por
+// email. Devuelve el person_id. La colocación en el árbol (affiliate) la hace la
+// activación; aquí solo se asegura la identidad para que el checkout proceda.
+func (s *Store) EnsurePerson(ctx context.Context, email, fullName, phone string) (int64, error) {
+	if email == "" {
+		return 0, fmt.Errorf("email vacío")
+	}
+	var id int64
+	err := s.db.QueryRow(ctx, `SELECT id FROM mlm.person WHERE lower(email)=lower($1) LIMIT 1`, email).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("lookup person: %w", err)
+	}
+	first, last := splitName(fullName, email)
+	if strings.TrimSpace(phone) == "" {
+		phone = "-"
+	}
+	if err := s.db.QueryRow(ctx, `
+		INSERT INTO mlm.person (first_name, last_name, email, phone_number, status)
+		VALUES ($1, $2, $3, $4, 'active')
+		ON CONFLICT (email) DO UPDATE SET updated_at = now()
+		RETURNING id
+	`, first, last, email, phone).Scan(&id); err != nil {
+		return 0, fmt.Errorf("create person: %w", err)
+	}
+	return id, nil
+}
+
+// splitName parte un nombre completo en (first, last). Si viene vacío, usa la
+// parte local del email como nombre.
+func splitName(fullName, email string) (string, string) {
+	fullName = strings.TrimSpace(fullName)
+	if fullName == "" {
+		local := email
+		if i := strings.IndexByte(email, '@'); i > 0 {
+			local = email[:i]
+		}
+		return local, local
+	}
+	parts := strings.Fields(fullName)
+	if len(parts) == 1 {
+		return parts[0], parts[0]
+	}
+	return parts[0], strings.Join(parts[1:], " ")
 }
 
 // PurchaseIntent representa una fila de payments.purchase_intent.

@@ -576,7 +576,9 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 type checkoutRequest struct {
 	Email     string `json:"email"`
 	PackageID int    `json:"package_id"`
-	Ref       string `json:"ref"` // código de referido (?ref=CODE) → sponsor para colocar
+	Ref       string `json:"ref"`   // código de referido (?ref=CODE) → sponsor para colocar
+	Name      string `json:"name"`  // nombre del token (para auto-provisión de mlm.person)
+	Phone     string `json:"phone"` // teléfono del token (E.164)
 }
 
 type checkoutResponse struct {
@@ -617,6 +619,15 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		h.log.Error().Err(err).Msg("lookup pack")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+
+	// Auto-provisión: usuario nuevo de Cognito sin fila en RDS → crear mlm.person
+	// (idempotente) para que el checkout pueda proceder. La colocación en el árbol
+	// la hace la activación.
+	if _, err := h.store.EnsurePerson(ctx, req.Email, req.Name, req.Phone); err != nil {
+		h.log.Error().Err(err).Str("email", req.Email).Msg("ensure person")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
