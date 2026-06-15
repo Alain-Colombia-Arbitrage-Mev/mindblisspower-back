@@ -42,9 +42,12 @@ jobs:
           KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           HOST: ${{ steps.t.outputs.host }}
           USER: ${{ vars.SSH_USER }}
+          HOSTKEY: ${{ github.ref_name == 'main' && secrets.PROD_HOST_KEY || secrets.STAGING_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh && printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
-          SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
+          # Pin de host key (anti-MITM): known_hosts = IP actual + clave pineada del server.
+          printf '%s %s\n' "$HOST" "$HOSTKEY" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+          SSHO="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -i $HOME/.ssh/deploy_key"
           scp $SSHO /tmp/vp-payments /tmp/vp-engine "$USER@$HOST:/tmp/"
           ssh $SSHO "$USER@$HOST" 'set -e
             sudo install -m 0755 /tmp/vp-payments /opt/vicion/bin/vp-payments
