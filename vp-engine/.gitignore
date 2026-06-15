@@ -5,8 +5,8 @@
 .env
 .env.local
 coverage.html
-sqlc/generated/*.go
-proto/gen/
+# Código GENERADO versionado (CI compila sin buf/protoc/sqlc):
+#   sqlc/generated/*.go  y  proto/gen/  antes estaban ignorados.
 .idea/
 .vscode/
 *.log
