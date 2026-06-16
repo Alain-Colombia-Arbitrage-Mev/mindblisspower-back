@@ -71,7 +71,7 @@ func Load() (*Config, error) {
 		GRPCTLSRequireClientCert:      envBool("GRPC_TLS_REQUIRE_CLIENT_CERT", true),
 		HTTPListenAddr:                env("HTTP_LISTEN_ADDR", "0.0.0.0:9090"),
 		OpenRouterAPIKey:              env("OPENROUTER_API_KEY", ""),
-		OpenRouterModel:               env("OPENROUTER_MODEL", "xiaomi/mimo-v2.5-pro"),
+		OpenRouterModel:               env("OPENROUTER_MODEL", "deepseek/deepseek-v4-pro"),
 		OpenRouterFallbackModel:       env("OPENROUTER_FALLBACK_MODEL", "minimax/minimax-m3"),
 		OpenRouterEndpoint:            env("OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"),
 		OpenRouterReferer:             env("OPENROUTER_REFERER", ""),

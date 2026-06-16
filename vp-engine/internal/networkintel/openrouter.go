@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefaultModel         = "xiaomi/mimo-v2.5-pro"
+	DefaultModel         = "deepseek/deepseek-v4-pro"
 	DefaultFallbackModel = "minimax/minimax-m3"
 	DefaultEndpoint      = "https://openrouter.ai/api/v1/chat/completions"
 )
