@@ -1,13 +1,13 @@
 # Multi-stage Bun build. Final image ~120 MB.
-# Build: docker build -t ghcr.io/vicionpower/app:dev .
-# Run:   docker run --env-file /etc/vicionpower/app.env -p 3000:3000 ghcr.io/vicionpower/app:dev
+# Build: docker build -t 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/api:dev .
+# Run:   docker run --env-file /etc/vicionpower/app.env -p 3000:3000 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/api:dev
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 FROM oven/bun:1.1-debian AS builder
 WORKDIR /app
 
 # Copy lockfile + manifest first for cache-friendly layer
-COPY package.json bun.lockb* ./
+COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile --production=false
 
 COPY tsconfig.json drizzle.config.ts ./
