@@ -28,9 +28,8 @@ for t in "${T[@]}"; do
   CMD="ENVN='$ENVN' IMAGE_TAG='$TAG' COMPOSE_B64='$cbom' COMPOSE_NAME='$cname' SERVICES='$svcs' bash -c \"echo $REMOTE | base64 -d | bash\""
 
   # FIX 3: construir JSON con jq para evitar inyección si TAG u otros valores contienen ", \ o newlines.
-  command -v jq >/dev/null \
-    && PARAMS=$(jq -nc --arg c "$CMD" '{commands:[$c]}') \
-    || PARAMS=$(printf '{"commands":["%s"]}' "$CMD")
+  command -v jq >/dev/null 2>&1 || { echo "ERROR: jq es requerido para construir el comando SSM de forma segura" >&2; exit 1; }
+  PARAMS=$(jq -nc --arg c "$CMD" '{commands:[$c]}')
   TMP=$(mktemp)
   printf '%s' "$PARAMS" > "$TMP"
 
