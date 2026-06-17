@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Corre EN el host vía SSM Run Command.
-# Args por env: ENVN, IMAGE_TAG, COMPOSE (ruta relativa al repo root), SERVICES (lista separada por espacios), REGION
+# Args por env: ENVN, IMAGE_TAG, COMPOSE_B64, COMPOSE_NAME, SERVICES (lista separada por espacios), REGION
 #
 # NOTA (Task 5 / validar en Task 11 — live deploy):
 #   (a) Los params SSM de vp-engine son la unión de server1 + server2; se inyectan vars extra en
@@ -17,6 +17,13 @@ REGISTRY="522814703714.dkr.ecr.${REGION}.amazonaws.com"
 # ECR login
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$REGISTRY"
+
+# FIX 2: materializar el compose file desde COMPOSE_B64 si está presente
+if [ -n "${COMPOSE_B64:-}" ]; then
+  mkdir -p /opt/vicion/compose
+  printf '%s' "$COMPOSE_B64" | base64 -d > "/opt/vicion/compose/$COMPOSE_NAME"
+  COMPOSE="/opt/vicion/compose/$COMPOSE_NAME"
+fi
 
 # Directorio para env-files (solo accesible por root / docker daemon)
 install -d -m 700 /run/vicionpower
@@ -54,11 +61,14 @@ for svc in $SERVICES; do
     FAIL=1
     continue
   fi
-  state=$(docker inspect -f '{{.State.Health.Status}}{{.State.Status}}' "$cid" 2>/dev/null || echo "")
-  case "$state" in
-    *healthy*|*running*) ;;
-    *) echo "UNHEALTHY: $svc ($state)"; FAIL=1 ;;
-  esac
+  # FIX 1: separar health y running con delimitador '|' para evitar que "unhealthy" coincida
+  # con el glob *healthy* de la versión anterior (substring falso-positivo).
+  state=$(docker inspect -f '{{.State.Health.Status}}|{{.State.Status}}' "$cid" 2>/dev/null || echo "|")
+  health="${state%%|*}"
+  running="${state#*|}"
+  if [ "$health" = "unhealthy" ]; then echo "UNHEALTHY: $svc (health=$health)"; FAIL=1; continue; fi
+  if [ "$running" != "running" ]; then echo "NOT-RUNNING: $svc (status=$running)"; FAIL=1; continue; fi
+  echo "OK: $svc (health=${health:-none} status=$running)"
 done
 
 [ "$FAIL" = 0 ] && echo "DEPLOY OK tag=$IMAGE_TAG" || { echo "DEPLOY FAILED"; exit 1; }

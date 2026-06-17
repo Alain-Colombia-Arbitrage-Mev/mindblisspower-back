@@ -20,9 +20,17 @@ for t in "${T[@]}"; do
   compose="${rest%%|*}"
   svcs="${rest#*|}"
 
+  # FIX 2: base64-codificar el compose file y pasarlo al host para que remote-deploy.sh lo materialice.
+  cbom=$(base64 -w0 "$compose")
+  cname=$(basename "$compose")
+
   # El script remoto recibe sus args por env; lo invocamos con base64 para no pelear con comillas.
-  CMD="ENVN='$ENVN' IMAGE_TAG='$TAG' COMPOSE='$compose' SERVICES='$svcs' bash -c \"echo $REMOTE | base64 -d | bash\""
-  PARAMS=$(printf '{"commands":["%s"]}' "$CMD")
+  CMD="ENVN='$ENVN' IMAGE_TAG='$TAG' COMPOSE_B64='$cbom' COMPOSE_NAME='$cname' SERVICES='$svcs' bash -c \"echo $REMOTE | base64 -d | bash\""
+
+  # FIX 3: construir JSON con jq para evitar inyección si TAG u otros valores contienen ", \ o newlines.
+  command -v jq >/dev/null \
+    && PARAMS=$(jq -nc --arg c "$CMD" '{commands:[$c]}') \
+    || PARAMS=$(printf '{"commands":["%s"]}' "$CMD")
   TMP=$(mktemp)
   printf '%s' "$PARAMS" > "$TMP"
 
