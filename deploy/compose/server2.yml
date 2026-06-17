@@ -16,4 +16,6 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file: [/run/vicionpower/vp-engine.env]
+    volumes:
+      - /etc/vp-engine/tls:/etc/vp-engine/tls:ro
     stop_grace_period: 20s
