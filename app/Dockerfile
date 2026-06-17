@@ -3,7 +3,7 @@
 # Run:   docker run --env-file /etc/vicionpower/app.env -p 3000:3000 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/api:dev
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
-FROM oven/bun:1.1-debian AS builder
+FROM oven/bun:1.2-debian AS builder
 WORKDIR /app
 
 # Copy lockfile + manifest first for cache-friendly layer
@@ -20,7 +20,7 @@ RUN bun run typecheck
 RUN bun install --frozen-lockfile --production
 
 # ─── Runtime ──────────────────────────────────────────────────────────────────
-FROM oven/bun:1.1-distroless AS runtime
+FROM oven/bun:1.2-distroless AS runtime
 WORKDIR /app
 
 # Non-root for defense-in-depth (the distroless image already runs as nonroot,
