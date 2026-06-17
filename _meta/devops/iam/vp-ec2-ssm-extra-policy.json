@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAppSecrets",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"],
+      "Resource": "arn:aws:ssm:us-east-1:522814703714:parameter/vicionpower/*"
+    },
+    {
+      "Sid": "DecryptSecrets",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": "arn:aws:kms:us-east-1:522814703714:key/18c8db45-c90f-4b8b-8348-8f0e49e81d59"
+    }
+  ]
+}
