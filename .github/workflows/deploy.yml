@@ -1,9 +1,5 @@
 name: deploy
 on:
-  workflow_run:
-    workflows: [build]
-    types: [completed]
-    branches: [main, staging]
   workflow_dispatch:
     inputs:
       tag:
@@ -27,7 +23,6 @@ concurrency:
 
 jobs:
   deploy:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,17 +35,8 @@ jobs:
       - name: resolve target
         id: t
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ENV="${{ inputs.environment }}"
-            TAG="${{ inputs.tag }}"
-          else
-            if [ "${{ github.event.workflow_run.head_branch }}" = "main" ]; then
-              ENV="prod"
-            else
-              ENV="staging"
-            fi
-            TAG="${{ github.event.workflow_run.head_sha }}"
-          fi
+          ENV="${{ inputs.environment }}"
+          TAG="${{ inputs.tag }}"
           echo "env=$ENV" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           # Formato targets: "inst|compose|svc1 svc2;inst|compose|svc1 svc2"
