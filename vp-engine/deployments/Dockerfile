@@ -30,7 +30,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       ./cmd/${CMD}
 
 # Verificar que compiló estático (sin libs dinámicas).
-RUN ldd /app-bin 2>&1 | grep -q "not a dynamic executable" || \
+# Usamos 'file' en vez de 'ldd' para compatibilidad con QEMU (cross-build arm64).
+RUN apk add --no-cache file && \
+    file /app-bin | grep -q "statically linked" || \
     (echo "ERROR: binario no es estático" && exit 1)
 
 # Stage 2: runtime scratch
