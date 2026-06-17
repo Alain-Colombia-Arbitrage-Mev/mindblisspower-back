@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Copy lockfile + manifest first for cache-friendly layer
 COPY package.json bun.lock* ./
-RUN bun install --frozen-lockfile --production=false
+RUN bun install --frozen-lockfile
 
 COPY tsconfig.json drizzle.config.ts ./
 COPY src ./src
