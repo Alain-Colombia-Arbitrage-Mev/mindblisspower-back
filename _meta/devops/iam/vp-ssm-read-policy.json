@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadProdAppParams",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath"
+      ],
+      "Resource": "arn:aws:ssm:us-east-1:522814703714:parameter/vicionpower/prod/*"
+    },
+    {
+      "Sid": "DecryptSecureStringViaSSM",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "kms:ViaService": "ssm.us-east-1.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "ReadRdsMasterSecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:us-east-1:522814703714:secret:rds!db-ff4f1edf-4d19-4ae2-96c0-9c66d0d51f5c-*"
+    }
+  ]
+}
