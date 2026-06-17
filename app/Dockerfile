@@ -27,9 +27,10 @@ WORKDIR /app
 # but be explicit).
 USER nonroot
 
-COPY --from=builder --chown=nonroot:nonroot /app/node_modules ./node_modules
-COPY --from=builder --chown=nonroot:nonroot /app/src         ./src
-COPY --from=builder --chown=nonroot:nonroot /app/package.json ./
+COPY --from=builder --chown=nonroot:nonroot /app/node_modules  ./node_modules
+COPY --from=builder --chown=nonroot:nonroot /app/src          ./src
+COPY --from=builder --chown=nonroot:nonroot /app/package.json  ./
+COPY --from=builder --chown=nonroot:nonroot /app/tsconfig.json ./
 
 ENV NODE_ENV=production \
     PORT=3000 \
