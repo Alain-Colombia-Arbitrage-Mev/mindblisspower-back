@@ -15,6 +15,7 @@ services:
     image: ${REGISTRY}/vp/vp-engine:${IMAGE_TAG}
     restart: unless-stopped
     network_mode: host
+    user: "0"
     env_file: [/run/vicionpower/vp-engine.env]
     volumes:
       - /etc/vp-engine/tls:/etc/vp-engine/tls:ro
