@@ -1,3 +1,5 @@
+> **OBSOLETO (Hetzner). La operación real está en AWS — ver PLAYBOOK-AWS.md.**
+
 # VicionPower — Hetzner DevOps Playbook
 
 Production deployment for the architecture decided in the schema/migration docs:
