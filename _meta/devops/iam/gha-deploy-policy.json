@@ -1,0 +1,46 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrPush",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage",
+        "ecr:BatchGetImage",
+        "ecr:DescribeImages"
+      ],
+      "Resource": [
+        "arn:aws:ecr:us-east-1:522814703714:repository/vp/api",
+        "arn:aws:ecr:us-east-1:522814703714:repository/vp/vp-engine",
+        "arn:aws:ecr:us-east-1:522814703714:repository/vp/vp-payments"
+      ]
+    },
+    {
+      "Sid": "SsmDeploy",
+      "Effect": "Allow",
+      "Action": ["ssm:SendCommand"],
+      "Resource": [
+        "arn:aws:ssm:us-east-1::document/AWS-RunShellScript",
+        "arn:aws:ec2:us-east-1:522814703714:instance/i-060e76a6c26bded35",
+        "arn:aws:ec2:us-east-1:522814703714:instance/i-02fcc4d2329040711",
+        "arn:aws:ec2:us-east-1:522814703714:instance/i-0f7f6c73503537d73"
+      ]
+    },
+    {
+      "Sid": "SsmPoll",
+      "Effect": "Allow",
+      "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
+      "Resource": "*"
+    }
+  ]
+}

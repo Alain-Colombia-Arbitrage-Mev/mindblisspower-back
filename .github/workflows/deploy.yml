@@ -1,13 +1,24 @@
 name: deploy
-
-# staging → EC2 staging · main → EC2 prod. Compila binarios arm64 y los
-# despliega por SSH (systemd restart). Los .env viven en el server (no en CI).
 on:
-  push:
-    branches: [main, staging]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "git-SHA a desplegar (rollback)"
+        required: true
+      environment:
+        description: "prod|staging"
+        required: true
+        default: prod
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
 
 concurrency:
-  group: deploy-back-${{ github.ref_name }}
+  group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -16,44 +27,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          go-version-file: vp-engine/go.mod
-          cache-dependency-path: vp-engine/go.sum
+          role-to-assume: arn:aws:iam::522814703714:role/vp-gha-deploy
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Gate (compile) + cross-build arm64
-        working-directory: vp-engine
-        run: |
-          go build ./...
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /tmp/vp-payments ./cmd/vp-payments
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /tmp/vp-engine   ./cmd/vp-engine
-
-      - name: Resolve target host
+      - name: resolve target
         id: t
         run: |
-          if [ "${{ github.ref_name }}" = "main" ]; then
-            echo "host=${{ vars.PROD_HOST }}" >> "$GITHUB_OUTPUT"; echo "env=prod" >> "$GITHUB_OUTPUT"
+          ENV="${{ inputs.environment }}"
+          TAG="${{ inputs.tag }}"
+          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Formato targets: "inst|compose|svc1 svc2;inst|compose|svc1 svc2"
+          # Campos por '|' (inst, compose, svcs); múltiples targets separados por ';'
+          if [ "$ENV" = "prod" ]; then
+            echo "targets=i-060e76a6c26bded35|deploy/compose/server1.yml|vp-engine vp-payments;i-02fcc4d2329040711|deploy/compose/server2.yml|api vp-engine" >> "$GITHUB_OUTPUT"
           else
-            echo "host=${{ vars.STAGING_HOST }}" >> "$GITHUB_OUTPUT"; echo "env=staging" >> "$GITHUB_OUTPUT"
+            echo "targets=i-0f7f6c73503537d73|deploy/compose/server2.yml|api vp-engine" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Deploy over SSH (${{ steps.t.outputs.env }})
-        env:
-          KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          HOST: ${{ steps.t.outputs.host }}
-          USER: ${{ vars.SSH_USER }}
-          HOSTKEY: ${{ github.ref_name == 'main' && secrets.PROD_HOST_KEY || secrets.STAGING_HOST_KEY }}
-        run: |
-          mkdir -p ~/.ssh && printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
-          # Pin de host key (anti-MITM): known_hosts = IP actual + clave pineada del server.
-          printf '%s %s\n' "$HOST" "$HOSTKEY" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
-          SSHO="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -i $HOME/.ssh/deploy_key"
-          scp $SSHO /tmp/vp-payments /tmp/vp-engine "$USER@$HOST:/tmp/"
-          ssh $SSHO "$USER@$HOST" 'set -e
-            sudo install -m 0755 /tmp/vp-payments /opt/vicion/bin/vp-payments
-            sudo install -m 0755 /tmp/vp-engine   /opt/vicion/bin/vp-engine
-            rm -f /tmp/vp-payments /tmp/vp-engine
-            sudo systemctl restart vp-engine vp-payments
-            sleep 3
-            echo "vp-payments=$(systemctl is-active vp-payments) vp-engine=$(systemctl is-active vp-engine)"
-            curl -fsS http://127.0.0.1:9095/health >/dev/null && echo "health OK" || { echo "HEALTH FAIL"; exit 1; }'
+      - name: deploy via SSM
+        run: bash _meta/devops/scripts/ci-ssm-deploy.sh "${{ steps.t.outputs.env }}" "${{ steps.t.outputs.tag }}" "${{ steps.t.outputs.targets }}"

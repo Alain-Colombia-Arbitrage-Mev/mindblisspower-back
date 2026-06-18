@@ -1,0 +1,13 @@
+services:
+  vp-engine:
+    image: ${REGISTRY}/vp/vp-engine:${IMAGE_TAG}
+    restart: unless-stopped
+    network_mode: host
+    env_file: [/run/vicionpower/vp-engine.env]
+    stop_grace_period: 20s
+  vp-payments:
+    image: ${REGISTRY}/vp/vp-payments:${IMAGE_TAG}
+    restart: unless-stopped
+    network_mode: host
+    env_file: [/run/vicionpower/vp-payments.env]
+    stop_grace_period: 20s

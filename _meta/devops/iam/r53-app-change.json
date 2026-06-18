@@ -1,0 +1,14 @@
+{
+  "Comment": "Repointing app.mindblisspower.com to vicionpower EIP 34.195.82.200 (i-060e76a6c26bded35)",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "app.mindblisspower.com.",
+        "Type": "A",
+        "TTL": 60,
+        "ResourceRecords": [ { "Value": "34.195.82.200" } ]
+      }
+    }
+  ]
+}

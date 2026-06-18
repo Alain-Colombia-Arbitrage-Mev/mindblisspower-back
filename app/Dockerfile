@@ -1,14 +1,14 @@
 # Multi-stage Bun build. Final image ~120 MB.
-# Build: docker build -t ghcr.io/vicionpower/app:dev .
-# Run:   docker run --env-file /etc/vicionpower/app.env -p 3000:3000 ghcr.io/vicionpower/app:dev
+# Build: docker build -t 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/api:dev .
+# Run:   docker run --env-file /etc/vicionpower/app.env -p 3000:3000 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/api:dev
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
-FROM oven/bun:1.1-debian AS builder
+FROM oven/bun:1.2-debian AS builder
 WORKDIR /app
 
 # Copy lockfile + manifest first for cache-friendly layer
-COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile --production=false
+COPY package.json bun.lock* ./
+RUN bun install --frozen-lockfile
 
 COPY tsconfig.json drizzle.config.ts ./
 COPY src ./src
@@ -20,16 +20,17 @@ RUN bun run typecheck
 RUN bun install --frozen-lockfile --production
 
 # ─── Runtime ──────────────────────────────────────────────────────────────────
-FROM oven/bun:1.1-distroless AS runtime
+FROM oven/bun:1.2-distroless AS runtime
 WORKDIR /app
 
 # Non-root for defense-in-depth (the distroless image already runs as nonroot,
 # but be explicit).
 USER nonroot
 
-COPY --from=builder --chown=nonroot:nonroot /app/node_modules ./node_modules
-COPY --from=builder --chown=nonroot:nonroot /app/src         ./src
-COPY --from=builder --chown=nonroot:nonroot /app/package.json ./
+COPY --from=builder --chown=nonroot:nonroot /app/node_modules  ./node_modules
+COPY --from=builder --chown=nonroot:nonroot /app/src          ./src
+COPY --from=builder --chown=nonroot:nonroot /app/package.json  ./
+COPY --from=builder --chown=nonroot:nonroot /app/tsconfig.json ./
 
 ENV NODE_ENV=production \
     PORT=3000 \
