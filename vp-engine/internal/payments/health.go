@@ -133,6 +133,9 @@ func (s *Store) GetSystemHealth(ctx context.Context, siblings map[string]string)
 					sh.Alerts = append(sh.Alerts, HealthEntry{Name: sig, Status: st, Detail: det})
 				}
 			}
+			if rerr := rows.Err(); rerr != nil {
+				sh.Alerts = append(sh.Alerts, HealthEntry{Name: "alerts", Status: "unknown", Detail: rerr.Error()})
+			}
 		}
 		// si err != nil o no hay filas, sh.Alerts queda vacío (degradación silenciosa)
 	}
@@ -165,7 +168,11 @@ func pingHealth(ctx context.Context, name, url string) HealthEntry {
 	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	t0 := time.Now()
-	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	req, rerr := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	if rerr != nil {
+		e.Status, e.Detail = "down", rerr.Error()
+		return e
+	}
 	resp, err := http.DefaultClient.Do(req)
 	e.LatencyMs = time.Since(t0).Milliseconds()
 	if err != nil {
