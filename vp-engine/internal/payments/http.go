@@ -68,6 +68,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
 	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
 	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
+	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
 	return h.rateLimit(mux)
 }
 
@@ -266,6 +267,21 @@ func (h *Handler) handleAdminFinance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fin)
+}
+
+// handleAdminHealthSystem: NOC de infra + negocio + alertas. Read-only, degrada
+// elegante (HTTP 200 siempre; checks fallidos => status down/unknown con detail).
+func (h *Handler) handleAdminHealthSystem(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	siblings := map[string]string{
+		"web":         env("HEALTH_WEB_URL", "http://127.0.0.1:3000/"),
+		"vp-engine":   env("HEALTH_ENGINE_URL", "http://127.0.0.1:9090/health"),
+		"vp-payments": env("HEALTH_PAYMENTS_URL", "http://127.0.0.1:9095/health"),
+	}
+	sh := h.store.GetSystemHealth(r.Context(), siblings)
+	writeJSON(w, http.StatusOK, sh)
 }
 
 // handleAdminSolvency: monitor de salud (θ histórico + período vigente + alerta
