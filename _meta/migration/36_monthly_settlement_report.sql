@@ -4,7 +4,7 @@
 -- El ruteo real (debit 1007 / crédito bonus) lo hace el motor (retirement.go)
 -- al postear; esta función sólo lee y agrega para reporte. Usar amount * c.factor
 -- para obtener el valor económico positivo en ambas direcciones:
---   concept 1007 (factor -1): amount -50 * -1 = +50 → to_retirement_usd
+--   concept 1007 (factor +1): amount +50 * +1 = +50 → to_retirement_usd  (factor flipped by migration 37)
 --   bonus kinds (factor +1): amount +50 * +1 = +50 → net_available_usd
 BEGIN;
 
