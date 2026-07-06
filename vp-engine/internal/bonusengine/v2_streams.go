@@ -433,23 +433,32 @@ func conceptIDByKind(ctx context.Context, tx pgx.Tx, kind string) (int, error) {
 const referralConceptID = 1012
 
 // postStreamPayment postea un pago de stream: rutea la porción a jubilación
-// (concept 1007, bloqueada), postea sólo el remanente como movimiento retirable
-// (available_at = fn_bonus_available_at), y marca la transaction como 'posted'.
-// Devuelve el transaction id.
+// (concept 1007 → wallet USD-RET, CRÉDITO positivo), y postea el remanente
+// retirable como movimiento en la wallet USD (available_at = fn_bonus_available_at).
+// walletCache = caché de IDs de wallets USD; retWallets = caché SEPARADO para
+// wallets USD-RET (ambos son mapas affiliateID→walletID en memoria del período).
+// Devuelve el transaction id, o "" si toWd==0 (todo fue a jubilación — I1 fix).
 func postStreamPayment(
 	ctx context.Context, tx pgx.Tx,
 	conceptID int, conceptKind string, affiliateID int64, net decimal.Decimal,
 	extRef, description string, postedAt time.Time, retirementAge int,
 	walletCache map[int64]int64,
+	retWallets map[int64]int64,
 ) (string, error) {
-	// Ruteo 401k: parte del net va a jubilación (1007), el resto retirable.
+	// Ruteo 401k: parte del net va a jubilación (USD-RET), el resto retirable (USD).
 	pct, err := pctToPlanFor(ctx, tx, affiliateID, conceptKind)
 	if err != nil {
 		return "", err
 	}
 	toRet, toWd := routeSplit(net, pct)
-	if err := postRetirementContribution(ctx, tx, affiliateID, toRet, extRef, postedAt, retirementAge, walletCache); err != nil {
+	if err := postRetirementContribution(ctx, tx, affiliateID, toRet, extRef, postedAt, retirementAge, retWallets); err != nil {
 		return "", err
+	}
+	// I1: cuando todo el net fue a jubilación no hay monto retirable. El movimiento
+	// :ret ya fue posteado en USD-RET; no crear una transaction USD vacía.
+	// Los callers (pay/Points) ignoran el id; Ranks lo guarda sólo si != "".
+	if toWd.Sign() <= 0 {
+		return "", nil
 	}
 
 	var txnID string
@@ -460,22 +469,20 @@ func postStreamPayment(
 		RETURNING id`, extRef, description, postedAt).Scan(&txnID); err != nil {
 		return "", fmt.Errorf("upsert txn (%s): %w", extRef, err)
 	}
-	if toWd.Sign() > 0 {
-		walletID, ok := walletCache[affiliateID]
-		if !ok {
-			if err := tx.QueryRow(ctx, `
-				SELECT w.id FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
-				 WHERE w.affiliate_id = $1 AND s.symbol = 'USD' LIMIT 1`, affiliateID).Scan(&walletID); err != nil {
-				return "", fmt.Errorf("wallet for affiliate %d: %w", affiliateID, err)
-			}
-			walletCache[affiliateID] = walletID
+	walletID, ok := walletCache[affiliateID]
+	if !ok {
+		if err := tx.QueryRow(ctx, `
+			SELECT w.id FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
+			 WHERE w.affiliate_id = $1 AND s.symbol = 'USD' LIMIT 1`, affiliateID).Scan(&walletID); err != nil {
+			return "", fmt.Errorf("wallet for affiliate %d: %w", affiliateID, err)
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
-			VALUES ($1, $2, $3, $4, $5, $6, mlm.fn_bonus_available_at($6))`,
-			txnID, walletID, affiliateID, conceptID, toWd, postedAt); err != nil {
-			return "", fmt.Errorf("insert movement (%s): %w", extRef, err)
-		}
+		walletCache[affiliateID] = walletID
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		VALUES ($1, $2, $3, $4, $5, $6, mlm.fn_bonus_available_at($6))`,
+		txnID, walletID, affiliateID, conceptID, toWd, postedAt); err != nil {
+		return "", fmt.Errorf("insert movement (%s): %w", extRef, err)
 	}
 	if _, err := tx.Exec(ctx, "UPDATE mlm.transaction SET status='posted' WHERE id=$1", txnID); err != nil {
 		return "", fmt.Errorf("post txn (%s): %w", extRef, err)
@@ -492,7 +499,8 @@ func PayV2Streams(
 	periodID int64, v2 *V2Streams, theta decimal.Decimal, postedAt time.Time,
 ) (decimal.Decimal, error) {
 	total := decimal.Zero
-	wallets := map[int64]int64{}
+	wallets := map[int64]int64{}    // caché wallet USD por afiliado
+	retWallets := map[int64]int64{} // caché wallet USD-RET por afiliado (separado)
 
 	pay := func(conceptID int, conceptKind string, e streamEntry, desc string) error {
 		net := e.Gross.Mul(theta).RoundDown(2)
@@ -500,7 +508,7 @@ func PayV2Streams(
 			return nil
 		}
 		if _, err := postStreamPayment(ctx, tx, conceptID, conceptKind, e.AffiliateID, net,
-			e.ExtRef, desc, postedAt, plan.RetirementAge, wallets); err != nil {
+			e.ExtRef, desc, postedAt, plan.RetirementAge, wallets, retWallets); err != nil {
 			return err
 		}
 		total = total.Add(net)
@@ -530,7 +538,7 @@ func PayV2Streams(
 				continue
 			}
 			if _, err := postStreamPayment(ctx, tx, cid, "r3_points", e.AffiliateID, net,
-				e.ExtRef, fmt.Sprintf("R3 points period=%d", periodID), postedAt, plan.RetirementAge, wallets); err != nil {
+				e.ExtRef, fmt.Sprintf("R3 points period=%d", periodID), postedAt, plan.RetirementAge, wallets, retWallets); err != nil {
 				return total, err
 			}
 			// T2 accounting del paquete propio.
@@ -564,11 +572,15 @@ func PayV2Streams(
 			if net.Sign() > 0 {
 				id, err := postStreamPayment(ctx, tx, cid, "rank_bonus", e.AffiliateID, net,
 					e.ExtRef, fmt.Sprintf("rank installment period=%d rank=%d", periodID, e.RankID),
-					postedAt, plan.RetirementAge, wallets)
+					postedAt, plan.RetirementAge, wallets, retWallets)
 				if err != nil {
 					return total, err
 				}
-				txnID = &id
+				// id=="" cuando toWd==0 (todo a jubilación); la cuota sigue saldada
+				// pero la FK transaction_id queda NULL (el :ret txn lleva el movimiento).
+				if id != "" {
+					txnID = &id
+				}
 				total = total.Add(net)
 			}
 			if _, err := tx.Exec(ctx, `

@@ -137,7 +137,8 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 
 	totalPaid := decimal.Zero
 	postedAt := pEnd // todos los pagos del período al instante de cierre lógico
-	walletCache := map[int64]int64{}
+	walletCache := map[int64]int64{}  // caché wallet USD por afiliado
+	retWallets := map[int64]int64{}   // caché wallet USD-RET por afiliado (separado del USD)
 
 	for _, c := range candidates {
 		net := c.GrossAmount.Mul(theta).RoundDown(2)
@@ -169,7 +170,7 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 			return fmt.Errorf("pctToPlanFor (%s): %w", extRef, err)
 		}
 		toRet, toWd := routeSplit(net, pct)
-		if err := postRetirementContribution(ctx, tx, c.AffiliateID, toRet, extRef, postedAt, plan.RetirementAge, walletCache); err != nil {
+		if err := postRetirementContribution(ctx, tx, c.AffiliateID, toRet, extRef, postedAt, plan.RetirementAge, retWallets); err != nil {
 			return fmt.Errorf("retirement contribution (%s): %w", extRef, err)
 		}
 		if toWd.Sign() > 0 {
