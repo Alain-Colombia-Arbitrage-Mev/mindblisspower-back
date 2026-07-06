@@ -261,4 +261,115 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 			t.Errorf("parcial invariante: |%s| + %s != 100", ret, wd)
 		}
 	})
+
+	// -------------------------------------------------------------------------
+	// Caso 4: ensureRetirementPlan crea la fila (no hay pre-insert) y deriva
+	// unlocks_at = birthday + retirement_age años.
+	// El afiliado de seedRetirementFixture tiene birthday='1980-01-15' y age=65
+	// → unlocks_at esperado = '2045-01-15'.
+	// -------------------------------------------------------------------------
+	t.Run("ensure_crea_con_birthday", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		// NO pre-insertamos retirement_plan; ensureRetirementPlan lo crea.
+		cache := map[int64]int64{}
+		if err := postRetirementContribution(ctx, tx, affID, d("100.00"),
+			"testret:ensure:birthday:1", postedAt, 65, cache); err != nil {
+			t.Fatalf("postRetirementContribution: %v", err)
+		}
+
+		// unlocks_at debe ser birthday + 65 años = 2045-01-15.
+		var unlocksAt *time.Time
+		if err := tx.QueryRow(ctx,
+			`SELECT unlocks_at FROM mlm.retirement_plan WHERE affiliate_id=$1`, affID,
+		).Scan(&unlocksAt); err != nil {
+			t.Fatalf("unlocks_at query: %v", err)
+		}
+		const wantUnlocks = "2045-01-15"
+		if unlocksAt == nil {
+			t.Errorf("unlocks_at con birthday: nil, want %s", wantUnlocks)
+		} else if got := unlocksAt.UTC().Format("2006-01-02"); got != wantUnlocks {
+			t.Errorf("unlocks_at con birthday: got %s, want %s", got, wantUnlocks)
+		}
+
+		// balance_usd debe acreditarse aunque esté bloqueado.
+		var bal decimal.Decimal
+		if err := tx.QueryRow(ctx,
+			`SELECT balance_usd FROM mlm.retirement_plan WHERE affiliate_id=$1`, affID,
+		).Scan(&bal); err != nil {
+			t.Fatalf("balance query: %v", err)
+		}
+		if !bal.Equal(d("100.00")) {
+			t.Errorf("balance con birthday: want 100, got %s", bal)
+		}
+	})
+
+	// -------------------------------------------------------------------------
+	// Caso 5: ensureRetirementPlan crea la fila para un afiliado sin birthday →
+	// unlocks_at IS NULL, pero balance_usd igual se acredita (bloqueado-no-perdido).
+	// -------------------------------------------------------------------------
+	t.Run("ensure_crea_sin_birthday", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		// Persona nueva sin birthday; todo se inserta en la tx (se revierte al salir).
+		var nullPersonID int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO mlm.person (first_name, last_name, email, phone_number, status)
+			VALUES ('nullbday', 'test', 'nullbday@t.local', '2', 'active')
+			RETURNING id`).Scan(&nullPersonID); err != nil {
+			t.Fatalf("insert person sin birthday: %v", err)
+		}
+
+		nullPath := fmt.Sprintf("%d.R_%d", affID, nullPersonID)
+		var nullAffID int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+			VALUES ($1, $2, 'R', 'active', $3::ltree, 1)
+			RETURNING id`, nullPersonID, affID, nullPath).Scan(&nullAffID); err != nil {
+			t.Fatalf("insert affiliate sin birthday: %v", err)
+		}
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+			VALUES ($1, 1, 'w-nullbday', 0)`, nullAffID); err != nil {
+			t.Fatalf("insert wallet sin birthday: %v", err)
+		}
+
+		// ensureRetirementPlan debe crear la fila con unlocks_at=NULL (sin birthday).
+		cache := map[int64]int64{}
+		if err := postRetirementContribution(ctx, tx, nullAffID, d("50.00"),
+			"testret:ensure:nullbday:1", postedAt, 65, cache); err != nil {
+			t.Fatalf("postRetirementContribution sin birthday: %v", err)
+		}
+
+		// unlocks_at debe ser NULL.
+		var unlocksAt *time.Time
+		if err := tx.QueryRow(ctx,
+			`SELECT unlocks_at FROM mlm.retirement_plan WHERE affiliate_id=$1`, nullAffID,
+		).Scan(&unlocksAt); err != nil {
+			t.Fatalf("unlocks_at query sin birthday: %v", err)
+		}
+		if unlocksAt != nil {
+			t.Errorf("unlocks_at sin birthday: got %s, want NULL", unlocksAt.UTC().Format("2006-01-02"))
+		}
+
+		// balance_usd debe ser 50 (invariante: bloqueado pero no perdido).
+		var bal decimal.Decimal
+		if err := tx.QueryRow(ctx,
+			`SELECT balance_usd FROM mlm.retirement_plan WHERE affiliate_id=$1`, nullAffID,
+		).Scan(&bal); err != nil {
+			t.Fatalf("balance sin birthday: %v", err)
+		}
+		if !bal.Equal(d("50.00")) {
+			t.Errorf("balance sin birthday: want 50, got %s", bal)
+		}
+	})
 }
