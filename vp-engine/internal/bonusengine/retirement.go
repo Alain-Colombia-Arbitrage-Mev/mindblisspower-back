@@ -62,13 +62,16 @@ func ensureRetirementPlan(ctx context.Context, tx pgx.Tx, affiliateID int64, ret
 }
 
 // postRetirementContribution postea el aporte 1007 (bloqueado a unlocks_at) y
-// suma al balance. Idempotente por extRef (sufijo :ret). walletCache reusa el
-// lookup de la wallet USD.
+// suma al balance. Idempotente por extRef (sufijo :ret).
+// El aporte se acredita como CRÉDITO POSITIVO en la wallet dedicada USD-RET
+// (concept 1007 factor=+1 desde migración 37). La wallet USD del afiliado
+// queda intacta — sólo recibe toWd (retirable). retWalletCache es un mapa
+// SEPARADO del caché USD; los callers lo pasan para no confundir las dos wallets.
 func postRetirementContribution(
 	ctx context.Context, tx pgx.Tx,
 	affiliateID int64, amount decimal.Decimal,
 	baseExtRef string, postedAt time.Time, retirementAge int,
-	walletCache map[int64]int64,
+	retWalletCache map[int64]int64,
 ) error {
 	if amount.Sign() <= 0 {
 		return nil
@@ -88,23 +91,48 @@ func postRetirementContribution(
 		}
 		return fmt.Errorf("upsert retirement txn (%s): %w", extRef, err)
 	}
-	walletID, ok := walletCache[affiliateID]
+
+	// Resolver (o crear) la wallet USD-RET del afiliado.
+	// Afiliados nuevos no tienen wallet USD-RET → GET-OR-CREATE idempotente.
+	walletID, ok := retWalletCache[affiliateID]
 	if !ok {
-		if err := tx.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			SELECT w.id FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
-			 WHERE w.affiliate_id = $1 AND s.symbol='USD' LIMIT 1`, affiliateID).Scan(&walletID); err != nil {
-			return fmt.Errorf("retirement wallet aff=%d: %w", affiliateID, err)
+			 WHERE w.affiliate_id = $1 AND s.symbol='USD-RET' LIMIT 1`, affiliateID).Scan(&walletID)
+		if err == pgx.ErrNoRows {
+			// Wallet no existe aún → insertar. ON CONFLICT DO NOTHING cubre
+			// concurrencia; si la fila ya fue creada por otra goroutine, re-SELECT.
+			retAddr := fmt.Sprintf("ret:%d", affiliateID)
+			insErr := tx.QueryRow(ctx, `
+				INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+				SELECT $1, s.id, $2, 0 FROM mlm.asset s WHERE s.symbol='USD-RET'
+				ON CONFLICT (affiliate_id, asset_id) DO NOTHING
+				RETURNING id`, affiliateID, retAddr).Scan(&walletID)
+			if insErr == pgx.ErrNoRows {
+				// Conflicto de inserción concurrente → re-SELECT.
+				if insErr = tx.QueryRow(ctx, `
+					SELECT w.id FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
+					 WHERE w.affiliate_id = $1 AND s.symbol='USD-RET' LIMIT 1`, affiliateID).Scan(&walletID); insErr != nil {
+					return fmt.Errorf("retirement ret-wallet re-select aff=%d: %w", affiliateID, insErr)
+				}
+			} else if insErr != nil {
+				return fmt.Errorf("retirement ret-wallet create aff=%d: %w", affiliateID, insErr)
+			}
+		} else if err != nil {
+			return fmt.Errorf("retirement ret-wallet aff=%d: %w", affiliateID, err)
 		}
-		walletCache[affiliateID] = walletID
+		retWalletCache[affiliateID] = walletID
 	}
-	// available_at = unlocks_at del plan (NULL si sin birthday => bloqueado).
-	// Concept 1007 tiene factor=-1 (débito del wallet), por lo tanto amount debe
-	// ser negativo. El saldo positivo se acumula en retirement_plan.balance_usd.
+
+	// Concept 1007 factor=+1 (migración 37): postear como CRÉDITO POSITIVO en
+	// la wallet USD-RET. available_at = unlocks_at del plan (NULL si sin
+	// birthday ⇒ bloqueado-pero-no-perdido). El saldo se acumula en
+	// retirement_plan.balance_usd (siempre positivo, independiente de la wallet).
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
 		SELECT $1, $2, $3, $4, $5, $6, rp.unlocks_at
 		  FROM mlm.retirement_plan rp WHERE rp.affiliate_id = $3`,
-		txnID, walletID, affiliateID, retirementContribConceptID, amount.Neg(), postedAt); err != nil {
+		txnID, walletID, affiliateID, retirementContribConceptID, amount, postedAt); err != nil {
 		return fmt.Errorf("retirement movement (%s): %w", extRef, err)
 	}
 	if _, err := tx.Exec(ctx, `

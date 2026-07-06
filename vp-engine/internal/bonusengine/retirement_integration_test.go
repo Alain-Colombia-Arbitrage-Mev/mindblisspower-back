@@ -81,6 +81,19 @@ func seedRetirementFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		t.Fatalf("seedRetirementFixture: plan_config: %v", err)
 	}
 
+	// Equivalente a migración 37: asset USD-RET + concepto 1007 factor=+1.
+	// El harness de test aplica los schemas hasta v1.3 (concept 1007 factor=-1,
+	// sin asset USD-RET). Hacemos el test auto-suficiente sin depender de que
+	// la migración 37 esté en la cadena del harness.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals)
+		VALUES (2, 'USD-RET', 'Retirement USD', true, 2)
+		ON CONFLICT (id) DO NOTHING;
+		UPDATE mlm.concept SET factor = 1 WHERE id = 1007;
+	`); err != nil {
+		t.Fatalf("seedRetirementFixture: USD-RET asset + concept 1007 factor: %v", err)
+	}
+
 	return affID
 }
 
@@ -102,6 +115,7 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 
 	d := func(s string) decimal.Decimal { v, _ := decimal.NewFromString(s); return v }
 
+	// sumMov: suma movements por concept_id + affiliate_id (independiente del wallet).
 	sumMov := func(tx pgx.Tx, conceptID int, aff int64) decimal.Decimal {
 		var v decimal.Decimal
 		if err := tx.QueryRow(ctx, `
@@ -124,6 +138,23 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		return n
 	}
 
+	// walletMovSum: suma movements de un afiliado en la wallet del asset dado.
+	// Sirve para las aserciones C1: USD wallet NO debe verse debitada por 1007;
+	// USD-RET wallet sí debe recibir el crédito positivo.
+	walletMovSum := func(tx pgx.Tx, assetSymbol string, conceptID int, aff int64) decimal.Decimal {
+		var v decimal.Decimal
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(sum(wm.amount), 0)
+			  FROM mlm.wallet_movement wm
+			  JOIN mlm.wallet w ON w.id = wm.wallet_id
+			  JOIN mlm.asset a ON a.id = w.asset_id
+			 WHERE a.symbol = $1 AND wm.concept_id = $2 AND wm.affiliate_id = $3`,
+			assetSymbol, conceptID, aff).Scan(&v); err != nil {
+			t.Fatalf("walletMovSum symbol=%s concept=%d aff=%d: %v", assetSymbol, conceptID, aff, err)
+		}
+		return v
+	}
+
 	// -------------------------------------------------------------------------
 	// Caso 1: modo agresivo — todo al plan (1007), nada retirable.
 	// -------------------------------------------------------------------------
@@ -141,16 +172,26 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		}
 
 		cache := map[int64]int64{}
+		retCache := map[int64]int64{}
 		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
-			d("100.00"), "testret:agresivo:1", "test agresivo", postedAt, 65, cache); err != nil {
+			d("100.00"), "testret:agresivo:1", "test agresivo", postedAt, 65, cache, retCache); err != nil {
 			t.Fatalf("postStreamPayment: %v", err)
 		}
 
-		// Concepto 1007: amount = -100 (débito factor=-1); balance_usd = +100.
-		if got := sumMov(tx, retirementContribConceptID, affID); !got.Equal(d("-100.00")) {
-			t.Errorf("1007 agresivo: want -100 (debit), got %s", got)
+		// C1 fix: concept 1007 es ahora CRÉDITO POSITIVO (+100) en la wallet USD-RET,
+		// no débito en la wallet USD. La wallet USD del afiliado no debe tener ningún
+		// movimiento de concepto 1007.
+		if got := sumMov(tx, retirementContribConceptID, affID); !got.Equal(d("100.00")) {
+			t.Errorf("1007 agresivo: want +100 (crédito USD-RET), got %s", got)
 		}
-		// Sin movimiento del concepto retirable (binary, id=11).
+		// Aserciones C1: USD wallet limpia de 1007; USD-RET wallet con +100.
+		if got := walletMovSum(tx, "USD", retirementContribConceptID, affID); !got.IsZero() {
+			t.Errorf("C1 agresivo: USD wallet no debe tener movimiento 1007, got %s", got)
+		}
+		if got := walletMovSum(tx, "USD-RET", retirementContribConceptID, affID); !got.Equal(d("100.00")) {
+			t.Errorf("C1 agresivo: USD-RET wallet debe tener +100, got %s", got)
+		}
+		// Sin movimiento del concepto retirable (binary, id=11) — toWd=0.
 		if n := countMov(tx, conceptBinaryID, affID); n != 0 {
 			t.Errorf("agresivo: esperaba 0 mov retiables, hubo %d", n)
 		}
@@ -195,8 +236,9 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		}
 
 		cache := map[int64]int64{}
+		retCache := map[int64]int64{}
 		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
-			d("100.00"), "testret:moderado:1", "test moderado", postedAt, 65, cache); err != nil {
+			d("100.00"), "testret:moderado:1", "test moderado", postedAt, 65, cache, retCache); err != nil {
 			t.Fatalf("postStreamPayment: %v", err)
 		}
 
@@ -241,24 +283,32 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		}
 
 		cache := map[int64]int64{}
+		retCache := map[int64]int64{}
 		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
-			d("100.00"), "testret:parcial:1", "test parcial", postedAt, 65, cache); err != nil {
+			d("100.00"), "testret:parcial:1", "test parcial", postedAt, 65, cache, retCache); err != nil {
 			t.Fatalf("postStreamPayment: %v", err)
 		}
 
-		// 1007 = -$50 (débito factor=-1).
-		if got := sumMov(tx, retirementContribConceptID, affID); !got.Equal(d("-50.00")) {
-			t.Errorf("parcial 1007: want -50 (debit), got %s", got)
+		// C1 fix: 1007 = +$50 CRÉDITO en USD-RET (no débito en USD).
+		if got := sumMov(tx, retirementContribConceptID, affID); !got.Equal(d("50.00")) {
+			t.Errorf("parcial 1007: want +50 (crédito USD-RET), got %s", got)
 		}
-		// Retirable = $50 (crédito).
+		// Aserciones C1: USD wallet no tiene 1007; USD-RET wallet tiene +50.
+		if got := walletMovSum(tx, "USD", retirementContribConceptID, affID); !got.IsZero() {
+			t.Errorf("C1 parcial: USD wallet no debe tener movimiento 1007, got %s", got)
+		}
+		if got := walletMovSum(tx, "USD-RET", retirementContribConceptID, affID); !got.Equal(d("50.00")) {
+			t.Errorf("C1 parcial: USD-RET wallet debe tener +50, got %s", got)
+		}
+		// Retirable = $50 (crédito en USD).
 		if got := sumMov(tx, conceptBinaryID, affID); !got.Equal(d("50.00")) {
 			t.Errorf("parcial retirable: want 50, got %s", got)
 		}
-		// Invariante: ABS(ret) + wd = 100 (no se crea dinero).
-		ret := sumMov(tx, retirementContribConceptID, affID).Neg()
+		// Invariante: ret + wd = 100 (no se crea dinero; ambos son positivos ahora).
+		ret := sumMov(tx, retirementContribConceptID, affID)
 		wd := sumMov(tx, conceptBinaryID, affID)
 		if !ret.Add(wd).Equal(d("100.00")) {
-			t.Errorf("parcial invariante: |%s| + %s != 100", ret, wd)
+			t.Errorf("parcial invariante: %s + %s != 100", ret, wd)
 		}
 	})
 
@@ -276,9 +326,10 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		// NO pre-insertamos retirement_plan; ensureRetirementPlan lo crea.
-		cache := map[int64]int64{}
+		// retCache es el caché de wallets USD-RET (separado del USD caché).
+		retCache := map[int64]int64{}
 		if err := postRetirementContribution(ctx, tx, affID, d("100.00"),
-			"testret:ensure:birthday:1", postedAt, 65, cache); err != nil {
+			"testret:ensure:birthday:1", postedAt, 65, retCache); err != nil {
 			t.Fatalf("postRetirementContribution: %v", err)
 		}
 
@@ -305,6 +356,14 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		}
 		if !bal.Equal(d("100.00")) {
 			t.Errorf("balance con birthday: want 100, got %s", bal)
+		}
+
+		// C1-catching: el movimiento 1007 es POSITIVO (+100) en USD-RET, no en USD.
+		if got := walletMovSum(tx, "USD", retirementContribConceptID, affID); !got.IsZero() {
+			t.Errorf("C1 birthday: USD wallet no debe tener movimiento 1007, got %s", got)
+		}
+		if got := walletMovSum(tx, "USD-RET", retirementContribConceptID, affID); !got.Equal(d("100.00")) {
+			t.Errorf("C1 birthday: USD-RET wallet debe tener +100, got %s", got)
 		}
 	})
 
@@ -344,9 +403,10 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		}
 
 		// ensureRetirementPlan debe crear la fila con unlocks_at=NULL (sin birthday).
-		cache := map[int64]int64{}
+		// retCache es el caché de wallets USD-RET (separado del USD caché).
+		retCache := map[int64]int64{}
 		if err := postRetirementContribution(ctx, tx, nullAffID, d("50.00"),
-			"testret:ensure:nullbday:1", postedAt, 65, cache); err != nil {
+			"testret:ensure:nullbday:1", postedAt, 65, retCache); err != nil {
 			t.Fatalf("postRetirementContribution sin birthday: %v", err)
 		}
 
@@ -370,6 +430,14 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		}
 		if !bal.Equal(d("50.00")) {
 			t.Errorf("balance sin birthday: want 50, got %s", bal)
+		}
+
+		// C1-catching: el movimiento 1007 es POSITIVO (+50) en USD-RET, no en USD.
+		if got := walletMovSum(tx, "USD", retirementContribConceptID, nullAffID); !got.IsZero() {
+			t.Errorf("C1 nullbday: USD wallet no debe tener movimiento 1007, got %s", got)
+		}
+		if got := walletMovSum(tx, "USD-RET", retirementContribConceptID, nullAffID); !got.Equal(d("50.00")) {
+			t.Errorf("C1 nullbday: USD-RET wallet debe tener +50, got %s", got)
 		}
 	})
 }
