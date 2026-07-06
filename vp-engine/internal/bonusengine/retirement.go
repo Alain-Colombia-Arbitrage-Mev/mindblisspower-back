@@ -50,7 +50,7 @@ func ensureRetirementPlan(ctx context.Context, tx pgx.Tx, affiliateID int64, ret
 	_, err := tx.Exec(ctx, `
 		INSERT INTO mlm.retirement_plan (affiliate_id, mode, opened_at, unlocks_at, balance_usd, updated_at)
 		SELECT $1, 'moderado', now(),
-		       (SELECT (p.birthday + ($2 || ' years')::interval)::date
+		       (SELECT (p.birthday + make_interval(years => $2))::date
 		          FROM mlm.affiliate a JOIN mlm.person p ON p.id = a.person_id
 		         WHERE a.id = $1 AND p.birthday IS NOT NULL),
 		       0, now()
@@ -98,11 +98,13 @@ func postRetirementContribution(
 		walletCache[affiliateID] = walletID
 	}
 	// available_at = unlocks_at del plan (NULL si sin birthday => bloqueado).
+	// Concept 1007 tiene factor=-1 (débito del wallet), por lo tanto amount debe
+	// ser negativo. El saldo positivo se acumula en retirement_plan.balance_usd.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
 		SELECT $1, $2, $3, $4, $5, $6, rp.unlocks_at
 		  FROM mlm.retirement_plan rp WHERE rp.affiliate_id = $3`,
-		txnID, walletID, affiliateID, retirementContribConceptID, amount, postedAt); err != nil {
+		txnID, walletID, affiliateID, retirementContribConceptID, amount.Neg(), postedAt); err != nil {
 		return fmt.Errorf("retirement movement (%s): %w", extRef, err)
 	}
 	if _, err := tx.Exec(ctx, `
