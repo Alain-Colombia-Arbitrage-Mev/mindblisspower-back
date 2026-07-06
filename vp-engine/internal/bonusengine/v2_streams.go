@@ -432,48 +432,52 @@ func conceptIDByKind(ctx context.Context, tx pgx.Tx, kind string) (int, error) {
 // comparte con conceptos legacy migrados → id explícito del seed v1.2).
 const referralConceptID = 1012
 
-// postStreamPayment postea un pago de stream: transaction idempotente por
-// external_ref + wallet_movement (con available_at de liquidación) + posted.
+// postStreamPayment postea un pago de stream: rutea la porción a jubilación
+// (concept 1007, bloqueada), postea sólo el remanente como movimiento retirable
+// (available_at = fn_bonus_available_at), y marca la transaction como 'posted'.
 // Devuelve el transaction id.
 func postStreamPayment(
 	ctx context.Context, tx pgx.Tx,
-	conceptID int, affiliateID int64, net decimal.Decimal,
-	extRef, description string, postedAt time.Time,
+	conceptID int, conceptKind string, affiliateID int64, net decimal.Decimal,
+	extRef, description string, postedAt time.Time, retirementAge int,
 	walletCache map[int64]int64,
 ) (string, error) {
+	// Ruteo 401k: parte del net va a jubilación (1007), el resto retirable.
+	pct, err := pctToPlanFor(ctx, tx, affiliateID, conceptKind)
+	if err != nil {
+		return "", err
+	}
+	toRet, toWd := routeSplit(net, pct)
+	if err := postRetirementContribution(ctx, tx, affiliateID, toRet, extRef, postedAt, retirementAge, walletCache); err != nil {
+		return "", err
+	}
+
 	var txnID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
 		VALUES ($1, $2, 'pending', $3)
 		ON CONFLICT (external_ref) DO UPDATE SET description = EXCLUDED.description
-		RETURNING id`,
-		extRef, description, postedAt).Scan(&txnID); err != nil {
+		RETURNING id`, extRef, description, postedAt).Scan(&txnID); err != nil {
 		return "", fmt.Errorf("upsert txn (%s): %w", extRef, err)
 	}
-
-	walletID, ok := walletCache[affiliateID]
-	if !ok {
-		if err := tx.QueryRow(ctx, `
-			SELECT w.id FROM mlm.wallet w
-			  JOIN mlm.asset s ON s.id = w.asset_id
-			 WHERE w.affiliate_id = $1 AND s.symbol = 'USD'
-			 LIMIT 1`, affiliateID).Scan(&walletID); err != nil {
-			return "", fmt.Errorf("wallet for affiliate %d: %w", affiliateID, err)
+	if toWd.Sign() > 0 {
+		walletID, ok := walletCache[affiliateID]
+		if !ok {
+			if err := tx.QueryRow(ctx, `
+				SELECT w.id FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
+				 WHERE w.affiliate_id = $1 AND s.symbol = 'USD' LIMIT 1`, affiliateID).Scan(&walletID); err != nil {
+				return "", fmt.Errorf("wallet for affiliate %d: %w", affiliateID, err)
+			}
+			walletCache[affiliateID] = walletID
 		}
-		walletCache[affiliateID] = walletID
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+			VALUES ($1, $2, $3, $4, $5, $6, mlm.fn_bonus_available_at($6))`,
+			txnID, walletID, affiliateID, conceptID, toWd, postedAt); err != nil {
+			return "", fmt.Errorf("insert movement (%s): %w", extRef, err)
+		}
 	}
-
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO mlm.wallet_movement
-		  (transaction_id, wallet_id, affiliate_id, concept_id, amount,
-		   posted_at, available_at)
-		VALUES ($1, $2, $3, $4, $5, $6, mlm.fn_bonus_available_at($6))`,
-		txnID, walletID, affiliateID, conceptID, net, postedAt); err != nil {
-		return "", fmt.Errorf("insert movement (%s): %w", extRef, err)
-	}
-
-	if _, err := tx.Exec(ctx,
-		"UPDATE mlm.transaction SET status='posted' WHERE id=$1", txnID); err != nil {
+	if _, err := tx.Exec(ctx, "UPDATE mlm.transaction SET status='posted' WHERE id=$1", txnID); err != nil {
 		return "", fmt.Errorf("post txn (%s): %w", extRef, err)
 	}
 	return txnID, nil
@@ -490,13 +494,13 @@ func PayV2Streams(
 	total := decimal.Zero
 	wallets := map[int64]int64{}
 
-	pay := func(conceptID int, e streamEntry, desc string) error {
+	pay := func(conceptID int, conceptKind string, e streamEntry, desc string) error {
 		net := e.Gross.Mul(theta).RoundDown(2)
 		if net.Sign() <= 0 {
 			return nil
 		}
-		if _, err := postStreamPayment(ctx, tx, conceptID, e.AffiliateID, net,
-			e.ExtRef, desc, postedAt, wallets); err != nil {
+		if _, err := postStreamPayment(ctx, tx, conceptID, conceptKind, e.AffiliateID, net,
+			e.ExtRef, desc, postedAt, plan.RetirementAge, wallets); err != nil {
 			return err
 		}
 		total = total.Add(net)
@@ -509,7 +513,7 @@ func PayV2Streams(
 			return total, err
 		}
 		for _, e := range v2.Yield {
-			if err := pay(cid, e, fmt.Sprintf("R2 yield period=%d", periodID)); err != nil {
+			if err := pay(cid, "r2_yield", e, fmt.Sprintf("R2 yield period=%d", periodID)); err != nil {
 				return total, err
 			}
 		}
@@ -525,8 +529,8 @@ func PayV2Streams(
 			if net.Sign() <= 0 {
 				continue
 			}
-			if _, err := postStreamPayment(ctx, tx, cid, e.AffiliateID, net,
-				e.ExtRef, fmt.Sprintf("R3 points period=%d", periodID), postedAt, wallets); err != nil {
+			if _, err := postStreamPayment(ctx, tx, cid, "r3_points", e.AffiliateID, net,
+				e.ExtRef, fmt.Sprintf("R3 points period=%d", periodID), postedAt, plan.RetirementAge, wallets); err != nil {
 				return total, err
 			}
 			// T2 accounting del paquete propio.
@@ -558,9 +562,9 @@ func PayV2Streams(
 			net := e.Gross.Mul(theta).RoundDown(2)
 			var txnID *string
 			if net.Sign() > 0 {
-				id, err := postStreamPayment(ctx, tx, cid, e.AffiliateID, net,
+				id, err := postStreamPayment(ctx, tx, cid, "rank_bonus", e.AffiliateID, net,
 					e.ExtRef, fmt.Sprintf("rank installment period=%d rank=%d", periodID, e.RankID),
-					postedAt, wallets)
+					postedAt, plan.RetirementAge, wallets)
 				if err != nil {
 					return total, err
 				}
@@ -580,7 +584,7 @@ func PayV2Streams(
 
 	if len(v2.Referral) > 0 {
 		for _, e := range v2.Referral {
-			if err := pay(referralConceptID, e, fmt.Sprintf("referral period=%d", periodID)); err != nil {
+			if err := pay(referralConceptID, "direct_bonus", e, fmt.Sprintf("referral period=%d", periodID)); err != nil {
 				return total, err
 			}
 		}
@@ -592,7 +596,7 @@ func PayV2Streams(
 			return total, err
 		}
 		for _, e := range v2.Royalty {
-			if err := pay(cid, e, fmt.Sprintf("royalty period=%d", periodID)); err != nil {
+			if err := pay(cid, "royalty", e, fmt.Sprintf("royalty period=%d", periodID)); err != nil {
 				return total, err
 			}
 		}

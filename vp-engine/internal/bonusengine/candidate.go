@@ -69,6 +69,9 @@ type PlanConfig struct {
 
 	// Gate re-verificado: el uplift R2/CD exige directos ACTIVOS por período.
 	DirectsActiveRequired bool
+
+	// Jubilación (ADR-0018 spec v2). Edad de desbloqueo del plan (default 65).
+	RetirementAge int
 }
 
 // Candidate = un pago potencial para un (ancestro, evento_fuente).
@@ -105,7 +108,8 @@ func LoadActivePlanConfig(ctx context.Context, q pgx.Tx) (*PlanConfig, error) {
 		       royalty_enabled, royalty_rate, royalty_generation, referral_rate,
 		       founder_enrollment_open, founder_referral_rate,
 		       founder_binary_matched_rate,
-		       directs_active_required
+		       directs_active_required,
+		       retirement_age
 		  FROM mlm.plan_config
 		 WHERE effective_from <= now()
 		   AND (effective_to IS NULL OR effective_to > now())
@@ -128,7 +132,8 @@ func LoadActivePlanConfig(ctx context.Context, q pgx.Tx) (*PlanConfig, error) {
 		&pc.RoyaltyEnabled, &pc.RoyaltyRate, &pc.RoyaltyGeneration, &pc.ReferralRate,
 		&pc.FounderEnrollmentOpen, &pc.FounderReferralRate,
 		&pc.FounderBinaryMatchedRate,
-		&pc.DirectsActiveRequired)
+		&pc.DirectsActiveRequired,
+		&pc.RetirementAge)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrNoActivePlanConfig

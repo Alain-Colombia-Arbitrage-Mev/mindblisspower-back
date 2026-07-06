@@ -1,0 +1,264 @@
+package bonusengine
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+)
+
+// seedRetirementFixture siembra los catálogos mínimos para el test de ruteo:
+// country, asset USD, concept binario (id=11), package, person con birthday,
+// afiliado, wallet USD y plan_config (con bypass approval, retirement_age=65).
+// Devuelve el affiliateID.
+func seedRetirementFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (affID int64) {
+	t.Helper()
+
+	// Catálogos base (igual que seedV2Tree — fresh container, sin ON CONFLICT).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1, 'CO', 'Colombia', 'Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1, 'USD', 'US Dollar', true, 2);
+		INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, active) VALUES
+		  (11, 'binary_bonus', 'Bono binario', 'Binary bonus', 1, false, true);
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type) VALUES
+		  (1, 'Pack 1000', 1000, 1000, 'enrollment');
+	`); err != nil {
+		t.Fatalf("seedRetirementFixture: catalogs: %v", err)
+	}
+
+	// Persona raíz (id=1).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (first_name, last_name, email, phone_number, status)
+		VALUES ('root', 'ret', 'root_ret@t.local', '0', 'active')`); err != nil {
+		t.Fatalf("seedRetirementFixture: root person: %v", err)
+	}
+
+	// Persona de test con birthday (id=2).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (first_name, last_name, email, phone_number, status, birthday)
+		VALUES ('ret', 'test', 'ret@t.local', '1', 'active', '1980-01-15')`); err != nil {
+		t.Fatalf("seedRetirementFixture: person: %v", err)
+	}
+
+	// Afiliado raíz (person_id=1).
+	var rootAffID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', '1', 0) RETURNING id`).Scan(&rootAffID); err != nil {
+		t.Fatalf("seedRetirementFixture: root aff: %v", err)
+	}
+
+	// Afiliado de test (person_id=2).
+	affPath := fmt.Sprintf("1.L_2")
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (2, $1, 'L', 'active', $2::ltree, 1) RETURNING id`, rootAffID, affPath).Scan(&affID); err != nil {
+		t.Fatalf("seedRetirementFixture: affiliate: %v", err)
+	}
+
+	// Wallet USD.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		VALUES ($1, 1, 'w-ret', 0)`, affID); err != nil {
+		t.Fatalf("seedRetirementFixture: wallet: %v", err)
+	}
+
+	// plan_config (sin parámetros en el multi-statement para evitar prepared stmt).
+	if _, err := pool.Exec(ctx, `
+		BEGIN;
+		SET LOCAL app.bypass_approval = 'on';
+		INSERT INTO mlm.plan_config (
+		  version_label, effective_from, block_size, bonus_per_block, depth_cap,
+		  daily_cap_factor, lifetime_cap_factor, treasury_alpha, carry_decay_days,
+		  qualified_directs_left, qualified_directs_right, created_by_person_id,
+		  retirement_age)
+		VALUES ('ret-test', now(), 100, 2.00, 10, 3.0, 2.0, 0.45, 14, 0, 0, 1, 65);
+		COMMIT;`); err != nil {
+		t.Fatalf("seedRetirementFixture: plan_config: %v", err)
+	}
+
+	return affID
+}
+
+// TestPostStreamPayment_RetirementRouting verifica el ruteo 401k en los tres
+// modos del plan de jubilación: agresivo (todo a 1007), moderado (todo
+// retirable) y parcial 50/50. Reutiliza el harness de testcontainers del
+// paquete (pgContainer) para correr contra Postgres real.
+func TestPostStreamPayment_RetirementRouting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires docker / testcontainers")
+	}
+	ctx := context.Background()
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+
+	affID := seedRetirementFixture(t, ctx, pool)
+	postedAt := time.Now().UTC()
+	const conceptBinaryID = 11 // sembrado en seedRetirementFixture
+
+	d := func(s string) decimal.Decimal { v, _ := decimal.NewFromString(s); return v }
+
+	sumMov := func(tx pgx.Tx, conceptID int, aff int64) decimal.Decimal {
+		var v decimal.Decimal
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(sum(amount), 0)
+			  FROM mlm.wallet_movement
+			 WHERE concept_id = $1 AND affiliate_id = $2`, conceptID, aff).Scan(&v); err != nil {
+			t.Fatalf("sumMov concept=%d aff=%d: %v", conceptID, aff, err)
+		}
+		return v
+	}
+
+	countMov := func(tx pgx.Tx, conceptID int, aff int64) int {
+		var n int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*)
+			  FROM mlm.wallet_movement
+			 WHERE concept_id = $1 AND affiliate_id = $2`, conceptID, aff).Scan(&n); err != nil {
+			t.Fatalf("countMov concept=%d aff=%d: %v", conceptID, aff, err)
+		}
+		return n
+	}
+
+	// -------------------------------------------------------------------------
+	// Caso 1: modo agresivo — todo al plan (1007), nada retirable.
+	// -------------------------------------------------------------------------
+	t.Run("agresivo", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO mlm.retirement_plan (affiliate_id, mode, opened_at, unlocks_at, balance_usd, updated_at)
+			VALUES ($1, 'agresivo', now(), '2045-01-15', 0, now())`, affID); err != nil {
+			t.Fatalf("insert retirement_plan: %v", err)
+		}
+
+		cache := map[int64]int64{}
+		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
+			d("100.00"), "testret:agresivo:1", "test agresivo", postedAt, 65, cache); err != nil {
+			t.Fatalf("postStreamPayment: %v", err)
+		}
+
+		// Concepto 1007: amount = -100 (débito factor=-1); balance_usd = +100.
+		if got := sumMov(tx, retirementContribConceptID, affID); !got.Equal(d("-100.00")) {
+			t.Errorf("1007 agresivo: want -100 (debit), got %s", got)
+		}
+		// Sin movimiento del concepto retirable (binary, id=11).
+		if n := countMov(tx, conceptBinaryID, affID); n != 0 {
+			t.Errorf("agresivo: esperaba 0 mov retiables, hubo %d", n)
+		}
+		// balance_usd = 100.
+		var bal decimal.Decimal
+		if err := tx.QueryRow(ctx, `SELECT balance_usd FROM mlm.retirement_plan WHERE affiliate_id=$1`, affID).Scan(&bal); err != nil {
+			t.Fatalf("balance: %v", err)
+		}
+		if !bal.Equal(d("100.00")) {
+			t.Errorf("balance agresivo: want 100, got %s", bal)
+		}
+		// available_at del movimiento 1007 = unlocks_at del plan.
+		var avail *time.Time
+		if err := tx.QueryRow(ctx, `
+			SELECT available_at FROM mlm.wallet_movement
+			 WHERE concept_id = $1 AND affiliate_id = $2`,
+			retirementContribConceptID, affID).Scan(&avail); err != nil {
+			t.Fatalf("available_at: %v", err)
+		}
+		wantDate := "2045-01-15"
+		if avail == nil {
+			t.Errorf("available_at agresivo: nil, want %s", wantDate)
+		} else if avail.UTC().Format("2006-01-02") != wantDate {
+			t.Errorf("available_at agresivo: got %s, want %s", avail.UTC().Format("2006-01-02"), wantDate)
+		}
+	})
+
+	// -------------------------------------------------------------------------
+	// Caso 2: modo moderado — todo retirable (sin routing row → pct=0).
+	// -------------------------------------------------------------------------
+	t.Run("moderado", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO mlm.retirement_plan (affiliate_id, mode, opened_at, unlocks_at, balance_usd, updated_at)
+			VALUES ($1, 'moderado', now(), NULL, 0, now())`, affID); err != nil {
+			t.Fatalf("insert retirement_plan moderado: %v", err)
+		}
+
+		cache := map[int64]int64{}
+		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
+			d("100.00"), "testret:moderado:1", "test moderado", postedAt, 65, cache); err != nil {
+			t.Fatalf("postStreamPayment: %v", err)
+		}
+
+		// Sin 1007.
+		if n := countMov(tx, retirementContribConceptID, affID); n != 0 {
+			t.Errorf("moderado: esperaba 0 mov 1007, hubo %d", n)
+		}
+		// $100 retirable (concept binary).
+		if got := sumMov(tx, conceptBinaryID, affID); !got.Equal(d("100.00")) {
+			t.Errorf("moderado: want $100 retirable, got %s", got)
+		}
+		// balance_usd = 0.
+		var bal decimal.Decimal
+		if err := tx.QueryRow(ctx, `SELECT balance_usd FROM mlm.retirement_plan WHERE affiliate_id=$1`, affID).Scan(&bal); err != nil {
+			t.Fatalf("balance moderado: %v", err)
+		}
+		if !bal.IsZero() {
+			t.Errorf("balance moderado: want 0, got %s", bal)
+		}
+	})
+
+	// -------------------------------------------------------------------------
+	// Caso 3: parcial 0.5 — 1007=$50, retirable=$50, suma=$100.
+	// -------------------------------------------------------------------------
+	t.Run("parcial_0.5", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO mlm.retirement_plan (affiliate_id, mode, opened_at, unlocks_at, balance_usd, updated_at)
+			VALUES ($1, 'agresivo', now(), '2045-01-15', 0, now())`, affID); err != nil {
+			t.Fatalf("insert retirement_plan parcial: %v", err)
+		}
+		// Bajar el routing de agresivo/binary_bonus a 0.5 sólo en esta tx.
+		if _, err := tx.Exec(ctx, `
+			UPDATE mlm.retirement_mode_routing SET pct_to_plan = 0.5
+			 WHERE mode = 'agresivo' AND concept_kind = 'binary_bonus'`); err != nil {
+			t.Fatalf("update routing parcial: %v", err)
+		}
+
+		cache := map[int64]int64{}
+		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
+			d("100.00"), "testret:parcial:1", "test parcial", postedAt, 65, cache); err != nil {
+			t.Fatalf("postStreamPayment: %v", err)
+		}
+
+		// 1007 = -$50 (débito factor=-1).
+		if got := sumMov(tx, retirementContribConceptID, affID); !got.Equal(d("-50.00")) {
+			t.Errorf("parcial 1007: want -50 (debit), got %s", got)
+		}
+		// Retirable = $50 (crédito).
+		if got := sumMov(tx, conceptBinaryID, affID); !got.Equal(d("50.00")) {
+			t.Errorf("parcial retirable: want 50, got %s", got)
+		}
+		// Invariante: ABS(ret) + wd = 100 (no se crea dinero).
+		ret := sumMov(tx, retirementContribConceptID, affID).Neg()
+		wd := sumMov(tx, conceptBinaryID, affID)
+		if !ret.Add(wd).Equal(d("100.00")) {
+			t.Errorf("parcial invariante: |%s| + %s != 100", ret, wd)
+		}
+	})
+}
