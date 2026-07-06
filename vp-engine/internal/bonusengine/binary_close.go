@@ -137,6 +137,7 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 
 	totalPaid := decimal.Zero
 	postedAt := pEnd // todos los pagos del período al instante de cierre lógico
+	walletCache := map[int64]int64{}
 
 	for _, c := range candidates {
 		net := c.GrossAmount.Mul(theta).RoundDown(2)
@@ -162,24 +163,36 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 			return fmt.Errorf("upsert txn (%s): %w", extRef, err)
 		}
 
-		// 2. wallet_movement
-		var walletID int64
-		err = tx.QueryRow(ctx, `
-			SELECT w.id FROM mlm.wallet w
-			  JOIN mlm.asset s ON s.id = w.asset_id
-			 WHERE w.affiliate_id = $1 AND s.symbol = 'USD'
-			 LIMIT 1`, c.AffiliateID).Scan(&walletID)
+		// 2. wallet_movement — ruteo 401k: toRet va al plan, toWd al billetera.
+		pct, err := pctToPlanFor(ctx, tx, c.AffiliateID, "binary_bonus")
 		if err != nil {
-			return fmt.Errorf("wallet for affiliate %d: %w", c.AffiliateID, err)
+			return fmt.Errorf("pctToPlanFor (%s): %w", extRef, err)
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO mlm.wallet_movement
-			  (transaction_id, wallet_id, affiliate_id, concept_id,
-			   vicionario_package_id, amount, posted_at, available_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, mlm.fn_bonus_available_at($7))`,
-			txnID, walletID, c.AffiliateID, binaryConceptID,
-			c.AffiliatePackageID, net, postedAt); err != nil {
-			return fmt.Errorf("insert wallet_movement: %w", err)
+		toRet, toWd := routeSplit(net, pct)
+		if err := postRetirementContribution(ctx, tx, c.AffiliateID, toRet, extRef, postedAt, plan.RetirementAge, walletCache); err != nil {
+			return fmt.Errorf("retirement contribution (%s): %w", extRef, err)
+		}
+		if toWd.Sign() > 0 {
+			walletID, ok := walletCache[c.AffiliateID]
+			if !ok {
+				if err := tx.QueryRow(ctx, `
+					SELECT w.id FROM mlm.wallet w
+					  JOIN mlm.asset s ON s.id = w.asset_id
+					 WHERE w.affiliate_id = $1 AND s.symbol = 'USD'
+					 LIMIT 1`, c.AffiliateID).Scan(&walletID); err != nil {
+					return fmt.Errorf("wallet for affiliate %d: %w", c.AffiliateID, err)
+				}
+				walletCache[c.AffiliateID] = walletID
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO mlm.wallet_movement
+				  (transaction_id, wallet_id, affiliate_id, concept_id,
+				   vicionario_package_id, amount, posted_at, available_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, mlm.fn_bonus_available_at($7))`,
+				txnID, walletID, c.AffiliateID, binaryConceptID,
+				c.AffiliatePackageID, toWd, postedAt); err != nil {
+				return fmt.Errorf("insert wallet_movement: %w", err)
+			}
 		}
 
 		// 3. binary_block_payment (los triggers T2/T3 validan caps)
