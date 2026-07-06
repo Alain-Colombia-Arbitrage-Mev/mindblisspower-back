@@ -40,12 +40,16 @@ SELECT te.external_ref, te.kind, te.affiliate_id,
  ORDER BY te.occurred_at DESC LIMIT 5;
 -- Esperado: un 'pv_credit' con external_ref='package_purchase:pi_...' (applied_at no nulo).
 
-\echo '== 5) COMISIONES del miembro (lo que verá en la UI) =='
+\echo '== 5) COMISIONES del miembro (lo que verá en la UI — solo wallet USD, excluye 401k USD-RET) =='
 SELECT
-  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen AND (available_at IS NULL OR available_at <= current_date)),0) AS disponible_retiro,
-  COALESCE(SUM(amount) FILTER (WHERE NOT is_frozen AND available_at > current_date AND amount > 0),0) AS madurando
+  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen AND (wm.available_at IS NULL OR wm.available_at <= current_date)),0) AS disponible_retiro,
+  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen AND wm.available_at > current_date AND wm.amount > 0),0) AS madurando
   FROM mlm.wallet_movement wm
   JOIN mlm.affiliate a ON a.id = wm.affiliate_id
   JOIN mlm.person p   ON p.id = a.person_id
+  JOIN mlm.wallet  w  ON w.id = wm.wallet_id
+  JOIN mlm.asset   s  ON s.id = w.asset_id AND s.symbol = 'USD'
  WHERE lower(p.email) = lower(:'email');
 -- Día 1 normalmente 0 (las comisiones las devenga el bonus engine después).
+-- Nota: esta query excluye la wallet USD-RET (401k) — espeja la lógica de
+-- GetMemberSummary/RequestWithdrawal para que el resultado sea coherente.

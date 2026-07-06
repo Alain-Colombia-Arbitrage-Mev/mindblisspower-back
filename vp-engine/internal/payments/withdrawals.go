@@ -59,13 +59,15 @@ func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInf
 	}
 
 	// Disponible = comisiones maduradas no congeladas − retiros ya pendientes.
+	// Scoped al wallet USD (walletID) para excluir la wallet USD-RET de jubilación
+	// y evitar que el saldo 401k sea contado como fondos retirables.
 	var availStr, pendingStr string
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount) FILTER (
 		         WHERE NOT is_frozen AND (available_at IS NULL OR available_at <= current_date)
 		       ), 0)::text
-		  FROM mlm.wallet_movement WHERE affiliate_id = $1
-	`, affID).Scan(&availStr); err != nil {
+		  FROM mlm.wallet_movement WHERE wallet_id = $1
+	`, walletID).Scan(&availStr); err != nil {
 		return WithdrawalResult{}, fmt.Errorf("available: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `
