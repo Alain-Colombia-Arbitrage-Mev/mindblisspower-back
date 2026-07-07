@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -21,7 +22,7 @@ func TestNetworkSustainabilityRoute_Mounted(t *testing.T) {
 		store:        &Store{}, // cache == nil → allow() returns true; db == nil is fine here
 		serviceToken: "test-token",
 		log:          zerolog.Nop(),
-		httpClient:   &http.Client{Timeout: 10 * 1e9}, // 10s
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
 	}
 
 	srv := httptest.NewServer(h.Routes())

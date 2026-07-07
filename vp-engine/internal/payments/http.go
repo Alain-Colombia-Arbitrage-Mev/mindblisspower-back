@@ -345,38 +345,44 @@ func (h *Handler) handleNetworkSustainability(w http.ResponseWriter, r *http.Req
 	}
 	var projected []projectedEntry
 
+	var projectedError string
 	const projCacheKey = "sustainability:proj"
 	if !h.store.cache.get(ctx, projCacheKey, &projected) {
 		// Cache miss: run Monte Carlo scenarios (expensive).
 		scenarios, serr := h.store.RunSustainabilityScenarios(ctx)
 		if serr != nil {
-			h.log.Error().Err(serr).Msg("sustainability: run scenarios")
-			writeErr(w, http.StatusInternalServerError, "internal")
-			return
+			h.log.Error().Err(serr).Msg("sustainability: run scenarios (degraded — returning live only)")
+			projected = []projectedEntry{}
+			projectedError = serr.Error()
+		} else {
+			projected = make([]projectedEntry, 0, len(scenarios))
+			for _, sc := range scenarios {
+				// Build projected metrics from live, overriding WorstTheta with
+				// the simulated value for this scenario.
+				pm := m
+				pm.WorstTheta = sc.WorstTheta
+				verdict := analyzeViaEngine(ctx, h.store.EngineURL, networkintel.AnalysisRequest{Metrics: pm}, h.httpClient)
+				projected = append(projected, projectedEntry{
+					Scenario:   sc.Name,
+					Simulation: sc,
+					Analysis:   verdict,
+				})
+			}
+			h.store.cache.set(ctx, projCacheKey, projected, sustainabilityCacheTTL)
 		}
-		projected = make([]projectedEntry, 0, len(scenarios))
-		for _, sc := range scenarios {
-			// Build projected metrics from live, overriding WorstTheta with
-			// the simulated value for this scenario.
-			pm := m
-			pm.WorstTheta = sc.WorstTheta
-			verdict := analyzeViaEngine(ctx, h.store.EngineURL, networkintel.AnalysisRequest{Metrics: pm}, h.httpClient)
-			projected = append(projected, projectedEntry{
-				Scenario:   sc.Name,
-				Simulation: sc,
-				Analysis:   verdict,
-			})
-		}
-		h.store.cache.set(ctx, projCacheKey, projected, sustainabilityCacheTTL)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"live": map[string]any{
 			"metrics":  m,
 			"analysis": liveVerdict,
 		},
 		"projected": projected,
-	})
+	}
+	if projectedError != "" {
+		resp["projected_error"] = projectedError
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAdminSolvency: monitor de salud (θ histórico + período vigente + alerta
