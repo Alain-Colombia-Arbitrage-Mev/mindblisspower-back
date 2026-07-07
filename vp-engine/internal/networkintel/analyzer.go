@@ -28,6 +28,13 @@ func DeterministicAnalysis(req AnalysisRequest) AnalysisResponse {
 	if m.CompanyFund < 0 {
 		score -= 18
 	}
+	if m.RankLiabilityRatio >= 0.5 {
+		if m.RankLiabilityRatio >= 0.75 {
+			score -= 15
+		} else {
+			score -= 8
+		}
+	}
 	if score < 0 {
 		score = 0
 	}
@@ -111,6 +118,15 @@ func deterministicFindings(m NetworkMetrics, activeRate, balance float64, weakLe
 			Area:     "fondo_empresa",
 			Title:    "Fondo de empresa bajo presion",
 			Detail:   fmt.Sprintf("Fondo %.2f frente a desembolsos proyectados %.2f.", m.CompanyFund, m.ProjectedOutflows),
+		})
+	}
+
+	if m.RankLiabilityRatio >= 0.5 {
+		findings = append(findings, Finding{
+			Severity: sev(m.RankLiabilityRatio, 0.5, 0.75),
+			Area:     "niveles",
+			Title:    "Exposición de bonos de rango",
+			Detail:   fmt.Sprintf("Las cuotas de rango pendientes equivalen al %.0f%% de los inflows; el bono de rango es T1-only (sin cap T2/T3), contenido solo por θ.", m.RankLiabilityRatio*100),
 		})
 	}
 
@@ -276,4 +292,12 @@ func spanishLeg(leg string) string {
 
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
+}
+
+// sev maps a ratio to "warn" or "critical" using two thresholds (warn, critical).
+func sev(ratio, warnThreshold, criticalThreshold float64) string {
+	if ratio >= criticalThreshold {
+		return "alta"
+	}
+	return "media"
 }

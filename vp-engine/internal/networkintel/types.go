@@ -16,8 +16,9 @@ type NetworkMetrics struct {
 	RightVolume       float64 `json:"right_volume"`
 	CompanyFund       float64 `json:"company_fund"`
 	ProjectedOutflows float64 `json:"projected_outflows"`
-	WorstTheta        float64 `json:"worst_theta"`
-	Rank              string  `json:"rank,omitempty"`
+	WorstTheta          float64 `json:"worst_theta"`
+	Rank                string  `json:"rank,omitempty"`
+	RankLiabilityRatio  float64 `json:"rank_liability_ratio,omitempty"`
 }
 
 type NetworkEvent struct {
