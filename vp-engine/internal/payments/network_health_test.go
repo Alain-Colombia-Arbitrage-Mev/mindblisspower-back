@@ -84,6 +84,13 @@ func TestBuildNetworkMetrics_Integration(t *testing.T) {
 	if m.TotalMembers < 1 {
 		t.Fatalf("TotalMembers=%d, want >= 1", m.TotalMembers)
 	}
+	// Exact counts from the fixture above.
+	if m.ActiveMembers != 2 {
+		t.Fatalf("ActiveMembers = %d, want 2", m.ActiveMembers)
+	}
+	if rx.PendingInstallments != 1 {
+		t.Fatalf("PendingInstallments = %d, want 1", rx.PendingInstallments)
+	}
 	// Left leg is the strong leg (100 > 40); LeftVolume must be larger.
 	if m.LeftVolume < m.RightVolume {
 		t.Fatalf("expected LeftVolume(%.2f) >= RightVolume(%.2f): weak leg should be right", m.LeftVolume, m.RightVolume)

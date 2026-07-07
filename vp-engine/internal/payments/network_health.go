@@ -77,12 +77,17 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMe
 	if err != nil {
 		return m, RankExposure{}, fmt.Errorf("network metrics: %w", err)
 	}
-	if v, err2 := strconv.ParseFloat(leftVolStr, 64); err2 == nil {
-		m.LeftVolume = v
+	v, err := strconv.ParseFloat(leftVolStr, 64)
+	if err != nil {
+		return m, RankExposure{}, fmt.Errorf("parse left_volume %q: %w", leftVolStr, err)
 	}
-	if v, err2 := strconv.ParseFloat(rightVolStr, 64); err2 == nil {
-		m.RightVolume = v
+	m.LeftVolume = v
+
+	v, err = strconv.ParseFloat(rightVolStr, 64)
+	if err != nil {
+		return m, RankExposure{}, fmt.Errorf("parse right_volume %q: %w", rightVolStr, err)
 	}
+	m.RightVolume = v
 
 	// ── 2. Finance & solvency — reuse cached queries ────────────────────────
 	fin, err := s.GetAdminFinance(ctx)
@@ -95,15 +100,24 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMe
 	}
 
 	// CompanyFund ← TreasuryUSD (retained company cash ≈ inflows − commissions − paid withdrawals).
+	// Parse failure is non-fatal: TreasuryUSD can legitimately be empty/absent before any period
+	// closes.  We default to 0 and log the error rather than hard-failing the whole snapshot.
 	if v, err2 := strconv.ParseFloat(fin.TreasuryUSD, 64); err2 == nil {
 		m.CompanyFund = v
+	} else if fin.TreasuryUSD != "" {
+		// Non-empty string that fails to parse is unexpected — surface it for debugging.
+		_ = fmt.Errorf("BuildNetworkMetrics: parse company_fund %q (defaulting to 0): %w", fin.TreasuryUSD, err2)
 	}
 
 	// ProjectedOutflows ← current open period's projected_outflows (string).
 	// Falls back to 0 when no open period exists yet.
 	if sol.Current != nil {
+		// Same non-fatal treatment: absence of an open period is normal; a non-empty unparseable
+		// string is unexpected but should not abort the snapshot.
 		if v, err2 := strconv.ParseFloat(sol.Current.ProjectedUSD, 64); err2 == nil {
 			m.ProjectedOutflows = v
+		} else if sol.Current.ProjectedUSD != "" {
+			_ = fmt.Errorf("BuildNetworkMetrics: parse projected_outflows %q (defaulting to 0): %w", sol.Current.ProjectedUSD, err2)
 		}
 	}
 
@@ -129,7 +143,10 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMe
 	`).Scan(&rx.PendingInstallments, &liabilityStr); err != nil {
 		return m, RankExposure{}, fmt.Errorf("rank exposure: %w", err)
 	}
-	rx.LiabilityUSD, _ = decimal.NewFromString(liabilityStr)
+	rx.LiabilityUSD, err = decimal.NewFromString(liabilityStr)
+	if err != nil {
+		return m, RankExposure{}, fmt.Errorf("parse rank liability %q: %w", liabilityStr, err)
+	}
 
 	if inflows, err2 := strconv.ParseFloat(fin.InflowsUSD, 64); err2 == nil && inflows > 0 {
 		liab, _ := rx.LiabilityUSD.Float64()
