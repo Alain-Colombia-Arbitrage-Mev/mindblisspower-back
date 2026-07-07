@@ -105,8 +105,8 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMe
 	if v, err2 := strconv.ParseFloat(fin.TreasuryUSD, 64); err2 == nil {
 		m.CompanyFund = v
 	} else if fin.TreasuryUSD != "" {
-		// Non-empty string that fails to parse is unexpected — surface it for debugging.
-		_ = fmt.Errorf("BuildNetworkMetrics: parse company_fund %q (defaulting to 0): %w", fin.TreasuryUSD, err2)
+		// Non-empty string that fails to parse: propagate — default-to-zero would silently mislead the advisor.
+		return m, RankExposure{}, fmt.Errorf("parse company_fund %q: %w", fin.TreasuryUSD, err2)
 	}
 
 	// ProjectedOutflows ← current open period's projected_outflows (string).
@@ -117,7 +117,8 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMe
 		if v, err2 := strconv.ParseFloat(sol.Current.ProjectedUSD, 64); err2 == nil {
 			m.ProjectedOutflows = v
 		} else if sol.Current.ProjectedUSD != "" {
-			_ = fmt.Errorf("BuildNetworkMetrics: parse projected_outflows %q (defaulting to 0): %w", sol.Current.ProjectedUSD, err2)
+			// Non-empty string that fails to parse: propagate — default-to-zero would silently mislead the advisor.
+			return m, RankExposure{}, fmt.Errorf("parse projected_outflows %q: %w", sol.Current.ProjectedUSD, err2)
 		}
 	}
 
