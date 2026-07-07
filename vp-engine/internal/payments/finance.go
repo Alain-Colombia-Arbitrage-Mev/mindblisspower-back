@@ -9,9 +9,10 @@ import (
 
 // TTLs de caché para lecturas calientes.
 const (
-	financeCacheTTL  = 20 * time.Second
-	solvencyCacheTTL = 20 * time.Second
-	memberCacheTTL   = 15 * time.Second
+	financeCacheTTL        = 20 * time.Second
+	solvencyCacheTTL       = 20 * time.Second
+	memberCacheTTL         = 15 * time.Second
+	sustainabilityCacheTTL = time.Hour
 )
 
 // MoneyflowRow es un agregado del ledger por tipo de concepto (kind).

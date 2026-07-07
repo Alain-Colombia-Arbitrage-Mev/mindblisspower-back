@@ -26,10 +26,19 @@ type Handler struct {
 	serviceToken string
 	adminEmails  []string
 	companyRoot  int64
+	httpClient   *http.Client
 }
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
-	return &Handler{store: store, gw: gw, serviceToken: serviceToken, adminEmails: adminEmails, companyRoot: companyRoot, log: log.With().Str("component", "payments").Logger()}
+	return &Handler{
+		store:        store,
+		gw:           gw,
+		serviceToken: serviceToken,
+		adminEmails:  adminEmails,
+		companyRoot:  companyRoot,
+		log:          log.With().Str("component", "payments").Logger(),
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
 // isAdminEmail: true si el email está en el allowlist por env o es is_admin en mlm.person.
@@ -71,6 +80,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
 	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
 	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
+	mux.HandleFunc("/api/admin/network/sustainability", h.handleNetworkSustainability)
 	return h.rateLimit(mux)
 }
 
@@ -305,6 +315,67 @@ func (h *Handler) handleNetworkHealth(w http.ResponseWriter, r *http.Request) {
 		"analysis":     resp,
 		"metrics":      m,
 		"rank_exposure": rx,
+	})
+}
+
+// handleNetworkSustainability: veredicto de sostenibilidad en tres escenarios
+// (live, modesto, estres). El live es siempre fresco; los proyectados se
+// cachean ~1h porque el simulador Monte Carlo es O(n²) (~12 s sin cache).
+func (h *Handler) handleNetworkSustainability(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	ctx := r.Context()
+
+	// ── Live (cheap — siempre fresco) ────────────────────────────────────────
+	m, rx, err := h.store.BuildNetworkMetrics(ctx)
+	if err != nil {
+		h.log.Error().Err(err).Msg("sustainability: build network metrics")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	m.RankLiabilityRatio = rx.ExposureRatio
+	liveVerdict := analyzeViaEngine(ctx, h.store.EngineURL, networkintel.AnalysisRequest{Metrics: m}, h.httpClient)
+
+	// ── Projected (expensive — cached) ───────────────────────────────────────
+	type projectedEntry struct {
+		Scenario   string                    `json:"scenario"`
+		Simulation ScenarioResult            `json:"simulation"`
+		Analysis   networkintel.AnalysisResponse `json:"analysis"`
+	}
+	var projected []projectedEntry
+
+	const projCacheKey = "sustainability:proj"
+	if !h.store.cache.get(ctx, projCacheKey, &projected) {
+		// Cache miss: run Monte Carlo scenarios (expensive).
+		scenarios, serr := h.store.RunSustainabilityScenarios(ctx)
+		if serr != nil {
+			h.log.Error().Err(serr).Msg("sustainability: run scenarios")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		projected = make([]projectedEntry, 0, len(scenarios))
+		for _, sc := range scenarios {
+			// Build projected metrics from live, overriding WorstTheta with
+			// the simulated value for this scenario.
+			pm := m
+			pm.WorstTheta = sc.WorstTheta
+			verdict := analyzeViaEngine(ctx, h.store.EngineURL, networkintel.AnalysisRequest{Metrics: pm}, h.httpClient)
+			projected = append(projected, projectedEntry{
+				Scenario:   sc.Name,
+				Simulation: sc,
+				Analysis:   verdict,
+			})
+		}
+		h.store.cache.set(ctx, projCacheKey, projected, sustainabilityCacheTTL)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"live": map[string]any{
+			"metrics":  m,
+			"analysis": liveVerdict,
+		},
+		"projected": projected,
 	})
 }
 
