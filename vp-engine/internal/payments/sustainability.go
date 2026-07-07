@@ -90,11 +90,12 @@ func (s *Store) RunSustainabilityScenarios(ctx context.Context) ([]ScenarioResul
 	simPlan.ReferralRate = bePlan.ReferralRate
 
 	// Fundadores (ADR-0018)
-	// bonusengine uses FounderEnrollmentOpen; simulator uses FounderFraction
-	// FounderEnrollmentOpen=true → all new enrollments are founders (FounderFraction=1.0)
-	// FounderEnrollmentOpen=false → no founders (FounderFraction=0)
+	// bonusengine uses FounderEnrollmentOpen; simulator uses FounderFraction.
+	// Asunción: ~10% de nuevos enrolados son fundadores (la ventana de lanzamiento se cierra);
+	// FounderEnrollmentOpen es un switch, no una fracción.
+	// Usar 1.0 trataría el 100% de enrolados durante las 52 semanas como fundadores — irreal.
 	if bePlan.FounderEnrollmentOpen {
-		simPlan.FounderFraction = 1.0
+		simPlan.FounderFraction = 0.1
 	} else {
 		simPlan.FounderFraction = 0.0
 	}
@@ -111,19 +112,19 @@ func (s *Store) RunSustainabilityScenarios(ctx context.Context) ([]ScenarioResul
 	}
 
 	// Fields with NO equivalent in plan_config (left at V1Conservative defaults):
-	//   simPlan.RankBonusBase     — no equivalent in plan_config
+	//   simPlan.RankBonusBase          — no equivalent in plan_config
 	//   simPlan.RepurchaseComplianceProb — no equivalent in plan_config
-	//   simPlan.RankDefs          — no equivalent (DB column); DefaultRankDefs() is used
+	//   simPlan.RankDefs               — no equivalent (DB column); DefaultRankDefs() is used
+	//   simPlan.DirectsActiveRequired  — no simulator field; yield may be overstated when true
+	//   simPlan.RetirementAge          — no simulator payout path
 
 	// ── 3. Build the two scenarios ────────────────────────────────────────────
 	base := simulator.Default()
 	base.Plan = simPlan
 	base.Periods = 52
-	// InitialAffiliates: use a representative but test-friendly population.
-	// The simulator's insertion sort is O(n²); 1,000 affiliates keeps each
-	// 52-period run well under 10 seconds.  The plan dynamics (θ, caps, streams)
-	// are identical regardless of tree size.
-	base.InitialAffiliates = 1_000
+	// árbol chico: las dinámicas de solvencia son independientes del tamaño; chico = rápido para el endpoint.
+	// El simulador es O(n²); 200 afiliados mantiene cada corrida de 52 periodos en segundos.
+	base.InitialAffiliates = 200
 	base.GrowthRate = 0.01 // modesto: 1% growth per period
 
 	stress := base
