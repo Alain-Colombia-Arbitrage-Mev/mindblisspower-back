@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 	stripe "github.com/stripe/stripe-go/v85"
+	"github.com/vicionpower/vp-engine/internal/networkintel"
 )
 
 const maxWebhookBody = int64(1 << 18) // 256 KiB
@@ -69,6 +70,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
 	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
 	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
+	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
 	return h.rateLimit(mux)
 }
 
@@ -282,6 +284,28 @@ func (h *Handler) handleAdminHealthSystem(w http.ResponseWriter, r *http.Request
 	}
 	sh := h.store.GetSystemHealth(r.Context(), siblings)
 	writeJSON(w, http.StatusOK, sh)
+}
+
+// handleNetworkHealth: snapshot de salud de la red (métricas reales → asesor AI
+// determinístico). Devuelve analysis, metrics y rank_exposure.
+func (h *Handler) handleNetworkHealth(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	m, rx, err := h.store.BuildNetworkMetrics(r.Context())
+	if err != nil {
+		h.log.Error().Err(err).Msg("build network metrics")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	m.RankLiabilityRatio = rx.ExposureRatio
+	req := networkintel.AnalysisRequest{Metrics: m}
+	resp := networkintel.DeterministicAnalysis(req)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"analysis":     resp,
+		"metrics":      m,
+		"rank_exposure": rx,
+	})
 }
 
 // handleAdminSolvency: monitor de salud (θ histórico + período vigente + alerta
