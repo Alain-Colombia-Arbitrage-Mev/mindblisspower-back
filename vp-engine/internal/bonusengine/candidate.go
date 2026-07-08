@@ -200,14 +200,17 @@ func EnumerateCandidates(
 			   AND te.occurred_at >= bp.period_start
 			   AND te.occurred_at <  bp.period_end
 		), touched AS (
-			SELECT anc.id AS ancestor_id, min(evt.id) AS first_event
+			-- Ancestros de cada evento via closure (index-backed) en vez de
+			-- self.path <@ anc.path (seq scan). c.distance = self.depth -
+			-- anc.depth, asi el bound de profundidad es c.distance <= $2.
+			-- distance > 0 excluye self (viejo anc.id <> self.id).
+			SELECT c.ancestor_id AS ancestor_id, min(evt.id) AS first_event
 			  FROM evt
-			  JOIN mlm.affiliate self ON self.id = evt.affiliate_id
-			  JOIN mlm.affiliate anc
-			    ON self.path <@ anc.path
-			   AND anc.id <> self.id
-			   AND (self.depth - anc.depth) <= $2
-			 GROUP BY anc.id
+			  JOIN mlm.affiliate_closure c
+			    ON c.descendant_id = evt.affiliate_id
+			   AND c.distance > 0
+			   AND c.distance <= $2
+			 GROUP BY c.ancestor_id
 		)
 		SELECT t.ancestor_id,
 		       t.first_event,
@@ -223,16 +226,18 @@ func EnumerateCandidates(
 		       EXISTS (SELECT 1 FROM mlm.affiliate ch
 		         WHERE ch.parent_id = a.id AND ch.position = 'R' AND ch.status = 'active') AS binary_child_r,
 		       (SELECT count(*) FROM mlm.affiliate d
+		         JOIN mlm.affiliate_closure dc
+		           ON dc.ancestor_id = a.id AND dc.descendant_id = d.id AND dc.distance > 0
 		         WHERE d.sponsor_id = a.id
 		           AND d.status = 'active'
-		           AND d.path <@ a.path
 		           AND substring(ltree2text(subpath(d.path, a.depth + 1, 1)) from 1 for 1) = 'L'
 		           AND EXISTS (SELECT 1 FROM mlm.affiliate_package dap
 		                        WHERE dap.affiliate_id = d.id AND dap.status = 'active')) AS sponsored_l,
 		       (SELECT count(*) FROM mlm.affiliate d
+		         JOIN mlm.affiliate_closure dc
+		           ON dc.ancestor_id = a.id AND dc.descendant_id = d.id AND dc.distance > 0
 		         WHERE d.sponsor_id = a.id
 		           AND d.status = 'active'
-		           AND d.path <@ a.path
 		           AND substring(ltree2text(subpath(d.path, a.depth + 1, 1)) from 1 for 1) = 'R'
 		           AND EXISTS (SELECT 1 FROM mlm.affiliate_package dap
 		                        WHERE dap.affiliate_id = d.id AND dap.status = 'active')) AS sponsored_r,

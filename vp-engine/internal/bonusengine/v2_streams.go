@@ -94,14 +94,17 @@ func periodIndex(ctx context.Context, tx pgx.Tx, periodID int64) (int, error) {
 // directGateSQL: EXISTS de un patrocinado directo ACTIVO en la pierna $leg
 // del afiliado a. Con directs_active_required, el directo además debe tener
 // recompra fresca (payout_state.last_purchase_at >= cutoff).
+// Descendientes de a vía closure (index-backed) en vez de `d.path <@ a.path`
+// (seq scan). distance > 0 excluye self. La detección de pierna sigue path-based.
 const directGateSQL = `
 	EXISTS (
 		SELECT 1
 		  FROM mlm.affiliate d
+		  JOIN mlm.affiliate_closure dc
+		    ON dc.ancestor_id = a.id AND dc.descendant_id = d.id AND dc.distance > 0
 		  LEFT JOIN mlm.affiliate_payout_state dps ON dps.affiliate_id = d.id
 		 WHERE d.sponsor_id = a.id
 		   AND d.status = 'active'
-		   AND d.path <@ a.path
 		   AND substring(ltree2text(subpath(d.path, a.depth + 1, 1)) from 1 for 1) = %s
 		   AND EXISTS (SELECT 1 FROM mlm.affiliate_package dap
 		                WHERE dap.affiliate_id = d.id AND dap.status = 'active')
