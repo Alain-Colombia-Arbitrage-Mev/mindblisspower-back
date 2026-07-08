@@ -81,3 +81,68 @@ func TestRequestWithdrawal_Integration(t *testing.T) {
 		t.Fatalf("withdrawals = %+v", sum.Withdrawals)
 	}
 }
+
+// C2: el guard de transición sólo permite requested→approved→paid (y rejected/
+// cancelled desde estados válidos). Rechaza saltos (requested→paid) y re-pagos
+// (paid→paid). Requiere Docker.
+func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2);
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'Adm','In','admin@test.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var affID, walletID, wrID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&affID); err != nil {
+		t.Fatalf("affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance) VALUES ($1,1,'usd-1',0) RETURNING id`, affID).Scan(&walletID); err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.withdrawal_request (affiliate_id, wallet_id, amount_usd, status)
+		VALUES ($1,$2,200,'requested') RETURNING id`, affID, walletID).Scan(&wrID); err != nil {
+		t.Fatalf("withdrawal: %v", err)
+	}
+
+	store := NewStore(pool)
+	const admin = "admin@test.local"
+
+	// requested → paid: salto inválido (exige approved antes).
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
+		t.Fatal("requested->paid debió fallar (falta approved)")
+	}
+	// requested → approved: ok.
+	if err := store.SetWithdrawalStatus(ctx, wrID, "approved", admin); err != nil {
+		t.Fatalf("requested->approved: %v", err)
+	}
+	// approved → paid: ok.
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err != nil {
+		t.Fatalf("approved->paid: %v", err)
+	}
+	// paid → paid: re-pago, inválido.
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
+		t.Fatal("paid->paid debió fallar (re-pago)")
+	}
+	// paid → rejected: inválido.
+	if err := store.SetWithdrawalStatus(ctx, wrID, "rejected", admin); err == nil {
+		t.Fatal("paid->rejected debió fallar")
+	}
+
+	var final string
+	if err := pool.QueryRow(ctx, `SELECT status::text FROM mlm.withdrawal_request WHERE id=$1`, wrID).Scan(&final); err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	if final != "paid" {
+		t.Fatalf("estado final = %s, want paid", final)
+	}
+}

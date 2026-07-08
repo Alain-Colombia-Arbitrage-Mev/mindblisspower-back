@@ -272,23 +272,38 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 // SetWithdrawalStatus cambia el estado de una solicitud (aprobar/rechazar/pagar/
 // cancelar) y registra quién aprobó. NOTA: marcar 'paid' NO postea aún el débito
 // contable (wallet_movement) — eso lo hace el motor; aquí solo el estado/auditoría.
+// withdrawalTransitions define las transiciones VÁLIDAS: target -> estados-previos
+// permitidos. Cualquier otra se rechaza (four-eyes: pagar exige aprobar antes;
+// no re-pagar un 'paid'; no reactivar un 'rejected').
+var withdrawalTransitions = map[string][]string{
+	"approved":  {"requested"},
+	"rejected":  {"requested"},
+	"paid":      {"approved"},
+	"cancelled": {"requested", "approved"},
+}
+
 func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error {
-	switch status {
-	case "approved", "rejected", "paid", "cancelled":
-	default:
+	allowedPrior, ok := withdrawalTransitions[status]
+	if !ok {
 		return fmt.Errorf("invalid status %q", status)
 	}
-	_, err := s.db.Exec(ctx, `
+	// Guard de transición + idempotencia: sólo actualiza si el estado ACTUAL es
+	// uno de los permitidos. RowsAffected==0 ⇒ transición inválida o ya aplicada
+	// (evita re-pagos y saltos de estado que corromperían four-eyes/finanzas).
+	ct, err := s.db.Exec(ctx, `
 		UPDATE mlm.withdrawal_request
 		   SET status=$2::mlm.withdrawal_status,
 		       approved_by_person_id = COALESCE(
 		         (SELECT id FROM mlm.person WHERE lower(email)=lower($3) LIMIT 1),
 		         approved_by_person_id),
 		       updated_at=now()
-		 WHERE id=$1
-	`, id, status, adminEmail)
+		 WHERE id=$1 AND status::text = ANY($4)
+	`, id, status, adminEmail, allowedPrior)
 	if err != nil {
 		return fmt.Errorf("set withdrawal status: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("invalid transition to %q for withdrawal %d (current status not in %v)", status, id, allowedPrior)
 	}
 	s.cache.del(ctx, "fin:admin")
 	s.cache.PublishEvent(ctx, "withdrawal."+status, map[string]any{"withdrawal_id": id, "by": adminEmail})
