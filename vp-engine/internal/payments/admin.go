@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
 )
 
 var ErrNotAdmin = errors.New("not an admin")
@@ -269,9 +270,21 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 	return out, total, rows.Err()
 }
 
+// withdrawalDebitConceptID es el concepto de DÉBITO de retiro (kind='withdrawal',
+// factor=-1, requires_pair=false). Sembrado en schema_payouts_v1.3.sql y en la
+// migración _meta/migration/40_withdrawal_concept.sql. El asiento es de una sola
+// vía: el dinero sale del sistema (banco/crypto), sin contra-crédito interno.
+const withdrawalDebitConceptID = 1013
+
 // SetWithdrawalStatus cambia el estado de una solicitud (aprobar/rechazar/pagar/
-// cancelar) y registra quién aprobó. NOTA: marcar 'paid' NO postea aún el débito
-// contable (wallet_movement) — eso lo hace el motor; aquí solo el estado/auditoría.
+// cancelar) y registra quién aprobó. Al transicionar a 'paid' — y SÓLO entonces —
+// postea el DÉBITO contable (mlm.transaction + mlm.wallet_movement negativo) en
+// la MISMA transacción que el cambio de estado, cerrando la brecha de doble-gasto
+// C1: sin ese débito el saldo del miembro nunca bajaba y la misma comisión podía
+// retirarse otra vez. El flujo hoy es admin-manual (no hay liquidación on-chain):
+// por eso el débito se postea aquí y NO vía el stub NATS de walletbridge (ese es
+// para un flujo on-chain futuro; ver walletbridge/bridge.go).
+//
 // withdrawalTransitions define las transiciones VÁLIDAS: target -> estados-previos
 // permitidos. Cualquier otra se rechaza (four-eyes: pagar exige aprobar antes;
 // no re-pagar un 'paid'; no reactivar un 'rejected').
@@ -287,10 +300,21 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	if !ok {
 		return fmt.Errorf("invalid status %q", status)
 	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op tras Commit
+
 	// Guard de transición + idempotencia: sólo actualiza si el estado ACTUAL es
 	// uno de los permitidos. RowsAffected==0 ⇒ transición inválida o ya aplicada
 	// (evita re-pagos y saltos de estado que corromperían four-eyes/finanzas).
-	ct, err := s.db.Exec(ctx, `
+	// RETURNING trae wallet_id + amount_usd del renglón transicionado para postear
+	// el débito con datos autoritativos (sin segundo round-trip ni race).
+	var walletID int64
+	var amountUSD string
+	err = tx.QueryRow(ctx, `
 		UPDATE mlm.withdrawal_request
 		   SET status=$2::mlm.withdrawal_status,
 		       approved_by_person_id = COALESCE(
@@ -298,13 +322,50 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 		         approved_by_person_id),
 		       updated_at=now()
 		 WHERE id=$1 AND status::text = ANY($4)
-	`, id, status, adminEmail, allowedPrior)
+		RETURNING wallet_id, amount_usd::text
+	`, id, status, adminEmail, allowedPrior).Scan(&walletID, &amountUSD)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 0 filas afectadas ⇒ transición inválida o ya aplicada. No se postea nada.
+		return fmt.Errorf("invalid transition to %q for withdrawal %d (current status not in %v)", status, id, allowedPrior)
+	}
 	if err != nil {
 		return fmt.Errorf("set withdrawal status: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("invalid transition to %q for withdrawal %d (current status not in %v)", status, id, allowedPrior)
+
+	// Débito contable SÓLO al pagar. Idempotente por external_ref='withdrawal:<id>'
+	// (UNIQUE en mlm.transaction): un segundo 'paid' del mismo id NO puede doble-
+	// postear (ON CONFLICT DO NOTHING ⇒ sin fila de txn ⇒ sin movement). El guard
+	// C2 arriba ya bloquea el segundo 'paid' de todos modos; esto es defensa en
+	// profundidad a nivel contable. El monto va NEGATIVO (fn_validate_movement
+	// exige amount<0 para conceptos factor=-1) contra la wallet USD del miembro,
+	// madurado y disponible de inmediato (posted_at = available_at = now()).
+	if status == "paid" {
+		amt, derr := decimal.NewFromString(amountUSD)
+		if derr != nil {
+			return fmt.Errorf("parse amount_usd %q: %w", amountUSD, derr)
+		}
+		debit := amt.Neg()
+		extRef := fmt.Sprintf("withdrawal:%d", id)
+		if _, err := tx.Exec(ctx, `
+			WITH txn AS (
+			  INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
+			  VALUES ($1, 'Retiro pagado (débito)', 'posted', now())
+			  ON CONFLICT (external_ref) DO NOTHING
+			  RETURNING id)
+			INSERT INTO mlm.wallet_movement
+			  (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+			SELECT t.id, w.id, w.affiliate_id, $3, $4, now(), current_date
+			  FROM txn t
+			  JOIN mlm.wallet w ON w.id = $2
+		`, extRef, walletID, withdrawalDebitConceptID, debit); err != nil {
+			return fmt.Errorf("post withdrawal debit: %w", err)
+		}
 	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
 	s.cache.del(ctx, "fin:admin")
 	s.cache.PublishEvent(ctx, "withdrawal."+status, map[string]any{"withdrawal_id": id, "by": adminEmail})
 	return nil
