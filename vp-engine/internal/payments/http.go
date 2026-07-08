@@ -81,6 +81,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
 	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
 	mux.HandleFunc("/api/admin/network/sustainability", h.handleNetworkSustainability)
+	mux.HandleFunc("/api/admin/command-center/summary", h.handleCommandCenterSummary)
+	mux.HandleFunc("/api/admin/command-center/alerts", h.handleCommandCenterAlerts)
+	mux.HandleFunc("/api/admin/command-center/alerts/{id}/ack", h.handleCommandCenterAlertAck)
 	return h.rateLimit(mux)
 }
 
