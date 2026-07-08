@@ -18,6 +18,10 @@ import (
 
 const maxWebhookBody = int64(1 << 18) // 256 KiB
 
+// idTokenHeader es el header por el que el BFF reenvía el id token Cognito crudo
+// para que el backend re-verifique la identidad (defensa en profundidad, H-2).
+const idTokenHeader = "X-VP-Id-Token"
+
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
 	store        *Store
@@ -27,6 +31,13 @@ type Handler struct {
 	adminEmails  []string
 	companyRoot  int64
 	httpClient   *http.Client
+
+	// verifier re-verifica el id token Cognito reenviado por el BFF. nil ⇒ no hay
+	// verificación disponible (sólo el fallback por query/body, con warning).
+	verifier IdentityVerifier
+	// requireVerified: si true, el header X-VP-Id-Token es obligatorio en los
+	// handlers que portan identidad (modo estricto tras el rollout de los BFFs).
+	requireVerified bool
 }
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
@@ -39,6 +50,14 @@ func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmail
 		log:          log.With().Str("component", "payments").Logger(),
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// SetIdentityVerifier inyecta el verificador de id tokens y el modo estricto.
+// verifier nil deja el backend en modo fallback (sólo query/body email, con
+// warning) para no romper callers durante el rollout.
+func (h *Handler) SetIdentityVerifier(v IdentityVerifier, requireVerified bool) {
+	h.verifier = v
+	h.requireVerified = requireVerified
 }
 
 // isAdminEmail: true si el email está en el allowlist por env o es is_admin en mlm.person.
@@ -141,6 +160,11 @@ func (h *Handler) handleAdminPlanSimulate(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
 	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return
@@ -204,6 +228,11 @@ func (h *Handler) handleAdminPlanPropose(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
 	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return
@@ -242,6 +271,11 @@ func (h *Handler) handleAdminPlanDecide(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
 	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return
@@ -455,6 +489,11 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	identity, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = identity
 	admin, err := h.isAdminEmail(r.Context(), req.Email)
 	if err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
@@ -484,14 +523,79 @@ func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// requireAdmin valida token de servicio + que el email sea admin.
+// verifiedEmail lee el id token del header X-VP-Id-Token y lo re-verifica
+// (firma JWKS + iss + aud==clientId + token_use==id + exp). Devuelve el email
+// verificado (lowercased) y true en éxito. Devuelve ("", false) si el header
+// está ausente o si la verificación falla (fail-closed cuando el header SÍ está
+// presente pero es inválido — el caller distingue ese caso con headerPresent).
+func (h *Handler) verifiedEmail(r *http.Request) (email string, ok bool) {
+	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
+	if raw == "" || h.verifier == nil {
+		return "", false
+	}
+	v, err := h.verifier.VerifyEmail(r.Context(), raw)
+	if err != nil {
+		h.log.Warn().Err(err).Msg("id token verification failed")
+		return "", false
+	}
+	return strings.ToLower(strings.TrimSpace(v)), true
+}
+
+// resolveIdentity deriva la identidad autoritativa de una request ya autenticada
+// por token de servicio, combinando el id token verificado (header) con el email
+// declarado por el cliente (query/body). Reglas (H-2, backward-compatible):
+//
+//   - Header presente + verificación OK ⇒ usa el email VERIFICADO. Si además
+//     viene un email declarado que NO coincide ⇒ 403 (evita que un caller
+//     asuma otra identidad que la de su token).
+//   - Header presente pero inválido ⇒ 401 (fail-closed; no cae al fallback).
+//   - Header ausente:
+//   - requireVerified=true ⇒ 401 (modo estricto).
+//   - requireVerified=false ⇒ fallback al email declarado + warning
+//     ("unverified-identity fallback") para observar callers pendientes.
+//
+// Devuelve el email autoritativo y true si la request puede proceder; en caso
+// contrario ya escribió la respuesta de error y devuelve false.
+func (h *Handler) resolveIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (string, bool) {
+	claimed := strings.ToLower(strings.TrimSpace(claimedEmail))
+
+	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
+	if raw != "" {
+		verified, ok := h.verifiedEmail(r)
+		if !ok {
+			// Header presente pero no verifica ⇒ fail-closed.
+			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
+			return "", false
+		}
+		if claimed != "" && claimed != verified {
+			h.log.Warn().Str("claimed", claimed).Str("verified", verified).Msg("identity mismatch: claimed email != verified id token")
+			writeErr(w, http.StatusForbidden, "identity_mismatch")
+			return "", false
+		}
+		return verified, true
+	}
+
+	// Header ausente.
+	if h.requireVerified {
+		writeErr(w, http.StatusUnauthorized, "id_token_required")
+		return "", false
+	}
+	if claimed == "" {
+		writeErr(w, http.StatusBadRequest, "missing email")
+		return "", false
+	}
+	h.log.Warn().Str("email", claimed).Str("path", r.URL.Path).Msg("unverified-identity fallback (no X-VP-Id-Token)")
+	return claimed, true
+}
+
+// requireAdmin valida token de servicio + identidad verificada (o fallback) +
+// que el email resultante sea admin.
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if !h.svcAuth(w, r) {
 		return "", false
 	}
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
 		return "", false
 	}
 	admin, err := h.isAdminEmail(r.Context(), email)
@@ -511,7 +615,10 @@ func (h *Handler) handleAdminCheck(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
 	}
-	email := r.URL.Query().Get("email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
+		return
+	}
 	admin, err := h.isAdminEmail(r.Context(), email)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -568,6 +675,11 @@ func (h *Handler) handleAdminBlock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	identity, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = identity
 	admin, err := h.isAdminEmail(r.Context(), req.Email)
 	if err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
@@ -618,8 +730,13 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if req.Email == "" || req.Amount == "" || len(req.BankInfo) < 6 {
-		writeErr(w, http.StatusBadRequest, "missing email, amount or bank_info")
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
+	if req.Amount == "" || len(req.BankInfo) < 6 {
+		writeErr(w, http.StatusBadRequest, "missing amount or bank_info")
 		return
 	}
 
@@ -650,9 +767,8 @@ func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
 	}
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
 		return
 	}
 	name, code, err := h.store.GetMemberContext(r.Context(), email)
@@ -673,9 +789,8 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
 		return
 	}
 	summary, err := h.store.GetMemberSummary(r.Context(), email)
