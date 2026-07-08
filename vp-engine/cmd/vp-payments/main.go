@@ -94,6 +94,29 @@ func run() error {
 		cancel()
 	}()
 
+	// Alert evaluator: runs every 5 minutes, non-fatal — an evaluator error must
+	// never crash the service.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		alertLog := logger.With().Str("component", "alert-evaluator").Logger()
+		alertLog.Info().Msg("alert evaluator started (every 5m)")
+		for {
+			select {
+			case <-rootCtx.Done():
+				alertLog.Info().Msg("alert evaluator stopped")
+				return
+			case <-ticker.C:
+				open, evalErr := store.EvaluateAlerts(rootCtx)
+				if evalErr != nil {
+					alertLog.Error().Err(evalErr).Msg("EvaluateAlerts failed (non-fatal)")
+				} else {
+					alertLog.Info().Int("open_alerts", open).Msg("alert evaluation complete")
+				}
+			}
+		}
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info().Str("addr", srv.Addr).Strs("payment_methods", cfg.PaymentMethods).Msg("http server listening")
