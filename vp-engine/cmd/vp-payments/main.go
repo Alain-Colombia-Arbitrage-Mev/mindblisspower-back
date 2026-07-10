@@ -102,6 +102,20 @@ func run() error {
 		logger.Warn().Msg("Cognito issuer/user-pool not configured; id-token verification disabled (unverified-fallback mode)")
 	}
 
+	// KYC: subida de documentos a S3 con URLs presignadas. Sin bucket configurado
+	// los endpoints KYC responden 503 (rollout seguro).
+	if cfg.KYCBucket != "" {
+		kycS3, kerr := payments.NewKYCS3(rootCtx, cfg.KYCBucket, cfg.KYCRegion)
+		if kerr != nil {
+			logger.Warn().Err(kerr).Msg("KYC S3 init failed; KYC endpoints disabled")
+		} else {
+			handler.SetKYC(kycS3)
+			logger.Info().Str("bucket", cfg.KYCBucket).Str("region", cfg.KYCRegion).Msg("KYC document upload enabled")
+		}
+	} else {
+		logger.Info().Msg("KYC_S3_BUCKET not set; KYC endpoints disabled")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
 		Handler:           handler.Routes(),

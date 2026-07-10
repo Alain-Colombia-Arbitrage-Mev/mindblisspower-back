@@ -38,6 +38,10 @@ type Handler struct {
 	// requireVerified: si true, el header X-VP-Id-Token es obligatorio en los
 	// handlers que portan identidad (modo estricto tras el rollout de los BFFs).
 	requireVerified bool
+
+	// kyc: presignado S3 para subida de documentos KYC. nil ⇒ endpoints KYC
+	// responden 503 kyc-unconfigured.
+	kyc *KYCS3
 }
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
@@ -80,6 +84,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/payments/checkout", h.handleCheckout)
 	mux.HandleFunc("/api/payments/me", h.handleMe)
 	mux.HandleFunc("/api/member/referral", h.handleMemberReferral)
+	mux.HandleFunc("/api/member/kyc/upload-url", h.handleKYCUploadURL)
+	mux.HandleFunc("/api/member/kyc/confirm", h.handleKYCConfirm)
+	mux.HandleFunc("/api/member/kyc/documents", h.handleKYCDocuments)
 	mux.HandleFunc("/api/payments/withdraw", h.handleWithdraw)
 	mux.HandleFunc("/api/webhooks/stripe", h.handleWebhook)
 	mux.HandleFunc("/api/admin/check", h.handleAdminCheck)
