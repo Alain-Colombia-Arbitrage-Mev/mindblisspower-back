@@ -1,0 +1,9 @@
+# vp-support — imagen mínima arm64 (binario estático precompilado).
+# distroless/static trae CA certs y usuario nonroot; sin RUN ⇒ el build
+# cross-arch no necesita emulación QEMU.
+# Build (desde vp-engine/, contexto = bin/ porque .dockerignore excluye bin/):
+#   docker buildx build --platform linux/arm64 -f deployments/Dockerfile.vp-support \
+#     -t $REGISTRY/vp/vp-support:kb-v1 --push bin
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY vp-support-linux-arm64 /usr/local/bin/vp-support
+ENTRYPOINT ["/usr/local/bin/vp-support"]

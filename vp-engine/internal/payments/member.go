@@ -174,6 +174,8 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	// Balances del miembro = SOLO sus ganancias (bonos/ROI) y débitos (retiros).
 	// Se EXCLUYEN inflows y fees (package_purchase/platform_fee/inter_platform):
 	// son asientos de la compra, no dinero retirable del comprador.
+	// Scoped al wallet USD (JOIN wallet+asset symbol='USD') para excluir la wallet
+	// USD-RET de jubilación y evitar que el saldo 401k se muestre como retirable.
 	err = s.reader().QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (
@@ -185,6 +187,8 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen), 0)::text
 		  FROM mlm.wallet_movement wm
 		  JOIN mlm.concept c ON c.id = wm.concept_id
+		  JOIN mlm.wallet  w ON w.id = wm.wallet_id
+		  JOIN mlm.asset   s ON s.id = w.asset_id AND s.symbol = 'USD'
 		 WHERE wm.affiliate_id = $1
 		   AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform')
 	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing, &out.WalletBalanceUSD)

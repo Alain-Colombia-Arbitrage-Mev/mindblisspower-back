@@ -13,9 +13,14 @@ import (
 
 	"github.com/rs/zerolog"
 	stripe "github.com/stripe/stripe-go/v85"
+	"github.com/vicionpower/vp-engine/internal/networkintel"
 )
 
 const maxWebhookBody = int64(1 << 18) // 256 KiB
+
+// idTokenHeader es el header por el que el BFF reenvía el id token Cognito crudo
+// para que el backend re-verifique la identidad (defensa en profundidad, H-2).
+const idTokenHeader = "X-VP-Id-Token"
 
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
@@ -25,10 +30,34 @@ type Handler struct {
 	serviceToken string
 	adminEmails  []string
 	companyRoot  int64
+	httpClient   *http.Client
+
+	// verifier re-verifica el id token Cognito reenviado por el BFF. nil ⇒ no hay
+	// verificación disponible (sólo el fallback por query/body, con warning).
+	verifier IdentityVerifier
+	// requireVerified: si true, el header X-VP-Id-Token es obligatorio en los
+	// handlers que portan identidad (modo estricto tras el rollout de los BFFs).
+	requireVerified bool
 }
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
-	return &Handler{store: store, gw: gw, serviceToken: serviceToken, adminEmails: adminEmails, companyRoot: companyRoot, log: log.With().Str("component", "payments").Logger()}
+	return &Handler{
+		store:        store,
+		gw:           gw,
+		serviceToken: serviceToken,
+		adminEmails:  adminEmails,
+		companyRoot:  companyRoot,
+		log:          log.With().Str("component", "payments").Logger(),
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// SetIdentityVerifier inyecta el verificador de id tokens y el modo estricto.
+// verifier nil deja el backend en modo fallback (sólo query/body email, con
+// warning) para no romper callers durante el rollout.
+func (h *Handler) SetIdentityVerifier(v IdentityVerifier, requireVerified bool) {
+	h.verifier = v
+	h.requireVerified = requireVerified
 }
 
 // isAdminEmail: true si el email está en el allowlist por env o es is_admin en mlm.person.
@@ -68,6 +97,12 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
 	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
 	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
+	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
+	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
+	mux.HandleFunc("/api/admin/network/sustainability", h.handleNetworkSustainability)
+	mux.HandleFunc("/api/admin/command-center/summary", h.handleCommandCenterSummary)
+	mux.HandleFunc("/api/admin/command-center/alerts", h.handleCommandCenterAlerts)
+	mux.HandleFunc("/api/admin/command-center/alerts/{id}/ack", h.handleCommandCenterAlertAck)
 	return h.rateLimit(mux)
 }
 
@@ -125,6 +160,11 @@ func (h *Handler) handleAdminPlanSimulate(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
 	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return
@@ -188,6 +228,11 @@ func (h *Handler) handleAdminPlanPropose(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
 	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return
@@ -226,6 +271,11 @@ func (h *Handler) handleAdminPlanDecide(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
 	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return
@@ -266,6 +316,110 @@ func (h *Handler) handleAdminFinance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fin)
+}
+
+// handleAdminHealthSystem: NOC de infra + negocio + alertas. Read-only, degrada
+// elegante (HTTP 200 siempre; checks fallidos => status down/unknown con detail).
+func (h *Handler) handleAdminHealthSystem(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	siblings := map[string]string{
+		"web":         env("HEALTH_WEB_URL", "http://127.0.0.1:3000/"),
+		"vp-engine":   env("HEALTH_ENGINE_URL", "http://127.0.0.1:9090/health"),
+		"vp-payments": env("HEALTH_PAYMENTS_URL", "http://127.0.0.1:9095/health"),
+	}
+	sh := h.store.GetSystemHealth(r.Context(), siblings)
+	writeJSON(w, http.StatusOK, sh)
+}
+
+// handleNetworkHealth: snapshot de salud de la red (métricas reales → asesor AI
+// determinístico). Devuelve analysis, metrics y rank_exposure.
+func (h *Handler) handleNetworkHealth(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	m, rx, err := h.store.BuildNetworkMetrics(r.Context())
+	if err != nil {
+		h.log.Error().Err(err).Msg("build network metrics")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	m.RankLiabilityRatio = rx.ExposureRatio
+	req := networkintel.AnalysisRequest{Metrics: m}
+	resp := networkintel.DeterministicAnalysis(req)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"analysis":     resp,
+		"metrics":      m,
+		"rank_exposure": rx,
+	})
+}
+
+// handleNetworkSustainability: veredicto de sostenibilidad en tres escenarios
+// (live, modesto, estres). El live es siempre fresco; los proyectados se
+// cachean ~1h porque el simulador Monte Carlo es O(n²) (~12 s sin cache).
+func (h *Handler) handleNetworkSustainability(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	ctx := r.Context()
+
+	// ── Live (cheap — siempre fresco) ────────────────────────────────────────
+	m, rx, err := h.store.BuildNetworkMetrics(ctx)
+	if err != nil {
+		h.log.Error().Err(err).Msg("sustainability: build network metrics")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	m.RankLiabilityRatio = rx.ExposureRatio
+	liveVerdict := analyzeViaEngine(ctx, h.store.EngineURL, networkintel.AnalysisRequest{Metrics: m}, h.httpClient)
+
+	// ── Projected (expensive — cached) ───────────────────────────────────────
+	type projectedEntry struct {
+		Scenario   string                    `json:"scenario"`
+		Simulation ScenarioResult            `json:"simulation"`
+		Analysis   networkintel.AnalysisResponse `json:"analysis"`
+	}
+	var projected []projectedEntry
+
+	var projectedError string
+	const projCacheKey = "sustainability:proj"
+	if !h.store.cache.get(ctx, projCacheKey, &projected) {
+		// Cache miss: run Monte Carlo scenarios (expensive).
+		scenarios, serr := h.store.RunSustainabilityScenarios(ctx)
+		if serr != nil {
+			h.log.Error().Err(serr).Msg("sustainability: run scenarios (degraded — returning live only)")
+			projected = []projectedEntry{}
+			projectedError = serr.Error()
+		} else {
+			projected = make([]projectedEntry, 0, len(scenarios))
+			for _, sc := range scenarios {
+				// Build projected metrics from live, overriding WorstTheta with
+				// the simulated value for this scenario.
+				pm := m
+				pm.WorstTheta = sc.WorstTheta
+				verdict := analyzeViaEngine(ctx, h.store.EngineURL, networkintel.AnalysisRequest{Metrics: pm}, h.httpClient)
+				projected = append(projected, projectedEntry{
+					Scenario:   sc.Name,
+					Simulation: sc,
+					Analysis:   verdict,
+				})
+			}
+			h.store.cache.set(ctx, projCacheKey, projected, sustainabilityCacheTTL)
+		}
+	}
+
+	resp := map[string]any{
+		"live": map[string]any{
+			"metrics":  m,
+			"analysis": liveVerdict,
+		},
+		"projected": projected,
+	}
+	if projectedError != "" {
+		resp["projected_error"] = projectedError
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAdminSolvency: monitor de salud (θ histórico + período vigente + alerta
@@ -335,6 +489,11 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	identity, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = identity
 	admin, err := h.isAdminEmail(r.Context(), req.Email)
 	if err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
@@ -364,14 +523,79 @@ func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// requireAdmin valida token de servicio + que el email sea admin.
+// verifiedEmail lee el id token del header X-VP-Id-Token y lo re-verifica
+// (firma JWKS + iss + aud==clientId + token_use==id + exp). Devuelve el email
+// verificado (lowercased) y true en éxito. Devuelve ("", false) si el header
+// está ausente o si la verificación falla (fail-closed cuando el header SÍ está
+// presente pero es inválido — el caller distingue ese caso con headerPresent).
+func (h *Handler) verifiedEmail(r *http.Request) (email string, ok bool) {
+	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
+	if raw == "" || h.verifier == nil {
+		return "", false
+	}
+	v, err := h.verifier.VerifyEmail(r.Context(), raw)
+	if err != nil {
+		h.log.Warn().Err(err).Msg("id token verification failed")
+		return "", false
+	}
+	return strings.ToLower(strings.TrimSpace(v)), true
+}
+
+// resolveIdentity deriva la identidad autoritativa de una request ya autenticada
+// por token de servicio, combinando el id token verificado (header) con el email
+// declarado por el cliente (query/body). Reglas (H-2, backward-compatible):
+//
+//   - Header presente + verificación OK ⇒ usa el email VERIFICADO. Si además
+//     viene un email declarado que NO coincide ⇒ 403 (evita que un caller
+//     asuma otra identidad que la de su token).
+//   - Header presente pero inválido ⇒ 401 (fail-closed; no cae al fallback).
+//   - Header ausente:
+//   - requireVerified=true ⇒ 401 (modo estricto).
+//   - requireVerified=false ⇒ fallback al email declarado + warning
+//     ("unverified-identity fallback") para observar callers pendientes.
+//
+// Devuelve el email autoritativo y true si la request puede proceder; en caso
+// contrario ya escribió la respuesta de error y devuelve false.
+func (h *Handler) resolveIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (string, bool) {
+	claimed := strings.ToLower(strings.TrimSpace(claimedEmail))
+
+	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
+	if raw != "" {
+		verified, ok := h.verifiedEmail(r)
+		if !ok {
+			// Header presente pero no verifica ⇒ fail-closed.
+			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
+			return "", false
+		}
+		if claimed != "" && claimed != verified {
+			h.log.Warn().Str("claimed", claimed).Str("verified", verified).Msg("identity mismatch: claimed email != verified id token")
+			writeErr(w, http.StatusForbidden, "identity_mismatch")
+			return "", false
+		}
+		return verified, true
+	}
+
+	// Header ausente.
+	if h.requireVerified {
+		writeErr(w, http.StatusUnauthorized, "id_token_required")
+		return "", false
+	}
+	if claimed == "" {
+		writeErr(w, http.StatusBadRequest, "missing email")
+		return "", false
+	}
+	h.log.Warn().Str("email", claimed).Str("path", r.URL.Path).Msg("unverified-identity fallback (no X-VP-Id-Token)")
+	return claimed, true
+}
+
+// requireAdmin valida token de servicio + identidad verificada (o fallback) +
+// que el email resultante sea admin.
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if !h.svcAuth(w, r) {
 		return "", false
 	}
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
 		return "", false
 	}
 	admin, err := h.isAdminEmail(r.Context(), email)
@@ -391,7 +615,10 @@ func (h *Handler) handleAdminCheck(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
 	}
-	email := r.URL.Query().Get("email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
+		return
+	}
 	admin, err := h.isAdminEmail(r.Context(), email)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -448,6 +675,11 @@ func (h *Handler) handleAdminBlock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	identity, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = identity
 	admin, err := h.isAdminEmail(r.Context(), req.Email)
 	if err != nil || !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
@@ -498,8 +730,13 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if req.Email == "" || req.Amount == "" || len(req.BankInfo) < 6 {
-		writeErr(w, http.StatusBadRequest, "missing email, amount or bank_info")
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	req.Email = email
+	if req.Amount == "" || len(req.BankInfo) < 6 {
+		writeErr(w, http.StatusBadRequest, "missing amount or bank_info")
 		return
 	}
 
@@ -530,9 +767,8 @@ func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
 	}
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
 		return
 	}
 	name, code, err := h.store.GetMemberContext(r.Context(), email)
@@ -553,9 +789,8 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
 		return
 	}
 	summary, err := h.store.GetMemberSummary(r.Context(), email)

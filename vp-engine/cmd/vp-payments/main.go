@@ -77,6 +77,31 @@ func run() error {
 	gw := payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 
+	// Verificación independiente de identidad (defensa en profundidad, H-2): el
+	// backend re-verifica el id token Cognito que reenvía el BFF en X-VP-Id-Token,
+	// en lugar de confiar en el `email` que envía el cliente. El token de servicio
+	// sigue siendo requerido (segundo factor). En modo REQUIRE_VERIFIED_IDENTITY=false
+	// (default) el header es opcional y hay fallback backward-compatible.
+	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
+		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
+		if verr != nil {
+			// Sin verificador: si el modo estricto está activo, no podemos arrancar
+			// de forma segura; si no, degradamos al fallback con warning.
+			if cfg.RequireVerifiedIdentity {
+				return verr
+			}
+			logger.Warn().Err(verr).Str("jwks", jwksURL).Msg("id-token verifier init failed; running in unverified-fallback mode")
+		} else {
+			handler.SetIdentityVerifier(verifier, cfg.RequireVerifiedIdentity)
+			logger.Info().Str("issuer", cfg.CognitoIssuer).Bool("require_verified", cfg.RequireVerifiedIdentity).Msg("id-token identity verification enabled")
+		}
+	} else {
+		if cfg.RequireVerifiedIdentity {
+			return errors.New("REQUIRE_VERIFIED_IDENTITY=true but Cognito issuer/user-pool not configured")
+		}
+		logger.Warn().Msg("Cognito issuer/user-pool not configured; id-token verification disabled (unverified-fallback mode)")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
 		Handler:           handler.Routes(),
@@ -92,6 +117,29 @@ func run() error {
 		sig := <-sigCh
 		logger.Info().Str("signal", sig.String()).Msg("shutdown signal received")
 		cancel()
+	}()
+
+	// Alert evaluator: runs every 5 minutes, non-fatal — an evaluator error must
+	// never crash the service.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		alertLog := logger.With().Str("component", "alert-evaluator").Logger()
+		alertLog.Info().Msg("alert evaluator started (every 5m)")
+		for {
+			select {
+			case <-rootCtx.Done():
+				alertLog.Info().Msg("alert evaluator stopped")
+				return
+			case <-ticker.C:
+				open, evalErr := store.EvaluateAlerts(rootCtx)
+				if evalErr != nil {
+					alertLog.Error().Err(evalErr).Msg("EvaluateAlerts failed (non-fatal)")
+				} else {
+					alertLog.Info().Int("open_alerts", open).Msg("alert evaluation complete")
+				}
+			}
+		}
 	}()
 
 	errCh := make(chan error, 1)

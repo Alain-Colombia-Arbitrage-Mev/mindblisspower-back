@@ -56,6 +56,28 @@ type Config struct {
 	// (POST /simulate). Vacío ⇒ el lock de solvencia usa solo la proyección forward.
 	EngineURL string
 
+	// ── Verificación de identidad (defensa en profundidad, H-2) ────────────────
+	// El backend re-verifica el id token Cognito que reenvía el BFF (header
+	// X-VP-Id-Token) contra el JWKS del user pool. Deriva la identidad del token
+	// verificado en lugar de confiar en el `email` que envía el cliente.
+	//
+	// CognitoIssuer: emisor esperado, p.ej.
+	//   https://cognito-idp.<region>.amazonaws.com/<userPoolId>
+	// Si está vacío se deriva de CognitoUserPoolID + AWSRegion.
+	CognitoIssuer string
+	// CognitoUserPoolID + AWSRegion se usan para derivar issuer/JWKS si falta el
+	// issuer explícito.
+	CognitoUserPoolID string
+	AWSRegion         string
+	// CognitoClientID: audiencia (`aud`) esperada del id token. Vacío ⇒ no se
+	// valida aud (pero sí firma + iss + token_use + exp).
+	CognitoClientID string
+	// RequireVerifiedIdentity: cuando true, el header X-VP-Id-Token es obligatorio
+	// en los handlers que portan identidad (rechaza si falta). Default false para
+	// permitir un rollout backward-compatible: primero se despliegan los BFFs que
+	// reenvían el token, luego se activa el modo estricto.
+	RequireVerifiedIdentity bool
+
 	// Redis (cache-aside + rate-limit). RedisAddr vacío ⇒ caché deshabilitada.
 	RedisAddr     string
 	RedisPassword string
@@ -104,6 +126,13 @@ func LoadConfig() (*Config, error) {
 		EngineURL:              env("VP_ENGINE_URL", "http://127.0.0.1:9090"),
 		RedisAddr:              env("REDIS_ADDR", ""),
 		RedisPassword:          env("REDIS_PASSWORD", ""),
+		// Verificación de identidad (H-2). Aliases aceptados para reutilizar los
+		// mismos nombres que ya usan los BFFs (COGNITO_USER_POOL_ID / COGNITO_CLIENT_ID).
+		CognitoIssuer:           env("COGNITO_ISSUER", ""),
+		CognitoUserPoolID:       firstEnv("COGNITO_USER_POOL_ID", "COGNITO_USERPOOL_ID"),
+		AWSRegion:               firstEnv("AWS_REGION", "COGNITO_REGION"),
+		CognitoClientID:         env("COGNITO_CLIENT_ID", ""),
+		RequireVerifiedIdentity: envBool("REQUIRE_VERIFIED_IDENTITY", false),
 	}
 
 	if c.DatabaseURL == "" {
@@ -121,7 +150,20 @@ func LoadConfig() (*Config, error) {
 	if len(c.PaymentMethods) == 0 {
 		c.PaymentMethods = []string{"card"}
 	}
+	// Deriva el issuer Cognito si no vino explícito pero sí el user pool + región.
+	if c.CognitoIssuer == "" && c.CognitoUserPoolID != "" && c.AWSRegion != "" {
+		c.CognitoIssuer = fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", c.AWSRegion, c.CognitoUserPoolID)
+	}
 	return c, nil
+}
+
+// JWKSURL devuelve la URL del JWKS del user pool (issuer + /.well-known/jwks.json).
+// Vacío si no hay issuer configurado.
+func (c *Config) JWKSURL() string {
+	if c.CognitoIssuer == "" {
+		return ""
+	}
+	return strings.TrimRight(c.CognitoIssuer, "/") + "/.well-known/jwks.json"
 }
 
 // loadEnvFile carga un archivo KEY=VALUE en el entorno. Las variables que YA
@@ -177,6 +219,18 @@ func envInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func splitCSV(s string) []string {

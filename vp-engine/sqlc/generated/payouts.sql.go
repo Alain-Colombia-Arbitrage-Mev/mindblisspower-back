@@ -195,13 +195,11 @@ func (q *Queries) GetActivePlanConfig(ctx context.Context, atTime pgtype.Timesta
 }
 
 const getAncestorsLimit = `-- name: GetAncestorsLimit :many
-WITH descendant AS (
-  SELECT path, depth FROM mlm.affiliate WHERE id = $1
-)
 SELECT a.id, a.path, a.depth, a.left_pv_current, a.right_pv_current,
        a.current_rank_id, a.status
-  FROM mlm.affiliate a, descendant d
- WHERE a.path @> d.path AND a.id <> $1
+  FROM mlm.affiliate a
+  JOIN mlm.affiliate_closure c ON c.ancestor_id = a.id
+ WHERE c.descendant_id = $1 AND c.distance > 0
  ORDER BY a.depth ASC
  LIMIT $2
 `
@@ -221,7 +219,9 @@ type GetAncestorsLimitRow struct {
 	Status         MlmPersonStatus `db:"status"`
 }
 
-// Ancestors via ltree path, ordenados por depth ASC, hasta depth_cap niveles.
+// Ancestors via mlm.affiliate_closure (index-backed; reemplaza `path @>` seq
+// scan), ordenados por depth ASC, hasta depth_cap niveles. distance > 0 excluye
+// self — equivalente al viejo `a.id <> $1`.
 func (q *Queries) GetAncestorsLimit(ctx context.Context, arg GetAncestorsLimitParams) ([]GetAncestorsLimitRow, error) {
 	rows, err := q.db.Query(ctx, getAncestorsLimit, arg.AffiliateID, arg.MaxDepth)
 	if err != nil {

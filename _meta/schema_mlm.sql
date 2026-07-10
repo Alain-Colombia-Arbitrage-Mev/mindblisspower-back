@@ -197,11 +197,32 @@ CREATE UNIQUE INDEX affiliate_parent_position_unique
   ON mlm.affiliate(parent_id, position)
   WHERE parent_id IS NOT NULL;
 
+-- NOTA GiST: en PRODUCCIÓN este índice se dropea a propósito
+-- (_meta/migration/02_postload.sql) porque el árbol legacy llega a depth ~369
+-- (path ~4KB) y supera el límite de página GiST de ltree. Las consultas de
+-- ancestro/descendiente se sirven vía mlm.affiliate_closure (tabla de closure,
+-- definida más abajo) — NO vía `path @>` / `path <@` sobre este índice. Se deja
+-- el CREATE aquí para DBs frescas sin paths profundos (dev/test), pero el código
+-- no depende de él.
 CREATE INDEX affiliate_path_gist     ON mlm.affiliate USING gist(path);
 CREATE INDEX affiliate_path_btree    ON mlm.affiliate USING btree(path);
 CREATE INDEX affiliate_sponsor_idx   ON mlm.affiliate(sponsor_id);
 CREATE INDEX affiliate_parent_idx    ON mlm.affiliate(parent_id);
 CREATE INDEX affiliate_status_idx    ON mlm.affiliate(status) WHERE status = 'active';
+
+-- Transitive-closure de la jerarquía binaria. Reemplaza los operadores ltree
+-- `path @>` / `path <@` (que sin el índice GiST hacen SEQ SCAN) por joins
+-- index-backed. Incluye la self-row (distance 0) de cada nodo. Se mantiene
+-- incremental vía trg_maintain_affiliate_closure (AFTER INSERT). Ver
+-- _meta/migration/39_affiliate_closure.sql.
+CREATE TABLE mlm.affiliate_closure (
+  ancestor_id   bigint NOT NULL REFERENCES mlm.affiliate(id),
+  descendant_id bigint NOT NULL REFERENCES mlm.affiliate(id),
+  distance      int    NOT NULL,
+  PRIMARY KEY (ancestor_id, descendant_id)
+);
+-- descendiente -> ancestros; la dirección inversa se apoya en la PK.
+CREATE INDEX affiliate_closure_desc_idx ON mlm.affiliate_closure (descendant_id, distance);
 
 -- =============================================================================
 -- 4. WALLETS & DOUBLE-ENTRY LEDGER
@@ -509,6 +530,30 @@ CREATE TRIGGER trg_affiliate_path
   BEFORE INSERT ON mlm.affiliate
   FOR EACH ROW EXECUTE FUNCTION mlm.fn_compute_affiliate_path();
 
+-- Mantener mlm.affiliate_closure al insertar un afiliado. N con parent P hereda
+-- los ancestros de P (incluido P) a distancia +1, más su self-row (distance 0).
+-- Los nodos siempre se insertan bajo un parent existente (adjacency), así que la
+-- closure de P ya existe. AFTER INSERT, misma transacción (no diferido).
+CREATE OR REPLACE FUNCTION mlm.fn_maintain_affiliate_closure() RETURNS trigger AS $$
+BEGIN
+  INSERT INTO mlm.affiliate_closure (ancestor_id, descendant_id, distance)
+  VALUES (NEW.id, NEW.id, 0)
+  ON CONFLICT (ancestor_id, descendant_id) DO NOTHING;
+
+  IF NEW.parent_id IS NOT NULL THEN
+    INSERT INTO mlm.affiliate_closure (ancestor_id, descendant_id, distance)
+    SELECT c.ancestor_id, NEW.id, c.distance + 1
+      FROM mlm.affiliate_closure c
+     WHERE c.descendant_id = NEW.parent_id
+    ON CONFLICT (ancestor_id, descendant_id) DO NOTHING;
+  END IF;
+
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_maintain_affiliate_closure
+  AFTER INSERT ON mlm.affiliate
+  FOR EACH ROW EXECUTE FUNCTION mlm.fn_maintain_affiliate_closure();
+
 -- Apply tree_event to ancestor aggregates (the hot path).
 -- Locks ancestors in path order to avoid deadlocks on concurrent inserts.
 CREATE OR REPLACE FUNCTION mlm.fn_apply_tree_event() RETURNS trigger AS $$
@@ -521,11 +566,15 @@ BEGIN
   -- Walk ancestors. For each ancestor A, determine which leg of A this affiliate sits in
   -- (compare A's child label in NEW path). Add pv_delta to that leg.
   WITH ancestors AS (
+    -- Ancestros vía closure (index-backed) en vez de `a.path @> v_path` (seq
+    -- scan sin GiST). distance > 0 excluye la self-row — equivalente al viejo
+    -- `a.id <> NEW.affiliate_id`. La detección de pierna abajo sigue path-based.
     SELECT a.id, a.path, a.depth
       FROM mlm.affiliate a
-     WHERE a.path @> v_path AND a.id <> NEW.affiliate_id
+      JOIN mlm.affiliate_closure c ON c.ancestor_id = a.id
+     WHERE c.descendant_id = NEW.affiliate_id AND c.distance > 0
      ORDER BY a.depth ASC
-     FOR UPDATE
+     FOR UPDATE OF a
   ), legged AS (
     SELECT
       anc.id,
@@ -565,22 +614,24 @@ SELECT w.id AS wallet_id, w.affiliate_id, w.asset_id,
   LEFT JOIN mlm.wallet_movement wm ON wm.wallet_id = w.id
  GROUP BY w.id;
 
+-- Descendientes vía closure (distance > 0) en vez de `desc_a.path <@ a.path AND
+-- desc_a.id <> a.id`. La detección de pierna sigue siendo path-based e idéntica.
 CREATE VIEW mlm.v_tree_pv_truth AS
 SELECT a.id, a.left_pv_lifetime AS materialized_left,
        a.right_pv_lifetime AS materialized_right,
        (SELECT COALESCE(SUM(te.pv_delta_left + te.pv_delta_right), 0)
           FROM mlm.tree_event te
           JOIN mlm.affiliate desc_a ON desc_a.id = te.affiliate_id
-         WHERE desc_a.path <@ a.path
-           AND desc_a.id <> a.id
-           AND substring(ltree2text(subpath(desc_a.path, a.depth + 1, 1)) from 1 for 1) = 'L'
+          JOIN mlm.affiliate_closure c
+            ON c.ancestor_id = a.id AND c.descendant_id = desc_a.id AND c.distance > 0
+         WHERE substring(ltree2text(subpath(desc_a.path, a.depth + 1, 1)) from 1 for 1) = 'L'
        ) AS computed_left,
        (SELECT COALESCE(SUM(te.pv_delta_left + te.pv_delta_right), 0)
           FROM mlm.tree_event te
           JOIN mlm.affiliate desc_a ON desc_a.id = te.affiliate_id
-         WHERE desc_a.path <@ a.path
-           AND desc_a.id <> a.id
-           AND substring(ltree2text(subpath(desc_a.path, a.depth + 1, 1)) from 1 for 1) = 'R'
+          JOIN mlm.affiliate_closure c
+            ON c.ancestor_id = a.id AND c.descendant_id = desc_a.id AND c.distance > 0
+         WHERE substring(ltree2text(subpath(desc_a.path, a.depth + 1, 1)) from 1 for 1) = 'R'
        ) AS computed_right
   FROM mlm.affiliate a;
 

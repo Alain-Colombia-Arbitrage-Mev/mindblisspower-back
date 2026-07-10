@@ -42,6 +42,17 @@ for svc in $SERVICES; do
   | while IFS="$(printf '\t')" read -r name value; do
       [ -n "$name" ] && printf '%s=%s\n' "${name#"$pfx"}" "$value" >> "/run/vicionpower/$svc.env"
     done
+  # Secretos sensibles desde AWS Secrets Manager (JSON por servicio). Se agregan
+  # DESPUÉS de los params SSM, así que sobre-escriben cualquier copia stale en SSM
+  # (última aparición gana al leer el env-file). Additivo: si el secreto no existe,
+  # se omite en silencio → migración sin downtime (crear secreto → redeploy → borrar
+  # el SecureString de SSM). Requiere jq en el host.
+  sm=$(aws secretsmanager get-secret-value --region "$REGION" \
+        --secret-id "vicionpower/$ENVN/$svc" --query SecretString --output text 2>/dev/null || true)
+  if [ -n "${sm:-}" ] && [ "$sm" != "None" ]; then
+    printf '%s' "$sm" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "/run/vicionpower/$svc.env"
+    echo "  (merged Secrets Manager secret for $svc)"
+  fi
 done
 
 export REGISTRY IMAGE_TAG="$IMAGE_TAG"
@@ -63,7 +74,9 @@ for svc in $SERVICES; do
   fi
   # FIX 1: separar health y running con delimitador '|' para evitar que "unhealthy" coincida
   # con el glob *healthy* de la versión anterior (substring falso-positivo).
-  state=$(docker inspect -f '{{.State.Health.Status}}|{{.State.Status}}' "$cid" 2>/dev/null || echo "|")
+  # FIX 3: contenedores SIN healthcheck tienen .State.Health nil y el template
+  # fallaba entero (→ "|" → running vacío → falso NOT-RUNNING). Guard con {{if}}.
+  state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.State.Status}}' "$cid" 2>/dev/null || echo "|")
   health="${state%%|*}"
   running="${state#*|}"
   if [ "$health" = "unhealthy" ]; then echo "UNHEALTHY: $svc (health=$health)"; FAIL=1; continue; fi

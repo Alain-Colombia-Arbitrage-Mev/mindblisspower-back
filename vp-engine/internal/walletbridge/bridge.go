@@ -112,6 +112,13 @@ func (b *Bridge) HandleDepositConfirmed(_ context.Context, _ []byte) error {
 
 // HandleWithdrawalCompleted es invocado cuando un retiro previamente solicitado
 // completó on-chain.
+//
+// NOTA (fix C1): el flujo de retiro ACTUAL es admin-manual (aprobar → marcar
+// 'paid' en el panel), y el DÉBITO contable ya se postea de forma atómica en
+// payments.SetWithdrawalStatus al transicionar a 'paid'. Este handler queda
+// como stub para el flujo on-chain FUTURO (settlement vía provider externo);
+// cuando exista, debe conciliar por external_ref='withdrawal:<id>' para NO
+// doble-postear el débito que el panel ya escribió.
 func (b *Bridge) HandleWithdrawalCompleted(_ context.Context, _ []byte) error {
 	return errors.New("HandleWithdrawalCompleted not yet implemented (fase payments)")
 }

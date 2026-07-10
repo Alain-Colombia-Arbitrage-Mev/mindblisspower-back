@@ -328,7 +328,11 @@ INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, acti
   (1009, 'retirement',   'Penalidad retiro anticipado (10%)', 'Early withdrawal penalty',     -1, false, true),
   (1010, 'retirement',   'Préstamo sobre plan',               'Retirement plan loan',          1, false, true),
   (1011, 'retirement',   'Pago de préstamo',                  'Loan repayment',               -1, false, true),
-  (1012, 'direct_bonus', 'Bono referido directo',             'Direct referral bonus',         1, false, true)
+  (1012, 'direct_bonus', 'Bono referido directo',             'Direct referral bonus',         1, false, true),
+  -- 1013: débito de retiro pagado (fix C1 doble-gasto). requires_pair=false
+  -- porque el dinero sale del sistema (banco/crypto), sin contra-crédito interno.
+  -- Ver _meta/migration/40_withdrawal_concept.sql.
+  (1013, 'withdrawal',   'Retiro pagado (débito)',            'Withdrawal paid (debit)',      -1, false, true)
 ON CONFLICT (id) DO NOTHING;
 
 COMMIT;

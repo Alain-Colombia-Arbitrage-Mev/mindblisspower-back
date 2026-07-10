@@ -209,61 +209,82 @@ func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int6
 		return 0, fmt.Errorf("advisory lock: %w", err)
 	}
 
-	currentID := sponsorID
 	const preferred = "L"
 
-	// Tope de descenso: el árbol real llega a ~191 niveles (bosque migrado), así
-	// que 512 da margen amplio sin permitir un loop infinito.
-	for safety := 0; safety < 512; safety++ {
-		// Pierna débil del nodo actual (calculada en SQL para no escanear numeric).
+	// Descenso weak-leg SET-BASED: un solo CTE recursivo baja desde el sponsor
+	// eligiendo en cada nodo la pierna débil (menor PV; desempate por conteo,
+	// luego 'L') y siguiendo el hijo de esa pierna, hasta el primer hueco (el
+	// nodo más profundo cuya pierna elegida no tiene hijo). Reemplaza el loop de
+	// O(prof) round-trips (~382 a prof 191) por 1 query, encogiendo la ventana del
+	// advisory_lock(sponsor) → mucha más throughput de colocación concurrente.
+	//
+	// Race-safety: el advisory lock serializa las colocaciones del MISMO sponsor.
+	// El INSERT usa ON CONFLICT (parent_id, position): si una colocación
+	// CROSS-sponsor concurrente tomó el hueco (posible cuando los subárboles se
+	// solapan), 0 filas → re-descendemos (el CTE ya ve la fila nueva bajo READ
+	// COMMITTED). El reintento sustituye al FOR UPDATE por-nodo del descenso viejo.
+	// Tope de profundidad 512: el bosque migrado llega a ~191 niveles.
+	for attempt := 0; attempt < 16; attempt++ {
+		var parentID int64
 		var side string
 		err := tx.QueryRow(ctx, `
-			SELECT CASE
-			         WHEN left_pv_current < right_pv_current THEN 'L'
-			         WHEN right_pv_current < left_pv_current THEN 'R'
-			         WHEN left_count < right_count THEN 'L'
-			         WHEN right_count < left_count THEN 'R'
-			         ELSE $2
-			       END
-			  FROM mlm.affiliate
-			 WHERE id = $1
-			 FOR UPDATE
-		`, currentID, preferred).Scan(&side)
+			WITH RECURSIVE walk AS (
+			  SELECT a.id AS node_id,
+			         CASE WHEN a.left_pv_current < a.right_pv_current THEN 'L'
+			              WHEN a.right_pv_current < a.left_pv_current THEN 'R'
+			              WHEN a.left_count < a.right_count THEN 'L'
+			              WHEN a.right_count < a.left_count THEN 'R'
+			              ELSE $2 END AS side,
+			         0 AS lvl
+			    FROM mlm.affiliate a
+			   WHERE a.id = $1
+			  UNION ALL
+			  SELECT c.id,
+			         CASE WHEN c.left_pv_current < c.right_pv_current THEN 'L'
+			              WHEN c.right_pv_current < c.left_pv_current THEN 'R'
+			              WHEN c.left_count < c.right_count THEN 'L'
+			              WHEN c.right_count < c.left_count THEN 'R'
+			              ELSE $2 END,
+			         w.lvl + 1
+			    FROM walk w
+			    JOIN mlm.affiliate c
+			      ON c.parent_id = w.node_id AND c.position = w.side::mlm.tree_position
+			   WHERE w.lvl < 512
+			)
+			SELECT node_id, side FROM walk
+			 ORDER BY lvl DESC
+			 LIMIT 1
+		`, sponsorID, preferred).Scan(&parentID, &side)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("node %d not found", currentID)
+			return 0, fmt.Errorf("node %d not found", sponsorID)
 		}
 		if err != nil {
-			return 0, fmt.Errorf("weak-leg select: %w", err)
+			return 0, fmt.Errorf("weak-leg descent: %w", err)
 		}
 
-		// ¿La pierna elegida está ocupada?
-		var childID int64
+		// Insertar en el hueco (trigger fn_compute_affiliate_path llena path/depth).
+		// ON CONFLICT (parent_id, position): si el slot ya se tomó, 0 filas → reintentar.
+		var newID int64
 		err = tx.QueryRow(ctx, `
-			SELECT id FROM mlm.affiliate WHERE parent_id = $1 AND position = $2 LIMIT 1
-		`, currentID, side).Scan(&childID)
+			INSERT INTO mlm.affiliate (person_id, parent_id, position, sponsor_id, path, depth, status)
+			VALUES ($1, $2, $3::mlm.tree_position, $4, ''::ltree, 0, 'active')
+			ON CONFLICT (parent_id, position) WHERE parent_id IS NOT NULL DO NOTHING
+			RETURNING id
+		`, personID, parentID, side, sponsorID).Scan(&newID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Hueco encontrado → insertar (trigger fn_compute_affiliate_path llena path/depth).
-			var newID int64
-			if err := tx.QueryRow(ctx, `
-				INSERT INTO mlm.affiliate (person_id, parent_id, position, sponsor_id, path, depth, status)
-				VALUES ($1, $2, $3, $4, ''::ltree, 0, 'active')
-				RETURNING id
-			`, personID, currentID, side, sponsorID).Scan(&newID); err != nil {
-				return 0, fmt.Errorf("insert affiliate: %w", err)
-			}
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO mlm.tree_event (external_ref, kind, affiliate_id, occurred_at)
-				VALUES ($1, 'enrollment', $2, now())
-				ON CONFLICT (external_ref) DO NOTHING
-			`, fmt.Sprintf("enroll:%d", newID), newID); err != nil {
-				return 0, fmt.Errorf("enrollment event: %w", err)
-			}
-			return newID, nil
+			continue // slot tomado por colocación concurrente → re-descender
 		}
 		if err != nil {
-			return 0, fmt.Errorf("child lookup: %w", err)
+			return 0, fmt.Errorf("insert affiliate: %w", err)
 		}
-		currentID = childID // descender
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO mlm.tree_event (external_ref, kind, affiliate_id, occurred_at)
+			VALUES ($1, 'enrollment', $2, now())
+			ON CONFLICT (external_ref) DO NOTHING
+		`, fmt.Sprintf("enroll:%d", newID), newID); err != nil {
+			return 0, fmt.Errorf("enrollment event: %w", err)
+		}
+		return newID, nil
 	}
-	return 0, errors.New("auto_place_depth_exceeded")
+	return 0, errors.New("auto_place_retries_exhausted")
 }

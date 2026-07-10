@@ -20,3 +20,27 @@ services:
     volumes:
       - /etc/vp-engine/tls:/etc/vp-engine/tls:ro
     stop_grace_period: 20s
+  # --- Soporte RAG (KB) — imágenes con tag propio (kb-v*), NO siguen IMAGE_TAG:
+  # se despliegan aparte y los deploys de api/vp-engine no deben tocarlas.
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    restart: unless-stopped
+    network_mode: host  # QDRANT__SERVICE__HOST=127.0.0.1 en su env ⇒ solo loopback
+    env_file: [/run/vicionpower/qdrant.env]
+    volumes:
+      - /opt/vicion/qdrant:/qdrant/storage
+    stop_grace_period: 20s
+  vp-support:
+    image: ${REGISTRY}/vp/vp-support:kb-v2
+    restart: unless-stopped
+    network_mode: host  # bind 0.0.0.0:9096; el SG mantiene el puerto cerrado al público
+    env_file: [/run/vicionpower/vp-support.env]
+    depends_on: [qdrant]
+    stop_grace_period: 20s
+  vp-kb-indexer:
+    image: ${REGISTRY}/vp/vp-kb-indexer:kb-v2
+    restart: unless-stopped
+    network_mode: host
+    env_file: [/run/vicionpower/vp-kb-indexer.env]
+    depends_on: [qdrant]
+    stop_grace_period: 20s

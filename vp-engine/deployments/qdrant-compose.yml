@@ -1,0 +1,32 @@
+# Qdrant para el RAG de soporte — EC2 WORKER (44.209.143.146)
+#
+#   docker compose -f qdrant-compose.yml up -d
+#
+# Seguridad (decisión 2026-07-09):
+#   - Puertos bindeados SOLO a localhost: el indexer y el bot corren en el
+#     mismo host. NUNCA abrir 6333/6334 en el Security Group.
+#   - API key obligatoria (QDRANT__SERVICE__API_KEY), misma que QDRANT_API_KEY
+#     del indexer.
+#   - Es un índice DERIVADO: ante desastre, `vp-kb-indexer --rebuild` lo
+#     reconstruye desde Postgres. Los snapshots son conveniencia, no backup
+#     crítico.
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    container_name: vp-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"   # REST (indexer + bot)
+      - "127.0.0.1:6334:6334"   # gRPC (no usado aún)
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?definir en /etc/vicion/qdrant.env}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+volumes:
+  qdrant_storage:
