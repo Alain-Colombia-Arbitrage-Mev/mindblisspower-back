@@ -81,6 +81,13 @@ type Config struct {
 	// Redis (cache-aside + rate-limit). RedisAddr vacío ⇒ caché deshabilitada.
 	RedisAddr     string
 	RedisPassword string
+
+	// ── KYC (subida de documentos) ──────────────────────────────────────────────
+	// KYCBucket: bucket S3 privado para documentos KYC. Vacío ⇒ endpoints KYC
+	// responden 503 kyc-unconfigured (rollout seguro sin bucket).
+	KYCBucket string
+	// KYCRegion: región del bucket (default: AWSRegion o us-east-1).
+	KYCRegion string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -133,6 +140,11 @@ func LoadConfig() (*Config, error) {
 		AWSRegion:               firstEnv("AWS_REGION", "COGNITO_REGION"),
 		CognitoClientID:         env("COGNITO_CLIENT_ID", ""),
 		RequireVerifiedIdentity: envBool("REQUIRE_VERIFIED_IDENTITY", false),
+		KYCBucket:               env("KYC_S3_BUCKET", ""),
+		KYCRegion:               firstEnv("KYC_S3_REGION", "AWS_REGION", "COGNITO_REGION"),
+	}
+	if c.KYCRegion == "" {
+		c.KYCRegion = "us-east-1"
 	}
 
 	if c.DatabaseURL == "" {
