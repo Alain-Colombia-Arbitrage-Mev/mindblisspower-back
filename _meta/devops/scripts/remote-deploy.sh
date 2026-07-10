@@ -74,7 +74,9 @@ for svc in $SERVICES; do
   fi
   # FIX 1: separar health y running con delimitador '|' para evitar que "unhealthy" coincida
   # con el glob *healthy* de la versión anterior (substring falso-positivo).
-  state=$(docker inspect -f '{{.State.Health.Status}}|{{.State.Status}}' "$cid" 2>/dev/null || echo "|")
+  # FIX 3: contenedores SIN healthcheck tienen .State.Health nil y el template
+  # fallaba entero (→ "|" → running vacío → falso NOT-RUNNING). Guard con {{if}}.
+  state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.State.Status}}' "$cid" 2>/dev/null || echo "|")
   health="${state%%|*}"
   running="${state#*|}"
   if [ "$health" = "unhealthy" ]; then echo "UNHEALTHY: $svc (health=$health)"; FAIL=1; continue; fi

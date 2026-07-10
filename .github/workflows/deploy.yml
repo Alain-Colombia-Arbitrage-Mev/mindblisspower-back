@@ -42,7 +42,7 @@ jobs:
           # Formato targets: "inst|compose|svc1 svc2;inst|compose|svc1 svc2"
           # Campos por '|' (inst, compose, svcs); múltiples targets separados por ';'
           if [ "$ENV" = "prod" ]; then
-            echo "targets=i-060e76a6c26bded35|deploy/compose/server1.yml|vp-engine vp-payments;i-02fcc4d2329040711|deploy/compose/server2.yml|api vp-engine" >> "$GITHUB_OUTPUT"
+            echo "targets=i-060e76a6c26bded35|deploy/compose/server1.yml|vp-engine vp-payments;i-02fcc4d2329040711|deploy/compose/server2.yml|api vp-engine qdrant vp-support vp-kb-indexer" >> "$GITHUB_OUTPUT"
           else
             echo "targets=i-0f7f6c73503537d73|deploy/compose/server2.yml|api vp-engine" >> "$GITHUB_OUTPUT"
           fi

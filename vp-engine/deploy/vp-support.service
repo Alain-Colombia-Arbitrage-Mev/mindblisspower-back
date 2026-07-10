@@ -1,0 +1,24 @@
+# systemd unit — vp-support (EC2 WORKER)
+# Install:
+#   sudo cp vp-support.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vp-support
+[Unit]
+Description=VicionPower support bot API (RAG KB + chat, escalates to Chatwoot)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vicion
+Group=vicion
+EnvironmentFile=/etc/vicion/vp-support.env
+ExecStart=/opt/vicion/bin/vp-support
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
