@@ -2,9 +2,11 @@ package payments
 
 import (
 	"fmt"
+	"time"
 
 	stripe "github.com/stripe/stripe-go/v85"
 	"github.com/stripe/stripe-go/v85/checkout/session"
+	"github.com/stripe/stripe-go/v85/paymentintent"
 	"github.com/stripe/stripe-go/v85/webhook"
 )
 
@@ -31,6 +33,16 @@ func NewStripeGateway(secretKey, webhookSecret, successURL, cancelURL, productID
 	}
 }
 
+// MetadataProductTag es el metadato que marca un cobro como propio de "PACK
+// MINDBLISS". La cuenta de Stripe es COMPARTIDA con otros negocios, así que lo
+// estampamos en la Session y en el PaymentIntent para (a) poder filtrar el
+// webhook contra eventos ajenos y (b) reconciliar vía Search API
+// (metadata['packmindbliss']:'true'). Coincide con el metadato del Product.
+const (
+	MetadataProductTag = "packmindbliss"
+	MetadataProductVal = "true"
+)
+
 // CreateCheckout crea una sesión de Checkout hosted de pago único por el total
 // (pack + 1%). Devuelve (url, sessionID).
 func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, metadata map[string]string) (string, string, error) {
@@ -43,6 +55,10 @@ func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, metadata map[
 			Quantity:  stripe.Int64(1),
 			PriceData: g.priceData(pack),
 		}},
+		// Propaga el metadato al PaymentIntent/Charge subyacente: Stripe NO copia
+		// el metadato del Product ni el de la Session hacia el PaymentIntent, así
+		// que sin esto el cargo no sería filtrable por product en el Search API.
+		PaymentIntentData: &stripe.CheckoutSessionPaymentIntentDataParams{},
 	}
 
 	// payment_method_configuration (pmc_…) y payment_method_types son mutuamente
@@ -56,8 +72,13 @@ func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, metadata map[
 		}
 		params.PaymentMethodTypes = pmTypes
 	}
+	// Marca de producto: garantizada aquí (independiente del caller) para blindar
+	// el webhook en la cuenta Stripe compartida.
+	params.AddMetadata(MetadataProductTag, MetadataProductVal)
+	params.PaymentIntentData.AddMetadata(MetadataProductTag, MetadataProductVal)
 	for k, v := range metadata {
 		params.AddMetadata(k, v)
+		params.PaymentIntentData.AddMetadata(k, v)
 	}
 
 	sess, err := session.New(params)
@@ -85,6 +106,62 @@ func (g *StripeGateway) priceData(pack Pack) *stripe.CheckoutSessionLineItemPric
 		}
 	}
 	return pd
+}
+
+// StripeSalesTotal es el agregado Stripe-nativo de cobros exitosos de PACK
+// MINDBLISS (marcados con packmindbliss=true) desde una fecha. GrossCents
+// incluye el 1% de activación (es el monto realmente cobrado por Stripe).
+type StripeSalesTotal struct {
+	Count      int64 `json:"count"`
+	GrossCents int64 `json:"gross_cents"`
+}
+
+// SearchSalesSince cuenta y suma los PaymentIntents `succeeded` marcados como
+// PACK MINDBLISS desde `from`, vía Search API (único endpoint de Stripe que
+// filtra por metadato). Aísla las ventas propias en la cuenta compartida sin
+// tener que expandir line items evento por evento.
+func (g *StripeGateway) SearchSalesSince(from time.Time) (StripeSalesTotal, error) {
+	var total StripeSalesTotal
+	query := fmt.Sprintf("metadata['%s']:'%s' AND status:'succeeded' AND created>=%d",
+		MetadataProductTag, MetadataProductVal, from.Unix())
+	params := &stripe.PaymentIntentSearchParams{
+		SearchParams: stripe.SearchParams{Query: query, Limit: stripe.Int64(100)},
+	}
+	iter := paymentintent.Search(params)
+	for iter.Next() {
+		pi := iter.PaymentIntent()
+		total.Count++
+		total.GrossCents += pi.Amount
+	}
+	if err := iter.Err(); err != nil {
+		return StripeSalesTotal{}, fmt.Errorf("stripe payment_intent search: %w", err)
+	}
+	return total, nil
+}
+
+// SessionPaid consulta a Stripe el estado de una Checkout Session concreta (para
+// el sweep de reconciliación cuando el webhook se perdió). Devuelve (pagada,
+// paymentIntentID). Solo confirma pagos de PACK MINDBLISS: exige la marca
+// packmindbliss=true en el metadato de la sesión (aísla la cuenta compartida).
+func (g *StripeGateway) SessionPaid(sessionID string) (bool, string, error) {
+	cs, err := session.Get(sessionID, nil)
+	if err != nil {
+		return false, "", fmt.Errorf("stripe session get %s: %w", sessionID, err)
+	}
+	if cs.Metadata[MetadataProductTag] != MetadataProductVal {
+		return false, "", nil // sesión ajena a la cuenta compartida; ignorar
+	}
+	if cs.PaymentStatus != stripe.CheckoutSessionPaymentStatusPaid {
+		return false, "", nil
+	}
+	piID := ""
+	if cs.PaymentIntent != nil {
+		piID = cs.PaymentIntent.ID
+	}
+	if piID == "" {
+		piID = "sess:" + cs.ID
+	}
+	return true, piID, nil
 }
 
 // ConstructEvent verifica la firma del webhook contra el payload crudo.

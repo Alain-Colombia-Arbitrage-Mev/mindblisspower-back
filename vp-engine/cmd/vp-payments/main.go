@@ -76,6 +76,7 @@ func run() error {
 	}
 	gw := payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
+	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 
 	// Verificación independiente de identidad (defensa en profundidad, H-2): el
 	// backend re-verifica el id token Cognito que reenvía el BFF en X-VP-Id-Token,
@@ -114,6 +115,23 @@ func run() error {
 		}
 	} else {
 		logger.Info().Msg("KYC_S3_BUCKET not set; KYC endpoints disabled")
+	}
+
+	// Cognito admin: deshabilitar/rehabilitar login al banear/desbanear. Sin user
+	// pool configurado, el banear solo aplica el flag en la DB (sin cortar login).
+	if cfg.CognitoUserPoolID != "" {
+		region := cfg.AWSRegion
+		if region == "" {
+			region = "us-east-1"
+		}
+		if ca, cerr := payments.NewCognitoAdmin(rootCtx, cfg.CognitoUserPoolID, region); cerr != nil {
+			logger.Warn().Err(cerr).Msg("Cognito admin init failed; ban no deshabilitará login")
+		} else {
+			handler.SetCognitoAdmin(ca)
+			logger.Info().Str("pool", cfg.CognitoUserPoolID).Msg("Cognito admin (ban disable/enable) enabled")
+		}
+	} else {
+		logger.Info().Msg("COGNITO_USER_POOL_ID not set; ban solo aplicará flag de DB")
 	}
 
 	srv := &http.Server{
@@ -155,6 +173,32 @@ func run() error {
 			}
 		}
 	}()
+
+	// Sweep de reconciliación: recupera pagos cuyo webhook se perdió (Stripe pagó
+	// pero el intent quedó sin activar). Non-fatal — nunca debe tumbar el servicio.
+	if cfg.ReconcileInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(cfg.ReconcileInterval)
+			defer ticker.Stop()
+			recLog := logger.With().Str("component", "reconcile-sweep").Logger()
+			recLog.Info().Dur("interval", cfg.ReconcileInterval).Dur("min_age", cfg.ReconcileMinAge).Msg("reconcile sweep started")
+			for {
+				select {
+				case <-rootCtx.Done():
+					recLog.Info().Msg("reconcile sweep stopped")
+					return
+				case <-ticker.C:
+					res, err := handler.ReconcileStuckPayments(rootCtx, cfg.ReconcileMinAge, 500)
+					if err != nil {
+						recLog.Error().Err(err).Msg("reconcile sweep failed (non-fatal)")
+					} else if res.Activated > 0 || res.Errors > 0 {
+						recLog.Info().Int("checked", res.Checked).Int("paid_found", res.PaidFound).
+							Int("activated", res.Activated).Int("errors", res.Errors).Msg("reconcile sweep complete")
+					}
+				}
+			}
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

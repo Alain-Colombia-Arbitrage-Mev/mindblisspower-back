@@ -1,0 +1,57 @@
+/* =============================================================================
+   pgloader script (DEV target): SQL Server viciongroup -> Postgres staging.*
+   Generated for the local vp-dev-db container migration of viciongroup260619.bak
+   Run inside dimitri/pgloader container:
+     docker run --rm -v <conf>:/data dimitri/pgloader pgloader /data/01_pgloader.dev.load
+   Source : SQL Server (host) default instance, db viciongroup, SQL login migrator
+   Target : vp-dev-db Postgres 17, db vicionpower, user postgres
+   ============================================================================= */
+
+LOAD DATABASE
+     FROM mssql://migrator:PqgrVptiYkT58D6O4JKBLUNeH0vw@host.docker.internal:1433/viciongroup
+     INTO postgresql://postgres:devpass@host.docker.internal:55432/vicionpower
+
+WITH include drop, create tables, create indexes,
+     foreign keys, downcase identifiers,
+     concurrency = 2,
+     batch rows = 25000, batch size = 50 MB
+
+SET work_mem to '256MB',
+    maintenance_work_mem to '1GB',
+    search_path to 'staging,public'
+
+CAST type bit            to boolean        drop typemod,
+     type datetime       to "timestamp"    drop typemod,    -- staged as naive timestamp; postload converts to timestamptz
+     type uniqueidentifier to uuid         drop typemod using sql-server-uniqueidentifier-to-uuid,
+     type "varchar(max)" to text           drop typemod,
+     type "nvarchar(max)" to text          drop typemod,
+     type money          to "numeric(20,4)" drop typemod,
+     type smallmoney     to "numeric(14,4)" drop typemod
+
+ALTER SCHEMA 'dbo' RENAME TO 'staging'
+
+INCLUDING ONLY TABLE NAMES LIKE
+     'asset',
+     'concept',
+     'country',
+     'movement',
+     'package',
+     'person',
+     'rank',
+     'role',
+     'vicionario',
+     'vicionarioMoneyAccount',
+     'vicionarioPackage',
+     'wallet',
+     'withdrawalRequest' IN SCHEMA 'dbo'
+
+BEFORE LOAD DO
+  $$ DROP SCHEMA IF EXISTS staging CASCADE; $$,
+  $$ CREATE SCHEMA staging; $$
+
+AFTER LOAD DO
+  $$ ANALYZE staging.movement; $$,
+  $$ ANALYZE staging.vicionario; $$,
+  $$ ANALYZE staging.vicionarioPackage; $$,
+  $$ ANALYZE staging.wallet; $$,
+  $$ ANALYZE staging.person; $$;

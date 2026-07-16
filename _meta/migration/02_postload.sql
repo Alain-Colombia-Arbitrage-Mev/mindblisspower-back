@@ -127,18 +127,32 @@ INSERT INTO mlm.person (
   created_at, updated_at
 )
 SELECT p.idperson,
-       p.firstname, p.lastname, p.alias, lower(p.email),
+       p.firstname, p.lastname, p.alias,
+       -- Email único por posición (directiva 2026-06-29): el legacy reusa emails
+       -- placeholder/compartidos entre registros DISTINTOS (idperson es 1:1 con
+       -- vicionario). Descartar los duplicados rompía el árbol (1,116 posiciones
+       -- reales, 798 con downline). Ahora se conserva el primer email tal cual y
+       -- a los demás se les añade un tag determinístico +vleg<idperson> para
+       -- cumplir person_email_key UNIQUE sin perder ninguna posición.
+       CASE
+         WHEN row_number() OVER (PARTITION BY lower(p.email) ORDER BY p.idperson) = 1
+              THEN lower(p.email)
+         WHEN lower(p.email) LIKE '%@%'
+              THEN regexp_replace(lower(p.email), '@', '+vleg' || p.idperson || '@')
+         ELSE lower(p.email) || '+vleg' || p.idperson
+       END,
        p.idcountryphone, p.phonenumber,
        -- Saneo inline: el CHECK de mlm.person dispara durante el INSERT,
        -- así que las fechas basura (año 203, 5024…) se anulan aquí.
        CASE WHEN p.birthday BETWEEN DATE '1900-01-01' AND CURRENT_DATE
             THEN p.birthday ELSE NULL END,
        p.idcountrybirthday,
+       -- Catálogo legacy cat=3: 3001 Activo, 3002 Inactivo, 3003 Pendiente, 3004 Borrado lógico.
        CASE p.idstatus
-         WHEN 1 THEN 'active'::mlm.person_status
-         WHEN 2 THEN 'pending'::mlm.person_status
-         WHEN 3 THEN 'suspended'::mlm.person_status
-         WHEN 4 THEN 'banned'::mlm.person_status
+         WHEN 3001 THEN 'active'::mlm.person_status
+         WHEN 3002 THEN 'suspended'::mlm.person_status
+         WHEN 3003 THEN 'pending'::mlm.person_status
+         WHEN 3004 THEN 'banned'::mlm.person_status
          ELSE 'pending'::mlm.person_status
        END,
        CASE WHEN v.kycapproved THEN 'approved'::mlm.kyc_status
@@ -151,8 +165,7 @@ SELECT p.idperson,
   FROM staging.person p
   LEFT JOIN staging.vicionario v ON v.idperson = p.idperson
  WHERE p.email IS NOT NULL
-   AND p.email <> ''
-ON CONFLICT (email) DO NOTHING;
+   AND p.email <> '';
 
 -- Catch invalid birthdays — quarantine, don't fail
 UPDATE mlm.person SET birthday = NULL WHERE birthday < '1900-01-01' OR birthday > CURRENT_DATE;
@@ -197,11 +210,12 @@ SELECT v.idvicionario,
        -- contadores de carrera NO se migran. counts se rebuildan en 03.
        0, 0, 0, 0, 0, 0, 0, 0,
        rm.new_rank_id,                          -- rango heredado vía staging.rank_map
+       -- Catálogo legacy cat=8: 8001 Activo, 8002 Inactivo, 8003 Pendiente, 8004 Borrado lógico.
        CASE v.idstatus
-         WHEN 1 THEN 'active'::mlm.person_status
-         WHEN 2 THEN 'pending'::mlm.person_status
-         WHEN 3 THEN 'suspended'::mlm.person_status
-         WHEN 4 THEN 'banned'::mlm.person_status
+         WHEN 8001 THEN 'active'::mlm.person_status
+         WHEN 8002 THEN 'suspended'::mlm.person_status
+         WHEN 8003 THEN 'pending'::mlm.person_status
+         WHEN 8004 THEN 'banned'::mlm.person_status
          ELSE 'active'::mlm.person_status
        END,
        coalesce(v.creationtime, '2020-01-01'::timestamp) AT TIME ZONE 'America/Bogota',
@@ -360,7 +374,10 @@ SELECT mp.id,
        max(coalesce(vp.updatetime, vp.creationtime) AT TIME ZONE 'America/Bogota')
   FROM mlm.affiliate mp
   LEFT JOIN staging.vicionariopackage vp
-         ON vp.idvicionario = mp.legacy_id_vicionario AND vp.idstatus = 1
+         -- Catálogo legacy cat=15: activación real = 15001 Activo, 15003 Completado,
+         -- 15004 Activo (sistema antiguo), 15005 Expirado (sistema antiguo). Excluye 15002 Inactivo.
+         ON vp.idvicionario = mp.legacy_id_vicionario
+        AND vp.idstatus IN (15001, 15003, 15004, 15005)
  GROUP BY mp.id;
 
 -- ---------------------------------------------------------------------------
@@ -382,13 +399,11 @@ INSERT INTO mlm.affiliate_package (
   created_at, activated_at
 )
 SELECT vp.idvicionariopackage, mp.id, vp.idpackage,
-       CASE vp.idstatus
-         WHEN 1 THEN 'active'::mlm.package_status
-         WHEN 2 THEN 'pending_payment'::mlm.package_status
-         WHEN 3 THEN 'expired'::mlm.package_status
-         WHEN 4 THEN 'refunded'::mlm.package_status
-         ELSE 'active'::mlm.package_status
-       END,
+       -- Directiva de negocio (2026-06-30): TODAS las membresías legacy arrancan
+       -- EXPIRADAS en el cutover — los usuarios deben renovar/recomprar en la
+       -- plataforma 2.0. Rango y posición SÍ se conservan (current_rank_id +
+       -- path/parent), pero la membresía no se hereda activa.
+       'expired'::mlm.package_status,
        vp.idpaymentmethod::text, vp.paymentproofpublicurl, vp.transactionhash,
        vp.currentperioddate,
        -- legacy trae sentinel 35003 (7,913 filas) fuera de smallint → NULL

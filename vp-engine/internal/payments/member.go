@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -48,11 +49,31 @@ type MemberSummary struct {
 	Withdrawals           []MemberWithdrawal `json:"withdrawals"`
 }
 
+// memberContext es el par cacheado nombre+código de referido.
+type memberContext struct {
+	Name string `json:"n"`
+	Code string `json:"c"`
+}
+
 // GetMemberContext devuelve el nombre real (mlm.person) y el código de referido
 // real (mlm.affiliate.invitation_link) del miembro por email — la fuente
 // autoritativa para los 117k migrados (cuyo id token de Cognito puede no traer
 // el nombre). Genera+persiste el código si el afiliado no tiene uno.
+// Cache-aside 10 min: se consulta en CADA carga del dashboard y el código es
+// inmutable una vez generado — sin cache, la carga pesada de registros
+// martillea RDS con esta query.
 func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code string, err error) {
+	ckey := "refctx:" + strings.ToLower(strings.TrimSpace(email))
+	var cached memberContext
+	if s.cache.get(ctx, ckey, &cached) && cached.Code != "" {
+		return cached.Name, cached.Code, nil
+	}
+	defer func() {
+		if err == nil && code != "" {
+			s.cache.set(ctx, ckey, memberContext{Name: name, Code: code}, 10*time.Minute)
+		}
+	}()
+
 	var fn, ln string
 	var affID *int64
 	var inv *string

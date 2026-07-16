@@ -23,7 +23,7 @@ type Config struct {
 	LogLevel       string
 	HTTPListenAddr string
 
-	DatabaseURL    string
+	DatabaseURL string
 	// ReadDatabaseURL: réplica de lectura RDS (opcional). Vacío ⇒ los reads van al
 	// primary. Los métodos read-only de payments la usan; las escrituras siempre
 	// al primary.
@@ -44,10 +44,11 @@ type Config struct {
 	// X-VP-Service-Token para crear sesiones de checkout.
 	ServiceToken string
 
-	SuccessURL     string
-	CancelURL      string
-	PaymentMethods []string // p.ej. ["card","crypto"]
-	AdminEmails    []string // allowlist de super-admin por env (además de mlm.person.is_admin)
+	SuccessURL       string
+	CancelURL        string
+	PaymentMethods   []string // p.ej. ["card","crypto"]
+	AdminEmails      []string // allowlist de admin por env (además de mlm.person.is_admin)
+	SuperAdminEmails []string // subconjunto con rol super_admin (acceso total)
 	// Afiliado raíz de la empresa: si un comprador no tiene sponsor (sin ?ref ni
 	// afiliado previo), se coloca bajo este root (la activación derrama). 0 = desactivado.
 	CompanyRootAffiliateID int64
@@ -55,6 +56,13 @@ type Config struct {
 	// EngineURL: base del motor vp-engine para el simulador canónico de θ
 	// (POST /simulate). Vacío ⇒ el lock de solvencia usa solo la proyección forward.
 	EngineURL string
+
+	// Sweep de reconciliación: activa intents pagados en Stripe que quedaron sin
+	// activar en DB (webhook perdido). Corre en background cada ReconcileInterval.
+	// 0 ⇒ desactivado. Solo toca intents con más de ReconcileMinAge de antigüedad
+	// (evita competir con el webhook normal) y menos de 30 días.
+	ReconcileInterval time.Duration
+	ReconcileMinAge   time.Duration
 
 	// ── Verificación de identidad (defensa en profundidad, H-2) ────────────────
 	// El backend re-verifica el id token Cognito que reenvía el BFF (header
@@ -101,19 +109,19 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 	c := &Config{
-		Env:                 env("ENV", "development"),
-		LogLevel:            env("LOG_LEVEL", "info"),
-		HTTPListenAddr:      env("PAYMENTS_HTTP_ADDR", "0.0.0.0:9095"),
+		Env:            env("ENV", "development"),
+		LogLevel:       env("LOG_LEVEL", "info"),
+		HTTPListenAddr: env("PAYMENTS_HTTP_ADDR", "0.0.0.0:9095"),
 		// DATABASE_URL preferido; fallback al nombre que ya usa el .env del repo.
 		// OJO: requiere rol con escritura (payments.purchase_intent), no el rol
 		// read-only de MEMBER_DATABASE_URL.
 		DatabaseURL:     firstEnv("DATABASE_URL", "VP_ENGINE_DATABASE_URL"),
 		ReadDatabaseURL: env("READ_DATABASE_URL", ""),
 		DBMaxConns:      int32(envInt("PAYMENTS_DB_MAX_CONNS", 10)),
-		DBConnLifetime: 30 * time.Minute,
-		NATSURL:        env("NATS_URL", ""),
-		NATSUser:       env("NATS_USER", ""),
-		NATSPassword:   env("NATS_PASSWORD", ""),
+		DBConnLifetime:  30 * time.Minute,
+		NATSURL:         env("NATS_URL", ""),
+		NATSUser:        env("NATS_USER", ""),
+		NATSPassword:    env("NATS_PASSWORD", ""),
 		// Aliases aceptados (los que ya pusiste en backend/.env.local):
 		//   STRIPE_SECRET_KEY      | CLAVE_API
 		//   STRIPE_WEBHOOK_SECRET  | SECRET_FIRMA
@@ -122,17 +130,21 @@ func LoadConfig() (*Config, error) {
 		// Vacío ⇒ producto inline. PAYMENTS_STRIPE_PRODUCT_ID (explícito) gana;
 		// fallback a ID_PRODUCTO_TEST para correr en test sin renombrar. En
 		// producción setear PAYMENTS_STRIPE_PRODUCT_ID al prod_… LIVE.
-		StripeProductID:     firstEnv("PAYMENTS_STRIPE_PRODUCT_ID", "ID_PRODUCTO_TEST"),
-		StripePMConfig:      firstEnv("PAYMENTS_PM_CONFIG", "ID_METODO_PAGO"),
-		ServiceToken:        os.Getenv("PAYMENTS_SERVICE_TOKEN"),
-		SuccessURL:          env("PAYMENTS_SUCCESS_URL", "https://app.mindblisspower.com/dashboard/packages?paid=1&session_id={CHECKOUT_SESSION_ID}"),
-		CancelURL:           env("PAYMENTS_CANCEL_URL", "https://app.mindblisspower.com/dashboard/packages?canceled=1"),
-		PaymentMethods:      splitCSV(env("PAYMENTS_METHODS", "card,crypto")),
-		AdminEmails:            splitCSV(env("PAYMENTS_ADMIN_EMAILS", "")),
+		StripeProductID:        firstEnv("PAYMENTS_STRIPE_PRODUCT_ID", "ID_PRODUCTO_TEST"),
+		StripePMConfig:         firstEnv("PAYMENTS_PM_CONFIG", "ID_METODO_PAGO"),
+		ServiceToken:           os.Getenv("PAYMENTS_SERVICE_TOKEN"),
+		SuccessURL:             env("PAYMENTS_SUCCESS_URL", "https://app.mindblisspower.com/dashboard/packages/confirmacion?paid=1&session_id={CHECKOUT_SESSION_ID}"),
+		CancelURL:              env("PAYMENTS_CANCEL_URL", "https://app.mindblisspower.com/dashboard/packages?canceled=1"),
+		PaymentMethods:         splitCSV(env("PAYMENTS_METHODS", "card,crypto")),
+		AdminEmails:            splitCSV(env("PAYMENTS_ADMIN_EMAILS", "gabgarluc@outlook.com")),
+		SuperAdminEmails:       splitCSV(env("PAYMENTS_SUPER_ADMIN_EMAILS", "devfidubit@gmail.com")),
 		CompanyRootAffiliateID: int64(envInt("PAYMENTS_COMPANY_ROOT_AFFILIATE_ID", 0)),
 		EngineURL:              env("VP_ENGINE_URL", "http://127.0.0.1:9090"),
-		RedisAddr:              env("REDIS_ADDR", ""),
-		RedisPassword:          env("REDIS_PASSWORD", ""),
+		// Sweep cada 15m por defecto; solo intents de >10m de antigüedad. 0 desactiva.
+		ReconcileInterval: time.Duration(envInt("PAYMENTS_RECONCILE_INTERVAL_MIN", 15)) * time.Minute,
+		ReconcileMinAge:   time.Duration(envInt("PAYMENTS_RECONCILE_MIN_AGE_MIN", 10)) * time.Minute,
+		RedisAddr:         env("REDIS_ADDR", ""),
+		RedisPassword:     env("REDIS_PASSWORD", ""),
 		// Verificación de identidad (H-2). Aliases aceptados para reutilizar los
 		// mismos nombres que ya usan los BFFs (COGNITO_USER_POOL_ID / COGNITO_CLIENT_ID).
 		CognitoIssuer:           env("COGNITO_ISSUER", ""),

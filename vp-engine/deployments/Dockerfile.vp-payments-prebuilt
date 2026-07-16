@@ -1,0 +1,9 @@
+# vp-payments — imagen arm64 con binario estático precompilado (deploy manual
+# rápido; el CI usa deployments/Dockerfile multi-stage). Sin RUN ⇒ el build
+# cross-arch no necesita QEMU.
+# Build (desde vp-engine/, contexto = bin/ porque .dockerignore excluye bin/):
+#   docker buildx build --platform linux/arm64 -f deployments/Dockerfile.vp-payments-prebuilt \
+#     -t $REGISTRY/vp/vp-payments:<tag> --push bin
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY vp-payments-linux-arm64 /app-bin
+ENTRYPOINT ["/app-bin"]

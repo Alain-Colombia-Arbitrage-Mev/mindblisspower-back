@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,13 +25,14 @@ const idTokenHeader = "X-VP-Id-Token"
 
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
-	store        *Store
-	gw           *StripeGateway
-	log          zerolog.Logger
-	serviceToken string
-	adminEmails  []string
-	companyRoot  int64
-	httpClient   *http.Client
+	store            *Store
+	gw               *StripeGateway
+	log              zerolog.Logger
+	serviceToken     string
+	adminEmails      []string
+	superAdminEmails []string // subconjunto con rol "super_admin" (acceso total)
+	companyRoot      int64
+	httpClient       *http.Client
 
 	// verifier re-verifica el id token Cognito reenviado por el BFF. nil ⇒ no hay
 	// verificación disponible (sólo el fallback por query/body, con warning).
@@ -42,7 +44,15 @@ type Handler struct {
 	// kyc: presignado S3 para subida de documentos KYC. nil ⇒ endpoints KYC
 	// responden 503 kyc-unconfigured.
 	kyc *KYCS3
+
+	// cognitoAdmin: enable/disable de login en Cognito al banear/desbanear.
+	// nil ⇒ el efecto Cognito se omite (solo se aplica el flag en mlm.person).
+	cognitoAdmin *CognitoAdmin
 }
+
+// SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
+// banear/desbanear no deshabilita el login (solo el flag de DB).
+func (h *Handler) SetCognitoAdmin(c *CognitoAdmin) { h.cognitoAdmin = c }
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
 	return &Handler{
@@ -64,14 +74,43 @@ func (h *Handler) SetIdentityVerifier(v IdentityVerifier, requireVerified bool) 
 	h.requireVerified = requireVerified
 }
 
-// isAdminEmail: true si el email está en el allowlist por env o es is_admin en mlm.person.
+// SetSuperAdmins define los emails con rol super_admin (acceso total). Son
+// automáticamente admins también.
+func (h *Handler) SetSuperAdmins(emails []string) { h.superAdminEmails = emails }
+
+// isSuperAdmin: true si el email está en el allowlist de super-admins.
+func (h *Handler) isSuperAdmin(email string) bool {
+	for _, a := range h.superAdminEmails {
+		if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(email)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAdminEmail: true si el email es super-admin, está en el allowlist por env, o
+// es is_admin en mlm.person.
 func (h *Handler) isAdminEmail(ctx context.Context, email string) (bool, error) {
+	if h.isSuperAdmin(email) {
+		return true, nil
+	}
 	for _, a := range h.adminEmails {
 		if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(email)) {
 			return true, nil
 		}
 	}
 	return h.store.IsAdmin(ctx, email)
+}
+
+// roleOf devuelve "super_admin" | "admin" | "" (para etiquetas del panel).
+func (h *Handler) roleOf(ctx context.Context, email string) string {
+	if h.isSuperAdmin(email) {
+		return "super_admin"
+	}
+	if admin, _ := h.isAdminEmail(ctx, email); admin {
+		return "admin"
+	}
+	return ""
 }
 
 // Routes monta el mux del servicio.
@@ -93,6 +132,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/users", h.handleAdminUsers)
 	mux.HandleFunc("/api/admin/summary", h.handleAdminSummary)
 	mux.HandleFunc("/api/admin/block", h.handleAdminBlock)
+	mux.HandleFunc("/api/admin/blacklist", h.handleAdminBlacklist)
+	mux.HandleFunc("/api/admin/blacklist/remove", h.handleAdminBlacklistRemove)
 	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
 	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
 	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
@@ -104,6 +145,15 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
 	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
 	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
+	mux.HandleFunc("/api/admin/sales/report", h.handleAdminSalesReport)
+	mux.HandleFunc("/api/admin/sales/reconcile", h.handleAdminSalesReconcile)
+	mux.HandleFunc("/api/admin/sales/sweep", h.handleAdminSalesSweep)
+	mux.HandleFunc("/api/admin/tickets", h.handleAdminTickets)
+	mux.HandleFunc("/api/admin/tickets/action", h.handleAdminTicketAction)
+	mux.HandleFunc("/api/admin/email", h.handleAdminEmail)
+	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
+	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)
+	mux.HandleFunc("/api/registration/precheck", h.handleRegistrationPrecheck)
 	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
 	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
 	mux.HandleFunc("/api/admin/network/sustainability", h.handleNetworkSustainability)
@@ -128,23 +178,68 @@ func (h *Handler) handleAdminActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
-// rateLimit: backstop por-endpoint (ventana fija 1 min) contra loops/abuso que
-// saturen la DB. Generoso (la caché ya absorbe la carga normal). Nil cache o
-// Redis caído ⇒ permite (no bloquea tráfico legítimo). Excluye webhook y health.
+// rateLimit: dos capas (ventana fija 1 min). Antes el contador era GLOBAL por
+// path (3000/min compartido entre TODOS los usuarios): con carga alta los
+// usuarios legítimos se bloqueaban entre sí ("demasiados intentos").
+//   - por cliente+path (240/min): "cliente" = IP real (X-Forwarded-For del
+//     proxy) o, si el BFF no la reenvía, el email del query autenticado —
+//     un abusivo se limita solo a sí mismo.
+//   - global por path (12000/min): backstop que protege la DB ante estampidas.
+//
+// Nil cache o Redis caído ⇒ permite. Excluye webhook y health.
 func (h *Handler) rateLimit(next http.Handler) http.Handler {
-	const perPathPerMinute = 3000
+	const perClientPerMinute = 240
+	const perPathPerMinute = 12000
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/webhooks/stripe" || r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		key := "rl:" + r.Method + ":" + r.URL.Path
-		if !h.store.cache.allow(r.Context(), key, perPathPerMinute, time.Minute) {
+		client := clientKey(r)
+		if !h.store.cache.allow(r.Context(), "rl:c:"+client+":"+r.Method+":"+r.URL.Path, perClientPerMinute, time.Minute) ||
+			!h.store.cache.allow(r.Context(), "rl:g:"+r.Method+":"+r.URL.Path, perPathPerMinute, time.Minute) {
 			writeErr(w, http.StatusTooManyRequests, "rate_limited")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// clientKey identifica al cliente para rate limiting: primera IP del
+// X-Forwarded-For (Caddy/BFF), o el email del query (llamadas BFF sin XFF),
+// o la IP directa como último recurso.
+func clientKey(r *http.Request) string {
+	// X-Forwarded-For solo se honra si la conexión viene del proxy local
+	// (Caddy en loopback / red privada). Un cliente directo podría inventar un
+	// XFF distinto por request y fabricar claves ilimitadas, anulando el límite
+	// por-cliente (quedaría solo el backstop global).
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" && fromTrustedProxy(r.RemoteAddr) {
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if email := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("email"))); email != "" {
+		return email
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// fromTrustedProxy: true si la conexión entra por loopback o red privada (el
+// proxy Caddy corre en el mismo host / VPC). Solo entonces el XFF es confiable.
+func fromTrustedProxy(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
 }
 
 type planSimulateReq struct {
@@ -356,8 +451,8 @@ func (h *Handler) handleNetworkHealth(w http.ResponseWriter, r *http.Request) {
 	req := networkintel.AnalysisRequest{Metrics: m}
 	resp := networkintel.DeterministicAnalysis(req)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"analysis":     resp,
-		"metrics":      m,
+		"analysis":      resp,
+		"metrics":       m,
 		"rank_exposure": rx,
 	})
 }
@@ -383,8 +478,8 @@ func (h *Handler) handleNetworkSustainability(w http.ResponseWriter, r *http.Req
 
 	// ── Projected (expensive — cached) ───────────────────────────────────────
 	type projectedEntry struct {
-		Scenario   string                    `json:"scenario"`
-		Simulation ScenarioResult            `json:"simulation"`
+		Scenario   string                        `json:"scenario"`
+		Simulation ScenarioResult                `json:"simulation"`
 		Analysis   networkintel.AnalysisResponse `json:"analysis"`
 	}
 	var projected []projectedEntry
@@ -631,7 +726,7 @@ func (h *Handler) handleAdminCheck(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"is_admin": admin})
+	writeJSON(w, http.StatusOK, map[string]any{"is_admin": admin, "role": h.roleOf(r.Context(), email)})
 }
 
 func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
@@ -746,6 +841,10 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing amount or bank_info")
 		return
 	}
+	// Wallet congelada: un usuario baneado/suspendido no puede retirar.
+	if h.rejectIfSuspended(r.Context(), w, req.Email) {
+		return
+	}
 
 	res, err := h.store.RequestWithdrawal(r.Context(), req.Email, req.Amount, req.BankInfo)
 	switch {
@@ -854,6 +953,10 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// Wallet congelada: un usuario baneado/suspendido no puede comprar.
+	if h.rejectIfSuspended(ctx, w, req.Email) {
+		return
+	}
 	pack, err := h.store.LookupPack(ctx, req.PackageID)
 	if errors.Is(err, ErrPackNotFound) {
 		writeErr(w, http.StatusNotFound, "package_not_found")
@@ -993,6 +1096,16 @@ func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {
 	var cs stripe.CheckoutSession
 	if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
 		return err
+	}
+	// Guard de cuenta compartida: la cuenta Stripe la comparten varios negocios.
+	// Solo activamos sesiones marcadas como "PACK MINDBLISS" (estampado en
+	// CreateCheckout). Un evento ajeno que llegue aquí se ignora sin error (200)
+	// para no forzar reintentos de Stripe. Defensa-en-profundidad: el flujo ya
+	// rechaza sesiones sin purchase_intent, pero este gate lo hace explícito.
+	if cs.Metadata[MetadataProductTag] != MetadataProductVal {
+		h.log.Warn().Str("session", cs.ID).Str("event", event.ID).
+			Msg("checkout.session sin marca packmindbliss; ignorando (cuenta compartida)")
+		return nil
 	}
 	// `payment` mode async (crypto/ACH) puede llegar como completed con
 	// payment_status 'unpaid' → solo activar cuando esté pagado.
