@@ -64,6 +64,15 @@ type Config struct {
 	ReconcileInterval time.Duration
 	ReconcileMinAge   time.Duration
 
+	// ── Recuperación de carritos abandonados ───────────────────────────────────
+	// Recordatorio por email a checkouts en estado 'created' que nunca se pagaron.
+	// CartReminderEnabled activa el sweep en background (cada CartReminderInterval).
+	// CartResumeBaseURL es el origen público del link "reanudar pago" (BFF
+	// growth-hub que redirige a una sesión de Stripe regenerada).
+	CartReminderEnabled  bool
+	CartReminderInterval time.Duration
+	CartResumeBaseURL    string
+
 	// ── Verificación de identidad (defensa en profundidad, H-2) ────────────────
 	// El backend re-verifica el id token Cognito que reenvía el BFF (header
 	// X-VP-Id-Token) contra el JWKS del user pool. Deriva la identidad del token
@@ -143,8 +152,12 @@ func LoadConfig() (*Config, error) {
 		// Sweep cada 15m por defecto; solo intents de >10m de antigüedad. 0 desactiva.
 		ReconcileInterval: time.Duration(envInt("PAYMENTS_RECONCILE_INTERVAL_MIN", 15)) * time.Minute,
 		ReconcileMinAge:   time.Duration(envInt("PAYMENTS_RECONCILE_MIN_AGE_MIN", 10)) * time.Minute,
-		RedisAddr:         env("REDIS_ADDR", ""),
-		RedisPassword:     env("REDIS_PASSWORD", ""),
+
+		CartReminderEnabled:  envBool("PAYMENTS_CART_REMINDER_ENABLED", true),
+		CartReminderInterval: time.Duration(envInt("PAYMENTS_CART_REMINDER_INTERVAL_MIN", 60)) * time.Minute,
+		CartResumeBaseURL:    env("PAYMENTS_CART_RESUME_BASE_URL", "https://app.mindblisspower.com"),
+		RedisAddr:            env("REDIS_ADDR", ""),
+		RedisPassword:        env("REDIS_PASSWORD", ""),
 		// Verificación de identidad (H-2). Aliases aceptados para reutilizar los
 		// mismos nombres que ya usan los BFFs (COGNITO_USER_POOL_ID / COGNITO_CLIENT_ID).
 		CognitoIssuer:           env("COGNITO_ISSUER", ""),

@@ -78,6 +78,7 @@ func run() error {
 	gw := payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
+	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
 
 	// Verificación independiente de identidad (defensa en profundidad, H-2): el
 	// backend re-verifica el id token Cognito que reenvía el BFF en X-VP-Id-Token,
@@ -195,6 +196,33 @@ func run() error {
 					} else if res.Activated > 0 || res.Errors > 0 {
 						recLog.Info().Int("checked", res.Checked).Int("paid_found", res.PaidFound).
 							Int("activated", res.Activated).Int("errors", res.Errors).Msg("reconcile sweep complete")
+					}
+				}
+			}
+		}()
+	}
+
+	// Sweep de recuperación de carritos abandonados: recuerda por email los
+	// checkouts 'created' que nunca se pagaron. cutoff = arranque del servicio ⇒
+	// solo carritos NUEVOS reciben recordatorio automático (los viejos se manejan
+	// manualmente desde el panel). Non-fatal.
+	if cfg.CartReminderEnabled && cfg.CartReminderInterval > 0 {
+		cartCutoff := time.Now().UTC()
+		go func() {
+			ticker := time.NewTicker(cfg.CartReminderInterval)
+			defer ticker.Stop()
+			cartLog := logger.With().Str("component", "cart-reminder").Logger()
+			cartLog.Info().Dur("interval", cfg.CartReminderInterval).Time("cutoff", cartCutoff).Msg("cart reminder sweep started")
+			for {
+				select {
+				case <-rootCtx.Done():
+					cartLog.Info().Msg("cart reminder sweep stopped")
+					return
+				case <-ticker.C:
+					if sent, err := handler.RemindAbandonedCarts(rootCtx, cartCutoff, 2); err != nil {
+						cartLog.Error().Err(err).Msg("cart reminder sweep failed (non-fatal)")
+					} else if sent > 0 {
+						cartLog.Info().Int("sent", sent).Msg("cart reminders sent")
 					}
 				}
 			}

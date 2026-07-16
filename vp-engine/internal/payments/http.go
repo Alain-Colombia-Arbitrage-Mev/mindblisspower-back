@@ -48,11 +48,24 @@ type Handler struct {
 	// cognitoAdmin: enable/disable de login en Cognito al banear/desbanear.
 	// nil ⇒ el efecto Cognito se omite (solo se aplica el flag en mlm.person).
 	cognitoAdmin *CognitoAdmin
+
+	// Recuperación de carritos abandonados: origen público del link "reanudar
+	// pago" y URL de éxito (para el caso "ya pagado"). El HMAC del token de
+	// resume usa serviceToken como clave.
+	resumeBaseURL string
+	successURL    string
 }
 
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
 // banear/desbanear no deshabilita el login (solo el flag de DB).
 func (h *Handler) SetCognitoAdmin(c *CognitoAdmin) { h.cognitoAdmin = c }
+
+// SetCartConfig inyecta el origen público del link de reanudar pago y la URL de
+// éxito, usados por el flujo de recuperación de carritos abandonados.
+func (h *Handler) SetCartConfig(resumeBaseURL, successURL string) {
+	h.resumeBaseURL = resumeBaseURL
+	h.successURL = successURL
+}
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
 	return &Handler{
@@ -121,6 +134,7 @@ func (h *Handler) Routes() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/payments/checkout", h.handleCheckout)
+	mux.HandleFunc("/api/payments/resume", h.handleResume)
 	mux.HandleFunc("/api/payments/me", h.handleMe)
 	mux.HandleFunc("/api/member/referral", h.handleMemberReferral)
 	mux.HandleFunc("/api/member/kyc/upload-url", h.handleKYCUploadURL)
@@ -148,6 +162,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/sales/report", h.handleAdminSalesReport)
 	mux.HandleFunc("/api/admin/sales/transactions", h.handleAdminSalesTransactions)
 	mux.HandleFunc("/api/admin/sales/verify", h.handleAdminSalesVerify)
+	mux.HandleFunc("/api/admin/carts/remind", h.handleAdminCartRemind)
+	mux.HandleFunc("/api/admin/carts/summary", h.handleAdminCartsSummary)
 	mux.HandleFunc("/api/admin/sales/reconcile", h.handleAdminSalesReconcile)
 	mux.HandleFunc("/api/admin/sales/sweep", h.handleAdminSalesSweep)
 	mux.HandleFunc("/api/admin/tickets", h.handleAdminTickets)
