@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"regexp"
@@ -89,6 +90,20 @@ func (k *KYCS3) ObjectSize(ctx context.Context, key string) (int64, error) {
 		return 0, err
 	}
 	return aws.ToInt64(head.ContentLength), nil
+}
+
+// GetObject descarga el contenido del objeto (para el OCR). Limita la lectura a
+// kycMaxSizeBytes por seguridad.
+func (k *KYCS3) GetObject(ctx context.Context, key string) ([]byte, error) {
+	out, err := k.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(k.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer out.Body.Close()
+	return io.ReadAll(io.LimitReader(out.Body, kycMaxSizeBytes+1))
 }
 
 // SetKYC inyecta el cliente S3 de KYC. nil ⇒ endpoints KYC responden 503.
@@ -176,7 +191,9 @@ func (h *Handler) handleKYCUploadURL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	key := fmt.Sprintf("kyc/%d/%s-%s", buyer.PersonID, hex.EncodeToString(nonce), sanitizeKYCFileName(req.FileName))
+	// Organización: una carpeta por cliente (personID) y otra por tipo de
+	// documento → kyc/{personID}/{docType}/{nonce}-{archivo}.
+	key := fmt.Sprintf("kyc/%d/%s/%s-%s", buyer.PersonID, req.DocType, hex.EncodeToString(nonce), sanitizeKYCFileName(req.FileName))
 
 	docID, err := h.store.CreateKYCDocument(r.Context(), buyer.PersonID, req.DocType, req.FileName, req.Mime, req.Size, key)
 	if err != nil {
@@ -259,6 +276,10 @@ func (h *Handler) handleKYCConfirm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Filtro OCR: los pasaportes se validan automáticamente (es pasaporte +
+	// vigente + datos coinciden ⇒ auto-aprobar). Se dispara en segundo plano;
+	// el confirm responde de inmediato con in_review.
+	h.maybeStartPassportOCR(req.DocumentID, buyer.PersonID)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "in_review"})
 }
 

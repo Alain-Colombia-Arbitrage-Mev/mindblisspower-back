@@ -119,6 +119,20 @@ func run() error {
 		logger.Info().Msg("KYC_S3_BUCKET not set; KYC endpoints disabled")
 	}
 
+	// Filtro OCR de pasaportes (OpenRouter visión). Sin API key el OCR se
+	// desactiva y los pasaportes quedan in_review para revisión manual.
+	if cfg.KYCOCRAPIKey != "" {
+		ocr := payments.NewKYCOCR(cfg.KYCOCRAPIKey, cfg.KYCOCRModel)
+		handler.SetKYCOCR(ocr)
+		model := cfg.KYCOCRModel
+		if model == "" {
+			model = payments.DefaultKYCOCRModel
+		}
+		logger.Info().Str("model", model).Msg("KYC OCR (auto-validación de pasaporte) enabled")
+	} else {
+		logger.Info().Msg("KYC OCR api key not set; pasaportes quedarán en revisión manual")
+	}
+
 	// Cognito admin: deshabilitar/rehabilitar login al banear/desbanear. Sin user
 	// pool configurado, el banear solo aplica el flag en la DB (sin cortar login).
 	if cfg.CognitoUserPoolID != "" {
@@ -224,6 +238,24 @@ func run() error {
 					} else if sent > 0 {
 						cartLog.Info().Int("sent", sent).Msg("cart reminders sent")
 					}
+				}
+			}
+		}()
+	}
+
+	// Sweep de respaldo del OCR de KYC: reprocesa pasaportes con ocr_status
+	// 'pending' que quedaron atascados (p. ej. un reinicio a mitad del análisis).
+	// El camino normal es la goroutine disparada al confirmar; esto es resiliencia.
+	if cfg.KYCOCRAPIKey != "" && cfg.KYCBucket != "" {
+		go func() {
+			ticker := time.NewTicker(3 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-ticker.C:
+					handler.RunKYCOCRSweep(rootCtx)
 				}
 			}
 		}()

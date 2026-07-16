@@ -105,6 +105,11 @@ type Config struct {
 	KYCBucket string
 	// KYCRegion: región del bucket (default: AWSRegion o us-east-1).
 	KYCRegion string
+	// KYCOCRAPIKey: API key de OpenRouter para el OCR de pasaportes. Vacío ⇒ OCR
+	// desactivado (los pasaportes quedan in_review para revisión manual).
+	KYCOCRAPIKey string
+	// KYCOCRModel: modelo de visión de OpenRouter (default gemini-3.1-flash-lite).
+	KYCOCRModel string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -167,6 +172,8 @@ func LoadConfig() (*Config, error) {
 		RequireVerifiedIdentity: envBool("REQUIRE_VERIFIED_IDENTITY", false),
 		KYCBucket:               env("KYC_S3_BUCKET", ""),
 		KYCRegion:               firstEnv("KYC_S3_REGION", "AWS_REGION", "COGNITO_REGION"),
+		KYCOCRAPIKey:            firstEnv("PAYMENTS_KYC_OCR_API_KEY", "OPENROUTER_API_RAG", "OPENROUTER_API_KEY"),
+		KYCOCRModel:             env("PAYMENTS_KYC_OCR_MODEL", ""),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"

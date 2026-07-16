@@ -45,6 +45,10 @@ type Handler struct {
 	// responden 503 kyc-unconfigured.
 	kyc *KYCS3
 
+	// kycocr: filtro OCR de pasaportes (OpenRouter visión). nil/deshabilitado ⇒
+	// los pasaportes quedan in_review para revisión manual.
+	kycocr *KYCOCR
+
 	// cognitoAdmin: enable/disable de login en Cognito al banear/desbanear.
 	// nil ⇒ el efecto Cognito se omite (solo se aplica el flag en mlm.person).
 	cognitoAdmin *CognitoAdmin
