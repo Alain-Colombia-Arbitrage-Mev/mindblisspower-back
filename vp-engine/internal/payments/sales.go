@@ -3,10 +3,13 @@ package payments
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // SalesRow es el desglose de ventas de un paquete (tier de precio del producto
@@ -26,20 +29,20 @@ type SalesRow struct {
 // desde `from`.
 //   - Created  = total de intents iniciados en el período.
 //   - Paid     = intents con dinero recibido (paid_at IS NOT NULL, excluye
-//                reembolsados). NOTA: antes filtraba por status='paid', pero ese
-//                estado es transitorio dentro de la tx de activación (created→
-//                paid→activated) y casi nunca queda persistido → la columna daba
-//                0 aunque hubiera ventas. paid_at es la señal correcta.
+//     reembolsados). NOTA: antes filtraba por status='paid', pero ese
+//     estado es transitorio dentro de la tx de activación (created→
+//     paid→activated) y casi nunca queda persistido → la columna daba
+//     0 aunque hubiera ventas. paid_at es la señal correcta.
 //   - Activated= intents colocados en el árbol (status='activated').
 //   - Revenue  = suma de amount_usd de lo efectivamente cobrado (paid_at not null,
-//                sin reembolsos), incluye pagos aún sin colocar (needs_placement).
+//     sin reembolsos), incluye pagos aún sin colocar (needs_placement).
 func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, error) {
 	rows, err := s.reader().Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
 		       count(*),
-		       count(*) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded'),
-		       count(*) FILTER (WHERE pi.status = 'activated'),
-		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded'), 0)::text
+		       count(*) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded' AND pi.stripe_present IS DISTINCT FROM false),
+		       count(*) FILTER (WHERE pi.status = 'activated' AND pi.stripe_present IS DISTINCT FROM false),
+		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded' AND pi.stripe_present IS DISTINCT FROM false), 0)::text
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1
@@ -152,17 +155,20 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 // mlm.person (identidad del pagador). Otros productos de Stripe NO aparecen aquí
 // porque nunca generan un purchase_intent.
 type SalesTransaction struct {
-	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Plan      string `json:"plan"`
-	AmountUSD string `json:"amount_usd"`
-	FeeUSD    string `json:"fee_usd"`
-	TotalUSD  string `json:"total_usd"`
-	Status    string `json:"status"`
-	Reference string `json:"reference"` // stripe_payment_intent_id
-	PaidAt    string `json:"paid_at"`
+	ID           string `json:"id"`
+	CreatedAt    string `json:"created_at"`
+	Email        string `json:"email"`
+	Name         string `json:"name"`
+	Plan         string `json:"plan"`
+	AmountUSD    string `json:"amount_usd"`
+	FeeUSD       string `json:"fee_usd"`
+	TotalUSD     string `json:"total_usd"`
+	Status       string `json:"status"`
+	Reference    string `json:"reference"` // stripe_payment_intent_id
+	PaidAt       string `json:"paid_at"`
+	ActivatedAt  string `json:"activated_at"`
+	AffiliateID  *int64 `json:"affiliate_id"`   // colocación en el árbol (null = sin colocar)
+	StripeVerify *bool  `json:"stripe_present"` // verificación Stripe live (null = sin verificar)
 }
 
 // SalesTransactions lista las ventas individuales de membresías desde `from`,
@@ -193,7 +199,9 @@ func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q
 		       pk.name,
 		       pi.amount_usd::text, pi.fee_usd::text, (pi.amount_usd + pi.fee_usd)::text,
 		       pi.status, COALESCE(pi.stripe_payment_intent_id, ''),
-		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), '')
+		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
+		       COALESCE(to_char(pi.activated_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
+		       pi.affiliate_id, pi.stripe_present
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1
@@ -210,7 +218,8 @@ func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q
 	for rows.Next() {
 		var t SalesTransaction
 		if err := rows.Scan(&t.ID, &t.CreatedAt, &t.Email, &t.Name, &t.Plan,
-			&t.AmountUSD, &t.FeeUSD, &t.TotalUSD, &t.Status, &t.Reference, &t.PaidAt); err != nil {
+			&t.AmountUSD, &t.FeeUSD, &t.TotalUSD, &t.Status, &t.Reference, &t.PaidAt,
+			&t.ActivatedAt, &t.AffiliateID, &t.StripeVerify); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, t)
@@ -255,6 +264,76 @@ func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Re
 		"limit":  limit,
 		"offset": offset,
 		"since":  time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// VerifyTransactionStripe consulta un intent contra Stripe live y PERSISTE el
+// resultado en stripe_present (true/false). Ids no consultables (sin pi_) dejan
+// stripe_present sin tocar. Devuelve la presencia y el status actual del intent.
+func (s *Store) VerifyTransactionStripe(ctx context.Context, gw *StripeGateway, intentID string) (PaymentIntentPresence, string, error) {
+	var piID, status string
+	err := s.reader().QueryRow(ctx,
+		`SELECT COALESCE(stripe_payment_intent_id, ''), status FROM payments.purchase_intent WHERE id = $1::uuid`,
+		intentID).Scan(&piID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PIPresenceUnknown, "", ErrIntentNotFound
+	}
+	if err != nil {
+		return PIPresenceUnknown, "", fmt.Errorf("verify: load intent: %w", err)
+	}
+	presence, err := gw.VerifyPaymentIntent(piID)
+	if err != nil {
+		return PIPresenceUnknown, status, err
+	}
+	if presence != PIPresenceUnknown {
+		if _, uerr := s.db.Exec(ctx,
+			`UPDATE payments.purchase_intent SET stripe_present = $2, updated_at = now() WHERE id = $1::uuid`,
+			intentID, presence == PIPresent); uerr != nil {
+			return presence, status, fmt.Errorf("verify: persist: %w", uerr)
+		}
+	}
+	return presence, status, nil
+}
+
+// handleAdminSalesVerify: GET /api/admin/sales/verify?id=<intent> — verifica una
+// venta contra Stripe live y persiste el resultado. Lo usa el detalle/timeline
+// del panel para marcar "✓ verificada" / "✗ no encontrada (posible prueba)".
+func (h *Handler) handleAdminSalesVerify(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id_required")
+		return
+	}
+	if h.gw == nil {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_unavailable")
+		return
+	}
+	presence, status, err := h.store.VerifyTransactionStripe(r.Context(), h.gw, id)
+	if errors.Is(err, ErrIntentNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err != nil {
+		h.log.Error().Err(err).Str("intent", id).Msg("sales verify")
+		writeErr(w, http.StatusBadGateway, "stripe_error")
+		return
+	}
+	presenceStr := "unknown"
+	switch presence {
+	case PIPresent:
+		presenceStr = "present"
+	case PIMissing:
+		presenceStr = "missing"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       id,
+		"status":   status,
+		"verified": presence != PIPresenceUnknown,
+		"present":  presence == PIPresent,
+		"presence": presenceStr,
 	})
 }
 

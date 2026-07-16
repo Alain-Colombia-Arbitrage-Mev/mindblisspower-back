@@ -58,12 +58,15 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		return ActivationResult{Status: "replay"}, tx.Commit(ctx)
 	}
 
-	// Marcar pagado (idempotente).
+	// Marcar pagado (idempotente). stripe_present=true: este pago llegó por el
+	// webhook de Stripe live, así que el cargo es real (a diferencia de registros
+	// de prueba sembrados que quedan con stripe_present NULL/false).
 	if _, err := tx.Exec(ctx, `
 		UPDATE payments.purchase_intent
 		   SET status = 'paid',
 		       stripe_payment_intent_id = $2,
 		       paid_at = COALESCE(paid_at, now()),
+		       stripe_present = true,
 		       updated_at = now()
 		 WHERE id = $1 AND status <> 'paid'
 	`, intentID, paymentIntentID); err != nil {
@@ -82,6 +85,8 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 			if cerr := tx.Commit(ctx); cerr != nil {
 				return ActivationResult{}, cerr
 			}
+			// Dinero recibido aunque sin colocar: comprobante + evento (best-effort).
+			s.afterPaymentConfirmed(ctx, intentID, "payment.paid", nil)
 			return ActivationResult{Status: "needs_placement"}, nil
 		}
 		affID, err = autoPlaceAffiliate(ctx, tx, personID, *sponsorID)
@@ -193,11 +198,86 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 	// Nueva compra/activación → cambian inflows, packs y el período → invalidar
 	// los agregados cacheados (el resumen del miembro se refresca por TTL).
 	s.cache.del(ctx, "fin:admin", "solvency")
-	// Evento de dominio (fan-out async vía Redis Stream): notif/analytics/feed.
-	s.cache.PublishEvent(ctx, "payment.activated", map[string]any{
-		"affiliate_id": affID, "package_id": packageID, "pv": pv, "session": sessionID,
-	})
+	// Evento de dominio enriquecido (feed) + comprobante al cliente (best-effort).
+	s.afterPaymentConfirmed(ctx, intentID, "payment.activated", &affID)
 	return ActivationResult{Status: "activated", AffiliateID: affID}, nil
+}
+
+// afterPaymentConfirmed corre TRAS el commit de un pago confirmado (best-effort):
+//  (1) publica el evento de dominio enriquecido (email/plan/monto) para el feed
+//      de actividad del panel, y
+//  (2) envía el comprobante de compra al cliente UNA sola vez (claim atómico
+//      sobre receipt_sent_at, anti-doble-envío; libera el claim si el correo
+//      falla para permitir reintento vía el sweep de reconciliación).
+// Nunca retorna error: cualquier fallo se loguea y no afecta la activación.
+func (s *Store) afterPaymentConfirmed(ctx context.Context, intentID, eventType string, affID *int64) {
+	var email, name, plan, amount, total, ref, paidAt string
+	err := s.db.QueryRow(ctx, `
+		SELECT pi.user_id,
+		       COALESCE((SELECT trim(p.first_name||' '||p.last_name) FROM mlm.person p WHERE p.id = pi.person_id), ''),
+		       pk.name, pi.amount_usd::text, (pi.amount_usd + pi.fee_usd)::text,
+		       COALESCE(pi.stripe_payment_intent_id, ''),
+		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD'), '')
+		  FROM payments.purchase_intent pi
+		  JOIN mlm.package pk ON pk.id = pi.package_id
+		 WHERE pi.id = $1
+	`, intentID).Scan(&email, &name, &plan, &amount, &total, &ref, &paidAt)
+	if err != nil {
+		s.log.Error().Err(err).Str("intent", intentID).Msg("post-pago: cargar datos")
+		return
+	}
+
+	// (1) Evento de dominio enriquecido (fan-out async vía Redis Stream).
+	if s.cache != nil {
+		payload := map[string]any{"email": email, "plan": plan, "amount_usd": amount, "reference": ref}
+		if affID != nil {
+			payload["affiliate_id"] = *affID
+		}
+		s.cache.PublishEvent(ctx, eventType, payload)
+	}
+
+	// (2) Comprobante al cliente — claim atómico anti-doble-envío.
+	ct, err := s.db.Exec(ctx,
+		`UPDATE payments.purchase_intent SET receipt_sent_at = now() WHERE id = $1 AND receipt_sent_at IS NULL`,
+		intentID)
+	if err != nil {
+		s.log.Error().Err(err).Str("intent", intentID).Msg("comprobante: claim")
+		return
+	}
+	if ct.RowsAffected() == 0 {
+		return // ya enviado antes (idempotente)
+	}
+	subject := "Confirmación de tu compra — MindBliss Power"
+	greeting := "Hola"
+	if name != "" {
+		greeting = "Hola " + name
+	}
+	body := fmt.Sprintf(`%s,
+
+¡Gracias por tu compra en MindBliss Power! Tu pago fue confirmado.
+
+  Membresía:  %s
+  Monto:      $%s USD
+  Total:      $%s USD (incluye 1%% de activación)
+  Referencia: %s
+  Fecha:      %s
+
+Ya puedes ingresar a tu panel para ver tu membresía activa.
+
+— Equipo MindBliss Power
+Este es un mensaje automático; por favor no respondas a este correo.`,
+		greeting, plan, amount, total, ref, paidAt)
+
+	if err := s.SendEmail(ctx, []string{email}, subject, body); err != nil {
+		s.log.Error().Err(err).Str("intent", intentID).Str("to", email).Msg("comprobante: envío falló")
+		// Liberar el claim para permitir reintento (p.ej. por el sweep de reconciliación).
+		if _, rerr := s.db.Exec(ctx,
+			`UPDATE payments.purchase_intent SET receipt_sent_at = NULL WHERE id = $1`, intentID); rerr != nil {
+			s.log.Error().Err(rerr).Str("intent", intentID).Msg("comprobante: liberar claim")
+		}
+		return
+	}
+	s.log.Info().Str("intent", intentID).Str("to", email).Msg("comprobante de compra enviado")
 }
 
 // autoPlaceAffiliate coloca al comprador bajo su sponsor siguiendo la regla

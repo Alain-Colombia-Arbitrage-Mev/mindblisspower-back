@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
 )
 
@@ -24,13 +25,18 @@ type Store struct {
 	db        *pgxpool.Pool // PRIMARY (writes + reads si no hay réplica)
 	dbRead    *pgxpool.Pool // réplica de lectura (opcional); nil ⇒ usa db
 	EngineURL string
-	cache     *Cache // nil ⇒ sin caché (degrada a DB)
+	cache     *Cache         // nil ⇒ sin caché (degrada a DB)
+	log       zerolog.Logger // best-effort (comprobantes, eventos); Nop por defecto
 }
 
-func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db, log: zerolog.Nop()} }
 
 // SetCache inyecta la caché Redis (cache-aside). nil = deshabilitada.
 func (s *Store) SetCache(c *Cache) { s.cache = c }
+
+// SetLogger inyecta el logger para tareas best-effort (envío de comprobantes,
+// eventos). Sin él, el Store usa zerolog.Nop().
+func (s *Store) SetLogger(l zerolog.Logger) { s.log = l }
 
 // SetReadPool inyecta la réplica de lectura (READ_DATABASE_URL). Los métodos de
 // SOLO LECTURA (finance/solvency/member) la usan vía reader(); las escrituras
@@ -149,18 +155,18 @@ func splitName(fullName, email string) (string, string) {
 
 // PurchaseIntent representa una fila de payments.purchase_intent.
 type PurchaseIntent struct {
-	ID                 string
-	UserID             string
-	PersonID           int64
-	AffiliateID        *int64
-	SponsorAffiliateID *int64
-	PackageID          int
-	PV                 int
-	AmountUSD          decimal.Decimal
-	FeeUSD             decimal.Decimal
-	TotalCents         int64
-	Currency           string
-	Status             string
+	ID                  string
+	UserID              string
+	PersonID            int64
+	AffiliateID         *int64
+	SponsorAffiliateID  *int64
+	PackageID           int
+	PV                  int
+	AmountUSD           decimal.Decimal
+	FeeUSD              decimal.Decimal
+	TotalCents          int64
+	Currency            string
+	Status              string
 	StripePaymentIntent string
 }
 

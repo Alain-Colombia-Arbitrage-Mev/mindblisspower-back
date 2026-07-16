@@ -1,7 +1,9 @@
 package payments
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	stripe "github.com/stripe/stripe-go/v85"
@@ -137,6 +139,36 @@ func (g *StripeGateway) SearchSalesSince(from time.Time) (StripeSalesTotal, erro
 		return StripeSalesTotal{}, fmt.Errorf("stripe payment_intent search: %w", err)
 	}
 	return total, nil
+}
+
+// PaymentIntentPresence indica el resultado de verificar un cargo contra Stripe.
+type PaymentIntentPresence int
+
+const (
+	PIPresenceUnknown PaymentIntentPresence = iota // id no verificable (vacío / "sess:…" / no "pi_")
+	PIPresent                                      // existe en la cuenta Stripe (live)
+	PIMissing                                      // Stripe respondió resource_missing (posible cargo de PRUEBA)
+)
+
+// VerifyPaymentIntent consulta si un payment_intent existe en la cuenta Stripe
+// (live) del servicio. Un cargo creado en modo TEST —o un id inexistente— da
+// resource_missing ⇒ PIMissing. Ids no consultables (vacío, fallback "sess:…" o
+// que no empiezan con "pi_") ⇒ PIPresenceUnknown, sin llamar a Stripe. Cualquier
+// otro error de red/API se propaga.
+func (g *StripeGateway) VerifyPaymentIntent(piID string) (PaymentIntentPresence, error) {
+	piID = strings.TrimSpace(piID)
+	if piID == "" || !strings.HasPrefix(piID, "pi_") {
+		return PIPresenceUnknown, nil
+	}
+	_, err := paymentintent.Get(piID, nil)
+	if err != nil {
+		var serr *stripe.Error
+		if errors.As(err, &serr) && serr.Code == stripe.ErrorCodeResourceMissing {
+			return PIMissing, nil
+		}
+		return PIPresenceUnknown, fmt.Errorf("stripe payment_intent get: %w", err)
+	}
+	return PIPresent, nil
 }
 
 // SessionPaid consulta a Stripe el estado de una Checkout Session concreta (para

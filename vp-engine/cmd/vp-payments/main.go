@@ -55,6 +55,7 @@ func run() error {
 
 	// Activación inline y atómica: el servicio solo necesita DB + Stripe (sin NATS).
 	store := payments.NewStore(pool)
+	store.SetLogger(logger)         // best-effort: comprobantes de compra, eventos
 	store.EngineURL = cfg.EngineURL // simulador canónico de θ (lock de solvencia)
 	if cfg.ReadDatabaseURL != "" {
 		readPool, rerr := db.Open(rootCtx, cfg.ReadDatabaseURL, cfg.DBMaxConns, cfg.DBConnLifetime)
