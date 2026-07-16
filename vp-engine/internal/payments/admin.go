@@ -4,12 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 )
 
 var ErrNotAdmin = errors.New("not an admin")
+
+// mpCodeRe reconoce el código canónico MP{affiliateID} (decimal) generado por
+// GetMemberContext, para poder resolverlo por id aunque invitation_link no se
+// haya persistido todavía.
+var mpCodeRe = regexp.MustCompile(`^[Mm][Pp]([0-9]+)$`)
 
 // IsAdmin verifica si el email corresponde a un admin (mlm.person.is_admin).
 func (s *Store) IsAdmin(ctx context.Context, email string) (bool, error) {
@@ -205,22 +213,56 @@ func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offse
 	return out, total, rows.Err()
 }
 
-// ResolveSponsorByCode mapea un código de referido (invitation_link) al
-// affiliate_id del referidor. Devuelve nil si no existe.
+// ResolveSponsorByCode mapea un código de referido al affiliate_id del referidor.
+// Robusto ante las distintas formas del código para que un link compartido
+// siempre resuelva:
+//  1. match exacto de invitation_link (códigos legacy "@handle" y "MP{id}" persistidos)
+//  2. match case-insensitive de invitation_link (por si el @handle vino con otra caja)
+//  3. fallback "MP{affiliateID}" → affiliate.id (código canónico aunque no se haya persistido)
+//
+// Devuelve nil si el código no corresponde a ningún afiliado.
 func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, error) {
+	code = strings.TrimSpace(code)
 	if code == "" {
 		return nil, nil
 	}
+
+	// 1) match exacto
 	var id int64
 	err := s.db.QueryRow(ctx,
 		`SELECT id FROM mlm.affiliate WHERE invitation_link = $1 LIMIT 1`, code).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+	if err == nil {
+		return &id, nil
 	}
-	if err != nil {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("resolve sponsor by code: %w", err)
 	}
-	return &id, nil
+
+	// 2) match case-insensitive
+	err = s.db.QueryRow(ctx,
+		`SELECT id FROM mlm.affiliate WHERE lower(invitation_link) = lower($1) LIMIT 1`, code).Scan(&id)
+	if err == nil {
+		return &id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("resolve sponsor by code (ci): %w", err)
+	}
+
+	// 3) fallback MP{affiliateID}
+	if m := mpCodeRe.FindStringSubmatch(code); m != nil {
+		if n, perr := strconv.ParseInt(m[1], 10, 64); perr == nil {
+			err = s.db.QueryRow(ctx,
+				`SELECT id FROM mlm.affiliate WHERE id = $1`, n).Scan(&id)
+			if err == nil {
+				return &id, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("resolve sponsor by mp code: %w", err)
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 // AdminWithdrawal es una solicitud de retiro para el panel.
