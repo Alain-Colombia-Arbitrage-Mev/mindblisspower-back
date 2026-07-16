@@ -178,6 +178,17 @@ func LoadConfig() (*Config, error) {
 	if c.CognitoIssuer == "" && c.CognitoUserPoolID != "" && c.AWSRegion != "" {
 		c.CognitoIssuer = fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", c.AWSRegion, c.CognitoUserPoolID)
 	}
+	// Derivación inversa: si el issuer sí está configurado (verificador de id-token
+	// activo) pero falta COGNITO_USER_POOL_ID, extrae el pool del issuer. Sin esto
+	// el admin de Cognito no se inicializa y el ban NO deshabilita el login, solo
+	// aplica el flag de DB. El pool es el último segmento del issuer:
+	// https://cognito-idp.<region>.amazonaws.com/<poolID>
+	if c.CognitoUserPoolID == "" && c.CognitoIssuer != "" {
+		iss := strings.TrimRight(c.CognitoIssuer, "/")
+		if i := strings.LastIndex(iss, "/"); i >= 0 && i+1 < len(iss) {
+			c.CognitoUserPoolID = iss[i+1:]
+		}
+	}
 	return c, nil
 }
 
