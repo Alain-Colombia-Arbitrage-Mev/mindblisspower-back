@@ -79,7 +79,7 @@ func (s *Store) SalesTotalsSince(ctx context.Context, from time.Time) (DBSalesTo
 	err := s.reader().QueryRow(ctx, `
 		SELECT count(*), COALESCE(sum(total_cents), 0)
 		  FROM payments.purchase_intent
-		 WHERE status = 'activated' AND created_at >= $1`, from).Scan(&t.Count, &t.GrossCents)
+		 WHERE status = 'activated' AND stripe_present IS DISTINCT FROM false AND created_at >= $1`, from).Scan(&t.Count, &t.GrossCents)
 	if err != nil {
 		return DBSalesTotal{}, fmt.Errorf("sales totals: %w", err)
 	}

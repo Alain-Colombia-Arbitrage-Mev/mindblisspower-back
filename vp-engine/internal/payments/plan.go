@@ -192,15 +192,15 @@ func (s *Store) ProposePlanChange(ctx context.Context, adminEmail string, change
 
 // PlanSimulation es el resultado de proyectar θ bajo una config propuesta.
 type PlanSimulation struct {
-	Theta             float64 `json:"theta"`
-	TreasuryAlpha     float64 `json:"treasury_alpha"`
-	InflowsWindowUSD  float64 `json:"inflows_window_usd"`
-	RoiObligationUSD  float64 `json:"roi_obligation_usd"`   // ROI de CDs activos, prorrateado a la ventana
+	Theta              float64 `json:"theta"`
+	TreasuryAlpha      float64 `json:"treasury_alpha"`
+	InflowsWindowUSD   float64 `json:"inflows_window_usd"`
+	RoiObligationUSD   float64 `json:"roi_obligation_usd"`   // ROI de CDs activos, prorrateado a la ventana
 	BonusObligationUSD float64 `json:"bonus_obligation_usd"` // referido+regalía sobre inflows de la ventana
-	ProjectedOutflows float64 `json:"projected_outflows_usd"`
-	Floor             float64 `json:"floor"`
-	Solvent           bool    `json:"solvent"` // forward Y canónico (si corrió) ≥ floor
-	Note              string  `json:"note"`
+	ProjectedOutflows  float64 `json:"projected_outflows_usd"`
+	Floor              float64 `json:"floor"`
+	Solvent            bool    `json:"solvent"` // forward Y canónico (si corrió) ≥ floor
+	Note               string  `json:"note"`
 	// Canónico: simulador Monte Carlo del plan binario (motor). Solo corre si el
 	// cambio toca α/caps/fundador y el motor está accesible.
 	CanonicalRan     bool    `json:"canonical_ran"`
@@ -312,14 +312,14 @@ func (s *Store) SimulatePlanTheta(ctx context.Context, changes map[string]any) (
 
 // PlanProposal es una fila del listado de propuestas de cambio de plan.
 type PlanProposal struct {
-	ID            int64           `json:"id"`
-	Status        string          `json:"status"`
-	Initiator     string          `json:"initiator"`
-	InitiatorRzn  string          `json:"initiator_reason"`
-	Payload       json.RawMessage `json:"payload"`
-	Approver      string          `json:"approver,omitempty"`
-	ApproverRzn   string          `json:"approver_reason,omitempty"`
-	CreatedAt     string          `json:"created_at"`
+	ID           int64           `json:"id"`
+	Status       string          `json:"status"`
+	Initiator    string          `json:"initiator"`
+	InitiatorRzn string          `json:"initiator_reason"`
+	Payload      json.RawMessage `json:"payload"`
+	Approver     string          `json:"approver,omitempty"`
+	ApproverRzn  string          `json:"approver_reason,omitempty"`
+	CreatedAt    string          `json:"created_at"`
 }
 
 // ListPlanProposals lista las propuestas de cambio de comisiones (recientes).

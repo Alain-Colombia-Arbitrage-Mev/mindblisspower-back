@@ -25,9 +25,9 @@ type MoneyflowRow struct {
 // AdminFinance es el tablero financiero de la red: todo el dinero en un vistazo.
 type AdminFinance struct {
 	// Entrante (caja real vía nuestro checkout Stripe).
-	InflowsUSD string `json:"inflows_usd"`     // Σ(amount+fee) de compras paid|activated
-	PacksPaid  int64  `json:"packs_paid"`      // # de packs pagados
-	FeesUSD    string `json:"fees_usd"`        // Σ del 1% de manejo
+	InflowsUSD string `json:"inflows_usd"` // Σ(amount+fee) de compras paid|activated
+	PacksPaid  int64  `json:"packs_paid"`  // # de packs pagados
+	FeesUSD    string `json:"fees_usd"`    // Σ del 1% de manejo
 
 	// Distribuido a la red (ledger).
 	CommissionsDistributedUSD string `json:"commissions_distributed_usd"` // Σ créditos a miembros (todos los bonos)
@@ -56,13 +56,14 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 		return f, nil
 	}
 
-	// Entrante real (nuestro endpoint Stripe).
+	// Entrante real (nuestro endpoint Stripe). Excluye cargos no verificados en
+	// Stripe live (stripe_present=false, p.ej. pruebas) para no inflar ingresos.
 	if err := s.reader().QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount_usd + fee_usd),0)::text,
 		       COALESCE(count(*),0),
 		       COALESCE(SUM(fee_usd),0)::text
 		  FROM payments.purchase_intent
-		 WHERE status IN ('paid','activated')
+		 WHERE status IN ('paid','activated') AND stripe_present IS DISTINCT FROM false
 	`).Scan(&f.InflowsUSD, &f.PacksPaid, &f.FeesUSD); err != nil {
 		return f, fmt.Errorf("inflows: %w", err)
 	}
@@ -102,7 +103,7 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	// Tesorería ≈ entrante − comisiones distribuidas − retiros pagados.
 	if err := s.reader().QueryRow(ctx, `
 		SELECT (
-		  (SELECT COALESCE(SUM(amount_usd+fee_usd),0) FROM payments.purchase_intent WHERE status IN ('paid','activated'))
+		  (SELECT COALESCE(SUM(amount_usd+fee_usd),0) FROM payments.purchase_intent WHERE status IN ('paid','activated') AND stripe_present IS DISTINCT FROM false)
 		  - (SELECT COALESCE(SUM(wm.amount),0) FROM mlm.wallet_movement wm JOIN mlm.concept c ON c.id=wm.concept_id
 		      WHERE wm.amount > 0 AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform'))
 		  - (SELECT COALESCE(SUM(amount_usd),0) FROM mlm.withdrawal_request WHERE status='paid')
@@ -153,13 +154,13 @@ type SolvencyPeriod struct {
 	PeriodID         int64   `json:"period_id"`
 	PeriodStart      string  `json:"period_start"`
 	PeriodEnd        string  `json:"period_end"`
-	Status           string  `json:"status"`            // open | closing | closed | aborted
+	Status           string  `json:"status"` // open | closing | closed | aborted
 	InflowsUSD       string  `json:"inflows_usd"`
 	ProjectedUSD     string  `json:"projected_outflows_usd"`
-	Theta            *string `json:"theta,omitempty"`   // null si no cerrado
+	Theta            *string `json:"theta,omitempty"` // null si no cerrado
 	TotalPaidUSD     *string `json:"total_paid_usd,omitempty"`
 	MaxPayoutUSD     string  `json:"max_payout_allowed_usd"`
-	SolvencyStatus   string  `json:"solvency_status"`   // pending | OK | BREACH
+	SolvencyStatus   string  `json:"solvency_status"` // pending | OK | BREACH
 	PayoutPctInflows *string `json:"payout_pct_of_inflow,omitempty"`
 }
 

@@ -10,12 +10,12 @@ import (
 
 // ScenarioResult holds the Monte Carlo sustainability output for one scenario.
 type ScenarioResult struct {
-	Name       string             `json:"name"`        // "modesto" | "estres"
+	Name       string             `json:"name"` // "modesto" | "estres"
 	Periods    int                `json:"periods"`
-	Solvent    bool               `json:"solvent"`      // SolvencyBreaches == 0
+	Solvent    bool               `json:"solvent"` // SolvencyBreaches == 0
 	WorstTheta float64            `json:"worst_theta"`
-	Margin     float64            `json:"margin"`       // CompanyFundRate
-	Streams    map[string]float64 `json:"streams"`      // binario/yield/puntos/rango/referido/regalia
+	Margin     float64            `json:"margin"`  // CompanyFundRate
+	Streams    map[string]float64 `json:"streams"` // binario/yield/puntos/rango/referido/regalia
 }
 
 // RunSustainabilityScenarios executes the Monte Carlo simulator for two
@@ -128,8 +128,8 @@ func (s *Store) RunSustainabilityScenarios(ctx context.Context) ([]ScenarioResul
 	base.GrowthRate = 0.01 // modesto: 1% growth per period
 
 	stress := base
-	stress.GrowthRate = 0.05                            // agresivo: 5% per period
-	stress.InflowShock = map[int]float64{26: 0.5}       // −50% shock at mid-run (period 26)
+	stress.GrowthRate = 0.05                      // agresivo: 5% per period
+	stress.InflowShock = map[int]float64{26: 0.5} // −50% shock at mid-run (period 26)
 
 	// ── 4. Run each scenario ─────────────────────────────────────────────────
 	modResult, err := runScenario(base, "modesto")

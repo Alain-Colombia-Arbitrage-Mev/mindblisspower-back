@@ -15,10 +15,10 @@ import (
 type MemberPayment struct {
 	PurchaseID  string `json:"purchase_id"`
 	PackageID   int    `json:"package_id"`
-	AmountUSD   string `json:"amount_usd"`   // valor del pack
-	FeeUSD      string `json:"fee_usd"`      // 1% activación
-	TotalUSD    string `json:"total_usd"`    // cobrado
-	Status      string `json:"status"`       // created|paid|activated|needs_placement|...
+	AmountUSD   string `json:"amount_usd"` // valor del pack
+	FeeUSD      string `json:"fee_usd"`    // 1% activación
+	TotalUSD    string `json:"total_usd"`  // cobrado
+	Status      string `json:"status"`     // created|paid|activated|needs_placement|...
 	CreatedAt   string `json:"created_at"`
 	PaidAt      string `json:"paid_at,omitempty"`
 	ActivatedAt string `json:"activated_at,omitempty"`
@@ -34,19 +34,19 @@ type MemberWithdrawal struct {
 
 // MemberSummary: lo que ve el miembro — sus pagos + posición + comisiones.
 type MemberSummary struct {
-	Positioned            bool               `json:"positioned"`
-	AffiliateID           *int64             `json:"affiliate_id,omitempty"`
-	Rank                  string             `json:"rank"`                  // nombre del rango actual (mlm.rank.name_es) o '—'
-	Plan                  string             `json:"plan"`                  // perfil: passive_investor | network
-	JoinedAt              string             `json:"joined_at"`             // fecha de ingreso (affiliate.created_at, o person.created_at si no posicionado)
-	WalletBalanceUSD      string             `json:"wallet_balance_usd"`    // balance total del ledger (no congelado): disponible + madurando
-	ActivePackages        int                `json:"active_packages"`
-	Payments              []MemberPayment    `json:"payments"`
-	CommissionAvailable   string             `json:"commission_available_usd"`    // madurado, no congelado
-	CommissionMaturing    string             `json:"commission_maturing_usd"`     // créditos que aún no maduran
-	AvailableForWithdrawal string            `json:"available_for_withdrawal_usd"` // disponible − retiros pendientes
-	MinWithdrawalUSD      int                `json:"min_withdrawal_usd"`
-	Withdrawals           []MemberWithdrawal `json:"withdrawals"`
+	Positioned             bool               `json:"positioned"`
+	AffiliateID            *int64             `json:"affiliate_id,omitempty"`
+	Rank                   string             `json:"rank"`               // nombre del rango actual (mlm.rank.name_es) o '—'
+	Plan                   string             `json:"plan"`               // perfil: passive_investor | network
+	JoinedAt               string             `json:"joined_at"`          // fecha de ingreso (affiliate.created_at, o person.created_at si no posicionado)
+	WalletBalanceUSD       string             `json:"wallet_balance_usd"` // balance total del ledger (no congelado): disponible + madurando
+	ActivePackages         int                `json:"active_packages"`
+	Payments               []MemberPayment    `json:"payments"`
+	CommissionAvailable    string             `json:"commission_available_usd"`     // madurado, no congelado
+	CommissionMaturing     string             `json:"commission_maturing_usd"`      // créditos que aún no maduran
+	AvailableForWithdrawal string             `json:"available_for_withdrawal_usd"` // disponible − retiros pendientes
+	MinWithdrawalUSD       int                `json:"min_withdrawal_usd"`
+	Withdrawals            []MemberWithdrawal `json:"withdrawals"`
 }
 
 // memberContext es el par cacheado nombre+código de referido.

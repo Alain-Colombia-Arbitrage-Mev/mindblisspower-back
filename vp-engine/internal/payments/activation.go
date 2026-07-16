@@ -204,11 +204,13 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 }
 
 // afterPaymentConfirmed corre TRAS el commit de un pago confirmado (best-effort):
-//  (1) publica el evento de dominio enriquecido (email/plan/monto) para el feed
-//      de actividad del panel, y
-//  (2) envía el comprobante de compra al cliente UNA sola vez (claim atómico
-//      sobre receipt_sent_at, anti-doble-envío; libera el claim si el correo
-//      falla para permitir reintento vía el sweep de reconciliación).
+//
+//	(1) publica el evento de dominio enriquecido (email/plan/monto) para el feed
+//	    de actividad del panel, y
+//	(2) envía el comprobante de compra al cliente UNA sola vez (claim atómico
+//	    sobre receipt_sent_at, anti-doble-envío; libera el claim si el correo
+//	    falla para permitir reintento vía el sweep de reconciliación).
+//
 // Nunca retorna error: cualquier fallo se loguea y no afecta la activación.
 func (s *Store) afterPaymentConfirmed(ctx context.Context, intentID, eventType string, affID *int64) {
 	var email, name, plan, amount, total, ref, paidAt string

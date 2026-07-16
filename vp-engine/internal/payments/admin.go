@@ -111,8 +111,8 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	var sum AdminSummary
 	rows, err := s.db.Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
-		       COALESCE(count(pi.id) FILTER (WHERE pi.status='activated'),0) AS sold,
-		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated'),0)::text AS revenue
+		       COALESCE(count(pi.id) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0) AS sold,
+		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0)::text AS revenue
 		  FROM mlm.package pk
 		  LEFT JOIN payments.purchase_intent pi ON pi.package_id=pk.id
 		 WHERE pk.is_active
@@ -135,9 +135,11 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 		return sum, err
 	}
 
+	// Excluir cargos no verificados en Stripe live (stripe_present=false, p.ej.
+	// transacciones de prueba) del total de ingresos y ventas.
 	_ = s.db.QueryRow(ctx, `
-		SELECT COALESCE(count(*) FILTER (WHERE status='activated'),0),
-		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated'),0)::text
+		SELECT COALESCE(count(*) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0),
+		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0)::text
 		  FROM payments.purchase_intent`).Scan(&sum.TotalSold, &sum.TotalRevenUSD)
 	_ = s.db.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE blacklisted) FROM mlm.person`).
 		Scan(&sum.TotalUsers, &sum.BlockedUsers)

@@ -11,12 +11,12 @@ import (
 
 func TestSanitizeKYCFileName(t *testing.T) {
 	cases := map[string]string{
-		"cedula frontal.jpg":       "cedula_frontal.jpg",
-		"../../etc/passwd":         "passwd",
-		`C:\docs\ine (2).png`:      "ine_2_.png",
-		"":                         "document",
-		"   ":                      "document",
-		"ñandú-ID.pdf":             "and_-ID.pdf",
+		"cedula frontal.jpg":              "cedula_frontal.jpg",
+		"../../etc/passwd":                "passwd",
+		`C:\docs\ine (2).png`:             "ine_2_.png",
+		"":                                "document",
+		"   ":                             "document",
+		"ñandú-ID.pdf":                    "and_-ID.pdf",
 		strings.Repeat("a", 200) + ".pdf": strings.Repeat("a", 76) + ".pdf",
 	}
 	for in, want := range cases {
@@ -28,10 +28,10 @@ func TestSanitizeKYCFileName(t *testing.T) {
 
 func TestValidateKYCUpload(t *testing.T) {
 	cases := []struct {
-		name                      string
-		docType, fileName, mime   string
-		size                      int64
-		want                      string
+		name                    string
+		docType, fileName, mime string
+		size                    int64
+		want                    string
 	}{
 		{"ok pdf", "identity_card", "ine.pdf", "application/pdf", 1024, ""},
 		{"ok jpg selfie", "selfie", "selfie.jpg", "image/jpeg", 5 << 20, ""},

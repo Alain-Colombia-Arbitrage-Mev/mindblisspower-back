@@ -49,9 +49,9 @@ var (
 
 // KYCS3 encapsula el presignado y verificación de objetos en el bucket KYC.
 type KYCS3 struct {
-	bucket   string
-	client   *s3.Client
-	presign  *s3.PresignClient
+	bucket  string
+	client  *s3.Client
+	presign *s3.PresignClient
 }
 
 // NewKYCS3 crea el cliente S3 con la cadena de credenciales estándar

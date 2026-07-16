@@ -83,7 +83,7 @@ const (
 
 // alertSignal carries the evaluated state for a single signal in one run.
 type alertSignal struct {
-	name        string  // signal column value
+	name        string // signal column value
 	breached    bool
 	severity    string  // "warning" | "critical" — meaningful only when breached
 	metricValue float64 // the raw measured value
@@ -128,10 +128,10 @@ func (s *Store) EvaluateAlerts(ctx context.Context) (int, error) {
 
 	// Signal 3 — rank_avalanche
 	signals = append(signals, evalRankAvalanche(rx.ExposureRatio, rx.LiabilityUSD.InexactFloat64(), map[string]any{
-		"exposure_ratio":        rx.ExposureRatio,
-		"liability_usd":         rx.LiabilityUSD.String(),
-		"pending_installments":  rx.PendingInstallments,
-		"rank_liability_ratio":  m.RankLiabilityRatio,
+		"exposure_ratio":       rx.ExposureRatio,
+		"liability_usd":        rx.LiabilityUSD.String(),
+		"pending_installments": rx.PendingInstallments,
+		"rank_liability_ratio": m.RankLiabilityRatio,
 	}))
 
 	// Signal 4 — leg_skew
