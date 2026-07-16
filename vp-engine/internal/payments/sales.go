@@ -21,15 +21,25 @@ type SalesRow struct {
 	RevenueUSD string `json:"revenue_usd"` // suma de intents activados
 }
 
-// SalesReport agrega ventas por paquete desde `from`. Revenue = solo intents
-// ACTIVADOS (dinero confirmado por webhook + paquete colocado).
+// SalesReport agrega ventas por paquete (solo membresías MindBliss: la fuente es
+// payments.purchase_intent, que únicamente contiene checkouts del PACK MINDBLISS)
+// desde `from`.
+//   - Created  = total de intents iniciados en el período.
+//   - Paid     = intents con dinero recibido (paid_at IS NOT NULL, excluye
+//                reembolsados). NOTA: antes filtraba por status='paid', pero ese
+//                estado es transitorio dentro de la tx de activación (created→
+//                paid→activated) y casi nunca queda persistido → la columna daba
+//                0 aunque hubiera ventas. paid_at es la señal correcta.
+//   - Activated= intents colocados en el árbol (status='activated').
+//   - Revenue  = suma de amount_usd de lo efectivamente cobrado (paid_at not null,
+//                sin reembolsos), incluye pagos aún sin colocar (needs_placement).
 func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, error) {
 	rows, err := s.reader().Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
-		       count(*) FILTER (WHERE pi.status = 'created'),
-		       count(*) FILTER (WHERE pi.status = 'paid'),
+		       count(*),
+		       count(*) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded'),
 		       count(*) FILTER (WHERE pi.status = 'activated'),
-		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.status = 'activated'), 0)::text
+		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded'), 0)::text
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1
@@ -133,6 +143,118 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 		"days":  days,
 		"rows":  report,
 		"since": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// SalesTransaction es una venta individual de membresía MindBliss para el
+// reporte de transacciones del panel. Fuente: payments.purchase_intent (solo
+// checkouts del PACK MINDBLISS), unido a mlm.package (nombre del plan) y
+// mlm.person (identidad del pagador). Otros productos de Stripe NO aparecen aquí
+// porque nunca generan un purchase_intent.
+type SalesTransaction struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+	Plan      string `json:"plan"`
+	AmountUSD string `json:"amount_usd"`
+	FeeUSD    string `json:"fee_usd"`
+	TotalUSD  string `json:"total_usd"`
+	Status    string `json:"status"`
+	Reference string `json:"reference"` // stripe_payment_intent_id
+	PaidAt    string `json:"paid_at"`
+}
+
+// SalesTransactions lista las ventas individuales de membresías desde `from`,
+// con filtro opcional por status y búsqueda por email (user_id). Paginado.
+func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q string, limit, offset int) ([]SalesTransaction, int64, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.reader().QueryRow(ctx, `
+		SELECT count(*)
+		  FROM payments.purchase_intent pi
+		  JOIN mlm.package pk ON pk.id = pi.package_id
+		 WHERE pi.created_at >= $1
+		   AND ($2 = '' OR pi.status = $2)
+		   AND ($3 = '' OR lower(pi.user_id) ILIKE '%'||lower($3)||'%')
+	`, from, status, q).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count sales transactions: %w", err)
+	}
+	rows, err := s.reader().Query(ctx, `
+		SELECT pi.id::text,
+		       to_char(pi.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		       pi.user_id,
+		       COALESCE((SELECT trim(p.first_name||' '||p.last_name) FROM mlm.person p WHERE p.id = pi.person_id), ''),
+		       pk.name,
+		       pi.amount_usd::text, pi.fee_usd::text, (pi.amount_usd + pi.fee_usd)::text,
+		       pi.status, COALESCE(pi.stripe_payment_intent_id, ''),
+		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), '')
+		  FROM payments.purchase_intent pi
+		  JOIN mlm.package pk ON pk.id = pi.package_id
+		 WHERE pi.created_at >= $1
+		   AND ($2 = '' OR pi.status = $2)
+		   AND ($3 = '' OR lower(pi.user_id) ILIKE '%'||lower($3)||'%')
+		 ORDER BY pi.created_at DESC
+		 LIMIT $4 OFFSET $5
+	`, from, status, q, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list sales transactions: %w", err)
+	}
+	defer rows.Close()
+	out := []SalesTransaction{}
+	for rows.Next() {
+		var t SalesTransaction
+		if err := rows.Scan(&t.ID, &t.CreatedAt, &t.Email, &t.Name, &t.Plan,
+			&t.AmountUSD, &t.FeeUSD, &t.TotalUSD, &t.Status, &t.Reference, &t.PaidAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, t)
+	}
+	return out, total, rows.Err()
+}
+
+// handleAdminSalesTransactions: GET /api/admin/sales/transactions?days=30&status=&q=&limit=&offset=
+// — detalle de ventas individuales de membresías para el panel (quién pagó, plan,
+// monto, estado, referencia). Solo membresías MindBliss (ver SalesTransactions).
+func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	qv := r.URL.Query()
+	days := atoiDefault(qv.Get("days"), 30)
+	if days < 1 || days > 365 {
+		days = 30
+	}
+	status := strings.TrimSpace(qv.Get("status"))
+	switch status {
+	case "", "created", "paid", "activated", "needs_placement", "failed", "expired", "refunded":
+	default:
+		status = "" // status desconocido ⇒ sin filtro (no error)
+	}
+	q := strings.TrimSpace(qv.Get("q"))
+	limit := atoiDefault(qv.Get("limit"), 25)
+	offset := atoiDefault(qv.Get("offset"), 0)
+	from := time.Now().UTC().AddDate(0, 0, -days)
+
+	txns, total, err := h.store.SalesTransactions(r.Context(), from, status, q, limit, offset)
+	if err != nil {
+		h.log.Error().Err(err).Msg("sales transactions")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from":   from.Format("2006-01-02"),
+		"days":   days,
+		"rows":   txns,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+		"since":  time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
