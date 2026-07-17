@@ -77,7 +77,10 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 	var fn, ln string
 	var affID *int64
 	var inv *string
-	err = s.reader().QueryRow(ctx, `
+	// Lee del PRIMARIO (no de la réplica): este valor se cachea 10min, así que un
+	// lag de réplica cachearía un nombre viejo justo tras editarlo. El costo es
+	// mínimo porque solo se ejecuta en cache-miss.
+	err = s.db.QueryRow(ctx, `
 		SELECT trim(p.first_name), trim(p.last_name), a.id, a.invitation_link
 		  FROM mlm.person p
 		  LEFT JOIN mlm.affiliate a ON a.person_id = p.id
