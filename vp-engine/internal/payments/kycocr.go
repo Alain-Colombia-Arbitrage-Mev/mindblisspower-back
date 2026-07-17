@@ -273,11 +273,14 @@ func evaluateDoc(docType string, ocr DocOCR, firstName, lastName string) (string
 		return "approved", "", nil
 
 	default:
-		return "approved", "", nil
+		// Tipo desconocido ⇒ fail-closed (no auto-aprobar).
+		return "rejected", "Tipo de documento no reconocido. Sube el documento solicitado.", nil
 	}
 }
 
 // evalIDDoc valida vigencia + coincidencia de nombre para documentos de identidad.
+// Fail-closed: sin nombre en el perfil no se puede verificar identidad ⇒ NO se
+// aprueba (se pide completar el nombre antes).
 func evalIDDoc(ocr DocOCR, firstName, lastName, expiredMsg, mismatchMsg string) (string, string, *time.Time) {
 	var expiry *time.Time
 	if t, ok := parseOCRDate(ocr.ExpiryDate); ok {
@@ -286,11 +289,11 @@ func evalIDDoc(ocr DocOCR, firstName, lastName, expiredMsg, mismatchMsg string) 
 		}
 		expiry = &t
 	}
-	// Si el perfil tiene nombre, exigimos coincidencia; si no, no bloqueamos por eso.
-	if strings.TrimSpace(firstName) != "" || strings.TrimSpace(lastName) != "" {
-		if !nameMatches(firstName, lastName, ocr.GivenNames, ocr.Surname) {
-			return "rejected", mismatchMsg, expiry
-		}
+	if strings.TrimSpace(firstName) == "" && strings.TrimSpace(lastName) == "" {
+		return "rejected", "Completa tu nombre en tu perfil antes de subir tu documento de identidad.", expiry
+	}
+	if !nameMatches(firstName, lastName, ocr.GivenNames, ocr.Surname) {
+		return "rejected", mismatchMsg, expiry
 	}
 	return "approved", "", expiry
 }
