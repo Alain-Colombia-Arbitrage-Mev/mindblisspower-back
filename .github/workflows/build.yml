@@ -10,8 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pin a la misma línea de Bun que usa app/Dockerfile (oven/bun:1.2). Evita
+      # depender de resolver "latest" contra la API de GitHub (que rompió el CI
+      # durante una degradación de api.github.com) y da builds reproducibles.
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: latest }
+        with: { bun-version: "1.2" }
       - run: bun install --frozen-lockfile
         working-directory: app
       - run: bun run typecheck
