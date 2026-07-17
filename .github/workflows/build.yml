@@ -23,6 +23,8 @@ jobs:
         with: { go-version-file: vp-engine/go.mod }
       - run: go build ./...
         working-directory: vp-engine
+      - run: go vet ./...
+        working-directory: vp-engine
   push:
     needs: test
     runs-on: ubuntu-latest

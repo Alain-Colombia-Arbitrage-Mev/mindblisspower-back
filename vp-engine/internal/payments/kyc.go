@@ -142,6 +142,8 @@ func validateKYCUpload(docType, fileName, mime string, size int64) string {
 
 type kycUploadURLRequest struct {
 	Email    string `json:"email"`
+	Name     string `json:"name"`  // del id token — para auto-provisión de mlm.person
+	Phone    string `json:"phone"` // del id token
 	DocType  string `json:"doc_type"`
 	FileName string `json:"file_name"`
 	Mime     string `json:"mime"`
@@ -173,6 +175,14 @@ func (h *Handler) handleKYCUploadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg := validateKYCUpload(req.DocType, req.FileName, req.Mime, req.Size); msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	// Auto-provisión: un usuario registrado en Cognito que aún no compró no tiene
+	// fila mlm.person, y el KYC (identidad) debe poder hacerse ANTES de comprar.
+	// EnsurePerson es idempotente (solo lee si ya existe), así que no bloqueamos.
+	if _, err := h.store.EnsurePerson(r.Context(), email, req.Name, req.Phone); err != nil {
+		h.log.Error().Err(err).Msg("kyc ensure person")
+		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	buyer, err := h.store.ResolveBuyer(r.Context(), email)

@@ -923,7 +923,16 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, err := h.store.GetMemberSummary(r.Context(), email)
 	if errors.Is(err, ErrBuyerNotFound) {
-		writeErr(w, http.StatusNotFound, "buyer_not_found")
+		// Usuario registrado en Cognito que aún no está provisionado en la red
+		// (no ha comprado). No es un error: devolvemos un resumen vacío 200 para
+		// que el perfil cargue sin un 404 en consola. El KYC/checkout crean la
+		// persona cuando corresponde.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"positioned":         false,
+			"kyc_status":         "not_started",
+			"wallet_balance_usd": "0.00",
+			"active_packages":    0,
+		})
 		return
 	}
 	if err != nil {
