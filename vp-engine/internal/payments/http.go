@@ -152,6 +152,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/block", h.handleAdminBlock)
 	mux.HandleFunc("/api/admin/blacklist", h.handleAdminBlacklist)
 	mux.HandleFunc("/api/admin/blacklist/remove", h.handleAdminBlacklistRemove)
+	mux.HandleFunc("/api/admin/admins", h.handleAdminAdmins)
+	mux.HandleFunc("/api/admin/admins/role", h.handleAdminAdminRole)
 	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
 	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
 	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
