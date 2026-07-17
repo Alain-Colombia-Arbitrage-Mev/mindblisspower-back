@@ -18,8 +18,8 @@ import (
 // Al confirmar un documento doc_type='passport', se descarga de S3 y se envía a
 // un modelo de visión (OpenRouter) que extrae los campos. Si es un pasaporte,
 // está vigente y el nombre coincide con la persona ⇒ el KYC se AUTO-APRUEBA.
-// Fallo de reglas ⇒ rechazado con motivo. Error del modelo / ilegible ⇒ queda
-// in_review para revisión manual de admin (nunca auto-rechazo por fallo técnico).
+// Fallo de reglas o error del modelo/ilegible ⇒ RECHAZADO con motivo claro para
+// que el miembro pueda volver a subir el documento (habilita re-subida).
 
 const kycOCREndpoint = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -129,7 +129,7 @@ func (k *KYCOCR) Analyze(ctx context.Context, data []byte, mime string) (Passpor
 			{Role: "user", Content: parts},
 		},
 		Temperature:    0,
-		MaxTokens:      700,
+		MaxTokens:      500,
 		ResponseFormat: map[string]any{"type": "json_object"},
 	}
 	payload, err := json.Marshal(body)
@@ -208,19 +208,19 @@ func (h *Handler) runPassportOCR(docID, personID int64) {
 	doc, err := h.store.KYCDocForOCR(ctx, docID, personID)
 	if err != nil {
 		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr load doc")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "no se pudo cargar el documento", nil, "")
+		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos procesar el documento. Vuelve a intentarlo.", nil, "")
 		return
 	}
 	data, err := h.kyc.GetObject(ctx, doc.StorageKey)
 	if err != nil {
 		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr download")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "no se pudo leer el archivo", nil, "")
+		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos leer el archivo. Vuelve a subirlo.", nil, "")
 		return
 	}
 	ocr, raw, err := h.kycocr.Analyze(ctx, data, doc.MimeType)
 	if err != nil {
 		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr analyze")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "no se pudo validar automáticamente", nil, raw)
+		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos verificar tu pasaporte automáticamente. Vuelve a subir una foto clara y vigente.", nil, raw)
 		return
 	}
 
@@ -240,14 +240,13 @@ func evaluatePassport(ocr PassportOCR, firstName, lastName string) (string, stri
 	}
 	expiry, ok := parseOCRDate(ocr.ExpiryDate)
 	if !ok {
-		// vigencia ilegible ⇒ revisión manual, no rechazo.
-		return "error", "No se pudo leer la fecha de vencimiento; en revisión.", nil
+		return "error", "No pudimos leer la fecha de vencimiento. Vuelve a subir una foto clara del pasaporte.", nil
 	}
 	if !expiry.After(time.Now().UTC()) {
 		return "rejected", "El pasaporte está vencido.", &expiry
 	}
 	if strings.TrimSpace(firstName) == "" && strings.TrimSpace(lastName) == "" {
-		return "error", "Faltan datos del perfil para validar identidad; en revisión.", &expiry
+		return "error", "Completa tu nombre en el perfil y vuelve a subir el pasaporte.", &expiry
 	}
 	if !nameMatches(firstName, lastName, ocr.GivenNames, ocr.Surname) {
 		return "rejected", "Los datos del pasaporte no coinciden con tu perfil.", &expiry
@@ -427,14 +426,21 @@ func (s *Store) FinishKYCOCR(ctx context.Context, docID, personID int64, decisio
 		`, personID); err != nil {
 			return fmt.Errorf("ocr reject person: %w", err)
 		}
-	default: // "error" ⇒ el documento queda in_review para revisión manual
+	default: // "error" ⇒ no se pudo validar automáticamente. Se RECHAZA (no se
+		// deja en in_review) para que el miembro pueda volver a subir el documento.
 		if _, err := tx.Exec(ctx, `
 			UPDATE mlm.kyc_document
-			   SET ocr_status='error', ocr_reason=$3, ocr_result=$4::jsonb,
-			       ocr_checked_at=now(), updated_at=now()
+			   SET status='rejected', ocr_status='error', reject_reason=$3, ocr_reason=$3,
+			       ocr_result=$4::jsonb, ocr_checked_at=now(), reviewed_at=now(), updated_at=now()
 			 WHERE id=$1 AND person_id=$2
 		`, docID, personID, reason, raw); err != nil {
 			return fmt.Errorf("ocr error doc: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE mlm.person SET kyc_status='rejected', updated_at=now()
+			 WHERE id=$1 AND kyc_status NOT IN ('approved')
+		`, personID); err != nil {
+			return fmt.Errorf("ocr error person: %w", err)
 		}
 	}
 	return tx.Commit(ctx)
