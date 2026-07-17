@@ -162,6 +162,7 @@ func (h *Handler) handleMemberProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "person_not_found")
 		return
 	}
-	saved, _ := h.store.GetProfile(r.Context(), email)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profile": saved})
+	// Devolvemos los valores recién guardados (no una re-lectura de la réplica,
+	// que por lag podría devolver datos viejos o vacíos y parecer que no guardó).
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profile": prof})
 }

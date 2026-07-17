@@ -78,12 +78,16 @@ func TestEvaluateDoc(t *testing.T) {
 		t.Errorf("valid passport should approve, got %s exp=%v", d, exp)
 	}
 
-	// cédula: tipo correcto + nombre coincide → approved
-	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "national_id", GivenNames: "ANA", Surname: "PEREZ"}, "Ana", "Perez"); d != "approved" {
+	// cédula: tipo correcto + vigente + nombre coincide → approved
+	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "national_id", ExpiryDate: future, GivenNames: "ANA", Surname: "PEREZ"}, "Ana", "Perez"); d != "approved" {
 		t.Errorf("national_id with matching name should approve, got %s", d)
 	}
+	// cédula sin fecha de vencimiento legible → rechazado (fail-closed)
+	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "national_id", GivenNames: "ANA", Surname: "PEREZ"}, "Ana", "Perez"); d != "rejected" {
+		t.Errorf("id without readable expiry should reject (fail-closed), got %s", d)
+	}
 	// cédula sin nombre en el perfil → rechazado (fail-closed, no se puede verificar)
-	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "national_id"}, "", ""); d != "rejected" {
+	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "national_id", ExpiryDate: future}, "", ""); d != "rejected" {
 		t.Errorf("id with empty profile name should reject (fail-closed), got %s", d)
 	}
 	// default: tipo desconocido → rechazado (fail-closed)

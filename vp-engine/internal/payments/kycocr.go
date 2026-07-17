@@ -211,31 +211,37 @@ func (h *Handler) runDocOCR(docID, personID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
 	defer cancel()
 
+	// Los fallos TÉCNICOS (doc no encontrado, S3, modelo) NO rechazan al miembro:
+	// se deja el doc 'pending' para que el sweep reintente (y se rinde tras un
+	// máximo, rechazando solo el DOC, no a la persona).
 	doc, err := h.store.KYCDocForOCR(ctx, docID, personID)
 	if err != nil {
-		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr load doc")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos procesar el documento. Vuelve a intentarlo.", nil, "")
+		if errors.Is(err, ErrKYCDocNotFound) {
+			return // el doc no existe (o lag de réplica) → no tocamos a la persona
+		}
+		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr load doc (retryable)")
+		_ = h.store.TouchKYCOCRPending(ctx, docID)
 		return
 	}
 	data, err := h.kyc.GetObject(ctx, doc.StorageKey)
 	if err != nil {
-		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr download")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos leer el archivo. Vuelve a subirlo.", nil, "")
+		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr download (retryable)")
+		_ = h.store.TouchKYCOCRPending(ctx, docID)
 		return
 	}
 	ocr, raw, err := h.kycocr.Analyze(ctx, data, doc.MimeType)
 	if err != nil {
-		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr analyze")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos verificar el documento automáticamente. Vuelve a subir una foto clara.", nil, raw)
+		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr analyze (retryable)")
+		_ = h.store.TouchKYCOCRPending(ctx, docID)
 		return
 	}
 
 	decision, reason, expiry := evaluateDoc(doc.DocType, ocr, doc.FirstName, doc.LastName)
-	if err := h.store.FinishKYCOCR(ctx, docID, personID, decision, reason, expiry, raw); err != nil {
+	if err := h.store.FinishKYCOCR(ctx, docID, personID, doc.DocType, decision, reason, expiry, raw); err != nil {
 		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr finish")
 		return
 	}
-	h.log.Info().Int64("doc", docID).Str("decision", decision).Str("reason", reason).Msg("kyc ocr done")
+	h.log.Info().Int64("doc", docID).Str("type", doc.DocType).Str("decision", decision).Str("reason", reason).Msg("kyc ocr done")
 }
 
 // evaluateDoc aplica reglas según el TIPO de documento. Cada tipo se valida
@@ -282,20 +288,22 @@ func evaluateDoc(docType string, ocr DocOCR, firstName, lastName string) (string
 // Fail-closed: sin nombre en el perfil no se puede verificar identidad ⇒ NO se
 // aprueba (se pide completar el nombre antes).
 func evalIDDoc(ocr DocOCR, firstName, lastName, expiredMsg, mismatchMsg string) (string, string, *time.Time) {
-	var expiry *time.Time
-	if t, ok := parseOCRDate(ocr.ExpiryDate); ok {
-		if !t.After(time.Now().UTC()) {
-			return "rejected", expiredMsg, &t
-		}
-		expiry = &t
+	expiry, ok := parseOCRDate(ocr.ExpiryDate)
+	if !ok {
+		// Fail-closed: sin fecha de vencimiento legible no podemos verificar la
+		// vigencia ⇒ rechazar (re-subible), no aprobar.
+		return "rejected", "No pudimos leer la fecha de vencimiento. Vuelve a subir una foto clara y completa del documento.", nil
+	}
+	if !expiry.After(time.Now().UTC()) {
+		return "rejected", expiredMsg, &expiry
 	}
 	if strings.TrimSpace(firstName) == "" && strings.TrimSpace(lastName) == "" {
-		return "rejected", "Completa tu nombre en tu perfil antes de subir tu documento de identidad.", expiry
+		return "rejected", "Completa tu nombre en tu perfil antes de subir tu documento de identidad.", &expiry
 	}
 	if !nameMatches(firstName, lastName, ocr.GivenNames, ocr.Surname) {
-		return "rejected", mismatchMsg, expiry
+		return "rejected", mismatchMsg, &expiry
 	}
-	return "approved", "", expiry
+	return "approved", "", &expiry
 }
 
 func parseOCRDate(s string) (time.Time, bool) {
@@ -421,17 +429,28 @@ func (s *Store) KYCDocForOCR(ctx context.Context, docID, personID int64) (kycOCR
 	return d, nil
 }
 
-// FinishKYCOCR aplica el resultado del OCR de forma transaccional.
-// decision: "approved" | "rejected" | "error".
-func (s *Store) FinishKYCOCR(ctx context.Context, docID, personID int64, decision, reason string, expiry *time.Time, rawJSON string) error {
+// primaryIDDoc: tipos que prueban identidad. SOLO estos cambian person.kyc_status
+// (un comprobante de domicilio o una selfie NO aprueban/rechazan al miembro; de lo
+// contrario cualquier documento débil aprobaría el KYC sin verificar la identidad).
+func primaryIDDoc(docType string) bool {
+	return docType == "passport" || docType == "identity_card"
+}
+
+// FinishKYCOCR aplica el resultado del OCR de un documento de forma transaccional.
+// decision: "approved" | "rejected" (decisiones de CONTENIDO; los fallos técnicos
+// se reintentan, no llegan aquí). El estado del MIEMBRO (person.kyc_status) solo
+// lo cambian los documentos de identidad primaria (pasaporte/cédula).
+func (s *Store) FinishKYCOCR(ctx context.Context, docID, personID int64, docType, decision, reason string, expiry *time.Time, rawJSON string) error {
+	// Guardamos ocr_result solo si es JSON válido (evita error ::jsonb → rollback).
 	var raw any
-	if strings.TrimSpace(rawJSON) != "" {
-		raw = rawJSON // jsonb acepta el texto JSON directamente
+	if s := strings.TrimSpace(rawJSON); s != "" && json.Valid([]byte(s)) {
+		raw = s
 	}
 	var expiryArg any
 	if expiry != nil {
 		expiryArg = expiry.Format("2006-01-02")
 	}
+	primary := primaryIDDoc(docType)
 
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -439,8 +458,7 @@ func (s *Store) FinishKYCOCR(ctx context.Context, docID, personID int64, decisio
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	switch decision {
-	case "approved":
+	if decision == "approved" {
 		if _, err := tx.Exec(ctx, `
 			UPDATE mlm.kyc_document
 			   SET status='approved', ocr_status='passed', ocr_reason=NULL,
@@ -450,13 +468,15 @@ func (s *Store) FinishKYCOCR(ctx context.Context, docID, personID int64, decisio
 		`, docID, personID, raw, expiryArg); err != nil {
 			return fmt.Errorf("ocr approve doc: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE mlm.person SET kyc_status='approved', updated_at=now()
-			 WHERE id=$1 AND kyc_status <> 'approved'
-		`, personID); err != nil {
-			return fmt.Errorf("ocr approve person: %w", err)
+		if primary {
+			if _, err := tx.Exec(ctx, `
+				UPDATE mlm.person SET kyc_status='approved', updated_at=now()
+				 WHERE id=$1 AND kyc_status <> 'approved'
+			`, personID); err != nil {
+				return fmt.Errorf("ocr approve person: %w", err)
+			}
 		}
-	case "rejected":
+	} else { // "rejected"
 		if _, err := tx.Exec(ctx, `
 			UPDATE mlm.kyc_document
 			   SET status='rejected', ocr_status='failed', reject_reason=$3, ocr_reason=$3,
@@ -466,30 +486,41 @@ func (s *Store) FinishKYCOCR(ctx context.Context, docID, personID int64, decisio
 		`, docID, personID, reason, raw, expiryArg); err != nil {
 			return fmt.Errorf("ocr reject doc: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE mlm.person SET kyc_status='rejected', updated_at=now()
-			 WHERE id=$1 AND kyc_status NOT IN ('approved')
-		`, personID); err != nil {
-			return fmt.Errorf("ocr reject person: %w", err)
-		}
-	default: // "error" ⇒ no se pudo validar automáticamente. Se RECHAZA (no se
-		// deja en in_review) para que el miembro pueda volver a subir el documento.
-		if _, err := tx.Exec(ctx, `
-			UPDATE mlm.kyc_document
-			   SET status='rejected', ocr_status='error', reject_reason=$3, ocr_reason=$3,
-			       ocr_result=$4::jsonb, ocr_checked_at=now(), reviewed_at=now(), updated_at=now()
-			 WHERE id=$1 AND person_id=$2
-		`, docID, personID, reason, raw); err != nil {
-			return fmt.Errorf("ocr error doc: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE mlm.person SET kyc_status='rejected', updated_at=now()
-			 WHERE id=$1 AND kyc_status NOT IN ('approved')
-		`, personID); err != nil {
-			return fmt.Errorf("ocr error person: %w", err)
+		if primary {
+			if _, err := tx.Exec(ctx, `
+				UPDATE mlm.person SET kyc_status='rejected', updated_at=now()
+				 WHERE id=$1 AND kyc_status NOT IN ('approved')
+			`, personID); err != nil {
+				return fmt.Errorf("ocr reject person: %w", err)
+			}
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// TouchKYCOCRPending bumpea updated_at de un doc pendiente (para espaciar los
+// reintentos del sweep ante fallos técnicos, sin rechazar nada).
+func (s *Store) TouchKYCOCRPending(ctx context.Context, docID int64) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE mlm.kyc_document SET updated_at=now() WHERE id=$1 AND ocr_status='pending'`, docID)
+	return err
+}
+
+// GiveUpStaleKYCOCR rechaza (re-subible) los documentos que llevan demasiado
+// tiempo 'pending' (fallo técnico persistente). NO toca person.kyc_status: un
+// problema de infraestructura no debe rechazar al miembro.
+func (s *Store) GiveUpStaleKYCOCR(ctx context.Context, maxAge time.Duration) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE mlm.kyc_document
+		   SET status='rejected', ocr_status='error',
+		       reject_reason='No pudimos verificar tu documento automáticamente. Vuelve a subir una foto clara.',
+		       ocr_reason='give up after retries', ocr_checked_at=now(), reviewed_at=now(), updated_at=now()
+		 WHERE ocr_status='pending' AND created_at < now() - $1::interval
+	`, fmt.Sprintf("%d seconds", int(maxAge.Seconds())))
+	if err != nil {
+		return 0, fmt.Errorf("give up stale kyc ocr: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // PendingKYCOCR es un documento con OCR pendiente (para el sweep de respaldo).
@@ -498,15 +529,18 @@ type PendingKYCOCR struct {
 	PersonID int64
 }
 
-// PendingKYCOCRDocs lista documentos con ocr_status='pending' más viejos que
-// minAge (para reprocesar tras un reinicio). Limita a limit filas.
-func (s *Store) PendingKYCOCRDocs(ctx context.Context, minAge time.Duration, limit int) ([]PendingKYCOCR, error) {
+// PendingKYCOCRDocs lista documentos con ocr_status='pending' entre minAge y
+// maxAge de antigüedad (reintento acotado; los más viejos que maxAge los abandona
+// GiveUpStaleKYCOCR). Limita a limit filas.
+func (s *Store) PendingKYCOCRDocs(ctx context.Context, minAge, maxAge time.Duration, limit int) ([]PendingKYCOCR, error) {
 	rows, err := s.reader().Query(ctx, `
 		SELECT id, person_id FROM mlm.kyc_document
-		 WHERE ocr_status='pending' AND updated_at < now() - $1::interval
+		 WHERE ocr_status='pending'
+		   AND updated_at < now() - $1::interval
+		   AND created_at  > now() - $2::interval
 		 ORDER BY created_at
-		 LIMIT $2
-	`, fmt.Sprintf("%d seconds", int(minAge.Seconds())), limit)
+		 LIMIT $3
+	`, fmt.Sprintf("%d seconds", int(minAge.Seconds())), fmt.Sprintf("%d seconds", int(maxAge.Seconds())), limit)
 	if err != nil {
 		return nil, fmt.Errorf("pending kyc ocr: %w", err)
 	}
@@ -522,13 +556,22 @@ func (s *Store) PendingKYCOCRDocs(ctx context.Context, minAge time.Duration, lim
 	return out, rows.Err()
 }
 
-// RunKYCOCRSweep reprocesa pasaportes con OCR pendiente atascados (resiliencia a
-// reinicios). Best-effort; los errores se registran, no se propagan.
+// RunKYCOCRSweep reprocesa documentos con OCR pendiente (resiliencia a fallos
+// técnicos/reinicios). Corre de forma síncrona en una sola goroutine (no se
+// solapa). Best-effort; los errores se registran, no se propagan.
 func (h *Handler) RunKYCOCRSweep(ctx context.Context) {
 	if h.kyc == nil || h.kycocr == nil || !h.kycocr.Enabled() {
 		return
 	}
-	docs, err := h.store.PendingKYCOCRDocs(ctx, 2*time.Minute, 20)
+	// 1) Rendirse con los pendientes de >20min (fallo técnico persistente):
+	//    rechaza solo el DOCUMENTO (re-subible), sin tocar a la persona.
+	if n, err := h.store.GiveUpStaleKYCOCR(ctx, 20*time.Minute); err != nil {
+		h.log.Error().Err(err).Msg("kyc ocr give up stale")
+	} else if n > 0 {
+		h.log.Info().Int64("count", n).Msg("kyc ocr gave up on stale docs")
+	}
+	// 2) Reintentar los recientes (2min–20min), espaciados por updated_at.
+	docs, err := h.store.PendingKYCOCRDocs(ctx, 2*time.Minute, 20*time.Minute, 20)
 	if err != nil {
 		h.log.Error().Err(err).Msg("kyc ocr sweep list")
 		return
