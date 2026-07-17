@@ -286,10 +286,10 @@ func (h *Handler) handleKYCConfirm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Filtro OCR: los pasaportes se validan automáticamente (es pasaporte +
-	// vigente + datos coinciden ⇒ auto-aprobar). Se dispara en segundo plano;
-	// el confirm responde de inmediato con in_review.
-	h.maybeStartPassportOCR(req.DocumentID, buyer.PersonID)
+	// Filtro OCR: TODOS los documentos se validan automáticamente (tipo correcto +
+	// legible + datos coinciden ⇒ auto-aprobar; si no, rechazado con motivo para
+	// re-subir). Se dispara en segundo plano; el confirm responde con in_review.
+	h.maybeStartDocOCR(req.DocumentID, buyer.PersonID)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "in_review"})
 }
 

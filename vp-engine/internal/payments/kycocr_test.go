@@ -53,28 +53,53 @@ func TestParseOCRDate(t *testing.T) {
 	}
 }
 
-func TestEvaluatePassport(t *testing.T) {
+func TestEvaluateDoc(t *testing.T) {
 	future := time.Now().UTC().AddDate(2, 0, 0).Format("2006-01-02")
 	past := time.Now().UTC().AddDate(-1, 0, 0).Format("2006-01-02")
 
+	// ilegible → rechazado
+	if d, _, _ := evaluateDoc("passport", DocOCR{IsReadable: false}, "Ana", "Perez"); d != "rejected" {
+		t.Errorf("unreadable should reject, got %s", d)
+	}
 	// no es pasaporte
-	if d, _, _ := evaluatePassport(PassportOCR{IsPassport: false}, "Ana", "Perez"); d != "rejected" {
+	if d, _, _ := evaluateDoc("passport", DocOCR{IsReadable: true, DocumentKind: "national_id"}, "Ana", "Perez"); d != "rejected" {
 		t.Errorf("non-passport should reject, got %s", d)
 	}
-	// vencido
-	if d, _, _ := evaluatePassport(PassportOCR{IsPassport: true, ExpiryDate: past, GivenNames: "ANA", Surname: "PEREZ"}, "Ana", "Perez"); d != "rejected" {
+	// pasaporte vencido
+	if d, _, _ := evaluateDoc("passport", DocOCR{IsReadable: true, DocumentKind: "passport", ExpiryDate: past, GivenNames: "ANA", Surname: "PEREZ"}, "Ana", "Perez"); d != "rejected" {
 		t.Errorf("expired should reject, got %s", d)
 	}
-	// vigencia ilegible → error (manual)
-	if d, _, _ := evaluatePassport(PassportOCR{IsPassport: true, ExpiryDate: "", GivenNames: "ANA", Surname: "PEREZ"}, "Ana", "Perez"); d != "error" {
-		t.Errorf("unreadable expiry should be error, got %s", d)
-	}
 	// datos no coinciden
-	if d, _, _ := evaluatePassport(PassportOCR{IsPassport: true, ExpiryDate: future, GivenNames: "JUAN", Surname: "LOPEZ"}, "Ana", "Perez"); d != "rejected" {
+	if d, _, _ := evaluateDoc("passport", DocOCR{IsReadable: true, DocumentKind: "passport", ExpiryDate: future, GivenNames: "JUAN", Surname: "LOPEZ"}, "Ana", "Perez"); d != "rejected" {
 		t.Errorf("name mismatch should reject, got %s", d)
 	}
-	// todo OK → approved
-	if d, _, exp := evaluatePassport(PassportOCR{IsPassport: true, ExpiryDate: future, GivenNames: "ANA MARIA", Surname: "PEREZ GOMEZ"}, "Ana", "Perez"); d != "approved" || exp == nil {
+	// pasaporte OK → approved
+	if d, _, exp := evaluateDoc("passport", DocOCR{IsReadable: true, DocumentKind: "passport", ExpiryDate: future, GivenNames: "ANA MARIA", Surname: "PEREZ GOMEZ"}, "Ana", "Perez"); d != "approved" || exp == nil {
 		t.Errorf("valid passport should approve, got %s exp=%v", d, exp)
+	}
+
+	// cédula: tipo correcto → approved (sin nombre en perfil no bloquea)
+	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "national_id"}, "", ""); d != "approved" {
+		t.Errorf("national_id should approve, got %s", d)
+	}
+	// cédula: tipo incorrecto → rechazado
+	if d, _, _ := evaluateDoc("identity_card", DocOCR{IsReadable: true, DocumentKind: "address_proof"}, "", ""); d != "rejected" {
+		t.Errorf("wrong kind for id should reject, got %s", d)
+	}
+	// comprobante con dirección → approved
+	if d, _, _ := evaluateDoc("proof_address", DocOCR{IsReadable: true, DocumentKind: "address_proof", HasAddress: true}, "", ""); d != "approved" {
+		t.Errorf("address proof should approve, got %s", d)
+	}
+	// comprobante sin dirección → rechazado
+	if d, _, _ := evaluateDoc("proof_address", DocOCR{IsReadable: true, DocumentKind: "address_proof", HasAddress: false}, "", ""); d != "rejected" {
+		t.Errorf("no-address proof should reject, got %s", d)
+	}
+	// selfie sosteniendo doc → approved
+	if d, _, _ := evaluateDoc("selfie", DocOCR{IsReadable: true, PersonHoldingDoc: true}, "", ""); d != "approved" {
+		t.Errorf("selfie holding doc should approve, got %s", d)
+	}
+	// selfie sin doc → rechazado
+	if d, _, _ := evaluateDoc("selfie", DocOCR{IsReadable: true, PersonHoldingDoc: false}, "", ""); d != "rejected" {
+		t.Errorf("selfie without doc should reject, got %s", d)
 	}
 }

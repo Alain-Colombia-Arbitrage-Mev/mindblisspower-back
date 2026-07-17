@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// KYC OCR — filtro de validación automática de pasaportes.
+// KYC OCR — validación automática de CUALQUIER documento KYC.
 // Al confirmar un documento doc_type='passport', se descarga de S3 y se envía a
 // un modelo de visión (OpenRouter) que extrae los campos. Si es un pasaporte,
 // está vigente y el nombre coincide con la persona ⇒ el KYC se AUTO-APRUEBA.
@@ -51,18 +51,17 @@ func (k *KYCOCR) Enabled() bool { return k != nil && k.apiKey != "" }
 // SetKYCOCR inyecta el cliente OCR. nil ⇒ los pasaportes quedan in_review manual.
 func (h *Handler) SetKYCOCR(k *KYCOCR) { h.kycocr = k }
 
-// PassportOCR es la extracción estructurada que devuelve el modelo.
-type PassportOCR struct {
-	IsPassport   bool    `json:"is_passport"`
-	DocumentType string  `json:"document_type"`
-	Surname      string  `json:"surname"`
-	GivenNames   string  `json:"given_names"`
-	PassportNo   string  `json:"passport_number"`
-	Nationality  string  `json:"nationality"`
-	DateOfBirth  string  `json:"date_of_birth"`
-	ExpiryDate   string  `json:"expiry_date"`
-	MRZPresent   bool    `json:"mrz_present"`
-	Confidence   float64 `json:"confidence"`
+// DocOCR es la extracción estructurada que devuelve el modelo para CUALQUIER
+// tipo de documento KYC (pasaporte, cédula/ID, comprobante de domicilio, selfie).
+type DocOCR struct {
+	DocumentKind     string  `json:"document_kind"`           // passport|national_id|drivers_license|address_proof|selfie_with_id|other
+	IsReadable       bool    `json:"is_readable"`             // la imagen es clara y legible
+	Surname          string  `json:"surname"`                 // apellidos (docs de identidad)
+	GivenNames       string  `json:"given_names"`             // nombres
+	ExpiryDate       string  `json:"expiry_date"`             // vigencia (docs de identidad), YYYY-MM-DD
+	HasAddress       bool    `json:"has_address"`             // comprobante de domicilio con dirección
+	PersonHoldingDoc bool    `json:"person_holding_document"` // selfie sosteniendo un documento
+	Confidence       float64 `json:"confidence"`
 }
 
 // ── OpenRouter (visión) ──────────────────────────────────────────────────────
@@ -102,15 +101,22 @@ type ocrResponse struct {
 	} `json:"error"`
 }
 
-const ocrSystemPrompt = `Eres un verificador de documentos de identidad. Recibes la imagen de un documento y devuelves ÚNICAMENTE un objeto JSON válido, sin texto adicional ni markdown, con exactamente estas claves:
-{"is_passport": bool, "document_type": string, "surname": string, "given_names": string, "passport_number": string, "nationality": string, "date_of_birth": "YYYY-MM-DD", "expiry_date": "YYYY-MM-DD", "mrz_present": bool, "confidence": number}
-Reglas: is_passport=true solo si el documento es claramente un pasaporte (no cédula, licencia u otro). Usa el formato ISO YYYY-MM-DD para las fechas; si una fecha no es legible, usa "". surname = apellidos, given_names = nombres. Si no puedes leer el documento, pon is_passport=false y confidence baja.`
+const ocrSystemPrompt = `Eres un verificador de documentos KYC. Recibes la imagen de un documento y devuelves ÚNICAMENTE un objeto JSON válido, sin texto adicional ni markdown, con exactamente estas claves:
+{"document_kind": string, "is_readable": bool, "surname": string, "given_names": string, "expiry_date": "YYYY-MM-DD", "has_address": bool, "person_holding_document": bool, "confidence": number}
+Reglas:
+- document_kind: clasifica la imagen en uno de: "passport" (pasaporte), "national_id" (cédula/DNI/INE/documento nacional de identidad), "drivers_license" (licencia de conducir), "address_proof" (recibo de servicios o estado de cuenta bancario con dirección), "selfie_with_id" (foto de una persona sosteniendo un documento), "other" (cualquier otra cosa, o ilegible).
+- is_readable=true solo si la imagen es clara, real y se pueden leer los datos (no borrosa, no recortada, no una captura de pantalla falsa).
+- surname/given_names: apellidos/nombres si es un documento de identidad; si no aplica, "".
+- expiry_date: vigencia en ISO YYYY-MM-DD si es visible; si no, "".
+- has_address=true si es un comprobante con una dirección física legible.
+- person_holding_document=true si se ve claramente a una persona sosteniendo un documento de identidad.
+- confidence: 0..1. Si no puedes leer o es sospechosa, is_readable=false y confidence baja.`
 
 // Analyze envía el documento al modelo de visión y devuelve la extracción + el
 // JSON crudo. Soporta imágenes (image_url) y PDF (file).
-func (k *KYCOCR) Analyze(ctx context.Context, data []byte, mime string) (PassportOCR, string, error) {
+func (k *KYCOCR) Analyze(ctx context.Context, data []byte, mime string) (DocOCR, string, error) {
 	if !k.Enabled() {
-		return PassportOCR{}, "", errors.New("kyc ocr not configured")
+		return DocOCR{}, "", errors.New("kyc ocr not configured")
 	}
 	b64 := base64.StdEncoding.EncodeToString(data)
 	dataURL := fmt.Sprintf("data:%s;base64,%s", mime, b64)
@@ -134,11 +140,11 @@ func (k *KYCOCR) Analyze(ctx context.Context, data []byte, mime string) (Passpor
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return PassportOCR{}, "", err
+		return DocOCR{}, "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kycOCREndpoint, bytes.NewReader(payload))
 	if err != nil {
-		return PassportOCR{}, "", err
+		return DocOCR{}, "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+k.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -147,27 +153,27 @@ func (k *KYCOCR) Analyze(ctx context.Context, data []byte, mime string) (Passpor
 
 	resp, err := k.httpClient.Do(req)
 	if err != nil {
-		return PassportOCR{}, "", err
+		return DocOCR{}, "", err
 	}
 	defer resp.Body.Close()
 
 	var decoded ocrResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return PassportOCR{}, "", fmt.Errorf("ocr decode: %w", err)
+		return DocOCR{}, "", fmt.Errorf("ocr decode: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if decoded.Error.Message != "" {
-			return PassportOCR{}, "", fmt.Errorf("openrouter %s: %s", resp.Status, decoded.Error.Message)
+			return DocOCR{}, "", fmt.Errorf("openrouter %s: %s", resp.Status, decoded.Error.Message)
 		}
-		return PassportOCR{}, "", fmt.Errorf("openrouter %s", resp.Status)
+		return DocOCR{}, "", fmt.Errorf("openrouter %s", resp.Status)
 	}
 	if len(decoded.Choices) == 0 {
-		return PassportOCR{}, "", errors.New("ocr empty response")
+		return DocOCR{}, "", errors.New("ocr empty response")
 	}
 	raw := stripJSONFence(decoded.Choices[0].Message.Content)
-	var out PassportOCR
+	var out DocOCR
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return PassportOCR{}, raw, fmt.Errorf("ocr parse: %w", err)
+		return DocOCR{}, raw, fmt.Errorf("ocr parse: %w", err)
 	}
 	return out, raw, nil
 }
@@ -183,9 +189,9 @@ func stripJSONFence(s string) string {
 
 // ── Orquestación ─────────────────────────────────────────────────────────────
 
-// maybeStartPassportOCR marca el pasaporte como OCR pendiente y lanza el análisis
-// en segundo plano. No-op si el OCR no está configurado o el doc no es pasaporte.
-func (h *Handler) maybeStartPassportOCR(docID, personID int64) {
+// maybeStartDocOCR marca el documento como OCR pendiente y lanza el análisis
+// en segundo plano. No-op si el OCR no está configurado.
+func (h *Handler) maybeStartDocOCR(docID, personID int64) {
 	if h.kyc == nil || h.kycocr == nil || !h.kycocr.Enabled() {
 		return
 	}
@@ -195,13 +201,13 @@ func (h *Handler) maybeStartPassportOCR(docID, personID int64) {
 		return
 	}
 	if n == 0 {
-		return // no es pasaporte o ya fue procesado
+		return // ya fue procesado o no está in_review
 	}
-	go h.runPassportOCR(docID, personID)
+	go h.runDocOCR(docID, personID)
 }
 
-// runPassportOCR ejecuta el OCR + validación + transición de estado (best-effort).
-func (h *Handler) runPassportOCR(docID, personID int64) {
+// runDocOCR ejecuta el OCR + validación + transición de estado (best-effort).
+func (h *Handler) runDocOCR(docID, personID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
 	defer cancel()
 
@@ -220,11 +226,11 @@ func (h *Handler) runPassportOCR(docID, personID int64) {
 	ocr, raw, err := h.kycocr.Analyze(ctx, data, doc.MimeType)
 	if err != nil {
 		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr analyze")
-		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos verificar tu pasaporte automáticamente. Vuelve a subir una foto clara y vigente.", nil, raw)
+		_ = h.store.FinishKYCOCR(ctx, docID, personID, "error", "No pudimos verificar el documento automáticamente. Vuelve a subir una foto clara.", nil, raw)
 		return
 	}
 
-	decision, reason, expiry := evaluatePassport(ocr, doc.FirstName, doc.LastName)
+	decision, reason, expiry := evaluateDoc(doc.DocType, ocr, doc.FirstName, doc.LastName)
 	if err := h.store.FinishKYCOCR(ctx, docID, personID, decision, reason, expiry, raw); err != nil {
 		h.log.Error().Err(err).Int64("doc", docID).Msg("kyc ocr finish")
 		return
@@ -232,26 +238,61 @@ func (h *Handler) runPassportOCR(docID, personID int64) {
 	h.log.Info().Int64("doc", docID).Str("decision", decision).Str("reason", reason).Msg("kyc ocr done")
 }
 
-// evaluatePassport aplica las reglas: es pasaporte + vigente + nombre coincide.
-// Devuelve ("approved"|"rejected"|"error", motivo, expiry).
-func evaluatePassport(ocr PassportOCR, firstName, lastName string) (string, string, *time.Time) {
-	if !ocr.IsPassport {
-		return "rejected", "El documento no parece ser un pasaporte.", nil
+// evaluateDoc aplica reglas según el TIPO de documento. Cada tipo se valida
+// automáticamente (es real/legible y del tipo correcto) y se aprueba o rechaza
+// con un motivo claro que permite volver a subir.
+// Devuelve ("approved"|"rejected", motivo, expiry).
+func evaluateDoc(docType string, ocr DocOCR, firstName, lastName string) (string, string, *time.Time) {
+	if !ocr.IsReadable {
+		return "rejected", "La imagen no es legible o no parece real. Vuelve a subir una foto clara y completa del documento.", nil
 	}
-	expiry, ok := parseOCRDate(ocr.ExpiryDate)
-	if !ok {
-		return "error", "No pudimos leer la fecha de vencimiento. Vuelve a subir una foto clara del pasaporte.", nil
+
+	switch docType {
+	case "passport":
+		if ocr.DocumentKind != "passport" {
+			return "rejected", "El documento no parece ser un pasaporte. Sube la página principal de tu pasaporte.", nil
+		}
+		return evalIDDoc(ocr, firstName, lastName, "El pasaporte está vencido.", "Los datos del pasaporte no coinciden con tu perfil.")
+
+	case "identity_card":
+		if ocr.DocumentKind != "national_id" && ocr.DocumentKind != "drivers_license" && ocr.DocumentKind != "passport" {
+			return "rejected", "No parece un documento de identidad válido. Sube tu cédula/DNI (frente y reverso).", nil
+		}
+		return evalIDDoc(ocr, firstName, lastName, "El documento de identidad está vencido.", "Los datos del documento no coinciden con tu perfil.")
+
+	case "proof_address":
+		if ocr.DocumentKind != "address_proof" || !ocr.HasAddress {
+			return "rejected", "No parece un comprobante de domicilio con una dirección legible. Sube un recibo o estado de cuenta reciente.", nil
+		}
+		return "approved", "", nil
+
+	case "selfie":
+		if !ocr.PersonHoldingDoc {
+			return "rejected", "No se ve una selfie sosteniendo tu documento. Toma una foto tuya sosteniendo tu identificación.", nil
+		}
+		return "approved", "", nil
+
+	default:
+		return "approved", "", nil
 	}
-	if !expiry.After(time.Now().UTC()) {
-		return "rejected", "El pasaporte está vencido.", &expiry
+}
+
+// evalIDDoc valida vigencia + coincidencia de nombre para documentos de identidad.
+func evalIDDoc(ocr DocOCR, firstName, lastName, expiredMsg, mismatchMsg string) (string, string, *time.Time) {
+	var expiry *time.Time
+	if t, ok := parseOCRDate(ocr.ExpiryDate); ok {
+		if !t.After(time.Now().UTC()) {
+			return "rejected", expiredMsg, &t
+		}
+		expiry = &t
 	}
-	if strings.TrimSpace(firstName) == "" && strings.TrimSpace(lastName) == "" {
-		return "error", "Completa tu nombre en el perfil y vuelve a subir el pasaporte.", &expiry
+	// Si el perfil tiene nombre, exigimos coincidencia; si no, no bloqueamos por eso.
+	if strings.TrimSpace(firstName) != "" || strings.TrimSpace(lastName) != "" {
+		if !nameMatches(firstName, lastName, ocr.GivenNames, ocr.Surname) {
+			return "rejected", mismatchMsg, expiry
+		}
 	}
-	if !nameMatches(firstName, lastName, ocr.GivenNames, ocr.Surname) {
-		return "rejected", "Los datos del pasaporte no coinciden con tu perfil.", &expiry
-	}
-	return "approved", "", &expiry
+	return "approved", "", expiry
 }
 
 func parseOCRDate(s string) (time.Time, bool) {
@@ -329,20 +370,22 @@ func normalizeName(s string) string {
 
 // kycOCRDoc son los datos del documento + persona para correr el OCR.
 type kycOCRDoc struct {
+	DocType    string
 	StorageKey string
 	MimeType   string
 	FirstName  string
 	LastName   string
 }
 
-// MarkKYCOCRPending marca el pasaporte in_review como ocr_status='pending'.
-// Devuelve filas afectadas (0 ⇒ no es pasaporte o ya procesado).
+// MarkKYCOCRPending marca CUALQUIER documento in_review como ocr_status='pending'
+// (todos los tipos se validan automáticamente por OCR, no solo el pasaporte).
+// Devuelve filas afectadas (0 ⇒ ya procesado o no está in_review).
 func (s *Store) MarkKYCOCRPending(ctx context.Context, docID, personID int64) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE mlm.kyc_document
 		   SET ocr_status = 'pending', updated_at = now()
 		 WHERE id = $1 AND person_id = $2
-		   AND doc_type = 'passport' AND status = 'in_review' AND ocr_status = 'skipped'
+		   AND status = 'in_review' AND ocr_status = 'skipped'
 	`, docID, personID)
 	if err != nil {
 		return 0, fmt.Errorf("mark kyc ocr pending: %w", err)
@@ -350,16 +393,16 @@ func (s *Store) MarkKYCOCRPending(ctx context.Context, docID, personID int64) (i
 	return tag.RowsAffected(), nil
 }
 
-// KYCDocForOCR devuelve storage_key + mime + nombres del titular.
+// KYCDocForOCR devuelve doc_type + storage_key + mime + nombres del titular.
 func (s *Store) KYCDocForOCR(ctx context.Context, docID, personID int64) (kycOCRDoc, error) {
 	var d kycOCRDoc
 	var first, last *string
 	err := s.db.QueryRow(ctx, `
-		SELECT k.storage_key, k.mime_type, trim(p.first_name), trim(p.last_name)
+		SELECT k.doc_type, k.storage_key, k.mime_type, trim(p.first_name), trim(p.last_name)
 		  FROM mlm.kyc_document k
 		  JOIN mlm.person p ON p.id = k.person_id
 		 WHERE k.id = $1 AND k.person_id = $2
-	`, docID, personID).Scan(&d.StorageKey, &d.MimeType, &first, &last)
+	`, docID, personID).Scan(&d.DocType, &d.StorageKey, &d.MimeType, &first, &last)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, ErrKYCDocNotFound
 	}
@@ -488,6 +531,6 @@ func (h *Handler) RunKYCOCRSweep(ctx context.Context) {
 		return
 	}
 	for _, d := range docs {
-		h.runPassportOCR(d.DocID, d.PersonID)
+		h.runDocOCR(d.DocID, d.PersonID)
 	}
 }
