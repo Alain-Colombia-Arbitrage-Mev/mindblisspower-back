@@ -11,3 +11,9 @@ services:
     network_mode: host
     env_file: [/run/vicionpower/vp-payments.env]
     stop_grace_period: 20s
+  vp-withdrawals:
+    image: ${REGISTRY}/vp/vp-withdrawals:${IMAGE_TAG}
+    restart: unless-stopped
+    network_mode: host
+    env_file: [/run/vicionpower/vp-withdrawals.env]
+    stop_grace_period: 20s

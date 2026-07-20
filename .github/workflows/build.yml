@@ -34,6 +34,7 @@ jobs:
           - { repo: vp/api,         context: app,       dockerfile: app/Dockerfile,                    cmd: "" }
           - { repo: vp/vp-engine,   context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile,  cmd: vp-engine }
           - { repo: vp/vp-payments, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile,  cmd: vp-payments }
+          - { repo: vp/vp-withdrawals, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-withdrawals }
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4

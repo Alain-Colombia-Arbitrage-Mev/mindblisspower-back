@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
+
+	"github.com/vicionpower/vp-engine/internal/withdrawals"
 )
 
 // MemberPayment es una compra hecha por el miembro (payments.purchase_intent).
@@ -174,7 +176,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	out.CommissionMaturing = "0.00"
 	out.AvailableForWithdrawal = "0.00"
 	out.WalletBalanceUSD = "0.00"
-	out.MinWithdrawalUSD = MinWithdrawalUSD
+	out.MinWithdrawalUSD = withdrawals.MinWithdrawalUSD
 	out.Withdrawals = []MemberWithdrawal{}
 	if affiliateID == nil {
 		s.cache.set(ctx, ckey, out, memberCacheTTL)
@@ -214,7 +216,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 		  JOIN mlm.wallet  w ON w.id = wm.wallet_id
 		  JOIN mlm.asset   s ON s.id = w.asset_id AND s.symbol = 'USD'
 		 WHERE wm.affiliate_id = $1
-		   AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform')
+		   AND `+withdrawals.ExcludedKindsPredicate+`
 	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing, &out.WalletBalanceUSD)
 	if err != nil {
 		return MemberSummary{}, fmt.Errorf("commissions: %w", err)
