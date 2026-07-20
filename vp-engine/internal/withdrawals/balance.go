@@ -61,6 +61,14 @@ const AvailableBalanceSQL = `
 	 WHERE wm.wallet_id = $1
 	   AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform')`
 
+// ExcludedKindsPredicate es el filtro de conceptos NO retirables, compartido
+// por AvailableBalanceSQL y por los agregados financieros de payments/finance.go
+// y payments/member.go, que necesitan el MISMO filtro dentro de agregaciones
+// distintas (no la consulta completa) — por eso se expone el predicado solo,
+// para concatenar, en vez de forzar esos callers a reusar AvailableBalanceSQL
+// donde no encaja.
+const ExcludedKindsPredicate = `c.kind NOT IN ('package_purchase','platform_fee','inter_platform')`
+
 // PendingWithdrawalsSQL suma los retiros ya solicitados o aprobados y aún no
 // pagados, que reservan saldo. Parámetro $1 = affiliate_id.
 const PendingWithdrawalsSQL = `
