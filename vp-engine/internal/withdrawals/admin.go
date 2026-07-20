@@ -36,6 +36,16 @@ func (s *Store) IsAdmin(ctx context.Context, email string) (bool, error) {
 }
 
 // AdminWithdrawal es una solicitud de retiro en la vista admin.
+//
+// El pago externo es MANUAL: el admin aprieta "Pagar", el sistema debita el
+// BRUTO (amount_usd) y después un humano transfiere el NETO a la cuenta BMP del
+// afiliado. Para poder hacerlo necesita saber cuánto transferir (net_usd) y a
+// qué correo (bmp_email_used) — sin eso, todo el mecanismo del vínculo BMP se
+// pierde justo en el último tramo. bmp_status/bmp_verified_at completan el
+// cuadro: dicen si el candado dejará pagar antes de intentarlo.
+//
+// Los campos se AGREGAN; ninguno reemplaza a los previos. Ver también el
+// contrato congelado de las claves de la RESPUESTA en handleAdminWithdrawals.
 type AdminWithdrawal struct {
 	ID        int64  `json:"id"`
 	Member    string `json:"member"`
@@ -44,6 +54,16 @@ type AdminWithdrawal struct {
 	Status    string `json:"status"`
 	BankInfo  string `json:"bank_info"`
 	CreatedAt string `json:"created_at"`
+
+	// Aritmética del retiro: amount_usd (bruto) = fee_usd + net_usd.
+	FeeUSD string `json:"fee_usd"`
+	NetUSD string `json:"net_usd"`
+
+	// Estado del candado BMP. Vacío ⇒ nunca se verificó (fila histórica o
+	// solicitud creada con el cliente BMP deshabilitado).
+	BMPStatus     string `json:"bmp_status"`
+	BMPEmailUsed  string `json:"bmp_email_used"`
+	BMPVerifiedAt string `json:"bmp_verified_at"`
 }
 
 // ListWithdrawals lista solicitudes (filtrable por status) paginadas.
@@ -61,7 +81,10 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 	rows, err := s.db.Query(ctx, `
 		SELECT wr.id, trim(p.first_name||' '||p.last_name) AS member, p.email,
 		       wr.amount_usd::text, wr.status::text, COALESCE(wr.comments,''),
-		       to_char(wr.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ')
+		       to_char(wr.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		       COALESCE(wr.fee_usd::text,''), COALESCE(wr.net_usd::text,''),
+		       COALESCE(wr.bmp_status,''), COALESCE(wr.bmp_email_used,''),
+		       COALESCE(to_char(wr.bmp_verified_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
 		  FROM mlm.withdrawal_request wr
 		  JOIN mlm.affiliate a ON a.id=wr.affiliate_id
 		  JOIN mlm.person p    ON p.id=a.person_id
@@ -76,7 +99,8 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 	out := []AdminWithdrawal{}
 	for rows.Next() {
 		var w AdminWithdrawal
-		if err := rows.Scan(&w.ID, &w.Member, &w.Email, &w.AmountUSD, &w.Status, &w.BankInfo, &w.CreatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Member, &w.Email, &w.AmountUSD, &w.Status, &w.BankInfo, &w.CreatedAt,
+			&w.FeeUSD, &w.NetUSD, &w.BMPStatus, &w.BMPEmailUsed, &w.BMPVerifiedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, w)
