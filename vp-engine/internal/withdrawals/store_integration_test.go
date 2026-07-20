@@ -152,6 +152,30 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance) VALUES ($1,1,'usd-1',0) RETURNING id`, affID).Scan(&walletID); err != nil {
 		t.Fatalf("wallet: %v", err)
 	}
+	// Saldo real en la wallet. Este test ejercita la MÁQUINA DE TRANSICIONES, y
+	// el retiro se inserta directo (saltándose RequestWithdrawal y su validación
+	// de saldo), así que sin este crédito la wallet queda en 0 y la re-validación
+	// de saldo al pagar rechazaría approved→paid, enmascarando lo que el test
+	// tiene que probar. Mismo criterio que grantFreshBMP más abajo: se neutralizan
+	// los candados ajenos para dejar al guard de transición como único motivo
+	// posible de rechazo.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, active)
+		  VALUES (11,'binary_bonus','Bono','Bonus',1,false,true) ON CONFLICT (id) DO NOTHING`); err != nil {
+		t.Fatalf("seed concepto: %v", err)
+	}
+	var seedTxnID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status)
+		VALUES ('seed:guard','bono test','posted') RETURNING id`).Scan(&seedTxnID); err != nil {
+		t.Fatalf("seed txn: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement
+		  (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		VALUES ($1,$2,$3,11,1000,now(),current_date - 1)`, seedTxnID, walletID, affID); err != nil {
+		t.Fatalf("seed saldo: %v", err)
+	}
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO mlm.withdrawal_request (affiliate_id, wallet_id, amount_usd, status)
 		VALUES ($1,$2,200,'requested') RETURNING id`, affID, walletID).Scan(&wrID); err != nil {
