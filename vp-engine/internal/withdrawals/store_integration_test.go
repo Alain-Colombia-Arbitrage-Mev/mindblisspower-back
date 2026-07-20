@@ -168,19 +168,19 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 		t.Fatalf("status desconocido: err = %v, want ErrInvalidTransition", err)
 	}
 
-	// requested → paid: salto inválido (exige approved antes). Se rechaza, pero
-	// el ERROR que sale es el del candado BMP, no ErrInvalidTransition: los
-	// candados de dinero (baneo, BMP) corren ANTES de abrir la transacción, y por
-	// lo tanto antes del guard de transición, que vive en el WHERE del UPDATE.
-	// Misma precedencia que ya tenía el candado de baneados (Task 5).
-	//
-	// Lo que importa acá es que NO se paga. Que el guard de transición sigue vivo
-	// lo prueban las aserciones de paid->paid y paid->rejected de más abajo, que
-	// sí llegan hasta el UPDATE.
-	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
-		t.Fatal("requested->paid: err = nil, want rechazo (falta approved)")
-	} else if !errors.Is(err, ErrBMPNotEligible) && !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("requested->paid: err = %v, want ErrBMPNotEligible o ErrInvalidTransition", err)
+	// requested → paid: salto inválido (exige approved antes). Los candados de
+	// dinero (baneo, BMP) corren ANTES de abrir la transacción, y por lo tanto
+	// antes del guard de transición que vive en el WHERE del UPDATE — así que
+	// si NO se otorgara una verificación BMP fresca acá, el candado BMP
+	// mordería primero y este assert terminaría validando esa ErrBMPNotEligible
+	// en vez del guard de transición. Se otorga fresca para que el candado BMP
+	// no muerda, dejando al guard de transición como el único motivo posible de
+	// rechazo — que es justo lo que este test tiene que probar: si el four-eyes
+	// se rompiera (p.ej. "paid": {"approved","requested"}), este Fatalf lo
+	// atraparía.
+	grantFreshBMP(t, store, wrID)
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("requested->paid: err = %v, want ErrInvalidTransition (falta approved)", err)
 	}
 	// requested → approved: ok.
 	if err := store.SetWithdrawalStatus(ctx, wrID, "approved", admin); err != nil {
@@ -294,9 +294,13 @@ func TestSetWithdrawalStatus_PostsDebit_Integration(t *testing.T) {
 	}
 	wrID := res.ID
 
-	// (d) Un retiro NO aprobado (status 'requested') no puede pagarse.
-	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
-		t.Fatal("requested->paid debió fallar (falta approved)")
+	// (d) Un retiro NO aprobado (status 'requested') no puede pagarse. Se otorga
+	// BMP fresca antes del intento para que el candado BMP no muerda primero —
+	// mismo razonamiento que en TestSetWithdrawalStatus_TransitionGuard_Integration:
+	// así el único motivo de rechazo posible es el guard de transición.
+	grantFreshBMP(t, store, wrID)
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("requested->paid: err = %v, want ErrInvalidTransition (falta approved)", err)
 	}
 	// Y NO debió postear ningún débito.
 	if n := countWithdrawalDebits(t, pool, ctx, wrID); n != 0 {

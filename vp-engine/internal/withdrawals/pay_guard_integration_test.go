@@ -121,6 +121,36 @@ func TestPay_StaleVerification_Rejected(t *testing.T) {
 	assertStatus(t, pool, id, "approved")
 }
 
+// bmp_verified_at en el FUTURO ⇒ rechazado. time.Since(futuro) da un valor
+// negativo, que sin el chequeo explícito de "edad < 0" pasaría el filtro de
+// frescura y dejaría el pago habilitado indefinidamente. No es alcanzable por
+// el camino normal (RefreshBMPVerification siempre escribe time.Now().UTC()),
+// pero sí por escritura manual a la base o un salto de reloj — el candado no
+// puede depender de que eso no pase.
+func TestPay_FutureVerification_Rejected(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "future@test.local", "1000")
+
+	store := NewStore(pool)
+	id := approvedWithdrawal(t, store, "future@test.local")
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.withdrawal_request
+		   SET bmp_status='allowed', bmp_verified_at = now() + interval '1 hour'
+		 WHERE id=$1`, id); err != nil {
+		t.Fatalf("future verification: %v", err)
+	}
+
+	err := store.SetWithdrawalStatus(ctx, id, "paid", "admin@test.local")
+	if !errors.Is(err, ErrBMPStale) {
+		t.Fatalf("err = %v, want ErrBMPStale (verificación en el futuro)", err)
+	}
+	assertNoDebit(t, pool, id)
+	assertStatus(t, pool, id, "approved")
+}
+
 // Justo DENTRO de la ventana (14 min) ⇒ paga. Ata el borde por el otro lado: sin
 // esto, un candado que rechazara todo pasaría igual los tests de rechazo.
 func TestPay_WithinFreshnessWindow_Succeeds(t *testing.T) {
@@ -203,10 +233,16 @@ func TestPay_FreshAndEligible_Succeeds(t *testing.T) {
 		t.Fatalf("pay: %v", err)
 	}
 
+	// Filtrado por external_ref del propio retiro, mismo criterio que
+	// assertNoDebit: contar concept_id=1013 sin filtrar por id es una trampa si
+	// alguien agrega un segundo pago a este test.
 	var amount string
 	if err := pool.QueryRow(ctx, `
-		SELECT wm.amount::text FROM mlm.wallet_movement wm
-		 WHERE wm.concept_id = 1013`).Scan(&amount); err != nil {
+		SELECT wm.amount::text
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.transaction t ON t.id = wm.transaction_id
+		 WHERE wm.concept_id = 1013 AND t.external_ref = $1`,
+		"withdrawal:"+itoa(id)).Scan(&amount); err != nil {
 		t.Fatalf("debit: %v", err)
 	}
 	// El débito es por el BRUTO ($200), no por el neto ($192).
@@ -424,11 +460,21 @@ func TestPay_RequireBMPFalse_StillBlocksBanned(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// assertNoDebit cuenta débitos de retiro (concept_id=1013) ligados a ESTE
+// retiro, vía external_ref='withdrawal:<id>' de mlm.transaction. Filtrar por
+// id importa: contar concept_id=1013 globalmente funciona hoy porque cada
+// test de este archivo sólo crea un retiro, pero un segundo pago agregado a un
+// test existente lo volvería un falso fallo (cuenta débitos ajenos) o un falso
+// éxito (no detecta el propio) sin avisar.
 func assertNoDebit(t *testing.T, pool *pgxpool.Pool, id int64) {
 	t.Helper()
 	var n int
-	if err := pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM mlm.wallet_movement WHERE concept_id = 1013`).Scan(&n); err != nil {
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.transaction t ON t.id = wm.transaction_id
+		 WHERE wm.concept_id = 1013 AND t.external_ref = $1`,
+		"withdrawal:"+itoa(id)).Scan(&n); err != nil {
 		t.Fatalf("count debits: %v", err)
 	}
 	if n != 0 {

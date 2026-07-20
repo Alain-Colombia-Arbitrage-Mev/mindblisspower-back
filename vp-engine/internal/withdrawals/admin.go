@@ -150,9 +150,16 @@ func (s *Store) RefreshBMPVerification(ctx context.Context, id int64, v BMPVerif
 //
 // FAIL-CLOSED en las tres ramas: si la consulta falla se devuelve error (no se
 // paga); si bmp_status es NULL o distinto de 'allowed' se devuelve
-// ErrBMPNotEligible; si bmp_verified_at es NULL o más viejo que BMPFreshness se
-// devuelve ErrBMPStale. Ninguna combinación devuelve nil sin evidencia positiva
-// y fresca de que BMP habilita.
+// ErrBMPNotEligible; si bmp_verified_at es NULL, futura, o más vieja que
+// BMPFreshness se devuelve ErrBMPStale. Ninguna combinación devuelve nil sin
+// evidencia positiva y fresca de que BMP habilita.
+//
+// La rama "futura" existe porque time.Since(futuro) da un valor NEGATIVO, que
+// pasaría el chequeo "< BMPFreshness" y dejaría el pago habilitado
+// indefinidamente. bmp_verified_at siempre lo fija este proceso con
+// time.Now().UTC(), así que no es alcanzable por el camino normal — pero sí por
+// una escritura manual a la base o un salto de reloj, y el candado no puede
+// depender de que eso no pase.
 func (s *Store) assertBMPFresh(ctx context.Context, id int64) error {
 	var status *string
 	var verifiedAt *time.Time
@@ -164,7 +171,11 @@ func (s *Store) assertBMPFresh(ctx context.Context, id int64) error {
 	if status == nil || *status != "allowed" {
 		return ErrBMPNotEligible
 	}
-	if verifiedAt == nil || time.Since(*verifiedAt) > BMPFreshness {
+	if verifiedAt == nil {
+		return ErrBMPStale
+	}
+	age := time.Since(*verifiedAt)
+	if age < 0 || age > BMPFreshness {
 		return ErrBMPStale
 	}
 	return nil
