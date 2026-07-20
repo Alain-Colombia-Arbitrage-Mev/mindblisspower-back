@@ -69,8 +69,9 @@ func TestRequestWithdrawal_Integration(t *testing.T) {
 		t.Fatalf("pending-aware: got %v, want ErrInsufficient", err)
 	}
 
-	// TODO(task-2): restaurar al migrar GetMemberSummary — resumen refleja
-	// disponible neto = 300 y 1 retiro.
+	// TODO(task-2): restaurar reescribiendo la aserción — GetMemberSummary vive en
+	// internal/payments y NO se migra. Consultar AvailableBalanceSQL (balance.go)
+	// directamente contra el pool para verificar el mismo invariante.
 	/*
 		sum, err := store.GetMemberSummary(ctx, email)
 		if err != nil {
