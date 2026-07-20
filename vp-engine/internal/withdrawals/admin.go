@@ -147,14 +147,28 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	// (evita re-pagos y saltos de estado que corromperían four-eyes/finanzas).
 	// RETURNING trae wallet_id + amount_usd del renglón transicionado para postear
 	// el débito con datos autoritativos (sin segundo round-trip ni race).
+	//
+	// approved_by_person_id se escribe SÓLO en la transición a 'approved'. $3 es
+	// el email del actor de ESTA transición, así que al pagar es el PAGADOR: como
+	// todo admin tiene fila en mlm.person, el subquery siempre resolvía non-NULL y
+	// el COALESCE anterior siempre sobrescribía, borrando al aprobador cuando
+	// aprobador y pagador eran distintos. El CASE deja la columna intacta en
+	// 'paid'/'rejected'/'cancelled' y conserva el rastro de four-eyes.
+	//
+	// (Que el pagador DEBA ser distinto del aprobador es una regla de política
+	// aparte, aún sin decidir; acá sólo se preserva la evidencia para poder
+	// auditarlo.)
 	var walletID int64
 	var amountUSD string
 	err = tx.QueryRow(ctx, `
 		UPDATE mlm.withdrawal_request
 		   SET status=$2::mlm.withdrawal_status,
-		       approved_by_person_id = COALESCE(
-		         (SELECT id FROM mlm.person WHERE lower(email)=lower($3) LIMIT 1),
-		         approved_by_person_id),
+		       approved_by_person_id = CASE
+		         WHEN $2 = 'approved' THEN COALESCE(
+		           (SELECT id FROM mlm.person WHERE lower(email)=lower($3) LIMIT 1),
+		           approved_by_person_id)
+		         ELSE approved_by_person_id
+		       END,
 		       updated_at=now()
 		 WHERE id=$1 AND status::text = ANY($4)
 		RETURNING wallet_id, amount_usd::text

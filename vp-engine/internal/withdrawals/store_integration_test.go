@@ -342,3 +342,107 @@ func countWithdrawalDebits(t *testing.T, pool *pgxpool.Pool, ctx context.Context
 	}
 	return n
 }
+
+// El rastro de QUIÉN APROBÓ debe sobrevivir al pago. approved_by_person_id se
+// escribía con COALESCE(subquery-por-email-del-actor, valor-anterior) en TODAS
+// las transiciones; como todo admin tiene fila en mlm.person, el subquery nunca
+// daba NULL y el pago siempre pisaba al aprobador con el pagador. Si aprobador y
+// pagador eran personas distintas, la evidencia de four-eyes se perdía para
+// siempre. Acá se aprueba con A y se paga con B, y la columna debe seguir en A.
+//
+// Antes de este test ningún test leía approved_by_person_id — por eso el defecto
+// pasó inadvertido.
+func TestSetWithdrawalStatus_PreservesApprover(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Dos admins DISTINTOS, ambos con fila en mlm.person (que es justo la razón
+	// por la que el COALESCE viejo siempre sobrescribía).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2);
+		INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, active)
+		  VALUES (11,'binary_bonus','Bono','Bonus',1,false,true);
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'Mem','Ber','member@test.local','0','active');
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status, is_admin)
+		  OVERRIDING SYSTEM VALUE VALUES (2,'Ada','Aprueba','approver@test.local','1','active',true);
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status, is_admin)
+		  OVERRIDING SYSTEM VALUE VALUES (3,'Beto','Paga','payer@test.local','2','active',true);
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var affID, walletID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&affID); err != nil {
+		t.Fatalf("affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		VALUES ($1,1,'usd-1',0) RETURNING id`, affID).Scan(&walletID); err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+	var txnID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status, initiated_by_person_id)
+		VALUES ('seed:bonus1','bono test','posted',1) RETURNING id`).Scan(&txnID); err != nil {
+		t.Fatalf("txn: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		VALUES ($1,$2,$3,11,500,now(),current_date - 1)`, txnID, walletID, affID); err != nil {
+		t.Fatalf("movement: %v", err)
+	}
+
+	store := NewStore(pool)
+
+	res, err := store.RequestWithdrawal(ctx, "member@test.local", "200", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	// Aprueba A (person_id=2).
+	if err := store.SetWithdrawalStatus(ctx, res.ID, "approved", "approver@test.local"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	var approver *int64
+	if err := pool.QueryRow(ctx,
+		`SELECT approved_by_person_id FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&approver); err != nil {
+		t.Fatalf("leer aprobador: %v", err)
+	}
+	if approver == nil || *approver != 2 {
+		t.Fatalf("tras approve, approved_by_person_id = %v, want 2 (el aprobador)", approver)
+	}
+
+	// Paga B (person_id=3). NO debe tocar la columna.
+	if err := store.SetWithdrawalStatus(ctx, res.ID, "paid", "payer@test.local"); err != nil {
+		t.Fatalf("pay: %v", err)
+	}
+
+	var after *int64
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT approved_by_person_id, status::text FROM mlm.withdrawal_request WHERE id=$1`,
+		res.ID).Scan(&after, &status); err != nil {
+		t.Fatalf("leer tras pago: %v", err)
+	}
+	if status != "paid" {
+		t.Fatalf("status = %q, want paid", status)
+	}
+	if after == nil {
+		t.Fatal("approved_by_person_id = NULL tras el pago, want 2 (el aprobador)")
+	}
+	if *after == 3 {
+		t.Fatalf("approved_by_person_id = 3 (el PAGADOR): el pago pisó el rastro del aprobador")
+	}
+	if *after != 2 {
+		t.Fatalf("approved_by_person_id = %d, want 2 (el aprobador)", *after)
+	}
+
+	// El pago sí ocurrió (el test no pasa por no haber pagado): un débito posteado.
+	if n := countWithdrawalDebits(t, pool, ctx, res.ID); n != 1 {
+		t.Fatalf("débitos del retiro = %d, want 1", n)
+	}
+}
