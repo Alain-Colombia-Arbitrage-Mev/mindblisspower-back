@@ -1,4 +1,4 @@
-package payments
+package withdrawals
 
 import (
 	"context"
@@ -6,10 +6,12 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
 )
 
-// MinWithdrawalUSD: monto mínimo de retiro (política).
+// MinWithdrawalUSD: monto mínimo de retiro (política). Aplica al BRUTO.
 const MinWithdrawalUSD = 100
 
 var (
@@ -17,6 +19,18 @@ var (
 	ErrInsufficient  = errors.New("saldo disponible insuficiente")
 	ErrNoWallet      = errors.New("sin wallet de comisiones")
 )
+
+// Store es el acceso a datos de retiros.
+type Store struct {
+	db  *pgxpool.Pool
+	log zerolog.Logger
+}
+
+func NewStore(db *pgxpool.Pool) *Store {
+	return &Store{db: db, log: zerolog.Nop()}
+}
+
+func (s *Store) SetLogger(l zerolog.Logger) { s.log = l }
 
 // WithdrawalResult es el resultado de crear una solicitud de retiro.
 type WithdrawalResult struct {
@@ -26,8 +40,8 @@ type WithdrawalResult struct {
 
 // RequestWithdrawal crea una solicitud de retiro (status 'requested', queda
 // pendiente de aprobación admin). NO escribe el ledger: el débito real
-// (wallet_movement) lo hace el motor cuando se paga. Valida mínimo + saldo
-// disponible (madurado, no congelado) descontando solicitudes ya pendientes.
+// (wallet_movement) lo hace SetWithdrawalStatus cuando se paga. Valida mínimo +
+// saldo disponible (madurado, no congelado) descontando solicitudes pendientes.
 func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInfo string) (WithdrawalResult, error) {
 	amount, err := decimal.NewFromString(amountStr)
 	if err != nil || amount.LessThan(decimal.NewFromInt(MinWithdrawalUSD)) {
@@ -40,7 +54,6 @@ func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInf
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Afiliado + wallet USD del miembro.
 	var affID, walletID int64
 	err = tx.QueryRow(ctx, `
 		SELECT a.id, w.id
@@ -58,29 +71,11 @@ func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInf
 		return WithdrawalResult{}, fmt.Errorf("resolve wallet: %w", err)
 	}
 
-	// Disponible = comisiones maduradas no congeladas − retiros ya pendientes.
-	// Scoped al wallet USD (walletID) para excluir la wallet USD-RET de jubilación
-	// y evitar que el saldo 401k sea contado como fondos retirables.
-	// Se EXCLUYEN los conceptos de compra/fee (package_purchase, platform_fee,
-	// inter_platform): son asientos contables del capital del comprador, no
-	// ganancias retirables. Mirrors member.go y finance.go.
 	var availStr, pendingStr string
-	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(SUM(wm.amount) FILTER (
-		         WHERE NOT wm.is_frozen AND (wm.available_at IS NULL OR wm.available_at <= current_date)
-		       ), 0)::text
-		  FROM mlm.wallet_movement wm
-		  JOIN mlm.concept c ON c.id = wm.concept_id
-		 WHERE wm.wallet_id = $1
-		   AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform')
-	`, walletID).Scan(&availStr); err != nil {
+	if err := tx.QueryRow(ctx, AvailableBalanceSQL, walletID).Scan(&availStr); err != nil {
 		return WithdrawalResult{}, fmt.Errorf("available: %w", err)
 	}
-	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(SUM(amount_usd), 0)::text
-		  FROM mlm.withdrawal_request
-		 WHERE affiliate_id = $1 AND status IN ('requested','approved')
-	`, affID).Scan(&pendingStr); err != nil {
+	if err := tx.QueryRow(ctx, PendingWithdrawalsSQL, affID).Scan(&pendingStr); err != nil {
 		return WithdrawalResult{}, fmt.Errorf("pending: %w", err)
 	}
 	avail, _ := decimal.NewFromString(availStr)
