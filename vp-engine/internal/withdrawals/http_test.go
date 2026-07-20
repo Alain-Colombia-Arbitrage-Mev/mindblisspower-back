@@ -26,6 +26,7 @@ type fakeStore struct {
 	listFn      func(ctx context.Context, status string, limit, offset int) ([]AdminWithdrawal, int64, error)
 	setStatusFn func(ctx context.Context, id int64, status, adminEmail string) error
 	isAdminFn   func(ctx context.Context, email string) (bool, error)
+	suspendedFn func(ctx context.Context, email string) (bool, error)
 
 	// gravado por los handlers, para asertar lo que se propagó al store
 	gotLimit, gotOffset int
@@ -69,6 +70,13 @@ func (f *fakeStore) IsAdmin(ctx context.Context, email string) (bool, error) {
 		return false, nil
 	}
 	return f.isAdminFn(ctx, email)
+}
+
+func (f *fakeStore) PersonSuspendedByEmail(ctx context.Context, email string) (bool, error) {
+	if f.suspendedFn == nil {
+		return false, nil
+	}
+	return f.suspendedFn(ctx, email)
 }
 
 // fakeVerifier implementa IdentityVerifier.
@@ -693,5 +701,78 @@ func TestAdminEndpointsRejectNonAdmin(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden || decodeErr(t, rr) != "not_admin" {
 		t.Fatalf("status=%d err=%q, want 403 not_admin", rr.Code, decodeErr(t, rr))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// D10 — chequeo de baneados al SOLICITAR. Modo FAIL-OPEN, deliberadamente al
+// revés del candado al pagar (SetWithdrawalStatus, fail-closed).
+// ---------------------------------------------------------------------------
+
+// Un baneado que intenta solicitar recibe 403 y NO llega al store.
+func TestHandleWithdraw_Suspended_Blocks(t *testing.T) {
+	store := &fakeStore{suspendedFn: func(context.Context, string) (bool, error) {
+		return true, nil
+	}}
+	h := NewHandler(store, testToken, nil, zerolog.Nop())
+	req := adminPost(t, "/api/payments/withdraw", map[string]any{
+		"email": "banned@test.local", "amount": "150.00", "bank_info": "Banco X 12345",
+	})
+	rr := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden || decodeErr(t, rr) != "account_suspended" {
+		t.Fatalf("status=%d err=%q, want 403 account_suspended", rr.Code, decodeErr(t, rr))
+	}
+	if store.gotRequestEmail != "" {
+		t.Fatalf("RequestWithdrawal fue llamado con %q; no debió llamarse", store.gotRequestEmail)
+	}
+}
+
+// FAIL-OPEN: si la consulta de baneo revienta por infraestructura, la solicitud
+// SIGUE registrándose. No mueve dinero y se re-verifica (fail-closed) al pagar,
+// así que negarla castigaría a un miembro limpio por una falla de la base.
+func TestHandleWithdraw_SuspensionCheckError_FailsOpen(t *testing.T) {
+	store := &fakeStore{
+		suspendedFn: func(context.Context, string) (bool, error) {
+			return false, errors.New("dial tcp: connection refused")
+		},
+		requestFn: func(context.Context, string, string, string) (WithdrawalResult, error) {
+			return WithdrawalResult{ID: 7, Status: "requested"}, nil
+		},
+	}
+	h := NewHandler(store, testToken, nil, zerolog.Nop())
+	req := adminPost(t, "/api/payments/withdraw", map[string]any{
+		"email": "member@test.local", "amount": "150.00", "bank_info": "Banco X 12345",
+	})
+	rr := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want 200 (fail-open)", rr.Code, rr.Body.String())
+	}
+	if store.gotRequestEmail != "member@test.local" {
+		t.Fatalf("RequestWithdrawal no fue llamado; fail-open debió dejar continuar")
+	}
+}
+
+// Al PAGAR, ErrSuspended sale como 403 account_suspended y no como 500: es una
+// decisión de política, no una caída. El admin debe poder distinguirlas.
+func TestAdminAction_Suspended_Returns403(t *testing.T) {
+	store := &fakeStore{
+		isAdminFn: func(context.Context, string) (bool, error) { return true, nil },
+		setStatusFn: func(context.Context, int64, string, string) error {
+			return ErrSuspended
+		},
+	}
+	h := NewHandler(store, testToken, nil, zerolog.Nop())
+	req := adminPost(t, "/api/admin/withdrawals/action", map[string]any{
+		"email": "admin@test.local", "id": 1, "action": "pay",
+	})
+	rr := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden || decodeErr(t, rr) != "account_suspended" {
+		t.Fatalf("status=%d err=%q, want 403 account_suspended", rr.Code, decodeErr(t, rr))
 	}
 }

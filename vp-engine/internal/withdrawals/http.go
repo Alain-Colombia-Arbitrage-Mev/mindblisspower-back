@@ -34,6 +34,7 @@ type StoreAPI interface {
 	ListWithdrawals(ctx context.Context, status string, limit, offset int) ([]AdminWithdrawal, int64, error)
 	SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error
 	IsAdmin(ctx context.Context, email string) (bool, error)
+	PersonSuspendedByEmail(ctx context.Context, email string) (bool, error)
 }
 
 var _ StoreAPI = (*Store)(nil)
@@ -208,6 +209,20 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing amount or bank_info")
 		return
 	}
+	// D10 al SOLICITAR: FAIL-OPEN, deliberadamente al revés que al pagar. Una
+	// solicitud no mueve dinero — queda pendiente de un admin y se vuelve a
+	// verificar (esa vez fail-closed) al pagar. Así que un error de infra se
+	// loguea y se deja pasar: negarle registrar la solicitud a un miembro limpio
+	// porque la base tosió es peor que dejar entrar una solicitud que igual será
+	// bloqueada aguas abajo.
+	if susp, serr := h.store.PersonSuspendedByEmail(r.Context(), email); serr != nil {
+		h.log.Error().Err(serr).Str("email", email).Msg("chequeo de suspensión (fail-open)")
+	} else if susp {
+		h.log.Warn().Str("email", email).Msg("solicitud de retiro bloqueada: cuenta suspendida")
+		writeErr(w, http.StatusForbidden, "account_suspended")
+		return
+	}
+
 	res, err := h.store.RequestWithdrawal(r.Context(), email, req.Amount, req.BankInfo)
 	switch {
 	case errors.Is(err, ErrMinWithdrawal):
@@ -308,6 +323,17 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 			h.log.Warn().Err(err).Int64("withdrawal_id", req.ID).Str("action", req.Action).
 				Msg("withdrawal transition rejected")
 			writeErr(w, http.StatusConflict, "transition_rejected")
+			return
+		}
+		// El candado D10 bloqueó el pago: es una decisión de política, NO una
+		// falla. Devolverlo como 500 le diría al admin "reintentá, se cayó algo"
+		// cuando la respuesta correcta es "este retiro no se paga hasta resolver
+		// el baneo". El dinero queda frenado en ambos casos; lo que cambia es
+		// que el admin sepa por qué.
+		if errors.Is(err, ErrSuspended) {
+			h.log.Warn().Int64("withdrawal_id", req.ID).Str("by", adminEmail).
+				Msg("pago bloqueado: cuenta suspendida/baneada")
+			writeErr(w, http.StatusForbidden, "account_suspended")
 			return
 		}
 		h.log.Error().Err(err).Int64("withdrawal_id", req.ID).Str("action", req.Action).

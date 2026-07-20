@@ -114,6 +114,28 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 		return fmt.Errorf("%w: status %q desconocido", ErrInvalidTransition, status)
 	}
 
+	// D10: los baneados no cobran. El chequeo al SOLICITAR (handleWithdraw) no
+	// alcanza — a quien lo banean DESPUÉS de solicitar hay que congelarle el
+	// dinero ya pedido. Va ANTES de abrir la transacción (nada que revertir) y
+	// SÓLO para 'paid': aprobar/rechazar/cancelar no sacan dinero y deben seguir
+	// disponibles para que el admin resuelva el caso.
+	//
+	// FAIL-CLOSED a propósito: si la consulta falla por infraestructura NO se
+	// paga. Un Postgres intermitente no puede ser la vía por la que sale dinero
+	// hacia un baneado; el admin reintenta. (Al solicitar el modo es el opuesto,
+	// fail-open; ver handleWithdraw en http.go.)
+	if status == "paid" {
+		susp, serr := s.PersonSuspendedByWithdrawalID(ctx, id)
+		if serr != nil {
+			return fmt.Errorf("chequeo de suspensión (fail-closed): %w", serr)
+		}
+		if susp {
+			s.log.Warn().Int64("withdrawal_id", id).Str("by", adminEmail).
+				Msg("pago bloqueado: cuenta suspendida/baneada")
+			return ErrSuspended
+		}
+	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
