@@ -157,9 +157,16 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 	store := NewStore(pool)
 	const admin = "admin@test.local"
 
+	// I3: el error de una transición inválida DEBE ser identificable como
+	// ErrInvalidTransition — es lo que el handler traduce a 409; cualquier otro
+	// error (Postgres caído) sale como 500.
+	if err := store.SetWithdrawalStatus(ctx, wrID, "no_existe", admin); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("status desconocido: err = %v, want ErrInvalidTransition", err)
+	}
+
 	// requested → paid: salto inválido (exige approved antes).
-	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
-		t.Fatal("requested->paid debió fallar (falta approved)")
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("requested->paid: err = %v, want ErrInvalidTransition (falta approved)", err)
 	}
 	// requested → approved: ok.
 	if err := store.SetWithdrawalStatus(ctx, wrID, "approved", admin); err != nil {
@@ -170,12 +177,30 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 		t.Fatalf("approved->paid: %v", err)
 	}
 	// paid → paid: re-pago, inválido.
-	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
-		t.Fatal("paid->paid debió fallar (re-pago)")
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("paid->paid: err = %v, want ErrInvalidTransition (re-pago)", err)
 	}
 	// paid → rejected: inválido.
-	if err := store.SetWithdrawalStatus(ctx, wrID, "rejected", admin); err == nil {
-		t.Fatal("paid->rejected debió fallar")
+	if err := store.SetWithdrawalStatus(ctx, wrID, "rejected", admin); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("paid->rejected: err = %v, want ErrInvalidTransition", err)
+	}
+
+	// C3: Store.IsAdmin es la tercera vía de isAdminEmail (admins concedidos
+	// desde el panel, mlm.person.is_admin). Se valida contra la base real porque
+	// es SQL copiado de payments.Store.IsAdmin.
+	if ok, err := store.IsAdmin(ctx, admin); err != nil || ok {
+		t.Fatalf("IsAdmin(is_admin=false) = %v, %v; want false, nil", ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE mlm.person SET is_admin=true WHERE lower(email)=lower($1)`, admin); err != nil {
+		t.Fatalf("grant admin: %v", err)
+	}
+	// Case-insensitive: el email llega del token/BFF sin normalizar.
+	if ok, err := store.IsAdmin(ctx, "ADMIN@Test.Local"); err != nil || !ok {
+		t.Fatalf("IsAdmin(is_admin=true) = %v, %v; want true, nil", ok, err)
+	}
+	// Email inexistente ⇒ (false, nil): NO es un error de infraestructura.
+	if ok, err := store.IsAdmin(ctx, "fantasma@test.local"); err != nil || ok {
+		t.Fatalf("IsAdmin(inexistente) = %v, %v; want false, nil", ok, err)
 	}
 
 	var final string
