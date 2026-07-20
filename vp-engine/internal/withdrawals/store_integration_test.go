@@ -866,3 +866,115 @@ func TestSetWithdrawalStatus_DebitsGrossNotNet(t *testing.T) {
 		t.Fatalf("tras pagar: fee_pct/fee_usd = %s/%s, want 0.0400/40.00", pct, fee)
 	}
 }
+
+// =============================================================================
+// Migración 49 — CHECK de coherencia del dinero
+// =============================================================================
+
+// El constraint existe y RECHAZA una fila donde net_usd != amount_usd - fee_usd.
+// Sin él, la invariante dependía sólo del código Go y cualquier UPDATE manual
+// podía descuadrar los tres montos sin que nada lo notara.
+func TestMigration49_NetCoherenceCheckRejectsIncoherentRow(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	affID, walletID := seedMemberWithBalance(t, pool, "chk@test.local", "1000")
+
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_constraint
+		 WHERE conrelid = 'mlm.withdrawal_request'::regclass
+		   AND conname = 'withdrawal_request_net_is_gross_minus_fee_chk'`).Scan(&n); err != nil {
+		t.Fatalf("check constraint presente: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("constraint withdrawal_request_net_is_gross_minus_fee_chk ausente")
+	}
+
+	// Descuadre de un centavo: debe rebotar.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.withdrawal_request
+		  (affiliate_id, wallet_id, amount_usd, status, fee_pct, fee_usd, net_usd)
+		VALUES ($1,$2,1000,'requested',0.04,40.00,959.99)`, affID, walletID); err == nil {
+		t.Fatalf("fila incoherente (1000/40.00/959.99) aceptada: el CHECK no está atando las columnas")
+	}
+
+	// Y también debe rebotar un UPDATE que rompa la invariante después.
+	var okID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.withdrawal_request
+		  (affiliate_id, wallet_id, amount_usd, status, fee_pct, fee_usd, net_usd)
+		VALUES ($1,$2,1000,'requested',0.04,40.00,960.00) RETURNING id`,
+		affID, walletID).Scan(&okID); err != nil {
+		t.Fatalf("fila coherente rechazada: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE mlm.withdrawal_request SET amount_usd = 900 WHERE id=$1`, okID); err == nil {
+		t.Fatalf("UPDATE que descuadra amount_usd aceptado: el CHECK no protege updates")
+	}
+}
+
+// El CHECK no puede tumbar las filas legítimas que existirán en producción:
+// históricas backfilleadas (fee 0, neto = bruto) e "intermedias" insertadas por
+// el binario viejo durante la ventana de deploy (fee_usd/net_usd NULL).
+func TestMigration49_NetCoherenceCheckAcceptsLegitimateRows(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	affID, walletID := seedMemberWithBalance(t, pool, "chkok@test.local", "1000")
+
+	// (a) Intermedia: código viejo, sin fee ni neto.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.withdrawal_request (affiliate_id, wallet_id, amount_usd, status)
+		VALUES ($1,$2,500,'requested')`, affID, walletID); err != nil {
+		t.Fatalf("fila intermedia (fee/net NULL) rechazada: %v", err)
+	}
+
+	// (b) Histórica backfilleada: fee 0, neto = bruto.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.withdrawal_request
+		  (affiliate_id, wallet_id, amount_usd, status, fee_pct, fee_usd, net_usd)
+		VALUES ($1,$2,500,'paid',0,0,500)`, affID, walletID); err != nil {
+		t.Fatalf("fila histórica backfilleada rechazada: %v", err)
+	}
+
+	// (c) Nueva con fee real, centavos incómodos.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.withdrawal_request
+		  (affiliate_id, wallet_id, amount_usd, status, fee_pct, fee_usd, net_usd)
+		VALUES ($1,$2,100.13,'requested',0.04,4.01,96.12)`, affID, walletID); err != nil {
+		t.Fatalf("fila nueva con fee real rechazada: %v", err)
+	}
+}
+
+// La migración 49 sigue siendo aplicable dos veces seguidas sin error DESPUÉS
+// de agregar el CHECK (ADD CONSTRAINT no tiene IF NOT EXISTS: si el DO/EXCEPTION
+// estuviera mal, el segundo apply reventaría con duplicate_object).
+func TestMigration49_ReapplyTwiceWithCheckConstraint(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	root := findRepoRoot(t)
+	sql, err := os.ReadFile(filepath.Join(root, "_meta/migration/49_withdrawal_bmp_and_fee.sql"))
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	// pgContainer ya la aplicó una vez; estas dos van encima.
+	for i := 0; i < 2; i++ {
+		if err := applySchema(ctx, pool, stripPsqlMeta(string(sql))); err != nil {
+			t.Fatalf("re-apply #%d: %v", i+1, err)
+		}
+	}
+
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_constraint
+		 WHERE conrelid = 'mlm.withdrawal_request'::regclass
+		   AND conname = 'withdrawal_request_net_is_gross_minus_fee_chk'`).Scan(&n); err != nil {
+		t.Fatalf("count constraint: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("constraints con ese nombre = %d, want 1", n)
+	}
+}
