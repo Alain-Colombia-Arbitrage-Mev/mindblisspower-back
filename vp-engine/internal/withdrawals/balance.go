@@ -40,6 +40,14 @@ const resolveUSDWalletBaseSQL = `
 const ResolveUSDWalletSQL = resolveUSDWalletBaseSQL + `
 	 LIMIT 1`
 
+// ExcludedKindsPredicate es el filtro de conceptos NO retirables, compartido
+// por AvailableBalanceSQL y por los agregados financieros de payments/finance.go
+// y payments/member.go, que necesitan el MISMO filtro dentro de agregaciones
+// distintas (no la consulta completa) — por eso se expone el predicado solo,
+// para concatenar, en vez de forzar esos callers a reusar AvailableBalanceSQL
+// donde no encaja.
+const ExcludedKindsPredicate = `c.kind NOT IN ('package_purchase','platform_fee','inter_platform')`
+
 // AvailableBalanceSQL calcula el saldo RETIRABLE de una wallet.
 //
 // Fuente única de verdad: antes esta consulta estaba duplicada literalmente en
@@ -51,6 +59,10 @@ const ResolveUSDWalletSQL = resolveUSDWalletBaseSQL + `
 //     inter_platform): son asientos del capital del comprador, no ganancias
 //   - el scope por wallet_id excluye la wallet USD-RET de jubilación (401k)
 //
+// El predicado de exclusión (ExcludedKindsPredicate) está centralizado en
+// esta constante y se concatena aquí, lo que garantiza que AvailableBalanceSQL
+// y otros agregados financieros usan el MISMO filtro.
+//
 // Parámetro $1 = wallet_id. Devuelve texto para parseo exacto con decimal.
 const AvailableBalanceSQL = `
 	SELECT COALESCE(SUM(wm.amount) FILTER (
@@ -59,15 +71,7 @@ const AvailableBalanceSQL = `
 	  FROM mlm.wallet_movement wm
 	  JOIN mlm.concept c ON c.id = wm.concept_id
 	 WHERE wm.wallet_id = $1
-	   AND c.kind NOT IN ('package_purchase','platform_fee','inter_platform')`
-
-// ExcludedKindsPredicate es el filtro de conceptos NO retirables, compartido
-// por AvailableBalanceSQL y por los agregados financieros de payments/finance.go
-// y payments/member.go, que necesitan el MISMO filtro dentro de agregaciones
-// distintas (no la consulta completa) — por eso se expone el predicado solo,
-// para concatenar, en vez de forzar esos callers a reusar AvailableBalanceSQL
-// donde no encaja.
-const ExcludedKindsPredicate = `c.kind NOT IN ('package_purchase','platform_fee','inter_platform')`
+	   AND ` + ExcludedKindsPredicate
 
 // PendingWithdrawalsSQL suma los retiros ya solicitados o aprobados y aún no
 // pagados, que reservan saldo. Parámetro $1 = affiliate_id.
