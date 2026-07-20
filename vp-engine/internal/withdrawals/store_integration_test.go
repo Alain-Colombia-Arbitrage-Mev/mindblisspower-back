@@ -3,7 +3,10 @@ package withdrawals
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -444,5 +447,211 @@ func TestSetWithdrawalStatus_PreservesApprover(t *testing.T) {
 	// El pago sí ocurrió (el test no pasa por no haber pagado): un débito posteado.
 	if n := countWithdrawalDebits(t, pool, ctx, res.ID); n != 1 {
 		t.Fatalf("débitos del retiro = %d, want 1", n)
+	}
+}
+
+// La migración 49 deja las columnas disponibles con los defaults correctos.
+func TestMigration49_ColumnsAndDefaults(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var feePct string
+	if err := pool.QueryRow(ctx, `
+		SELECT column_default FROM information_schema.columns
+		 WHERE table_schema='mlm' AND table_name='withdrawal_request'
+		   AND column_name='fee_pct'`).Scan(&feePct); err != nil {
+		t.Fatalf("fee_pct default: %v", err)
+	}
+	if !strings.Contains(feePct, "0.04") {
+		t.Fatalf("fee_pct default = %q, want contiene 0.04", feePct)
+	}
+
+	for _, col := range []string{"bmp_verified_at", "bmp_status", "bmp_email_used", "fee_usd", "net_usd"} {
+		var n int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema='mlm' AND table_name='withdrawal_request' AND column_name=$1`,
+			col).Scan(&n); err != nil {
+			t.Fatalf("check %s: %v", col, err)
+		}
+		if n != 1 {
+			t.Fatalf("columna %s ausente", col)
+		}
+	}
+}
+
+// El default de fee_pct debe leer EXACTAMENTE 0.0400 (numeric(5,4)), no solo
+// "contener" 0.04 como substring — un INSERT que omite fee_pct debe heredar
+// la fracción de comisión correcta.
+func TestMigration49_FeePctDefaultValue(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2);
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'Mem','Ber','member49@test.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var affID, walletID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&affID); err != nil {
+		t.Fatalf("affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance) VALUES ($1,1,'usd-1',0) RETURNING id`,
+		affID).Scan(&walletID); err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+
+	var wrID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.withdrawal_request (affiliate_id, wallet_id, amount_usd, status)
+		VALUES ($1,$2,200,'requested') RETURNING id`, affID, walletID).Scan(&wrID); err != nil {
+		t.Fatalf("withdrawal: %v", err)
+	}
+
+	var feePct decimal.Decimal
+	if err := pool.QueryRow(ctx,
+		`SELECT fee_pct FROM mlm.withdrawal_request WHERE id=$1`, wrID).Scan(&feePct); err != nil {
+		t.Fatalf("read fee_pct: %v", err)
+	}
+	if got := feePct.StringFixed(4); got != "0.0400" {
+		t.Fatalf("fee_pct default = %s, want 0.0400", got)
+	}
+}
+
+// El backfill de la migración 49 (fee_pct=0, fee_usd=0, net_usd=amount_usd
+// WHERE fee_usd IS NULL) debe cubrir filas "viejas" (sin fee calculado) sin
+// pisar filas que YA tienen un fee real calculado — incluso si la migración
+// se re-aplica después de que existan retiros con fee real.
+//
+// pgContainer ya aplica la migración 49 una vez al levantar el schema. Este
+// test simula el escenario temporal completo:
+//  1. Una fila "vieja" se inserta SIN fee (como si fuera anterior a la
+//     migración, o insertada por código que aún no calcula fee_usd).
+//  2. Una fila "nueva" se inserta CON fee real ya calculado (como hará el
+//     código de cobro de fee una vez implementado).
+//  3. Se re-aplica la migración 49 completa contra el mismo pool.
+//  4. Se verifica: la fila vieja queda backfillada (fee_usd=0,
+//     net_usd=amount_usd); la fila nueva NO se toca.
+func TestMigration49_BackfillDoesNotOverwriteRealFees(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2);
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'Mem','Ber','member49b@test.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var affID, walletID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&affID); err != nil {
+		t.Fatalf("affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance) VALUES ($1,1,'usd-1',0) RETURNING id`,
+		affID).Scan(&walletID); err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+
+	// (1) Fila vieja: sin fee_usd (columna nace NULL, sin default).
+	var oldID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.withdrawal_request (affiliate_id, wallet_id, amount_usd, status)
+		VALUES ($1,$2,200,'paid') RETURNING id`, affID, walletID).Scan(&oldID); err != nil {
+		t.Fatalf("old withdrawal: %v", err)
+	}
+	var oldFeeUSDNull bool
+	if err := pool.QueryRow(ctx,
+		`SELECT fee_usd IS NULL FROM mlm.withdrawal_request WHERE id=$1`, oldID).Scan(&oldFeeUSDNull); err != nil {
+		t.Fatalf("check old fee_usd: %v", err)
+	}
+	if !oldFeeUSDNull {
+		t.Fatalf("precondición rota: fila vieja ya tiene fee_usd no-NULL")
+	}
+
+	// (2) Fila nueva: con fee real ya calculado (4% de 200 = 8.00; neto 192.00).
+	var newID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.withdrawal_request
+		  (affiliate_id, wallet_id, amount_usd, status, fee_pct, fee_usd, net_usd)
+		VALUES ($1,$2,200,'requested',0.04,8.00,192.00) RETURNING id`,
+		affID, walletID).Scan(&newID); err != nil {
+		t.Fatalf("new withdrawal: %v", err)
+	}
+
+	// (3) Re-aplicar la migración 49 completa (no sólo el UPDATE) contra el
+	// mismo pool — así se prueba idempotencia real de principio a fin.
+	root := findRepoRoot(t)
+	sql, err := os.ReadFile(filepath.Join(root, "_meta/migration/49_withdrawal_bmp_and_fee.sql"))
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	if err := applySchema(ctx, pool, stripPsqlMeta(string(sql))); err != nil {
+		t.Fatalf("re-apply migration 49: %v", err)
+	}
+
+	// (4a) Fila vieja: backfillada.
+	var oldFeePct, oldFeeUSD, oldNetUSD decimal.Decimal
+	if err := pool.QueryRow(ctx, `
+		SELECT fee_pct, fee_usd, net_usd FROM mlm.withdrawal_request WHERE id=$1`,
+		oldID).Scan(&oldFeePct, &oldFeeUSD, &oldNetUSD); err != nil {
+		t.Fatalf("read old after re-apply: %v", err)
+	}
+	if !oldFeePct.IsZero() {
+		t.Fatalf("fila vieja: fee_pct = %s, want 0", oldFeePct)
+	}
+	if !oldFeeUSD.IsZero() {
+		t.Fatalf("fila vieja: fee_usd = %s, want 0", oldFeeUSD)
+	}
+	if oldNetUSD.StringFixed(2) != "200.00" {
+		t.Fatalf("fila vieja: net_usd = %s, want 200.00 (= amount_usd)", oldNetUSD)
+	}
+
+	// (4b) Fila nueva: intacta, el re-apply NO debió pisar el fee real.
+	var newFeePct, newFeeUSD, newNetUSD decimal.Decimal
+	if err := pool.QueryRow(ctx, `
+		SELECT fee_pct, fee_usd, net_usd FROM mlm.withdrawal_request WHERE id=$1`,
+		newID).Scan(&newFeePct, &newFeeUSD, &newNetUSD); err != nil {
+		t.Fatalf("read new after re-apply: %v", err)
+	}
+	if newFeePct.StringFixed(4) != "0.0400" {
+		t.Fatalf("fila nueva: fee_pct = %s, want 0.0400 (no debió tocarse)", newFeePct)
+	}
+	if newFeeUSD.StringFixed(2) != "8.00" {
+		t.Fatalf("fila nueva: fee_usd = %s, want 8.00 (no debió tocarse)", newFeeUSD)
+	}
+	if newNetUSD.StringFixed(2) != "192.00" {
+		t.Fatalf("fila nueva: net_usd = %s, want 192.00 (no debió tocarse)", newNetUSD)
+	}
+}
+
+// El índice parcial sobre bmp_status (filtrado a status requested/approved)
+// se crea con sintaxis válida y es usable.
+func TestMigration49_PartialIndexExists(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		 WHERE schemaname='mlm' AND tablename='withdrawal_request'
+		   AND indexname='withdrawal_request_bmp_status_idx'`).Scan(&n); err != nil {
+		t.Fatalf("check index: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("índice withdrawal_request_bmp_status_idx ausente")
 	}
 }
