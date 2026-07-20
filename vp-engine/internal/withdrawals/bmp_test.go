@@ -2,6 +2,7 @@ package withdrawals
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -115,6 +116,55 @@ func TestVerifyUser_Precedence_KYCBeforeVA(t *testing.T) {
 	}
 }
 
+// El caso que importa para el dinero: KYC (Bridge) pendiente debe bloquear el
+// pago aunque la cuenta virtual esté activa y BMP permita el retiro. No basta
+// con afirmar el BlockReason: si alguien reordena el switch o mueve la
+// condición de bridgeCustomerStatus fuera de la cadena, CanWithdraw podría
+// quedar en true mientras el afiliado sigue sin KYC aprobado.
+func TestVerifyUser_KYCPending_NotEligible(t *testing.T) {
+	srv := bmpServer(t, 200, `{
+	  "exists": true,
+	  "user": {"userId":"u-1"},
+	  "virtualAccountActivated": true,
+	  "withdrawalStatus": "allowed",
+	  "bridgeCustomerStatus": "pending"
+	}`)
+	defer srv.Close()
+
+	v, err := NewBMPClient(srv.URL, "cid", "csec").VerifyUser(context.Background(), "a@b.com")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if v.CanWithdraw {
+		t.Fatal("CanWithdraw = true, want false (KYC/Bridge pendiente)")
+	}
+	if v.BlockReason != BlockKYCPending {
+		t.Fatalf("BlockReason = %q, want %q", v.BlockReason, BlockKYCPending)
+	}
+}
+
+// strings.EqualFold endurece la regla literal del spec (== "active") a
+// case-insensitive. Fija esa decisión: un refactor a comparación exacta debe
+// romper este test.
+func TestVerifyUser_CaseInsensitiveStatuses_Eligible(t *testing.T) {
+	srv := bmpServer(t, 200, `{
+	  "exists": true,
+	  "user": {"userId":"u-1"},
+	  "virtualAccountActivated": true,
+	  "withdrawalStatus": "ALLOWED",
+	  "bridgeCustomerStatus": "Active"
+	}`)
+	defer srv.Close()
+
+	v, err := NewBMPClient(srv.URL, "cid", "csec").VerifyUser(context.Background(), "a@b.com")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !v.CanWithdraw {
+		t.Fatalf("CanWithdraw = false (reason %q), want true", v.BlockReason)
+	}
+}
+
 func TestVerifyUser_NotRegistered(t *testing.T) {
 	srv := bmpServer(t, 200, `{"exists": false}`)
 	defer srv.Close()
@@ -174,6 +224,38 @@ func TestVerifyUser_UpstreamErrors(t *testing.T) {
 			}
 			if v.CanWithdraw {
 				t.Fatal("CanWithdraw = true en error upstream")
+			}
+		})
+	}
+}
+
+// 401/403 significan que fallaron NUESTRAS credenciales (bloquea a TODOS los
+// afiliados, no a uno). El caller debe poder distinguirlo con errors.Is en
+// vez de parsear el string del error, para emitir una alerta operativa
+// diferenciada (consumido por Task 9).
+func TestVerifyUser_AuthError_WrapsErrBMPAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		code    int
+		wantErr bool
+	}{
+		{"unauthorized", http.StatusUnauthorized, true},
+		{"forbidden", http.StatusForbidden, true},
+		{"rate_limited", http.StatusTooManyRequests, false},
+		{"server_error", http.StatusInternalServerError, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+
+			_, err := NewBMPClient(srv.URL, "cid", "csec").VerifyUser(context.Background(), "a@b.com")
+			if err == nil {
+				t.Fatal("err = nil, want error")
+			}
+			if got := errors.Is(err, ErrBMPAuth); got != tc.wantErr {
+				t.Fatalf("errors.Is(err, ErrBMPAuth) = %v, want %v (err=%v)", got, tc.wantErr, err)
 			}
 		})
 	}

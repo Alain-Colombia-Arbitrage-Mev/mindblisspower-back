@@ -63,6 +63,13 @@ func LoadConfig() (Config, error) {
 	if cfg.ServiceToken == "" {
 		return cfg, fmt.Errorf("SERVICE_TOKEN requerido")
 	}
+	// En producción, BMP_BASE_URL debe ser explícito. El default apunta al
+	// backend de DEV de BMP, que no conoce afiliados reales y responde
+	// exists:false para todos: si la variable falta en un despliegue de
+	// producción, el servicio decidiría pagos en silencio contra dev.
+	if cfg.Env == "production" && strings.TrimSpace(os.Getenv("BMP_BASE_URL")) == "" {
+		return cfg, fmt.Errorf("BMP_BASE_URL requerido en producción (ENV=production): el default apunta al backend de dev de BMP")
+	}
 	return cfg, nil
 }
 

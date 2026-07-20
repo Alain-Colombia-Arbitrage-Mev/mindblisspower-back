@@ -3,7 +3,9 @@ package withdrawals
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +25,17 @@ const (
 // descarta: no devuelve restrictionReason ni bridgeCustomerStatus, y exige
 // tarjeta activa (ver D8/D9 en el spec).
 const verificationPath = "/api/v1/be-mindpower/user-verification"
+
+// maxBMPResponseBody acota el body de la respuesta de BMP (paridad con
+// internal/withdrawals/http.go: json.NewDecoder(io.LimitReader(r.Body, 1<<16))).
+// BMP es un tercero: no confiamos en que su respuesta venga acotada.
+const maxBMPResponseBody = int64(1 << 16) // 64 KiB
+
+// ErrBMPAuth indica que BMP rechazó NUESTRAS credenciales (401/403). No es un
+// bloqueo del afiliado consultado: bloquea la verificación de TODOS los
+// afiliados, así que el caller debe usar errors.Is(err, ErrBMPAuth) para
+// emitir una alerta operativa diferenciada (Task 9).
+var ErrBMPAuth = errors.New("bmp: credenciales rechazadas")
 
 // BMPVerification es la respuesta de BMP ya traducida a decisión de negocio. El
 // frontend nunca interpreta campos crudos de BMP: esta traducción es el único
@@ -115,11 +128,14 @@ func (c *BMPClient) VerifyUser(ctx context.Context, email string) (BMPVerificati
 	if resp.StatusCode != http.StatusOK {
 		// 401/403 significan que NUESTRAS credenciales fallaron, no las del
 		// afiliado: el caller debe alertar, porque bloquea TODOS los pagos.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return unavailable, fmt.Errorf("bmp: status %d: %w", resp.StatusCode, ErrBMPAuth)
+		}
 		return unavailable, fmt.Errorf("bmp: status %d", resp.StatusCode)
 	}
 
 	var raw bmpRawResponse
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBMPResponseBody)).Decode(&raw); err != nil {
 		return unavailable, fmt.Errorf("bmp: decode: %w", err)
 	}
 
