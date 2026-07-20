@@ -652,6 +652,18 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 			writeErr(w, http.StatusConflict, "bmp_verification_stale")
 			return
 		}
+		// El saldo dejó de cubrir el retiro entre la aprobación y el pago
+		// (típicamente movimientos congelados por ops). Va con un código PROPIO,
+		// 422, distinto de los 409 de arriba: los otros rechazos se resuelven
+		// reintentando o destrabando la cuenta BMP, éste NO — el admin tiene que
+		// ir a mirar por qué desapareció el saldo. Confundirlo con un 409 lo
+		// mandaría a reintentar en loop.
+		if errors.Is(err, ErrInsufficientAtPay) {
+			h.log.Warn().Int64("withdrawal_id", req.ID).Str("by", adminEmail).
+				Msg("pago bloqueado: saldo insuficiente al momento de pagar")
+			writeErr(w, http.StatusUnprocessableEntity, "insufficient_balance_at_pay")
+			return
+		}
 		h.log.Error().Err(err).Int64("withdrawal_id", req.ID).Str("action", req.Action).
 			Msg("withdrawal action")
 		writeErr(w, http.StatusInternalServerError, "internal")

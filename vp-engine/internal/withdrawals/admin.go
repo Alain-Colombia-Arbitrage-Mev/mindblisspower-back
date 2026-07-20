@@ -145,6 +145,13 @@ var (
 	ErrBMPNotEligible = errors.New("cuenta BMP no habilitada para recibir")
 	// ErrBMPStale: la verificación existe y es favorable, pero está vencida.
 	ErrBMPStale = errors.New("verificación BMP vencida")
+	// ErrInsufficientAtPay: al momento de pagar, el saldo disponible ya no cubre
+	// el retiro aprobado. Es DISTINTO de ErrInsufficient (que rechaza al
+	// SOLICITAR): acá el afiliado sí tenía el saldo cuando pidió, y algo lo quitó
+	// entre la aprobación y el pago — típicamente ops congelando movimientos
+	// (wallet_movement.is_frozen) por sospecha de fraude. El admin necesita ver
+	// esa diferencia: no es "pediste de más", es "el saldo cambió, revisá por qué".
+	ErrInsufficientAtPay = errors.New("saldo disponible insuficiente al momento de pagar")
 )
 
 // RefreshBMPVerification persiste una verificación recién obtenida. La llama el
@@ -274,7 +281,7 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	// (Que el pagador DEBA ser distinto del aprobador es una regla de política
 	// aparte, aún sin decidir; acá sólo se preserva la evidencia para poder
 	// auditarlo.)
-	var walletID int64
+	var walletID, affiliateID int64
 	var amountUSD string
 	err = tx.QueryRow(ctx, `
 		UPDATE mlm.withdrawal_request
@@ -287,8 +294,8 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 		       END,
 		       updated_at=now()
 		 WHERE id=$1 AND status::text = ANY($4)
-		RETURNING wallet_id, amount_usd::text
-	`, id, status, adminEmail, allowedPrior).Scan(&walletID, &amountUSD)
+		RETURNING wallet_id, affiliate_id, amount_usd::text
+	`, id, status, adminEmail, allowedPrior).Scan(&walletID, &affiliateID, &amountUSD)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 0 filas afectadas ⇒ transición inválida o ya aplicada. No se postea nada.
 		return fmt.Errorf("%w: a %q para el retiro %d (estado actual no está en %v)", ErrInvalidTransition, status, id, allowedPrior)
@@ -309,6 +316,50 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 		if derr != nil {
 			return fmt.Errorf("parse amount_usd %q: %w", amountUSD, derr)
 		}
+
+		// Re-validación de saldo DENTRO de la transacción del pago, antes de
+		// postear el débito.
+		//
+		// El saldo se validaba SÓLO al solicitar, y entre aprobar y pagar pasan
+		// días. El caso que importa: ops marca is_frozen=true sobre los movimientos
+		// de un afiliado por sospecha de fraude (esa columna no tiene escritor en el
+		// código; su uso previsto es manual). AvailableBalanceSQL excluye los
+		// congelados, pero nada volvía a mirarlo al pagar: el UPDATE no consultaba
+		// saldo y fn_validate_movement sólo verifica el SIGNO del monto, no que la
+		// wallet quede no-negativa. La wallet terminaba en -$1000.
+		//
+		// Fórmula (ver PendingWithdrawalsExcludingSQL): este retiro ya figura entre
+		// los pendientes por estar en 'approved', así que se lo excluye del agregado
+		// en vez de restarlo dos veces.
+		//
+		//	monto <= disponible - (pendientes de OTROS retiros)
+		//
+		// Va dentro de la transacción a propósito: leer el saldo fuera dejaría una
+		// ventana entre la lectura y el débito. Un error de la consulta aborta el
+		// pago (fail-closed): no se debita contra un saldo que no se pudo leer.
+		var availStr, pendingStr string
+		if err := tx.QueryRow(ctx, AvailableBalanceSQL, walletID).Scan(&availStr); err != nil {
+			return fmt.Errorf("re-validación de saldo al pagar (fail-closed): %w", err)
+		}
+		if err := tx.QueryRow(ctx, PendingWithdrawalsExcludingSQL, affiliateID, id).Scan(&pendingStr); err != nil {
+			return fmt.Errorf("re-validación de pendientes al pagar (fail-closed): %w", err)
+		}
+		avail, aerr := decimal.NewFromString(availStr)
+		if aerr != nil {
+			return fmt.Errorf("parse disponible %q: %w", availStr, aerr)
+		}
+		pending, perr := decimal.NewFromString(pendingStr)
+		if perr != nil {
+			return fmt.Errorf("parse pendientes %q: %w", pendingStr, perr)
+		}
+		if amt.GreaterThan(avail.Sub(pending)) {
+			s.log.Warn().Int64("withdrawal_id", id).Str("by", adminEmail).
+				Str("amount", amt.String()).Str("available", avail.String()).
+				Str("pending_otros", pending.String()).
+				Msg("pago bloqueado: el saldo disponible ya no cubre el retiro")
+			return ErrInsufficientAtPay
+		}
+
 		debit := amt.Neg()
 		extRef := fmt.Sprintf("withdrawal:%d", id)
 		if _, err := tx.Exec(ctx, `

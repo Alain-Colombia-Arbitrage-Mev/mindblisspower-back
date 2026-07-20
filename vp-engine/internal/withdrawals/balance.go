@@ -79,3 +79,23 @@ const PendingWithdrawalsSQL = `
 	SELECT COALESCE(SUM(amount_usd), 0)::text
 	  FROM mlm.withdrawal_request
 	 WHERE affiliate_id = $1 AND status IN ('requested','approved')`
+
+// PendingWithdrawalsExcludingSQL es PendingWithdrawalsSQL sin UN retiro puntual.
+// Parámetros: $1 = affiliate_id, $2 = id del retiro a excluir.
+//
+// Existe para la re-validación de saldo AL PAGAR (ver SetWithdrawalStatus). Allí
+// el retiro que se está pagando ya está en 'approved', así que PendingWithdrawals
+// lo INCLUYE: compararlo contra `disponible - pendientes` lo restaría dos veces
+// —una como pendiente y otra como el monto que se pide pagar— y rechazaría todo
+// pago legítimo cuyo saldo no duplicara el monto. La fórmula correcta es:
+//
+//	monto <= disponible - (pendientes de OTROS retiros)
+//
+// Excluir por id explícitamente, en vez de confiar en que el UPDATE de estado ya
+// corrió antes dentro de la misma transacción, hace que la fórmula no dependa
+// del orden de las sentencias: si alguien mueve la validación arriba del UPDATE,
+// sigue siendo correcta.
+const PendingWithdrawalsExcludingSQL = `
+	SELECT COALESCE(SUM(amount_usd), 0)::text
+	  FROM mlm.withdrawal_request
+	 WHERE affiliate_id = $1 AND status IN ('requested','approved') AND id <> $2`
