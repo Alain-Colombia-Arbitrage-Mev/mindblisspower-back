@@ -72,6 +72,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/migration/44_receipt_and_verify.sql",
 		"_meta/migration/45_cart_reminders.sql",
 		"_meta/migration/46_kyc_ocr.sql",
+		"_meta/migration/49_withdrawal_bmp_and_fee.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {

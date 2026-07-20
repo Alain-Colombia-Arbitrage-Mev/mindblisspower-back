@@ -41,10 +41,15 @@ type AdminFinance struct {
 	RanksBonusUSD string `json:"ranks_bonus_usd"` // Σ neto pagado por rangos
 
 	// Retiros.
-	WithdrawalsPaidUSD    string `json:"withdrawals_paid_usd"`
+	WithdrawalsPaidUSD    string `json:"withdrawals_paid_usd"`    // BRUTO pagado (lo que se debitó al afiliado)
 	WithdrawalsPendingUSD string `json:"withdrawals_pending_usd"` // solicitados|aprobados sin pagar
 
-	// Dinero de la empresa (retenido) ≈ entrante − comisiones − retiros pagados.
+	// Ingreso por comisión de retiro (4%): Σ fee_usd de retiros PAGADOS. El
+	// afiliado se debita el bruto pero solo el neto sale de caja; el fee se
+	// queda en la empresa (ver migración 49) y es INGRESO, no un simple resto.
+	WithdrawalFeeIncomeUSD string `json:"withdrawal_fee_income_usd"`
+
+	// Dinero de la empresa (retenido) ≈ entrante − comisiones − retiros pagados (NETO).
 	TreasuryUSD string `json:"treasury_usd"`
 
 	// Desglose del flujo por concepto.
@@ -92,23 +97,41 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 		return f, fmt.Errorf("ranks: %w", err)
 	}
 
-	// Retiros.
+	// Retiros. WithdrawalsPaidUSD es el BRUTO (amount_usd): lo que se debitó de
+	// la wallet del afiliado — coincide con el asiento contable 1013. El fee
+	// (ingreso de la empresa) se reporta aparte en WithdrawalFeeIncomeUSD.
 	if err := s.reader().QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(amount_usd) FILTER (WHERE status='paid'),0)::text,
-		  COALESCE(SUM(amount_usd) FILTER (WHERE status IN ('requested','approved')),0)::text
+		  COALESCE(SUM(amount_usd) FILTER (WHERE status IN ('requested','approved')),0)::text,
+		  COALESCE(SUM(fee_usd) FILTER (WHERE status='paid'),0)::text
 		  FROM mlm.withdrawal_request
-	`).Scan(&f.WithdrawalsPaidUSD, &f.WithdrawalsPendingUSD); err != nil {
+	`).Scan(&f.WithdrawalsPaidUSD, &f.WithdrawalsPendingUSD, &f.WithdrawalFeeIncomeUSD); err != nil {
 		return f, fmt.Errorf("withdrawals: %w", err)
 	}
 
-	// Tesorería ≈ entrante − comisiones distribuidas − retiros pagados.
+	// Tesorería ≈ entrante − comisiones distribuidas − retiros pagados EN NETO.
+	//
+	// El afiliado solicita el BRUTO (amount_usd) y se le debita el bruto de su
+	// wallet interna, pero de la CAJA REAL de la empresa solo sale el NETO
+	// (net_usd = amount_usd - fee_usd): el fee (4%) nunca sale, se queda como
+	// ingreso de la empresa. Restar amount_usd aquí subestima la tesorería en
+	// exactamente Σfee_usd (ver WithdrawalFeeIncomeUSD arriba).
+	//
+	// COALESCE(net_usd, amount_usd): net_usd es NULL solo para filas insertadas
+	// por un binario viejo durante la ventana de deploy de la migración 49
+	// (fee_usd/net_usd nacen NULL, sin default — no hay backfill retroactivo
+	// para ellas). Ante esa incertidumbre asumimos que no se cobró fee (neto =
+	// bruto), igual que el criterio ya usado por el backfill histórico de la
+	// migración: nunca inventamos un fee que no conste. Los retiros históricos
+	// anteriores al fee (backfill de la migración 49) ya tienen net_usd =
+	// amount_usd explícito, así que el COALESCE es un no-op para ellos.
 	if err := s.reader().QueryRow(ctx, `
 		SELECT (
 		  (SELECT COALESCE(SUM(amount_usd+fee_usd),0) FROM payments.purchase_intent WHERE status IN ('paid','activated') AND stripe_present IS DISTINCT FROM false)
 		  - (SELECT COALESCE(SUM(wm.amount),0) FROM mlm.wallet_movement wm JOIN mlm.concept c ON c.id=wm.concept_id
 		      WHERE wm.amount > 0 AND `+withdrawals.ExcludedKindsPredicate+`)
-		  - (SELECT COALESCE(SUM(amount_usd),0) FROM mlm.withdrawal_request WHERE status='paid')
+		  - (SELECT COALESCE(SUM(COALESCE(net_usd, amount_usd)),0) FROM mlm.withdrawal_request WHERE status='paid')
 		)::text
 	`).Scan(&f.TreasuryUSD); err != nil {
 		return f, fmt.Errorf("treasury: %w", err)
