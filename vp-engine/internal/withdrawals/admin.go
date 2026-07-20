@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -108,6 +109,67 @@ var withdrawalTransitions = map[string][]string{
 	"cancelled": {"requested", "approved"},
 }
 
+// BMPFreshness: antigüedad máxima aceptable de la verificación BMP al pagar.
+// Entre la solicitud y el pago pasan días, y en el medio la cuenta BMP puede
+// desactivarse, perder el KYC o quedar restringida. Una verificación de la
+// semana pasada no dice nada sobre si el dinero llegará hoy.
+const BMPFreshness = 15 * time.Minute
+
+var (
+	// ErrBMPNotEligible: la última verificación BMP no habilita el pago (o no
+	// hay ninguna). Es una decisión de política, no una falla ⇒ 409, no 500.
+	ErrBMPNotEligible = errors.New("cuenta BMP no habilitada para recibir")
+	// ErrBMPStale: la verificación existe y es favorable, pero está vencida.
+	ErrBMPStale = errors.New("verificación BMP vencida")
+)
+
+// RefreshBMPVerification persiste una verificación recién obtenida. La llama el
+// handler justo antes de pagar, FUERA de la transacción del pago: consultar a un
+// tercero con una transacción de Postgres abierta la mantiene viva durante todo
+// el round-trip HTTP y, bajo carga, encadena bloqueos sobre la misma fila.
+//
+// Si BMP no responde, el handler NO llama a esto: la verificación vieja queda
+// intacta y el candado la rechaza por vencida o por no elegible. Fail-closed por
+// omisión — no hay camino en el que un tercero caído habilite un pago.
+func (s *Store) RefreshBMPVerification(ctx context.Context, id int64, v BMPVerification) error {
+	status := v.BlockReason
+	if v.CanWithdraw {
+		status = "allowed"
+	}
+	if _, err := s.db.Exec(ctx, `
+		UPDATE mlm.withdrawal_request
+		   SET bmp_status=$2, bmp_verified_at=$3, updated_at=now()
+		 WHERE id=$1`, id, status, v.CheckedAt); err != nil {
+		return fmt.Errorf("refresh bmp verification: %w", err)
+	}
+	return nil
+}
+
+// assertBMPFresh valida que la última verificación habilite el pago Y esté
+// dentro de la ventana de frescura.
+//
+// FAIL-CLOSED en las tres ramas: si la consulta falla se devuelve error (no se
+// paga); si bmp_status es NULL o distinto de 'allowed' se devuelve
+// ErrBMPNotEligible; si bmp_verified_at es NULL o más viejo que BMPFreshness se
+// devuelve ErrBMPStale. Ninguna combinación devuelve nil sin evidencia positiva
+// y fresca de que BMP habilita.
+func (s *Store) assertBMPFresh(ctx context.Context, id int64) error {
+	var status *string
+	var verifiedAt *time.Time
+	if err := s.db.QueryRow(ctx, `
+		SELECT bmp_status, bmp_verified_at
+		  FROM mlm.withdrawal_request WHERE id=$1`, id).Scan(&status, &verifiedAt); err != nil {
+		return fmt.Errorf("lectura de verificación BMP (fail-closed): %w", err)
+	}
+	if status == nil || *status != "allowed" {
+		return ErrBMPNotEligible
+	}
+	if verifiedAt == nil || time.Since(*verifiedAt) > BMPFreshness {
+		return ErrBMPStale
+	}
+	return nil
+}
+
 func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error {
 	allowedPrior, ok := withdrawalTransitions[status]
 	if !ok {
@@ -133,6 +195,17 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 			s.log.Warn().Int64("withdrawal_id", id).Str("by", adminEmail).
 				Msg("pago bloqueado: cuenta suspendida/baneada")
 			return ErrSuspended
+		}
+
+		// Candado BMP, también fail-closed y también SÓLO para 'paid'. El orden
+		// importa: primero el baneo (barato y local), después BMP (lee una fila
+		// que el handler acaba de refrescar contra un tercero). Igual que el
+		// anterior, va ANTES de abrir la transacción: nada que revertir.
+		//
+		if berr := s.assertBMPFresh(ctx, id); berr != nil {
+			s.log.Warn().Err(berr).Int64("withdrawal_id", id).Str("by", adminEmail).
+				Msg("pago bloqueado: verificación BMP no elegible o vencida")
+			return berr
 		}
 	}
 

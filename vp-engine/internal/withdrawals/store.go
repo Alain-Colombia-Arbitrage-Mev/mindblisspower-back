@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,22 @@ func NewStore(db *pgxpool.Pool) *Store {
 }
 
 func (s *Store) SetLogger(l zerolog.Logger) { s.log = l }
+
+// EmailByWithdrawalID resuelve el email con el que se debe verificar en BMP: el
+// vínculo aprobado si existe (Task 11), o el de la persona en caso contrario.
+func (s *Store) EmailByWithdrawalID(ctx context.Context, id int64) (string, error) {
+	var email string
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(wr.bmp_email_used,''), p.email)
+		  FROM mlm.withdrawal_request wr
+		  JOIN mlm.affiliate a ON a.id = wr.affiliate_id
+		  JOIN mlm.person p    ON p.id = a.person_id
+		 WHERE wr.id = $1`, id).Scan(&email)
+	if err != nil {
+		return "", fmt.Errorf("email by withdrawal: %w", err)
+	}
+	return strings.ToLower(strings.TrimSpace(email)), nil
+}
 
 // WithdrawalResult es el resultado de crear una solicitud de retiro.
 //

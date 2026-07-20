@@ -36,6 +36,8 @@ type StoreAPI interface {
 	SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error
 	IsAdmin(ctx context.Context, email string) (bool, error)
 	PersonSuspendedByEmail(ctx context.Context, email string) (bool, error)
+	EmailByWithdrawalID(ctx context.Context, id int64) (string, error)
+	RefreshBMPVerification(ctx context.Context, id int64, v BMPVerification) error
 }
 
 var _ StoreAPI = (*Store)(nil)
@@ -407,6 +409,31 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusBadRequest, "invalid_action")
 		return
 	}
+	// Al PAGAR se re-verifica contra BMP y se persiste el resultado, para que el
+	// candado de admin.go (assertBMPFresh) evalúe datos frescos en vez de la
+	// verificación del día de la solicitud.
+	//
+	// Ocurre acá, ANTES de SetWithdrawalStatus, precisamente para que la llamada
+	// HTTP al tercero quede fuera de la transacción de Postgres del pago.
+	//
+	// Si BMP no responde NO se refresca nada: la verificación vieja queda y el
+	// candado la rechaza por vencida (o por no elegible). El error se loguea, no
+	// se propaga — el rechazo lo emite el candado, que es el único lugar donde
+	// vive la regla.
+	if status == "paid" && h.bmp != nil && h.bmp.Enabled() {
+		email, eerr := h.store.EmailByWithdrawalID(r.Context(), req.ID)
+		if eerr != nil {
+			h.log.Error().Err(eerr).Int64("withdrawal_id", req.ID).Msg("resolver email para re-chequeo BMP")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		if v, verr := h.bmp.VerifyUser(r.Context(), email); verr != nil {
+			h.logBMPError(verr)
+		} else if rerr := h.store.RefreshBMPVerification(r.Context(), req.ID, v); rerr != nil {
+			h.log.Error().Err(rerr).Int64("withdrawal_id", req.ID).Msg("persistir re-chequeo BMP")
+		}
+	}
+
 	if err := h.store.SetWithdrawalStatus(r.Context(), req.ID, status, adminEmail); err != nil {
 		// Sólo una transición inválida es culpa del cliente (409). Cualquier otro
 		// error (Postgres caído, etc.) es 500: reportarlo como "transición
@@ -426,6 +453,23 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 			h.log.Warn().Int64("withdrawal_id", req.ID).Str("by", adminEmail).
 				Msg("pago bloqueado: cuenta suspendida/baneada")
 			writeErr(w, http.StatusForbidden, "account_suspended")
+			return
+		}
+		// El candado BMP bloqueó el pago. Mismo criterio que ErrSuspended: es
+		// política, no falla, así que 409 con un motivo que el admin pueda
+		// accionar (pedirle al afiliado que complete su cuenta BMP / reintentar
+		// para refrescar la verificación) en vez de un 500 que diría "se cayó
+		// algo, reintentá".
+		if errors.Is(err, ErrBMPNotEligible) {
+			h.log.Warn().Int64("withdrawal_id", req.ID).Str("by", adminEmail).
+				Msg("pago bloqueado: cuenta BMP no habilitada")
+			writeErr(w, http.StatusConflict, "bmp_not_eligible")
+			return
+		}
+		if errors.Is(err, ErrBMPStale) {
+			h.log.Warn().Int64("withdrawal_id", req.ID).Str("by", adminEmail).
+				Msg("pago bloqueado: verificación BMP vencida")
+			writeErr(w, http.StatusConflict, "bmp_verification_stale")
 			return
 		}
 		h.log.Error().Err(err).Int64("withdrawal_id", req.ID).Str("action", req.Action).

@@ -140,6 +140,20 @@ func seedMemberWithBalance(t *testing.T, pool *pgxpool.Pool, email, amount strin
 	return affID, walletID
 }
 
+// grantFreshBMP persiste una verificación BMP elegible y recién hecha sobre el
+// retiro, que es lo que el candado fail-closed de SetWithdrawalStatus exige para
+// pagar (Task 10). Los tests que ejercitan OTRA cosa (contabilidad del débito,
+// four-eyes, transiciones) lo llaman para llegar al pago; los que ejercitan el
+// candado en sí NO deben usarlo.
+func grantFreshBMP(t *testing.T, store *Store, id int64) {
+	t.Helper()
+	if err := store.RefreshBMPVerification(context.Background(), id, BMPVerification{
+		CanWithdraw: true, CheckedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("grantFreshBMP(%d): %v", id, err)
+	}
+}
+
 func applySchema(ctx context.Context, pool *pgxpool.Pool, sql string) error {
 	if i := strings.Index(sql, "\nBEGIN;"); i > 0 {
 		prelude := sql[:i]

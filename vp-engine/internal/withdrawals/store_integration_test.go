@@ -168,15 +168,27 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 		t.Fatalf("status desconocido: err = %v, want ErrInvalidTransition", err)
 	}
 
-	// requested → paid: salto inválido (exige approved antes).
-	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("requested->paid: err = %v, want ErrInvalidTransition (falta approved)", err)
+	// requested → paid: salto inválido (exige approved antes). Se rechaza, pero
+	// el ERROR que sale es el del candado BMP, no ErrInvalidTransition: los
+	// candados de dinero (baneo, BMP) corren ANTES de abrir la transacción, y por
+	// lo tanto antes del guard de transición, que vive en el WHERE del UPDATE.
+	// Misma precedencia que ya tenía el candado de baneados (Task 5).
+	//
+	// Lo que importa acá es que NO se paga. Que el guard de transición sigue vivo
+	// lo prueban las aserciones de paid->paid y paid->rejected de más abajo, que
+	// sí llegan hasta el UPDATE.
+	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err == nil {
+		t.Fatal("requested->paid: err = nil, want rechazo (falta approved)")
+	} else if !errors.Is(err, ErrBMPNotEligible) && !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("requested->paid: err = %v, want ErrBMPNotEligible o ErrInvalidTransition", err)
 	}
 	// requested → approved: ok.
 	if err := store.SetWithdrawalStatus(ctx, wrID, "approved", admin); err != nil {
 		t.Fatalf("requested->approved: %v", err)
 	}
-	// approved → paid: ok.
+	// approved → paid: ok. Requiere verificación BMP fresca (candado Task 10);
+	// este test ejercita la máquina de transiciones, no el candado.
+	grantFreshBMP(t, store, wrID)
 	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err != nil {
 		t.Fatalf("approved->paid: %v", err)
 	}
@@ -295,6 +307,7 @@ func TestSetWithdrawalStatus_PostsDebit_Integration(t *testing.T) {
 	if err := store.SetWithdrawalStatus(ctx, wrID, "approved", admin); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
+	grantFreshBMP(t, store, wrID)
 	if err := store.SetWithdrawalStatus(ctx, wrID, "paid", admin); err != nil {
 		t.Fatalf("pay: %v", err)
 	}
@@ -421,6 +434,7 @@ func TestSetWithdrawalStatus_PreservesApprover(t *testing.T) {
 	}
 
 	// Paga B (person_id=3). NO debe tocar la columna.
+	grantFreshBMP(t, store, res.ID)
 	if err := store.SetWithdrawalStatus(ctx, res.ID, "paid", "payer@test.local"); err != nil {
 		t.Fatalf("pay: %v", err)
 	}
@@ -838,6 +852,7 @@ func TestSetWithdrawalStatus_DebitsGrossNotNet(t *testing.T) {
 	if err := store.SetWithdrawalStatus(ctx, res.ID, "approved", "debit@test.local"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
+	grantFreshBMP(t, store, res.ID)
 	if err := store.SetWithdrawalStatus(ctx, res.ID, "paid", "debit@test.local"); err != nil {
 		t.Fatalf("pay: %v", err)
 	}

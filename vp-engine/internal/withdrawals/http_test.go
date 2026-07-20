@@ -27,6 +27,8 @@ type fakeStore struct {
 	setStatusFn func(ctx context.Context, id int64, status, adminEmail string) error
 	isAdminFn   func(ctx context.Context, email string) (bool, error)
 	suspendedFn func(ctx context.Context, email string) (bool, error)
+	emailByIDFn func(ctx context.Context, id int64) (string, error)
+	refreshFn   func(ctx context.Context, id int64, v BMPVerification) error
 
 	// gravado por los handlers, para asertar lo que se propagó al store
 	gotLimit, gotOffset int
@@ -42,6 +44,12 @@ type fakeStore struct {
 	// resultado de la verificación BMP que el handler propagó al store
 	gotBMPEmail     string
 	gotVerification BMPVerification
+
+	// re-chequeo BMP al pagar (Task 10)
+	refreshedID           int64
+	refreshedVerification BMPVerification
+	refreshCalled         bool
+	emailByIDCalled       bool
 }
 
 func (f *fakeStore) RequestWithdrawalWithBMP(ctx context.Context, email, amount, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error) {
@@ -82,6 +90,23 @@ func (f *fakeStore) PersonSuspendedByEmail(ctx context.Context, email string) (b
 		return false, nil
 	}
 	return f.suspendedFn(ctx, email)
+}
+
+func (f *fakeStore) EmailByWithdrawalID(ctx context.Context, id int64) (string, error) {
+	f.emailByIDCalled = true
+	if f.emailByIDFn == nil {
+		return "member@test.local", nil
+	}
+	return f.emailByIDFn(ctx, id)
+}
+
+func (f *fakeStore) RefreshBMPVerification(ctx context.Context, id int64, v BMPVerification) error {
+	f.refreshCalled = true
+	f.refreshedID, f.refreshedVerification = id, v
+	if f.refreshFn == nil {
+		return nil
+	}
+	return f.refreshFn(ctx, id, v)
 }
 
 // fakeVerifier implementa IdentityVerifier.
