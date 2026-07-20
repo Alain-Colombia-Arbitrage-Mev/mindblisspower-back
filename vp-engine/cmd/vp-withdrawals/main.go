@@ -57,18 +57,25 @@ func run() error {
 	store := withdrawals.NewStore(pool)
 	store.SetLogger(logger)
 	handler := withdrawals.NewHandler(store, cfg.ServiceToken, cfg.AdminEmails, logger)
+	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 
 	// Misma defensa H-2 que vp-payments: re-verificar el id token Cognito.
 	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
 		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
 		if verr != nil {
-			logger.Warn().Err(verr).Msg("id-token verifier init failed; rol admin deshabilitado")
+			logger.Warn().Err(verr).
+				Msg("id-token verifier init failed; identidad SIN verificar: se confía en el email declarado por el llamador")
 		} else {
 			handler.SetIdentityVerifier(verifier, false)
 			logger.Info().Str("issuer", cfg.CognitoIssuer).Msg("id-token identity verification enabled")
 		}
 	} else {
-		logger.Warn().Msg("COGNITO_ISSUER no configurado; rol admin deshabilitado (fail-closed)")
+		// No es fail-closed: requireVerified queda en false, así que resolveIdentity
+		// acepta el email declarado (query/body) sin verificarlo. Cualquiera con el
+		// token de servicio puede hacerse pasar por admin. Paridad intencional con
+		// vp-payments y vp-support hasta que el rollout estricto de los BFFs permita
+		// exigir el header X-VP-Id-Token.
+		logger.Warn().Msg("COGNITO_ISSUER no configurado; identidad SIN verificar: se confía en el email declarado por el llamador")
 	}
 
 	srv := &http.Server{

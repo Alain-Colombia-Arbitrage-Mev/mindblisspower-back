@@ -9,6 +9,31 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// ErrInvalidTransition señala que el cambio de estado solicitado no es válido
+// desde el estado actual (o ya fue aplicado). Es culpa del cliente ⇒ 409. Se
+// distingue explícitamente de un fallo de infraestructura (Postgres caído, etc.),
+// que debe salir como 500: reportar "transición rechazada" ante una caída le
+// mentiría al admin sobre el estado real del dinero.
+var ErrInvalidTransition = errors.New("transición de retiro inválida")
+
+// IsAdmin indica si la persona con ese email tiene is_admin=true en mlm.person
+// (admins concedidos desde el panel, migración 47). Copia de
+// payments.Store.IsAdmin: email inexistente ⇒ (false, nil); error de consulta ⇒
+// se propaga para que el handler falle cerrado con 500.
+func (s *Store) IsAdmin(ctx context.Context, email string) (bool, error) {
+	var admin bool
+	err := s.db.QueryRow(ctx,
+		`SELECT COALESCE(is_admin,false) FROM mlm.person WHERE lower(email)=lower($1) LIMIT 1`,
+		email).Scan(&admin)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is_admin: %w", err)
+	}
+	return admin, nil
+}
+
 // AdminWithdrawal es una solicitud de retiro en la vista admin.
 type AdminWithdrawal struct {
 	ID        int64  `json:"id"`
@@ -86,7 +111,7 @@ var withdrawalTransitions = map[string][]string{
 func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error {
 	allowedPrior, ok := withdrawalTransitions[status]
 	if !ok {
-		return fmt.Errorf("invalid status %q", status)
+		return fmt.Errorf("%w: status %q desconocido", ErrInvalidTransition, status)
 	}
 
 	tx, err := s.db.Begin(ctx)
@@ -114,7 +139,7 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	`, id, status, adminEmail, allowedPrior).Scan(&walletID, &amountUSD)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 0 filas afectadas ⇒ transición inválida o ya aplicada. No se postea nada.
-		return fmt.Errorf("invalid transition to %q for withdrawal %d (current status not in %v)", status, id, allowedPrior)
+		return fmt.Errorf("%w: a %q para el retiro %d (estado actual no está en %v)", ErrInvalidTransition, status, id, allowedPrior)
 	}
 	if err != nil {
 		return fmt.Errorf("set withdrawal status: %w", err)
