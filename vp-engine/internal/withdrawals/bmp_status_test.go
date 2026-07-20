@@ -49,8 +49,10 @@ func TestBMPStatusEndpoint_Eligible(t *testing.T) {
 	if !out.Available || !out.CanWithdraw {
 		t.Fatalf("available/can_withdraw = %v/%v, want true/true", out.Available, out.CanWithdraw)
 	}
-	// Hasta la Task 11 el email verificado es el de sesión: el modal lo muestra
-	// para que el afiliado sepa CON QUÉ correo se comprobó su cuenta BMP.
+	// Sin vínculo BMP alterno aprobado (acá el Handler no tiene store), el email
+	// verificado es el de sesión: el modal lo muestra para que el afiliado sepa
+	// CON QUÉ correo se comprobó su cuenta BMP. El caso con vínculo aprobado lo
+	// cubre TestBMPStatus_UsesApprovedLinkedEmail.
 	if out.BMPEmail != "a@b.com" {
 		t.Fatalf("bmp_email = %q, want a@b.com", out.BMPEmail)
 	}

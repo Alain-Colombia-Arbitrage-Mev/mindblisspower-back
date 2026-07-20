@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,6 +39,12 @@ type StoreAPI interface {
 	PersonSuspendedByEmail(ctx context.Context, email string) (bool, error)
 	EmailByWithdrawalID(ctx context.Context, id int64) (string, error)
 	RefreshBMPVerification(ctx context.Context, id int64, v BMPVerification) error
+
+	// Vínculo de email BMP alterno con aprobación admin (Task 11).
+	RequestBMPLink(ctx context.Context, memberEmail, bmpEmail, ip string, v BMPVerification) (int64, error)
+	ListPendingBMPLinks(ctx context.Context, limit, offset int) ([]BMPLink, int64, error)
+	ReviewBMPLink(ctx context.Context, id int64, approve bool, adminEmail, note string) error
+	ApprovedBMPEmail(ctx context.Context, memberEmail string) (string, error)
 }
 
 var _ StoreAPI = (*Store)(nil)
@@ -88,6 +95,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/payments/bmp-status", h.handleBMPStatus)
 	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
 	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
+	mux.HandleFunc("/api/payments/bmp-link", h.handleBMPLinkRequest)
+	mux.HandleFunc("/api/admin/bmp-links", h.handleAdminBMPLinks)
+	mux.HandleFunc("/api/admin/bmp-links/action", h.handleAdminBMPLinkAction)
 	return mux
 }
 
@@ -323,16 +333,186 @@ func (h *Handler) logBMPError(err error) {
 	h.log.Warn().Err(err).Msg("BMP unavailable")
 }
 
-// bmpEmailFor devuelve el correo con el que se debe verificar en BMP. Hasta la
-// Task 11 es siempre el de sesión; ahí pasará a consultar el vínculo BMP
-// alterno aprobado. El guard de store nil se incluye desde ya porque los tests
-// de handler construyen el Handler sin base de datos: cuando el cuerpo consulte
-// la base, ese camino debe seguir devolviendo el email de sesión.
+// bmpEmailFor devuelve el correo con el que se debe verificar en BMP: el
+// vínculo alterno APROBADO si existe, o el de sesión.
+//
+// El guard de store nil mantiene utilizables los tests de handler que no montan
+// base de datos (ver bmp_status_test.go).
+//
+// Un error al consultar el vínculo degrada al email de sesión en vez de fallar:
+// esta ruta es fail-open igual que el resto de la verificación al solicitar, y
+// el candado fail-closed al pagar vuelve a resolver el email (ver
+// Store.EmailByWithdrawalID) sobre el valor ya persistido en la fila.
 func (h *Handler) bmpEmailFor(r *http.Request, sessionEmail string) string {
 	if h == nil || h.store == nil {
 		return sessionEmail
 	}
+	linked, err := h.store.ApprovedBMPEmail(r.Context(), sessionEmail)
+	if err != nil {
+		h.log.Error().Err(err).Msg("approved bmp email")
+		return sessionEmail
+	}
+	if linked != "" {
+		return linked
+	}
 	return sessionEmail
+}
+
+type bmpLinkReq struct {
+	Email    string `json:"email"`
+	BMPEmail string `json:"bmp_email"`
+}
+
+// handleBMPLinkRequest: el miembro solicita vincular un email BMP alterno. Se
+// verifica contra BMP PRIMERO — no se encola un email que BMP no reconoce,
+// porque llenaría de basura la cola que un humano tiene que revisar.
+//
+// A diferencia del resto de la verificación al solicitar, acá NO hay fail-open:
+// si BMP no responde no podemos saber si el correo existe, y encolar a ciegas es
+// exactamente lo que este endpoint evita.
+func (h *Handler) handleBMPLinkRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	var req bmpLinkReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBody)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	email, ok := h.resolveIdentity(w, r, req.Email)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(req.BMPEmail) == "" {
+		writeErr(w, http.StatusBadRequest, "bmp_email_required")
+		return
+	}
+	if h.bmp == nil || !h.bmp.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "bmp_unavailable")
+		return
+	}
+	v, verr := h.bmp.VerifyUser(r.Context(), req.BMPEmail)
+	if verr != nil {
+		h.logBMPError(verr)
+		writeErr(w, http.StatusServiceUnavailable, "bmp_unavailable")
+		return
+	}
+
+	id, err := h.store.RequestBMPLink(r.Context(), email, req.BMPEmail, clientIP(r), v)
+	switch {
+	case errors.Is(err, ErrLinkPending):
+		writeErr(w, http.StatusConflict, "link_already_pending")
+	case errors.Is(err, ErrBMPEmailUnknown):
+		writeErr(w, http.StatusBadRequest, "bmp_email_unknown")
+	case errors.Is(err, ErrNoWallet):
+		writeErr(w, http.StatusBadRequest, "no_affiliate")
+	case err != nil:
+		h.log.Error().Err(err).Msg("request bmp link")
+		writeErr(w, http.StatusInternalServerError, "internal")
+	default:
+		// Rastro de auditoría: toda solicitud de vínculo queda logueada.
+		h.log.Info().Int64("bmp_link_id", id).Str("email", email).Msg("bmp link requested")
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "pending_admin"})
+	}
+}
+
+func (h *Handler) handleAdminBMPLinks(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	limit := atoiDefault(q.Get("limit"), 25)
+	offset := atoiDefault(q.Get("offset"), 0)
+	items, total, err := h.store.ListPendingBMPLinks(r.Context(), limit, offset)
+	if err != nil {
+		h.log.Error().Err(err).Msg("list bmp links")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "total": total, "limit": limit, "offset": offset,
+	})
+}
+
+type bmpLinkActionReq struct {
+	Email  string `json:"email"`
+	ID     int64  `json:"id"`
+	Action string `json:"action"` // approve | reject
+	Note   string `json:"note"`
+}
+
+func (h *Handler) handleAdminBMPLinkAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	// Body antes de identidad, mismo criterio que handleAdminWithdrawalAction:
+	// growth-hub manda el email sólo en el body, vicion-admin en ambos.
+	var req bmpLinkActionReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBody)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	claimed := strings.TrimSpace(req.Email)
+	if claimed == "" {
+		claimed = r.URL.Query().Get("email")
+	}
+	adminEmail, ok := h.resolveIdentity(w, r, claimed)
+	if !ok {
+		return
+	}
+	admin, err := h.isAdminEmail(r.Context(), adminEmail)
+	if err != nil {
+		h.log.Error().Err(err).Msg("is_admin")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if !admin {
+		writeErr(w, http.StatusForbidden, "not_admin")
+		return
+	}
+	if (req.Action != "approve" && req.Action != "reject") || req.ID <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_action")
+		return
+	}
+	if err := h.store.ReviewBMPLink(r.Context(), req.ID, req.Action == "approve", adminEmail, req.Note); err != nil {
+		// Que el vínculo ya no esté pendiente es una condición de carrera entre
+		// dos admins, no una falla: 409 con un motivo accionable.
+		if errors.Is(err, ErrLinkNotPending) {
+			h.log.Warn().Err(err).Int64("bmp_link_id", req.ID).Msg("bmp link review rejected")
+			writeErr(w, http.StatusConflict, "review_rejected")
+			return
+		}
+		h.log.Error().Err(err).Int64("bmp_link_id", req.ID).Msg("review bmp link")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// Rastro four-eyes: qué vínculo, a qué estado y quién lo movió.
+	h.log.Info().Int64("bmp_link_id", req.ID).Str("action", req.Action).Str("by", adminEmail).
+		Msg("admin bmp link action")
+	writeJSON(w, http.StatusOK, map[string]string{"status": req.Action})
+}
+
+// clientIP extrae la IP del solicitante para la auditoría del vínculo.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 func (h *Handler) handleAdminWithdrawals(w http.ResponseWriter, r *http.Request) {

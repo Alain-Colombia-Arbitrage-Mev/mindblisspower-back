@@ -30,6 +30,12 @@ type fakeStore struct {
 	emailByIDFn func(ctx context.Context, id int64) (string, error)
 	refreshFn   func(ctx context.Context, id int64, v BMPVerification) error
 
+	// vínculo BMP alterno (Task 11)
+	requestLinkFn func(ctx context.Context, memberEmail, bmpEmail, ip string, v BMPVerification) (int64, error)
+	listLinksFn   func(ctx context.Context, limit, offset int) ([]BMPLink, int64, error)
+	reviewLinkFn  func(ctx context.Context, id int64, approve bool, adminEmail, note string) error
+	approvedFn    func(ctx context.Context, memberEmail string) (string, error)
+
 	// gravado por los handlers, para asertar lo que se propagó al store
 	gotLimit, gotOffset int
 	gotStatus           string
@@ -50,6 +56,18 @@ type fakeStore struct {
 	refreshedVerification BMPVerification
 	refreshCalled         bool
 	emailByIDCalled       bool
+
+	// gravado por los handlers de vínculo (Task 11)
+	gotLinkMemberEmail string
+	gotLinkBMPEmail    string
+	gotLinkIP          string
+	gotLinkVerif       BMPVerification
+	gotReviewID        int64
+	gotReviewApprove   bool
+	gotReviewAdmin     string
+	gotReviewNote      string
+	reviewLinkCalled   bool
+	approvedCalledWith string
 }
 
 func (f *fakeStore) RequestWithdrawalWithBMP(ctx context.Context, email, amount, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error) {
@@ -107,6 +125,39 @@ func (f *fakeStore) RefreshBMPVerification(ctx context.Context, id int64, v BMPV
 		return nil
 	}
 	return f.refreshFn(ctx, id, v)
+}
+
+func (f *fakeStore) RequestBMPLink(ctx context.Context, memberEmail, bmpEmail, ip string, v BMPVerification) (int64, error) {
+	f.gotLinkMemberEmail, f.gotLinkBMPEmail, f.gotLinkIP, f.gotLinkVerif = memberEmail, bmpEmail, ip, v
+	if f.requestLinkFn == nil {
+		return 7, nil
+	}
+	return f.requestLinkFn(ctx, memberEmail, bmpEmail, ip, v)
+}
+
+func (f *fakeStore) ListPendingBMPLinks(ctx context.Context, limit, offset int) ([]BMPLink, int64, error) {
+	f.gotLimit, f.gotOffset = limit, offset
+	if f.listLinksFn == nil {
+		return []BMPLink{}, 0, nil
+	}
+	return f.listLinksFn(ctx, limit, offset)
+}
+
+func (f *fakeStore) ReviewBMPLink(ctx context.Context, id int64, approve bool, adminEmail, note string) error {
+	f.reviewLinkCalled = true
+	f.gotReviewID, f.gotReviewApprove, f.gotReviewAdmin, f.gotReviewNote = id, approve, adminEmail, note
+	if f.reviewLinkFn == nil {
+		return nil
+	}
+	return f.reviewLinkFn(ctx, id, approve, adminEmail, note)
+}
+
+func (f *fakeStore) ApprovedBMPEmail(ctx context.Context, memberEmail string) (string, error) {
+	f.approvedCalledWith = memberEmail
+	if f.approvedFn == nil {
+		return "", nil
+	}
+	return f.approvedFn(ctx, memberEmail)
 }
 
 // fakeVerifier implementa IdentityVerifier.
