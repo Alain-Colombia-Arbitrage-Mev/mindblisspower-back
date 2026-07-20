@@ -316,14 +316,14 @@ func (h *Handler) handleBMPStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // logBMPError distingue el fallo de NUESTRAS credenciales del resto: un 401/403
-// significa que el Client-Secret venció o fue revocado, y eso bloquea la
+// significa que el x-client-secret venció o fue revocado, y eso bloquea la
 // verificación de TODOS los afiliados. No puede pasar en silencio.
 //
 // La distinción se hace con errors.Is sobre el centinela ErrBMPAuth, no
 // parseando el mensaje: el texto del error es formato, no contrato.
 func (h *Handler) logBMPError(err error) {
 	if errors.Is(err, ErrBMPAuth) {
-		h.log.Error().Err(err).Msg("BMP AUTH FAILED — revisar Client-Id/Client-Secret; bloquea todos los pagos")
+		h.log.Error().Err(err).Msg("BMP AUTH FAILED — revisar x-client-id/x-client-secret (BMP_CLIENT_ID/BMP_CLIENT_SECRET); bloquea todos los pagos")
 		return
 	}
 	if strings.Contains(err.Error(), "status 429") {
