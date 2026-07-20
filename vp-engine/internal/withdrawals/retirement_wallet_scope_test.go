@@ -5,8 +5,64 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
+
+// resolveUSDWallet ejecuta ResolveUSDWalletSQL (balance.go) — la MISMA
+// constante que usa RequestWithdrawal en producción (store.go) para resolver
+// affiliate_id/wallet_id a partir del email — y no una copia local del texto
+// SQL. Usar el símbolo compartido (en vez de re-teclear la query aquí)
+// garantiza que este test ejerce exactamente lo que producción ejecuta: si
+// alguien edita el JOIN en ResolveUSDWalletSQL (p.ej. quita
+// "AND s.symbol = 'USD'"), este helper queda afectado exactamente igual que
+// RequestWithdrawal, sin posibilidad de que la query del test y la de
+// producción diverjan silenciosamente.
+//
+// NOTA sobre por qué esto NO basta por sí solo: ResolveUSDWalletSQL trae
+// "LIMIT 1" sin ORDER BY. Si el filtro de asset se rompe y quedan 2 wallets
+// candidatas, cuál de las dos devuelve el LIMIT 1 depende del plan que elija
+// Postgres — y en la práctica (seq scan en orden físico/de inserción) suele
+// devolver la wallet USD primero simplemente porque se insertó primero en
+// este test, enmascarando el bug. Por eso el assert principal usa
+// resolveAllUSDWallets (abajo), que comparte el mismo SELECT/JOIN/WHERE pero
+// SIN LIMIT, y exige que el conjunto completo de candidatas sea exactamente
+// {usdWalletID} — determinista sin importar el plan.
+func resolveUSDWallet(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string) (affID, walletID int64) {
+	t.Helper()
+	if err := pool.QueryRow(ctx, ResolveUSDWalletSQL, email).Scan(&affID, &walletID); err != nil {
+		t.Fatalf("resolveUSDWallet(%s): %v", email, err)
+	}
+	return affID, walletID
+}
+
+// resolveAllUSDWallets ejecuta resolveUSDWalletBaseSQL (balance.go, símbolo
+// compartido con ResolveUSDWalletSQL) SIN LIMIT: pide TODAS las wallets que
+// matchean el mismo SELECT/JOIN/WHERE que usa producción, en vez de una fila
+// arbitraria. Con el filtro de asset intacto sólo puede matchear la wallet
+// USD; si el filtro se rompe, cualquier otra wallet del afiliado (p.ej.
+// USD-RET/401k) aparece también aquí — de forma determinista, sin depender
+// de qué fila devolvería un LIMIT 1 sin ORDER BY.
+func resolveAllUSDWallets(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string) []int64 {
+	t.Helper()
+	rows, err := pool.Query(ctx, resolveUSDWalletBaseSQL, email)
+	if err != nil {
+		t.Fatalf("resolveAllUSDWallets(%s): %v", email, err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var affID, walletID int64
+		if err := rows.Scan(&affID, &walletID); err != nil {
+			t.Fatalf("resolveAllUSDWallets(%s) scan: %v", email, err)
+		}
+		ids = append(ids, walletID)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("resolveAllUSDWallets(%s) rows: %v", email, err)
+	}
+	return ids
+}
 
 // TestWithdrawal_ExcludesRetirementWallet_Integration es el test de regresión para
 // el bug crítico C1 (follow-up): las queries de saldo disponible contaban los
@@ -125,26 +181,60 @@ func TestWithdrawal_ExcludesRetirementWallet_Integration(t *testing.T) {
 		t.Errorf("RequestWithdrawal($200): got %v, want ErrInsufficient — el saldo 401k está siendo contado como retirable", err)
 	}
 
-	// ── Assert 2: el saldo disponible excluye el wallet USD-RET ─────────────────
-	// GetMemberSummary vive en internal/payments y NO se migra a
-	// internal/withdrawals; verificamos el mismo invariante consultando
-	// AvailableBalanceSQL (balance.go) directamente contra la wallet USD
-	// (usdWalletID) — misma query que respaldaba CommissionAvailable, scoped por
-	// wallet para excluir la wallet USD-RET de jubilación. AvailableForWithdrawal
-	// se replica vía queryAvailableForWithdrawal (definido en
-	// store_integration_test.go, mismo paquete): AvailableBalanceSQL menos
-	// retiros pendientes (ninguno aún en este punto del test).
+	// ── Assert 2: la resolución de wallet de PRODUCCIÓN apunta a USD, nunca a
+	// USD-RET, y el saldo disponible sobre esa wallet resuelta excluye el 401k ──
+	//
+	// IMPORTANTE: antes esta sección consultaba AvailableBalanceSQL directamente
+	// contra la constante local `usdWalletID` (la que ESTE TEST sembró), sin
+	// pasar por ninguna resolución. Eso es tautológico: AvailableBalanceSQL
+	// filtra con "WHERE wm.wallet_id = $1", así que pasarle usdWalletID a mano
+	// garantiza $150 sin importar cómo se rompa la resolución de wallet en
+	// producción (store.go) — el movimiento de retWalletID NUNCA puede colarse
+	// en esa suma, sin importar el bug. El comentario que estaba aquí antes
+	// ("el scope por wallet_id excluye la wallet USD-RET") invertía la lógica:
+	// el scope no DEMUESTRA la exclusión del 401k, la PRESUPONE.
+	//
+	// Fix, parte 1 (determinista): resolveAllUSDWallets comparte el mismo
+	// SELECT/JOIN/WHERE que ResolveUSDWalletSQL de producción (símbolo
+	// resolveUSDWalletBaseSQL, balance.go) pero SIN el "LIMIT 1", así que
+	// devuelve TODAS las wallets candidatas. Afirmamos que el conjunto es
+	// exactamente {usdWalletID}: si retWalletID aparece, el filtro de asset
+	// dejó de excluir la wallet USD-RET/401k — sin importar qué fila hubiera
+	// devuelto un LIMIT 1 sin ORDER BY.
+	if got := resolveAllUSDWallets(t, ctx, pool, email); len(got) != 1 || got[0] != usdWalletID {
+		t.Fatalf("wallets USD candidatas para %s = %v, want exactamente [%d] "+
+			"(usdWalletID) — si retWalletID (%d, USD-RET/401k) aparece aquí, el "+
+			"filtro de asset en ResolveUSDWalletSQL/resolveUSDWalletBaseSQL dejó de "+
+			"excluir la wallet de jubilación",
+			email, got, usdWalletID, retWalletID)
+	}
+
+	// Fix, parte 2 (comportamiento real de producción): resolveUSDWallet
+	// ejecuta ResolveUSDWalletSQL tal cual — el MISMO símbolo compilado que usa
+	// RequestWithdrawal (store.go), con su LIMIT 1 — y confirma que efectivamente
+	// resuelve a usdWalletID en la práctica. Usamos ese wallet_id RESUELTO (no
+	// el sembrado a mano en el setup) para las consultas de saldo que siguen.
+	resolvedAffID, resolvedWalletID := resolveUSDWallet(t, ctx, pool, email)
+	if resolvedAffID != affID || resolvedWalletID != usdWalletID {
+		t.Fatalf("ResolveUSDWalletSQL(%s) = (affID=%d, walletID=%d), want (affID=%d, "+
+			"walletID=%d usdWalletID) — si walletID resuelve a retWalletID (%d, "+
+			"USD-RET/401k) en vez de usdWalletID, la resolución de wallet de "+
+			"producción dejó de filtrar por asset y el saldo de jubilación se "+
+			"volvería retirable",
+			email, resolvedAffID, resolvedWalletID, affID, usdWalletID, retWalletID)
+	}
+
 	// wallet_movement.amount es numeric(20,8) → ::text da "150.00000000".
 	// Comparamos numéricamente con decimal para evitar fragilidad de formato.
 	var availStr string
-	if err := pool.QueryRow(ctx, AvailableBalanceSQL, usdWalletID).Scan(&availStr); err != nil {
+	if err := pool.QueryRow(ctx, AvailableBalanceSQL, resolvedWalletID).Scan(&availStr); err != nil {
 		t.Fatalf("available: %v", err)
 	}
 	gotAvail, _ := decimal.NewFromString(availStr)
 	if !gotAvail.Equal(decimal.NewFromInt(150)) {
 		t.Errorf("CommissionAvailable = %s, want 150 — el saldo 401k (USD-RET) NO debe sumarse a comisiones retirables", availStr)
 	}
-	if got := queryAvailableForWithdrawal(t, ctx, pool, usdWalletID, affID); got != "150.00" {
+	if got := queryAvailableForWithdrawal(t, ctx, pool, resolvedWalletID, affID); got != "150.00" {
 		t.Errorf("AvailableForWithdrawal = %s, want 150.00", got)
 	}
 

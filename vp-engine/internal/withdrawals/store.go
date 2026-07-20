@@ -55,15 +55,7 @@ func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInf
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	var affID, walletID int64
-	err = tx.QueryRow(ctx, `
-		SELECT a.id, w.id
-		  FROM mlm.person p
-		  JOIN mlm.affiliate a ON a.person_id = p.id
-		  JOIN mlm.wallet w    ON w.affiliate_id = a.id
-		  JOIN mlm.asset s     ON s.id = w.asset_id AND s.symbol = 'USD'
-		 WHERE lower(p.email) = lower($1)
-		 LIMIT 1
-	`, email).Scan(&affID, &walletID)
+	err = tx.QueryRow(ctx, ResolveUSDWalletSQL, email).Scan(&affID, &walletID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return WithdrawalResult{}, ErrNoWallet
 	}
