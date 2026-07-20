@@ -145,7 +145,6 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/member/kyc/upload-url", h.handleKYCUploadURL)
 	mux.HandleFunc("/api/member/kyc/confirm", h.handleKYCConfirm)
 	mux.HandleFunc("/api/member/kyc/documents", h.handleKYCDocuments)
-	mux.HandleFunc("/api/payments/withdraw", h.handleWithdraw)
 	mux.HandleFunc("/api/webhooks/stripe", h.handleWebhook)
 	mux.HandleFunc("/api/admin/check", h.handleAdminCheck)
 	mux.HandleFunc("/api/admin/users", h.handleAdminUsers)
@@ -156,8 +155,6 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/admins", h.handleAdminAdmins)
 	mux.HandleFunc("/api/admin/admins/role", h.handleAdminAdminRole)
 	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
-	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
-	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
 	mux.HandleFunc("/api/admin/finance", h.handleAdminFinance)
 	mux.HandleFunc("/api/admin/solvency", h.handleAdminSolvency)
 	mux.HandleFunc("/api/admin/plan", h.handleAdminPlan)
@@ -581,65 +578,6 @@ func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"payments": items, "total": total, "limit": limit, "offset": offset})
 }
 
-func (h *Handler) handleAdminWithdrawals(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAdmin(w, r); !ok {
-		return
-	}
-	status := r.URL.Query().Get("status")
-	limit := atoiDefault(r.URL.Query().Get("limit"), 25)
-	offset := atoiDefault(r.URL.Query().Get("offset"), 0)
-	items, total, err := h.store.ListWithdrawals(r.Context(), status, limit, offset)
-	if err != nil {
-		h.log.Error().Err(err).Msg("list withdrawals")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"withdrawals": items, "total": total, "limit": limit, "offset": offset})
-}
-
-type adminWdActionReq struct {
-	Email  string `json:"email"`
-	ID     int64  `json:"id"`
-	Action string `json:"action"` // approve|reject|pay|cancel
-}
-
-func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	if !h.svcAuth(w, r) {
-		return
-	}
-	var req adminWdActionReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	identity, ok := h.resolveIdentity(w, r, req.Email)
-	if !ok {
-		return
-	}
-	req.Email = identity
-	admin, err := h.isAdminEmail(r.Context(), req.Email)
-	if err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
-	status := map[string]string{"approve": "approved", "reject": "rejected", "pay": "paid", "cancel": "cancelled"}[req.Action]
-	if status == "" || req.ID <= 0 {
-		writeErr(w, http.StatusBadRequest, "invalid_action")
-		return
-	}
-	if err := h.store.SetWithdrawalStatus(r.Context(), req.ID, status, req.Email); err != nil {
-		h.log.Error().Err(err).Msg("withdrawal action")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	h.log.Info().Int64("withdrawal_id", req.ID).Str("status", status).Str("by", req.Email).Msg("admin withdrawal action")
-	writeJSON(w, http.StatusOK, map[string]string{"status": status})
-}
-
 // svcAuth valida el token de servicio (compartido con el BFF). Devuelve false
 // y responde 401 si no coincide.
 func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
@@ -834,61 +772,6 @@ func atoiDefault(s string, def int) int {
 		return def
 	}
 	return n
-}
-
-type withdrawRequest struct {
-	Email    string `json:"email"`
-	Amount   string `json:"amount"`    // USD, p.ej. "150.00"
-	BankInfo string `json:"bank_info"` // banco/cuenta/titular (texto que verá ops)
-}
-
-// handleWithdraw crea una solicitud de retiro (pendiente de aprobación admin).
-func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	var req withdrawRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
-	if !ok {
-		return
-	}
-	req.Email = email
-	if req.Amount == "" || len(req.BankInfo) < 6 {
-		writeErr(w, http.StatusBadRequest, "missing amount or bank_info")
-		return
-	}
-	// Wallet congelada: un usuario baneado/suspendido no puede retirar.
-	if h.rejectIfSuspended(r.Context(), w, req.Email) {
-		return
-	}
-
-	res, err := h.store.RequestWithdrawal(r.Context(), req.Email, req.Amount, req.BankInfo)
-	switch {
-	case errors.Is(err, ErrMinWithdrawal):
-		writeErr(w, http.StatusBadRequest, "min_withdrawal")
-		return
-	case errors.Is(err, ErrInsufficient):
-		writeErr(w, http.StatusBadRequest, "insufficient_balance")
-		return
-	case errors.Is(err, ErrNoWallet):
-		writeErr(w, http.StatusBadRequest, "no_balance")
-		return
-	case err != nil:
-		h.log.Error().Err(err).Msg("request withdrawal")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	h.log.Info().Int64("withdrawal_id", res.ID).Str("email", req.Email).Msg("withdrawal requested")
-	writeJSON(w, http.StatusOK, res)
 }
 
 // handleMe devuelve los pagos + posición + comisiones del miembro. Lo llama el
