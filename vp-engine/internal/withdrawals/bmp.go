@@ -24,7 +24,7 @@ const (
 // verificationPath es el ÚNICO endpoint que consumimos. user-eligibility se
 // descarta: no devuelve restrictionReason ni bridgeCustomerStatus, y exige
 // tarjeta activa (ver D8/D9 en el spec).
-const verificationPath = "/api/v1/be-mindpower/user-verification"
+const verificationPath = "/api/v1/mindpower/user-verification"
 
 // maxBMPResponseBody acota el body de la respuesta de BMP (paridad con
 // internal/withdrawals/http.go: json.NewDecoder(io.LimitReader(r.Body, 1<<16))).
@@ -115,8 +115,11 @@ func (c *BMPClient) VerifyUser(ctx context.Context, email string) (BMPVerificati
 	if err != nil {
 		return unavailable, fmt.Errorf("bmp: build request: %w", err)
 	}
-	req.Header.Set("Client-Id", c.clientID)
-	req.Header.Set("Client-Secret", c.clientSecret)
+	// Nombres de header EXACTOS que exige BMP: prefijo x- obligatorio. Sin él la
+	// API responde 401 "Missing client credentials" (verificado contra prod). El
+	// nombre HTTP es case-insensitive, pero "Client-Id" (sin x-) NO lo reconoce.
+	req.Header.Set("x-client-id", c.clientID)
+	req.Header.Set("x-client-secret", c.clientSecret)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
