@@ -92,6 +92,54 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	return pool, cleanup
 }
 
+// seedMemberWithBalance crea persona + afiliado + wallet USD y acredita una
+// comisión MADURADA (available_at ayer) de `amount`. Devuelve affiliate_id y
+// wallet_id. Los catálogos (country/asset/concept) se siembran idempotentemente
+// para poder llamarlo varias veces sobre el mismo contenedor.
+func seedMemberWithBalance(t *testing.T, pool *pgxpool.Pool, email, amount string) (int64, int64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia')
+		  ON CONFLICT (id) DO NOTHING;
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2)
+		  ON CONFLICT (id) DO NOTHING;
+		INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, active)
+		  VALUES (11,'binary_bonus','Bono','Bonus',1,false,true) ON CONFLICT (id) DO NOTHING;
+	`); err != nil {
+		t.Fatalf("seed catálogos: %v", err)
+	}
+	var personID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.person (first_name, last_name, email, phone_number, status)
+		VALUES ('Mem','Ber',$1,'0','active') RETURNING id`, email).Scan(&personID); err != nil {
+		t.Fatalf("seed person %s: %v", email, err)
+	}
+	var affID, walletID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES ($1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`, personID).Scan(&affID); err != nil {
+		t.Fatalf("seed affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		VALUES ($1,1,'usd-'||$1::bigint::text,0) RETURNING id`, affID).Scan(&walletID); err != nil {
+		t.Fatalf("seed wallet: %v", err)
+	}
+	var txnID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status)
+		VALUES ('seed:bonus:'||$1, 'bono test', 'posted') RETURNING id`, email).Scan(&txnID); err != nil {
+		t.Fatalf("seed txn: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		VALUES ($1,$2,$3,11,$4::numeric,now(),current_date - 1)`, txnID, walletID, affID, amount); err != nil {
+		t.Fatalf("seed movement: %v", err)
+	}
+	return affID, walletID
+}
+
 func applySchema(ctx context.Context, pool *pgxpool.Pool, sql string) error {
 	if i := strings.Index(sql, "\nBEGIN;"); i > 0 {
 		prelude := sql[:i]

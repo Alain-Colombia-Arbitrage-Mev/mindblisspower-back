@@ -655,3 +655,214 @@ func TestMigration49_PartialIndexExists(t *testing.T) {
 		t.Fatalf("índice withdrawal_request_bmp_status_idx ausente")
 	}
 }
+
+// =============================================================================
+// Task 8 — comisión de retiro del 4%
+// =============================================================================
+
+// El fee se congela en la fila al solicitar: fee_pct=0.0400 y amount/fee/net
+// coherentes EN LA BASE (no sólo en Go).
+func TestRequestWithdrawal_PersistsFee(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "fee@test.local", "1000")
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawal(ctx, "fee@test.local", "1000", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if res.GrossUSD != "1000" || res.FeeUSD != "40" || res.NetUSD != "960" {
+		t.Fatalf("gross/fee/net = %s/%s/%s, want 1000/40/960", res.GrossUSD, res.FeeUSD, res.NetUSD)
+	}
+
+	var gross, fee, net, pct string
+	if err := pool.QueryRow(ctx, `
+		SELECT amount_usd::text, fee_usd::text, net_usd::text, fee_pct::text
+		  FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&gross, &fee, &net, &pct); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if gross != "1000.00" || fee != "40.00" || net != "960.00" {
+		t.Fatalf("row = %s/%s/%s, want 1000.00/40.00/960.00", gross, fee, net)
+	}
+	if pct != "0.0400" {
+		t.Fatalf("fee_pct = %s, want 0.0400", pct)
+	}
+
+	// Coherencia aritmética verificada POR POSTGRES sobre las columnas
+	// almacenadas: no alcanza con que cuadre en Go si la base guardó otra cosa.
+	var coherent bool
+	if err := pool.QueryRow(ctx, `
+		SELECT fee_usd + net_usd = amount_usd
+		   AND fee_usd = round(amount_usd * fee_pct, 2)
+		  FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&coherent); err != nil {
+		t.Fatalf("coherencia: %v", err)
+	}
+	if !coherent {
+		t.Fatalf("fila incoherente: fee+net != amount, o fee != round(amount*pct,2)")
+	}
+}
+
+// Centavos incómodos: el invariante fee+net==gross debe cuadrar EN LA BASE para
+// cada monto, no sólo en el cálculo en memoria.
+func TestRequestWithdrawal_FeeAndNetSumToGross(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	cases := []struct{ amount, fee, net string }{
+		{"100.01", "4.00", "96.01"},
+		{"100.07", "4.00", "96.07"},
+		{"100.13", "4.01", "96.12"},
+		{"333.33", "13.33", "320.00"},
+		{"999.99", "40.00", "959.99"},
+		{"12345.67", "493.83", "11851.84"},
+	}
+	store := NewStore(pool)
+	for i, tc := range cases {
+		email := "cents" + itoa(int64(i)) + "@test.local"
+		seedMemberWithBalance(t, pool, email, "100000")
+		res, err := store.RequestWithdrawal(ctx, email, tc.amount, "Banco X, cuenta 123456")
+		if err != nil {
+			t.Fatalf("%s: request: %v", tc.amount, err)
+		}
+		var gross, fee, net string
+		if err := pool.QueryRow(ctx, `
+			SELECT amount_usd::text, fee_usd::text, net_usd::text
+			  FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&gross, &fee, &net); err != nil {
+			t.Fatalf("%s: read row: %v", tc.amount, err)
+		}
+		if gross != tc.amount || fee != tc.fee || net != tc.net {
+			t.Errorf("%s: row = %s/%s/%s, want %s/%s/%s",
+				tc.amount, gross, fee, net, tc.amount, tc.fee, tc.net)
+		}
+		var sums bool
+		if err := pool.QueryRow(ctx, `
+			SELECT fee_usd + net_usd = amount_usd FROM mlm.withdrawal_request WHERE id=$1`,
+			res.ID).Scan(&sums); err != nil {
+			t.Fatalf("%s: sum check: %v", tc.amount, err)
+		}
+		if !sums {
+			t.Errorf("%s: fee+net != gross en la base", tc.amount)
+		}
+	}
+}
+
+// $100 exactos (el mínimo) se aceptan: el mínimo aplica al BRUTO, no al neto.
+// Si se aplicara al neto ($96 < $100) esta solicitud se rechazaría.
+func TestRequestWithdrawal_MinAppliesToGross(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "min@test.local", "500")
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawal(ctx, "min@test.local", "100", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request de $100 rechazado: %v", err)
+	}
+	if res.NetUSD != "96" {
+		t.Fatalf("net = %s, want 96", res.NetUSD)
+	}
+	var gross, net string
+	if err := pool.QueryRow(ctx, `
+		SELECT amount_usd::text, net_usd::text FROM mlm.withdrawal_request WHERE id=$1`,
+		res.ID).Scan(&gross, &net); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if gross != "100.00" || net != "96.00" {
+		t.Fatalf("row = %s/%s, want 100.00/96.00", gross, net)
+	}
+}
+
+// Cuantización: un monto con más de 2 decimales se TRUNCA antes de validar, y
+// el valor validado es exactamente el almacenado.
+//
+//   - "100.009" contra un disponible de $100.004…: truncar da 100.00 y se
+//     acepta; redondear daría 100.01 > disponible y lo rechazaría. Este caso
+//     fija la decisión (truncar, no redondear) y prueba que lo validado es lo
+//     que Postgres termina guardando.
+//   - "99.999" NO se sube a $100: el mínimo se evalúa sobre el cuantizado.
+func TestRequestWithdrawal_QuantizesBeforeValidating(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	// Saldo con sub-centavos reales (wallet_movement.amount es numeric(20,8)).
+	seedMemberWithBalance(t, pool, "quant@test.local", "100.00499999")
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawal(ctx, "quant@test.local", "100.009", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if res.GrossUSD != "100" || res.FeeUSD != "4" || res.NetUSD != "96" {
+		t.Fatalf("gross/fee/net = %s/%s/%s, want 100/4/96", res.GrossUSD, res.FeeUSD, res.NetUSD)
+	}
+	var gross string
+	if err := pool.QueryRow(ctx, `
+		SELECT amount_usd::text FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&gross); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	// Lo validado == lo almacenado: Postgres no tuvo nada que redondear.
+	if gross != "100.00" {
+		t.Fatalf("amount_usd = %s, want 100.00 (truncado, no redondeado a 100.01)", gross)
+	}
+
+	// Sub-centavos por debajo del mínimo: truncar NO los sube a $100.
+	seedMemberWithBalance(t, pool, "quantmin@test.local", "500")
+	if _, err := store.RequestWithdrawal(ctx, "quantmin@test.local", "99.999", "Banco X, cuenta 123456"); !errors.Is(err, ErrMinWithdrawal) {
+		t.Fatalf("99.999: got %v, want ErrMinWithdrawal", err)
+	}
+}
+
+// El débito contable al pagar sigue siendo por el BRUTO: el afiliado se debita
+// $1000 y recibe $960; la diferencia es el fee, que NO se contra-acredita. Y el
+// fee congelado no se recalcula al pagar.
+func TestSetWithdrawalStatus_DebitsGrossNotNet(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	affID, walletID := seedMemberWithBalance(t, pool, "debit@test.local", "5000")
+	if _, err := pool.Exec(ctx,
+		`UPDATE mlm.person SET is_admin=true WHERE email='debit@test.local'`); err != nil {
+		t.Fatalf("admin: %v", err)
+	}
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawal(ctx, "debit@test.local", "1000", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if err := store.SetWithdrawalStatus(ctx, res.ID, "approved", "debit@test.local"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if err := store.SetWithdrawalStatus(ctx, res.ID, "paid", "debit@test.local"); err != nil {
+		t.Fatalf("pay: %v", err)
+	}
+
+	var debit string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(sum(amount),0)::text FROM mlm.wallet_movement
+		 WHERE wallet_id=$1 AND affiliate_id=$2 AND concept_id=$3`,
+		walletID, affID, withdrawalDebitConceptID).Scan(&debit); err != nil {
+		t.Fatalf("debit: %v", err)
+	}
+	d, derr := decimal.NewFromString(debit)
+	if derr != nil {
+		t.Fatalf("parse debit %q: %v", debit, derr)
+	}
+	if !d.Equal(decimal.RequireFromString("-1000")) {
+		t.Fatalf("débito = %s, want -1000 (el BRUTO, no el neto -960)", debit)
+	}
+
+	var pct, fee string
+	if err := pool.QueryRow(ctx, `
+		SELECT fee_pct::text, fee_usd::text FROM mlm.withdrawal_request WHERE id=$1`,
+		res.ID).Scan(&pct, &fee); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if pct != "0.0400" || fee != "40.00" {
+		t.Fatalf("tras pagar: fee_pct/fee_usd = %s/%s, want 0.0400/40.00", pct, fee)
+	}
+}
