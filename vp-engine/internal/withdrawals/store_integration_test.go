@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -864,6 +865,147 @@ func TestSetWithdrawalStatus_DebitsGrossNotNet(t *testing.T) {
 	}
 	if pct != "0.0400" || fee != "40.00" {
 		t.Fatalf("tras pagar: fee_pct/fee_usd = %s/%s, want 0.0400/40.00", pct, fee)
+	}
+}
+
+// =============================================================================
+// Task 9 — persistencia de la verificación BMP al solicitar
+// =============================================================================
+
+// readBMPColumns devuelve (bmp_status, bmp_email_used, bmp_verified_at IS NULL)
+// de un retiro. Los dos primeros son punteros porque las columnas son NULLables.
+func readBMPColumns(t *testing.T, pool *pgxpool.Pool, ctx context.Context, wrID int64) (*string, *string, bool) {
+	t.Helper()
+	var status, emailUsed *string
+	var verifiedAtNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT bmp_status, bmp_email_used, bmp_verified_at IS NULL
+		  FROM mlm.withdrawal_request WHERE id=$1`, wrID).Scan(&status, &emailUsed, &verifiedAtNull); err != nil {
+		t.Fatalf("read bmp columns: %v", err)
+	}
+	return status, emailUsed, verifiedAtNull
+}
+
+// Verificación EXITOSA: la fila queda 'allowed', con la marca de tiempo y el
+// email con el que se verificó. Es lo que el candado fail-closed al pagar
+// (Task 10) va a leer, así que tiene que estar realmente en la base.
+func TestRequestWithdrawalWithBMP_PersistsAllowed(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "bmpok@test.local", "1000")
+
+	checked := time.Now().UTC().Truncate(time.Second)
+	v := BMPVerification{
+		Exists: true, CanWithdraw: true, UserID: "u-1", CheckedAt: checked,
+		VirtualAccountActivated: true, BridgeCustomerStatus: "active", WithdrawalStatus: "allowed",
+	}
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawalWithBMP(ctx, "bmpok@test.local", "200",
+		"Banco X, cuenta 123456", "alterno@bmp.local", v)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	status, emailUsed, verifiedAtNull := readBMPColumns(t, pool, ctx, res.ID)
+	if status == nil || *status != "allowed" {
+		t.Fatalf("bmp_status = %v, want allowed", status)
+	}
+	if verifiedAtNull {
+		t.Fatal("bmp_verified_at = NULL: sin marca de tiempo el candado al pagar no puede exigir frescura")
+	}
+	if emailUsed == nil || *emailUsed != "alterno@bmp.local" {
+		t.Fatalf("bmp_email_used = %v, want alterno@bmp.local", emailUsed)
+	}
+}
+
+// Verificación NO DISPONIBLE (BMP caído): la solicitud EXISTE igual (fail-open),
+// marcada 'unavailable', y bmp_email_used queda NULL — sin verificación no
+// afirmamos con qué correo se validó.
+func TestRequestWithdrawalWithBMP_PersistsUnavailable(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "bmpdown@test.local", "1000")
+
+	v := BMPVerification{BlockReason: BlockUnavailable, CheckedAt: time.Now().UTC()}
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawalWithBMP(ctx, "bmpdown@test.local", "200",
+		"Banco X, cuenta 123456", "sesion@test.local", v)
+	if err != nil {
+		t.Fatalf("request con BMP caído rechazado (debe ser fail-open): %v", err)
+	}
+	if res.ID == 0 || res.Status != "requested" {
+		t.Fatalf("res = %+v, want una solicitud creada en 'requested'", res)
+	}
+
+	status, emailUsed, verifiedAtNull := readBMPColumns(t, pool, ctx, res.ID)
+	if status == nil || *status != BlockUnavailable {
+		t.Fatalf("bmp_status = %v, want %q", status, BlockUnavailable)
+	}
+	if verifiedAtNull {
+		t.Fatal("bmp_verified_at = NULL: debe registrarse CUÁNDO se intentó verificar")
+	}
+	if emailUsed != nil {
+		t.Fatalf("bmp_email_used = %q, want NULL: sin verificación no se afirma con qué email se validó", *emailUsed)
+	}
+}
+
+// Un bloqueo REAL de BMP se persiste con su motivo (no como 'unavailable' ni
+// 'allowed'), y el email verificado SÍ se conserva: BMP sí respondió.
+func TestRequestWithdrawalWithBMP_PersistsBlockReason(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "bmpkyc@test.local", "1000")
+
+	v := BMPVerification{
+		Exists: true, CanWithdraw: false, BlockReason: BlockKYCPending,
+		CheckedAt: time.Now().UTC(), BridgeCustomerStatus: "pending",
+	}
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawalWithBMP(ctx, "bmpkyc@test.local", "200",
+		"Banco X, cuenta 123456", "bmpkyc@test.local", v)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	status, emailUsed, _ := readBMPColumns(t, pool, ctx, res.ID)
+	if status == nil || *status != BlockKYCPending {
+		t.Fatalf("bmp_status = %v, want %q", status, BlockKYCPending)
+	}
+	if emailUsed == nil || *emailUsed != "bmpkyc@test.local" {
+		t.Fatalf("bmp_email_used = %v, want bmpkyc@test.local (BMP sí respondió)", emailUsed)
+	}
+}
+
+// El wrapper RequestWithdrawal (sin datos BMP) equivale a 'unavailable': no debe
+// dejar la columna NULL, o el candado al pagar no sabría distinguir "no
+// verificado" de "columna vieja".
+func TestRequestWithdrawal_WrapperMarksUnavailable(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "bmpwrap@test.local", "1000")
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawal(ctx, "bmpwrap@test.local", "200", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	status, emailUsed, verifiedAtNull := readBMPColumns(t, pool, ctx, res.ID)
+	if status == nil || *status != BlockUnavailable {
+		t.Fatalf("bmp_status = %v, want %q", status, BlockUnavailable)
+	}
+	if verifiedAtNull {
+		t.Fatal("bmp_verified_at = NULL")
+	}
+	if emailUsed != nil {
+		t.Fatalf("bmp_email_used = %q, want NULL", *emailUsed)
 	}
 }
 

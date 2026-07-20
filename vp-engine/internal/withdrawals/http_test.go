@@ -38,10 +38,15 @@ type fakeStore struct {
 	gotRequestEmail     string
 	isAdminCalledWith   string
 	isAdminCallHappened bool
+
+	// resultado de la verificación BMP que el handler propagó al store
+	gotBMPEmail     string
+	gotVerification BMPVerification
 }
 
-func (f *fakeStore) RequestWithdrawal(ctx context.Context, email, amount, bankInfo string) (WithdrawalResult, error) {
+func (f *fakeStore) RequestWithdrawalWithBMP(ctx context.Context, email, amount, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error) {
 	f.gotRequestEmail, f.gotAmount, f.gotBank = email, amount, bankInfo
+	f.gotBMPEmail, f.gotVerification = bmpEmail, v
 	if f.requestFn == nil {
 		return WithdrawalResult{ID: 1, Status: "requested"}, nil
 	}

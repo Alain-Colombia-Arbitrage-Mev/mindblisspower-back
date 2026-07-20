@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,7 +55,22 @@ type WithdrawalResult struct {
 // El monto pedido es el BRUTO: el mínimo y la validación de saldo aplican sobre
 // él, no sobre el neto. Pedir exactamente $100 se acepta (el afiliado recibe
 // $96 tras el 4%).
+//
+// Esta variante NO lleva datos de verificación BMP: la fila queda marcada
+// 'unavailable' (equivalente a RequestWithdrawalWithBMP con BlockUnavailable) y
+// el candado fail-closed al pagar la volverá a verificar.
 func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInfo string) (WithdrawalResult, error) {
+	return s.RequestWithdrawalWithBMP(ctx, email, amountStr, bankInfo, "",
+		BMPVerification{BlockReason: BlockUnavailable, CheckedAt: time.Now().UTC()})
+}
+
+// RequestWithdrawalWithBMP es RequestWithdrawal más el resultado de la
+// verificación BMP, que se persiste en la fila para que el admin vea el estado
+// con el que se solicitó y el candado al pagar tenga qué re-verificar.
+//
+// bmpEmail es el correo con el que se verificó en BMP: el de sesión, o el
+// vínculo alterno aprobado (Task 11). Vacío ⇒ no hubo verificación.
+func (s *Store) RequestWithdrawalWithBMP(ctx context.Context, email, amountStr, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error) {
 	amount, err := decimal.NewFromString(amountStr)
 	if err != nil {
 		return WithdrawalResult{}, ErrMinWithdrawal
@@ -106,13 +122,30 @@ func (s *Store) RequestWithdrawal(ctx context.Context, email, amountStr, bankInf
 	// (concepto 1013). net_usd es lo que recibe en BMP; fee_usd es el ingreso.
 	fee, net := CalcFee(amount, DefaultFeePct)
 
+	// bmpStatus guarda 'allowed' cuando la verificación pasó, o el motivo del
+	// bloqueo. SetWithdrawalStatus exigirá 'allowed' Y frescura para pagar (Task 10).
+	bmpStatus := v.BlockReason
+	if v.CanWithdraw {
+		bmpStatus = "allowed"
+	}
+	if v.BlockReason == BlockUnavailable {
+		// Sin verificación no afirmamos con qué email se validó: dejar ahí el
+		// correo de sesión le diría al admin que BMP confirmó algo que nunca
+		// llegó a responder.
+		bmpEmail = ""
+	}
+
 	var id int64
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO mlm.withdrawal_request
-		  (affiliate_id, wallet_id, amount_usd, status, comments, fee_pct, fee_usd, net_usd)
-		VALUES ($1, $2, $3, 'requested', $4, $5, $6, $7)
+		  (affiliate_id, wallet_id, amount_usd, status, comments,
+		   fee_pct, fee_usd, net_usd,
+		   bmp_status, bmp_verified_at, bmp_email_used)
+		VALUES ($1, $2, $3, 'requested', $4, $5, $6, $7, $8, $9, NULLIF($10,''))
 		RETURNING id
-	`, affID, walletID, amount, bankInfo, DefaultFeePct, fee, net).Scan(&id); err != nil {
+	`, affID, walletID, amount, bankInfo,
+		DefaultFeePct, fee, net,
+		bmpStatus, v.CheckedAt, bmpEmail).Scan(&id); err != nil {
 		return WithdrawalResult{}, fmt.Errorf("insert withdrawal: %w", err)
 	}
 

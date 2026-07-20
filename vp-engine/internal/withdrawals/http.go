@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -30,7 +31,7 @@ type IdentityVerifier interface {
 // como interfaz para que la capa HTTP sea testeable sin Postgres; el único
 // implementador de producción es *Store.
 type StoreAPI interface {
-	RequestWithdrawal(ctx context.Context, email, amountStr, bankInfo string) (WithdrawalResult, error)
+	RequestWithdrawalWithBMP(ctx context.Context, email, amountStr, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error)
 	ListWithdrawals(ctx context.Context, status string, limit, offset int) ([]AdminWithdrawal, int64, error)
 	SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error
 	IsAdmin(ctx context.Context, email string) (bool, error)
@@ -48,6 +49,10 @@ type Handler struct {
 
 	verifier        IdentityVerifier
 	requireVerified bool
+
+	// bmp verifica la cuenta BMP del afiliado. nil ⇒ verificación deshabilitada:
+	// todo se comporta como 'unavailable' (fail-open al solicitar).
+	bmp *BMPClient
 }
 
 func NewHandler(store StoreAPI, serviceToken string, adminEmails []string, log zerolog.Logger) *Handler {
@@ -68,12 +73,17 @@ func (h *Handler) SetIdentityVerifier(v IdentityVerifier, strict bool) {
 // automáticamente admins también. Paridad con payments.Handler.SetSuperAdmins.
 func (h *Handler) SetSuperAdmins(emails []string) { h.superAdminEmails = emails }
 
+// SetBMPClient inyecta el cliente BMP. nil ⇒ verificación deshabilitada
+// (todo se comporta como 'unavailable', fail-open al solicitar).
+func (h *Handler) SetBMPClient(c *BMPClient) { h.bmp = c }
+
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/api/payments/withdraw", h.handleWithdraw)
+	mux.HandleFunc("/api/payments/bmp-status", h.handleBMPStatus)
 	mux.HandleFunc("/api/admin/withdrawals", h.handleAdminWithdrawals)
 	mux.HandleFunc("/api/admin/withdrawals/action", h.handleAdminWithdrawalAction)
 	return mux
@@ -223,7 +233,21 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.store.RequestWithdrawal(r.Context(), email, req.Amount, req.BankInfo)
+	// Verificación BMP al solicitar: FAIL-OPEN, por la misma razón que el chequeo
+	// de suspensión de arriba. Si BMP no responde, la solicitud se registra igual
+	// marcada 'unavailable' y se re-verifica (fail-closed) al pagar. Una caída de
+	// un tercero no debe congelar la experiencia del afiliado.
+	bmpEmail := h.bmpEmailFor(r, email)
+	verification := BMPVerification{BlockReason: BlockUnavailable, CheckedAt: time.Now().UTC()}
+	if h.bmp != nil && h.bmp.Enabled() {
+		if v, verr := h.bmp.VerifyUser(r.Context(), bmpEmail); verr != nil {
+			h.logBMPError(verr)
+		} else {
+			verification = v
+		}
+	}
+
+	res, err := h.store.RequestWithdrawalWithBMP(r.Context(), email, req.Amount, req.BankInfo, bmpEmail, verification)
 	switch {
 	case errors.Is(err, ErrMinWithdrawal):
 		writeErr(w, http.StatusBadRequest, "min_withdrawal")
@@ -239,6 +263,74 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		h.log.Info().Int64("withdrawal_id", res.ID).Str("email", email).Msg("withdrawal requested")
 		writeJSON(w, http.StatusOK, res)
 	}
+}
+
+// handleBMPStatus consulta el estado BMP del email de sesión. FAIL-OPEN: si BMP
+// no responde devuelve 200 con available:false y el modal deja continuar; la
+// solicitud queda marcada 'unavailable' y se re-verifica (fail-closed) al pagar.
+//
+// available distingue "BMP contestó" de "no sabemos": el frontend NO debe leer
+// can_withdraw:false como un bloqueo cuando available es false.
+func (h *Handler) handleBMPStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.svcAuth(w, r) {
+		return
+	}
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
+		return
+	}
+	if h.bmp == nil || !h.bmp.Enabled() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false, "can_withdraw": false, "block_reason": BlockUnavailable,
+		})
+		return
+	}
+
+	bmpEmail := h.bmpEmailFor(r, email)
+	v, err := h.bmp.VerifyUser(r.Context(), bmpEmail)
+	if err != nil {
+		h.logBMPError(err)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false, "can_withdraw": false, "block_reason": BlockUnavailable,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available":    true,
+		"can_withdraw": v.CanWithdraw,
+		"block_reason": v.BlockReason,
+		"bmp_email":    bmpEmail,
+	})
+}
+
+// logBMPError distingue el fallo de NUESTRAS credenciales del resto: un 401/403
+// significa que el Client-Secret venció o fue revocado, y eso bloquea la
+// verificación de TODOS los afiliados. No puede pasar en silencio.
+//
+// La distinción se hace con errors.Is sobre el centinela ErrBMPAuth, no
+// parseando el mensaje: el texto del error es formato, no contrato.
+func (h *Handler) logBMPError(err error) {
+	if errors.Is(err, ErrBMPAuth) {
+		h.log.Error().Err(err).Msg("BMP AUTH FAILED — revisar Client-Id/Client-Secret; bloquea todos los pagos")
+		return
+	}
+	if strings.Contains(err.Error(), "status 429") {
+		h.log.Warn().Err(err).Msg("BMP rate limited")
+		return
+	}
+	h.log.Warn().Err(err).Msg("BMP unavailable")
+}
+
+// bmpEmailFor devuelve el correo con el que se debe verificar en BMP. Hasta la
+// Task 11 es siempre el de sesión; ahí pasará a consultar el vínculo BMP
+// alterno aprobado. El guard de store nil se incluye desde ya porque los tests
+// de handler construyen el Handler sin base de datos: cuando el cuerpo consulte
+// la base, ese camino debe seguir devolviendo el email de sesión.
+func (h *Handler) bmpEmailFor(r *http.Request, sessionEmail string) string {
+	if h == nil || h.store == nil {
+		return sessionEmail
+	}
+	return sessionEmail
 }
 
 func (h *Handler) handleAdminWithdrawals(w http.ResponseWriter, r *http.Request) {

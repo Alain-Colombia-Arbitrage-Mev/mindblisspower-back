@@ -59,6 +59,16 @@ func run() error {
 	handler := withdrawals.NewHandler(store, cfg.ServiceToken, cfg.AdminEmails, logger)
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 
+	// Verificación BMP. Sin credenciales el servicio sigue arriba: la solicitud
+	// se registra marcada 'unavailable' (fail-open) y el candado al pagar la
+	// re-verifica. Se avisa fuerte porque en producción es una mala config.
+	if cfg.BMPClientID != "" && cfg.BMPClientSecret != "" {
+		handler.SetBMPClient(withdrawals.NewBMPClient(cfg.BMPBaseURL, cfg.BMPClientID, cfg.BMPClientSecret))
+		logger.Info().Str("bmp_base_url", cfg.BMPBaseURL).Msg("BMP verification enabled")
+	} else {
+		logger.Warn().Msg("BMP_CLIENT_ID/SECRET ausentes: verificación BMP deshabilitada")
+	}
+
 	// Misma defensa H-2 que vp-payments: re-verificar el id token Cognito.
 	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
 		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
