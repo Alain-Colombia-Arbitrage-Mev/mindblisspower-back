@@ -202,10 +202,18 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 		// que el handler acaba de refrescar contra un tercero). Igual que el
 		// anterior, va ANTES de abrir la transacción: nada que revertir.
 		//
+		// El interruptor WITHDRAWALS_REQUIRE_BMP sólo decide si este resultado
+		// BLOQUEA. La verificación se hace y se persiste en ambos modos, así que
+		// la cola admin muestra el estado real del afiliado aunque el candado
+		// esté desactivado. El candado de baneados de arriba NO tiene interruptor.
 		if berr := s.assertBMPFresh(ctx, id); berr != nil {
+			if s.requireBMP {
+				s.log.Warn().Err(berr).Int64("withdrawal_id", id).Str("by", adminEmail).
+					Msg("pago bloqueado: verificación BMP no elegible o vencida")
+				return berr
+			}
 			s.log.Warn().Err(berr).Int64("withdrawal_id", id).Str("by", adminEmail).
-				Msg("pago bloqueado: verificación BMP no elegible o vencida")
-			return berr
+				Msg("candado BMP DESACTIVADO (WITHDRAWALS_REQUIRE_BMP=false): se paga pese a la verificación")
 		}
 	}
 

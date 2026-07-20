@@ -26,13 +26,34 @@ var (
 type Store struct {
 	db  *pgxpool.Pool
 	log zerolog.Logger
+
+	// requireBMP: si el candado BMP al pagar BLOQUEA (true) o sólo observa
+	// (false). Ver Config.RequireBMP. El default de NewStore es true a
+	// propósito: un Store construido sin configurar el interruptor tiene el
+	// candado PUESTO.
+	requireBMP bool
 }
 
 func NewStore(db *pgxpool.Pool) *Store {
-	return &Store{db: db, log: zerolog.Nop()}
+	// requireBMP arranca en true: el default seguro no depende de que alguien se
+	// acuerde de llamar a SetRequireBMP.
+	return &Store{db: db, log: zerolog.Nop(), requireBMP: true}
 }
 
 func (s *Store) SetLogger(l zerolog.Logger) { s.log = l }
+
+// SetRequireBMP aplica el interruptor de despliegue WITHDRAWALS_REQUIRE_BMP.
+// En false emite un Warn — main lo llama en cada arranque, así que la advertencia
+// queda en los logs de cada boot mientras el candado esté desactivado.
+//
+// NO afecta al candado de baneados (D10): ese es fail-closed siempre.
+func (s *Store) SetRequireBMP(require bool) {
+	s.requireBMP = require
+	if !require {
+		s.log.Warn().Msg("WITHDRAWALS_REQUIRE_BMP=false: el candado BMP al pagar está DESACTIVADO — " +
+			"la verificación se ejecuta y se persiste, pero NO impide pagar")
+	}
+}
 
 // EmailByWithdrawalID resuelve el email con el que se debe verificar en BMP: el
 // vínculo aprobado si existe (Task 11), o el de la persona en caso contrario.

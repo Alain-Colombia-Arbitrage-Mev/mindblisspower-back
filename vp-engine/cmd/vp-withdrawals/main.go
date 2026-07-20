@@ -56,6 +56,10 @@ func run() error {
 
 	store := withdrawals.NewStore(pool)
 	store.SetLogger(logger)
+	// Interruptor de despliegue del candado BMP al pagar. Se llama SIEMPRE (no
+	// sólo cuando es false) para que el Warn de "candado desactivado" salga en
+	// cada arranque mientras la bandera esté puesta en false.
+	store.SetRequireBMP(cfg.RequireBMP)
 	handler := withdrawals.NewHandler(store, cfg.ServiceToken, cfg.AdminEmails, logger)
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 

@@ -334,6 +334,93 @@ func TestNonPayTransitions_NotGuardedByBMP(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Interruptor de despliegue: WITHDRAWALS_REQUIRE_BMP
+// ---------------------------------------------------------------------------
+
+// Con el interruptor en true (default), el retiro sin verificación válida NO se
+// paga. Es el mismo escenario que el de abajo, montado idéntico, para que la
+// única variable entre ambos sea la bandera.
+func TestPay_RequireBMPTrue_Rejects(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "flagon@test.local", "1000")
+
+	store := NewStore(pool)
+	store.SetRequireBMP(true)
+	id := approvedWithdrawal(t, store, "flagon@test.local")
+
+	if err := store.SetWithdrawalStatus(ctx, id, "paid", "admin@test.local"); !errors.Is(err, ErrBMPNotEligible) {
+		t.Fatalf("err = %v, want ErrBMPNotEligible", err)
+	}
+	assertNoDebit(t, pool, id)
+	assertStatus(t, pool, id, "approved")
+}
+
+// Con el interruptor en false, EL MISMO retiro se paga — y bmp_status queda
+// persistido igual, para que la cola admin siga mostrando el estado real del
+// afiliado aunque el candado no esté bloqueando.
+func TestPay_RequireBMPFalse_PaysAndStillPersistsStatus(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "flagoff@test.local", "1000")
+
+	store := NewStore(pool)
+	store.SetRequireBMP(false)
+	id := approvedWithdrawal(t, store, "flagoff@test.local")
+
+	if err := store.SetWithdrawalStatus(ctx, id, "paid", "admin@test.local"); err != nil {
+		t.Fatalf("con WITHDRAWALS_REQUIRE_BMP=false el pago debió pasar: %v", err)
+	}
+	assertStatus(t, pool, id, "paid")
+
+	// El débito sí se posteó (se pagó de verdad, no se saltó la contabilidad).
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM mlm.wallet_movement WHERE concept_id = 1013`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("débitos = %d, want 1", n)
+	}
+
+	// Y el estado BMP real sigue visible: el interruptor apaga el BLOQUEO, no la
+	// observabilidad.
+	var status *string
+	if err := pool.QueryRow(ctx,
+		`SELECT bmp_status FROM mlm.withdrawal_request WHERE id=$1`, id).Scan(&status); err != nil {
+		t.Fatalf("leer bmp_status: %v", err)
+	}
+	if status == nil || *status != BlockUnavailable {
+		t.Fatalf("bmp_status = %v, want %q persistido pese al interruptor", status, BlockUnavailable)
+	}
+}
+
+// El interruptor NO afecta al candado de baneados: con REQUIRE_BMP=false, un
+// baneado sigue sin cobrar.
+func TestPay_RequireBMPFalse_StillBlocksBanned(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "flagban@test.local", "1000")
+
+	store := NewStore(pool)
+	store.SetRequireBMP(false)
+	id := approvedWithdrawal(t, store, "flagban@test.local")
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE mlm.person SET blacklisted = true WHERE email='flagban@test.local'`); err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+
+	if err := store.SetWithdrawalStatus(ctx, id, "paid", "admin@test.local"); !errors.Is(err, ErrSuspended) {
+		t.Fatalf("err = %v, want ErrSuspended (el interruptor NO desactiva el candado de baneados)", err)
+	}
+	assertNoDebit(t, pool, id)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
