@@ -330,3 +330,20 @@ func TestBMPEmailFor_NilStore(t *testing.T) {
 		t.Fatalf("bmpEmailFor = %q, want a@b.com", got)
 	}
 }
+
+// bmp-status es una consulta: sólo GET. Era el único handler que no validaba el
+// método, así que aceptaba POST/PUT/DELETE y gastaba una llamada a BMP por cada
+// uno. El chequeo va ANTES del token de servicio, igual que en el resto de los
+// handlers con método restringido.
+func TestBMPStatusEndpoint_RejectsNonGET(t *testing.T) {
+	h := NewHandler(nil, testToken, nil, zerolog.Nop())
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		req := httptest.NewRequest(m, "/api/payments/bmp-status?email=a@b.com", nil)
+		req.Header.Set("X-VP-Service-Token", testToken)
+		rr := httptest.NewRecorder()
+		h.Routes().ServeHTTP(rr, req)
+		if rr.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s: status = %d (%s), want 405", m, rr.Code, rr.Body.String())
+		}
+	}
+}

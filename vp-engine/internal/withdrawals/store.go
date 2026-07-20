@@ -173,9 +173,14 @@ func (s *Store) RequestWithdrawalWithBMP(ctx context.Context, email, amountStr, 
 		return WithdrawalResult{}, ErrInsufficient
 	}
 
-	// El fee se CONGELA al solicitar: fee_pct queda en la fila y el pago lo lee
-	// de ahí, no de DefaultFeePct. Si mañana cambia la política, los retiros ya
-	// solicitados conservan el porcentaje prometido.
+	// El fee se CONGELA al solicitar: fee_pct, fee_usd y net_usd quedan en la
+	// fila, calculados con la política vigente HOY. Si mañana cambia
+	// DefaultFeePct, los retiros ya solicitados conservan el porcentaje que se
+	// les prometió, porque nadie los recalcula.
+	//
+	// El camino de pago NO lee fee_pct: sólo debita el BRUTO (amount_usd). Las
+	// columnas de fee son para la cola admin (cuánto transferir: net_usd) y para
+	// el reporte de ingresos (SUM(fee_usd) WHERE status='paid').
 	//
 	// amount_usd sigue siendo el BRUTO: es lo que se debita del afiliado al pagar
 	// (concepto 1013). net_usd es lo que recibe en BMP; fee_usd es el ingreso.

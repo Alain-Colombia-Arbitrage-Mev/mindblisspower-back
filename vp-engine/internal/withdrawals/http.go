@@ -284,6 +284,13 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 // available distingue "BMP contestó" de "no sabemos": el frontend NO debe leer
 // can_withdraw:false como un bloqueo cuando available es false.
 func (h *Handler) handleBMPStatus(w http.ResponseWriter, r *http.Request) {
+	// Es una consulta: sólo GET. Era el único handler sin validar el método, así
+	// que aceptaba POST/PUT/DELETE indistintamente y gastaba una llamada a BMP
+	// por cada uno.
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
 	if !h.svcAuth(w, r) {
 		return
 	}

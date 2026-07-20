@@ -115,7 +115,9 @@ func (b *Bridge) HandleDepositConfirmed(_ context.Context, _ []byte) error {
 //
 // NOTA (fix C1): el flujo de retiro ACTUAL es admin-manual (aprobar → marcar
 // 'paid' en el panel), y el DÉBITO contable ya se postea de forma atómica en
-// payments.SetWithdrawalStatus al transicionar a 'paid'. Este handler queda
+// withdrawals.Store.SetWithdrawalStatus (internal/withdrawals/admin.go) al
+// transicionar a 'paid' — vivió en payments hasta que el flujo se movió a su
+// propio servicio (cmd/vp-withdrawals). Este handler queda
 // como stub para el flujo on-chain FUTURO (settlement vía provider externo);
 // cuando exista, debe conciliar por external_ref='withdrawal:<id>' para NO
 // doble-postear el débito que el panel ya escribió.

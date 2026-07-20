@@ -266,10 +266,12 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op tras Commit
 
 	// Guard de transición + idempotencia: sólo actualiza si el estado ACTUAL es
-	// uno de los permitidos. RowsAffected==0 ⇒ transición inválida o ya aplicada
+	// uno de los permitidos. Si ninguna fila matchea, el RETURNING no produce
+	// renglón y el Scan devuelve pgx.ErrNoRows ⇒ transición inválida o ya aplicada
 	// (evita re-pagos y saltos de estado que corromperían four-eyes/finanzas).
-	// RETURNING trae wallet_id + amount_usd del renglón transicionado para postear
-	// el débito con datos autoritativos (sin segundo round-trip ni race).
+	// RETURNING trae wallet_id + affiliate_id + amount_usd del renglón
+	// transicionado para postear el débito y re-validar el saldo con datos
+	// autoritativos (sin segundo round-trip ni race).
 	//
 	// approved_by_person_id se escribe SÓLO en la transición a 'approved'. $3 es
 	// el email del actor de ESTA transición, así que al pagar es el PAGADOR: como
@@ -310,7 +312,9 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	// C2 arriba ya bloquea el segundo 'paid' de todos modos; esto es defensa en
 	// profundidad a nivel contable. El monto va NEGATIVO (fn_validate_movement
 	// exige amount<0 para conceptos factor=-1) contra la wallet USD del miembro,
-	// madurado y disponible de inmediato (posted_at = available_at = now()).
+	// madurado y disponible de inmediato (posted_at = now(), available_at =
+	// current_date, o sea hoy — AvailableBalanceSQL cuenta como madurado todo
+	// available_at <= current_date).
 	if status == "paid" {
 		amt, derr := decimal.NewFromString(amountUSD)
 		if derr != nil {

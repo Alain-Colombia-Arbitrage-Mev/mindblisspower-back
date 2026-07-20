@@ -34,9 +34,15 @@ type Config struct {
 	// (WITHDRAWALS_REQUIRE_BMP). DEFAULT true.
 	//
 	// El sistema debe poder desplegarse ANTES de tener credenciales productivas
-	// de BMP; con el candado activo eso congelaría todos los pagos. En false la
-	// verificación se ejecuta y se PERSISTE igual (la cola admin sigue mostrando
-	// el estado real de cada afiliado), pero no impide pagar.
+	// de BMP; con el candado activo eso congelaría todos los pagos. En false el
+	// resultado de la verificación NO impide pagar.
+	//
+	// Ojo con lo que este interruptor NO hace: no habilita la verificación. Sin
+	// BMP_CLIENT_ID/BMP_CLIENT_SECRET el cliente queda deshabilitado, el handler
+	// nunca llama a RefreshBMPVerification y la cola admin muestra 'unavailable'
+	// para todos — que es justo el escenario para el que existe el interruptor.
+	// La verificación se ejecuta y se persiste sólo cuando HAY credenciales; en
+	// ese caso el interruptor apaga el bloqueo, no la observabilidad.
 	//
 	// No afecta al candado de baneados (D10), que es fail-closed siempre, ni a
 	// la verificación al solicitar.
