@@ -3,8 +3,41 @@ package withdrawals
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
+
+// itoa formatea un int64 en base 10 (helper para construir external_ref en tests).
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// queryAvailableForWithdrawal replica el invariante que internal/payments.GetMemberSummary
+// exponía como AvailableForWithdrawal: AvailableBalanceSQL (disponible bruto,
+// madurado, no congelado, excluye compra/fee) MENOS retiros pendientes
+// (PendingWithdrawalsSQL, status requested/approved), con piso en 0 — misma
+// fórmula que member.go:255-260. GetMemberSummary vive en internal/payments y
+// NO se migra a internal/withdrawals; este helper consulta directamente las
+// constantes SQL de balance.go para preservar el invariante en los tests
+// migrados sin depender de ese símbolo.
+func queryAvailableForWithdrawal(t *testing.T, ctx context.Context, pool *pgxpool.Pool, walletID, affID int64) string {
+	t.Helper()
+	var availStr, pendingStr string
+	if err := pool.QueryRow(ctx, AvailableBalanceSQL, walletID).Scan(&availStr); err != nil {
+		t.Fatalf("available: %v", err)
+	}
+	if err := pool.QueryRow(ctx, PendingWithdrawalsSQL, affID).Scan(&pendingStr); err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	avail, _ := decimal.NewFromString(availStr)
+	pending, _ := decimal.NewFromString(pendingStr)
+	forWd := avail.Sub(pending)
+	if forWd.IsNegative() {
+		forWd = decimal.Zero
+	}
+	return forWd.StringFixed(2)
+}
 
 // Valida la solicitud de retiro: mínimo $100, tope = disponible, descuento de
 // pendientes e inserción en mlm.withdrawal_request. Requiere Docker.
@@ -69,29 +102,29 @@ func TestRequestWithdrawal_Integration(t *testing.T) {
 		t.Fatalf("pending-aware: got %v, want ErrInsufficient", err)
 	}
 
-	// TODO(task-2): restaurar reescribiendo la aserción — GetMemberSummary vive en
-	// internal/payments y NO se migra. Consultar AvailableBalanceSQL (balance.go)
-	// directamente contra el pool para verificar el mismo invariante.
-	/*
-		sum, err := store.GetMemberSummary(ctx, email)
-		if err != nil {
-			t.Fatalf("summary: %v", err)
-		}
-		if sum.AvailableForWithdrawal != "300.00" {
-			t.Fatalf("available = %s, want 300.00", sum.AvailableForWithdrawal)
-		}
-		if len(sum.Withdrawals) != 1 || sum.Withdrawals[0].Status != "requested" {
-			t.Fatalf("withdrawals = %+v", sum.Withdrawals)
-		}
-	*/
+	// Mismo invariante que antes verificaba GetMemberSummary.AvailableForWithdrawal:
+	// disponible bruto (AvailableBalanceSQL=500) menos el retiro pendiente
+	// ($200 'requested', vía PendingWithdrawalsSQL) = 300.
+	if avail := queryAvailableForWithdrawal(t, ctx, pool, walletID, affID); avail != "300.00" {
+		t.Fatalf("available = %s, want 300.00", avail)
+	}
+	// Mismo invariante que antes verificaba sum.Withdrawals: existe exactamente
+	// 1 solicitud para el afiliado, en estado 'requested'.
+	var wCount int
+	var wStatus string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), max(status::text) FROM mlm.withdrawal_request WHERE affiliate_id=$1
+	`, affID).Scan(&wCount, &wStatus); err != nil {
+		t.Fatalf("withdrawals: %v", err)
+	}
+	if wCount != 1 || wStatus != "requested" {
+		t.Fatalf("withdrawals count=%d status=%s, want 1/requested", wCount, wStatus)
+	}
 }
 
-// TODO(task-2): restaurar al migrar SetWithdrawalStatus.
-//
 // C2: el guard de transición sólo permite requested→approved→paid (y rejected/
 // cancelled desde estados válidos). Rechaza saltos (requested→paid) y re-pagos
 // (paid→paid). Requiere Docker.
-/*
 func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
@@ -153,10 +186,7 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 		t.Fatalf("estado final = %s, want paid", final)
 	}
 }
-*/
 
-// TODO(task-2): restaurar al migrar SetWithdrawalStatus.
-//
 // C1: al marcar 'paid', SetWithdrawalStatus postea el DÉBITO contable en la misma
 // transacción, de modo que el saldo disponible BAJA por el monto pagado y la misma
 // comisión no puede retirarse dos veces. Verifica: (a) exactamente un
@@ -164,7 +194,6 @@ func TestSetWithdrawalStatus_TransitionGuard_Integration(t *testing.T) {
 // cae por el monto pagado; (c) re-pagar es idempotente (sin segundo débito, además
 // bloqueado por el guard C2); (d) un retiro NO aprobado no puede pagarse.
 // Requiere Docker.
-/*
 func TestSetWithdrawalStatus_PostsDebit_Integration(t *testing.T) {
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
@@ -210,11 +239,11 @@ func TestSetWithdrawalStatus_PostsDebit_Integration(t *testing.T) {
 	const admin = "admin@test.local"
 	const bank = "Banco X, cuenta 123456, titular Member"
 
-	// Estado inicial: disponible = $500.
-	if sum, err := store.GetMemberSummary(ctx, member); err != nil {
-		t.Fatalf("summary inicial: %v", err)
-	} else if sum.AvailableForWithdrawal != "500.00" {
-		t.Fatalf("disponible inicial = %s, want 500.00", sum.AvailableForWithdrawal)
+	// Estado inicial: disponible = $500. Mismo invariante que antes verificaba
+	// GetMemberSummary.AvailableForWithdrawal (sin retiros pendientes todavía,
+	// PendingWithdrawalsSQL=0, así que coincide con el bruto de AvailableBalanceSQL).
+	if avail := queryAvailableForWithdrawal(t, ctx, pool, walletID, affID); avail != "500.00" {
+		t.Fatalf("disponible inicial = %s, want 500.00", avail)
 	}
 
 	// Solicitar $200.
@@ -259,13 +288,11 @@ func TestSetWithdrawalStatus_PostsDebit_Integration(t *testing.T) {
 		t.Fatalf("monto del débito = %s, want -200.00000000", amt)
 	}
 
-	// (b) Disponible cae del $500 al $300 (500 comisión − 200 débito).
-	sum, err := store.GetMemberSummary(ctx, member)
-	if err != nil {
-		t.Fatalf("summary tras pago: %v", err)
-	}
-	if sum.AvailableForWithdrawal != "300.00" {
-		t.Fatalf("disponible tras pago = %s, want 300.00", sum.AvailableForWithdrawal)
+	// (b) Disponible cae del $500 al $300 (500 comisión − 200 débito). El retiro
+	// ya está 'paid' (no cuenta en PendingWithdrawalsSQL), así que el débito -200
+	// posteado en mlm.wallet_movement se refleja directo en AvailableBalanceSQL.
+	if avail := queryAvailableForWithdrawal(t, ctx, pool, walletID, affID); avail != "300.00" {
+		t.Fatalf("disponible tras pago = %s, want 300.00", avail)
 	}
 
 	// (c) Re-pagar es idempotente: el guard C2 lo bloquea Y no se postea 2º débito.
@@ -290,4 +317,3 @@ func countWithdrawalDebits(t *testing.T, pool *pgxpool.Pool, ctx context.Context
 	}
 	return n
 }
-*/

@@ -1,4 +1,4 @@
-package payments
+package withdrawals
 
 import (
 	"context"
@@ -125,19 +125,27 @@ func TestWithdrawal_ExcludesRetirementWallet_Integration(t *testing.T) {
 		t.Errorf("RequestWithdrawal($200): got %v, want ErrInsufficient — el saldo 401k está siendo contado como retirable", err)
 	}
 
-	// ── Assert 2: GetMemberSummary reporta CommissionAvailable == 150 ───────────
+	// ── Assert 2: el saldo disponible excluye el wallet USD-RET ─────────────────
+	// GetMemberSummary vive en internal/payments y NO se migra a
+	// internal/withdrawals; verificamos el mismo invariante consultando
+	// AvailableBalanceSQL (balance.go) directamente contra la wallet USD
+	// (usdWalletID) — misma query que respaldaba CommissionAvailable, scoped por
+	// wallet para excluir la wallet USD-RET de jubilación. AvailableForWithdrawal
+	// se replica vía queryAvailableForWithdrawal (definido en
+	// store_integration_test.go, mismo paquete): AvailableBalanceSQL menos
+	// retiros pendientes (ninguno aún en este punto del test).
 	// wallet_movement.amount es numeric(20,8) → ::text da "150.00000000".
 	// Comparamos numéricamente con decimal para evitar fragilidad de formato.
-	sum, err := store.GetMemberSummary(ctx, email)
-	if err != nil {
-		t.Fatalf("GetMemberSummary: %v", err)
+	var availStr string
+	if err := pool.QueryRow(ctx, AvailableBalanceSQL, usdWalletID).Scan(&availStr); err != nil {
+		t.Fatalf("available: %v", err)
 	}
-	gotAvail, _ := decimal.NewFromString(sum.CommissionAvailable)
+	gotAvail, _ := decimal.NewFromString(availStr)
 	if !gotAvail.Equal(decimal.NewFromInt(150)) {
-		t.Errorf("CommissionAvailable = %s, want 150 — el saldo 401k (USD-RET) NO debe sumarse a comisiones retirables", sum.CommissionAvailable)
+		t.Errorf("CommissionAvailable = %s, want 150 — el saldo 401k (USD-RET) NO debe sumarse a comisiones retirables", availStr)
 	}
-	if sum.AvailableForWithdrawal != "150.00" {
-		t.Errorf("AvailableForWithdrawal = %s, want 150.00", sum.AvailableForWithdrawal)
+	if got := queryAvailableForWithdrawal(t, ctx, pool, usdWalletID, affID); got != "150.00" {
+		t.Errorf("AvailableForWithdrawal = %s, want 150.00", got)
 	}
 
 	// ── Assert 3: RequestWithdrawal($300) → ErrInsufficient ─────────────────────
@@ -267,13 +275,16 @@ func TestWithdrawal_ExcludesPackagePurchaseCapital_Integration(t *testing.T) {
 	}
 
 	// ── Assert auxiliar: balance retirable reportado = $50, no $550 ──────────────
-	sum, err := store.GetMemberSummary(ctx, email)
-	if err != nil {
-		t.Fatalf("GetMemberSummary: %v", err)
+	// GetMemberSummary no se migra a internal/withdrawals; verificamos el mismo
+	// invariante (CommissionAvailable) vía AvailableBalanceSQL directo contra
+	// usdWalletID, igual que el Assert 2 de arriba.
+	var availStr string
+	if err := pool.QueryRow(ctx, AvailableBalanceSQL, usdWalletID).Scan(&availStr); err != nil {
+		t.Fatalf("available: %v", err)
 	}
-	gotAvail, _ := decimal.NewFromString(sum.CommissionAvailable)
+	gotAvail, _ := decimal.NewFromString(availStr)
 	if !gotAvail.Equal(decimal.NewFromInt(50)) {
 		t.Errorf("CommissionAvailable = %s, want 50 — "+
-			"package_purchase capital NO debe aparecer en saldo retirable", sum.CommissionAvailable)
+			"package_purchase capital NO debe aparecer en saldo retirable", availStr)
 	}
 }
