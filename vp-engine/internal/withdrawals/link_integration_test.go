@@ -299,3 +299,106 @@ func TestBMPLinkPartialUniqueIndexes(t *testing.T) {
 		t.Fatalf("segundo rejected (debe permitirse): %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// EmailByWithdrawalID: precedencia bmp_email_used → vínculo aprobado → persona
+// ---------------------------------------------------------------------------
+
+// El escenario que bloqueaba retiros para siempre: afiliado con vínculo BMP
+// APROBADO que solicita mientras BMP no está disponible (timeout transitorio, o
+// —el caso del despliegue inicial— cliente BMP deshabilitado por falta de
+// credenciales). bmp_email_used queda NULL, y al pagar hay que verificar contra
+// el correo VINCULADO, no contra el de sesión: BMP no conoce el de sesión y
+// responde 'not_registered', dejando el retiro impagable de forma permanente.
+func TestEmailByWithdrawalID_FallsBackToApprovedLink(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "fb@test.local", "1000")
+
+	store := NewStore(pool)
+	v := BMPVerification{Exists: true, CanWithdraw: true, UserID: "u-fb", CheckedAt: time.Now().UTC()}
+	linkID, err := store.RequestBMPLink(ctx, "fb@test.local", "alterno@bmp.com", "1.2.3.4", v)
+	if err != nil {
+		t.Fatalf("request link: %v", err)
+	}
+	if err := store.ReviewBMPLink(ctx, linkID, true, "admin@test.local", "ok"); err != nil {
+		t.Fatalf("approve link: %v", err)
+	}
+
+	// RequestWithdrawal (sin BMP) deja bmp_email_used NULL — exactamente lo que
+	// pasa con el cliente BMP deshabilitado.
+	res, err := store.RequestWithdrawal(ctx, "fb@test.local", "200", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var used *string
+	if err := pool.QueryRow(ctx,
+		`SELECT bmp_email_used FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&used); err != nil {
+		t.Fatalf("leer bmp_email_used: %v", err)
+	}
+	if used != nil {
+		t.Fatalf("bmp_email_used = %q, want NULL (premisa del test)", *used)
+	}
+
+	got, err := store.EmailByWithdrawalID(ctx, res.ID)
+	if err != nil {
+		t.Fatalf("email by withdrawal: %v", err)
+	}
+	if got != "alterno@bmp.com" {
+		t.Fatalf("email = %q, want %q (el vínculo aprobado, no el de sesión)", got, "alterno@bmp.com")
+	}
+}
+
+// bmp_email_used persistido GANA sobre el vínculo aprobado: es el correo con el
+// que BMP efectivamente respondió al solicitar.
+func TestEmailByWithdrawalID_PersistedWins(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "pw@test.local", "1000")
+
+	store := NewStore(pool)
+	v := BMPVerification{Exists: true, CanWithdraw: true, UserID: "u-pw", CheckedAt: time.Now().UTC()}
+	linkID, err := store.RequestBMPLink(ctx, "pw@test.local", "vinculo@bmp.com", "1.2.3.4", v)
+	if err != nil {
+		t.Fatalf("request link: %v", err)
+	}
+	if err := store.ReviewBMPLink(ctx, linkID, true, "admin@test.local", "ok"); err != nil {
+		t.Fatalf("approve link: %v", err)
+	}
+
+	res, err := store.RequestWithdrawalWithBMP(ctx, "pw@test.local", "200", "Banco X, cuenta 123456",
+		"usado@bmp.com", v)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	got, err := store.EmailByWithdrawalID(ctx, res.ID)
+	if err != nil {
+		t.Fatalf("email by withdrawal: %v", err)
+	}
+	if got != "usado@bmp.com" {
+		t.Fatalf("email = %q, want %q (bmp_email_used tiene precedencia)", got, "usado@bmp.com")
+	}
+}
+
+// Sin vínculo y sin bmp_email_used ⇒ el email de la persona.
+func TestEmailByWithdrawalID_FallsBackToPerson(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedMemberWithBalance(t, pool, "np@test.local", "1000")
+
+	store := NewStore(pool)
+	res, err := store.RequestWithdrawal(ctx, "np@test.local", "200", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	got, err := store.EmailByWithdrawalID(ctx, res.ID)
+	if err != nil {
+		t.Fatalf("email by withdrawal: %v", err)
+	}
+	if got != "np@test.local" {
+		t.Fatalf("email = %q, want %q", got, "np@test.local")
+	}
+}

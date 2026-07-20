@@ -55,12 +55,33 @@ func (s *Store) SetRequireBMP(require bool) {
 	}
 }
 
-// EmailByWithdrawalID resuelve el email con el que se debe verificar en BMP: el
-// vínculo aprobado si existe (Task 11), o el de la persona en caso contrario.
+// EmailByWithdrawalID resuelve el email con el que se debe verificar en BMP al
+// pagar. Precedencia, de más a menos específico:
+//
+//  1. bmp_email_used — el correo con el que YA se verificó al solicitar. Es el
+//     dato más autoritativo: es lo que BMP efectivamente respondió.
+//  2. el vínculo alterno APROBADO del afiliado (mlm.bmp_account_link,
+//     status='approved') — Task 11.
+//  3. el email de la persona.
+//
+// El paso (2) NO es redundante con (1). bmp_email_used queda NULL siempre que
+// al solicitar no hubo verificación: BMP con un timeout transitorio, o —el caso
+// del despliegue inicial— el cliente BMP deshabilitado por falta de
+// credenciales, que deja NULL a TODAS las solicitudes. Sin este escalón, al
+// activar WITHDRAWALS_REQUIRE_BMP se verificaría el correo de sesión de un
+// afiliado cuyo vínculo aprobado apunta a otro lado; BMP respondería
+// 'not_registered' y su retiro quedaría bloqueado para siempre, sin más salida
+// que editar la base a mano.
 func (s *Store) EmailByWithdrawalID(ctx context.Context, id int64) (string, error) {
 	var email string
 	err := s.db.QueryRow(ctx, `
-		SELECT COALESCE(NULLIF(wr.bmp_email_used,''), p.email)
+		SELECT COALESCE(
+		         NULLIF(wr.bmp_email_used,''),
+		         (SELECT NULLIF(l.bmp_email,'')
+		            FROM mlm.bmp_account_link l
+		           WHERE l.affiliate_id = wr.affiliate_id AND l.status = 'approved'
+		           LIMIT 1),
+		         p.email)
 		  FROM mlm.withdrawal_request wr
 		  JOIN mlm.affiliate a ON a.id = wr.affiliate_id
 		  JOIN mlm.person p    ON p.id = a.person_id
