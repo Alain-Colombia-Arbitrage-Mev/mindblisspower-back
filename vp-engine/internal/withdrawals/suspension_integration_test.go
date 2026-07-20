@@ -189,6 +189,166 @@ func TestPersonSuspendedByWithdrawalID_Integration(t *testing.T) {
 	}
 }
 
+// Dominio COMPLETO de mlm.person_status cruzado con blacklisted. Se enumeran
+// los cinco valores del enum (_meta/schema_mlm.sql:129) en vez de sólo las ramas
+// que el predicado tiene escritas hoy: probar únicamente las ramas existentes es
+// como se coló el defecto original — el predicado sólo miraba 'suspended' y
+// nadie preguntó qué pasaba con 'banned'.
+//
+// Si algún día se agrega un valor al enum, este test NO lo detecta solo; la
+// defensa es la lista de abajo, que debe revisarse junto con el enum.
+func TestPersonSuspendedByEmail_EnumDomain(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'E','N','enum@test.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	store := NewStore(pool)
+
+	cases := []struct {
+		status      string
+		blacklisted bool
+		want        bool
+		why         string
+	}{
+		// Cuentas vigentes y limpias: deben poder cobrar.
+		{"active", false, false, "cuenta vigente"},
+		{"pending", false, false, "alta sin completar, pero no sancionada"},
+
+		// Sancionadas por status: no cobran.
+		{"suspended", false, true, "baja temporal"},
+		{"banned", false, true, "baja definitiva; el caso legacy del defecto"},
+		{"deleted", false, true, "cuenta eliminada"},
+
+		// El flag manda por sí solo, sea cual sea el status.
+		{"active", true, true, "blacklisted pesa aunque el status esté activo"},
+		{"pending", true, true, "blacklisted pesa aunque el status esté pendiente"},
+		{"suspended", true, true, "ambas mitades del predicado a la vez"},
+		{"banned", true, true, "ambas mitades del predicado a la vez"},
+		{"deleted", true, true, "ambas mitades del predicado a la vez"},
+	}
+
+	for _, tc := range cases {
+		name := tc.status
+		if tc.blacklisted {
+			name += "+blacklisted"
+		}
+		t.Run(name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx,
+				`UPDATE mlm.person SET status=$1::mlm.person_status, blacklisted=$2 WHERE id=1`,
+				tc.status, tc.blacklisted); err != nil {
+				t.Fatalf("set estado: %v", err)
+			}
+			got, err := store.PersonSuspendedByEmail(ctx, "enum@test.local")
+			if err != nil {
+				t.Fatalf("check: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("status=%q blacklisted=%v ⇒ suspended=%v, want %v (%s)",
+					tc.status, tc.blacklisted, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// El escenario EXACTO del defecto, de extremo a extremo: una persona cargada
+// desde el backup legacy con status='banned' y blacklisted=false (02_postload
+// mapea idstatus 3004/8004 a 'banned' sin tocar el flag). Con el predicado viejo
+// pasaba el candado como limpia y el admin le pagaba.
+func TestSetWithdrawalStatus_LegacyBannedStatus_BlocksPay(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2);
+		INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, active)
+		  VALUES (11,'binary_bonus','Bono','Bonus',1,false,true);
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'Leg','Acy','legacy@test.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var affID, walletID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&affID); err != nil {
+		t.Fatalf("affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		VALUES ($1,1,'usd-1',0) RETURNING id`, affID).Scan(&walletID); err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+	var txnID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status, initiated_by_person_id)
+		VALUES ('seed:bonus1','bono test','posted',1) RETURNING id`).Scan(&txnID); err != nil {
+		t.Fatalf("txn: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		VALUES ($1,$2,$3,11,500,now(),current_date - 1)`, txnID, walletID, affID); err != nil {
+		t.Fatalf("movement: %v", err)
+	}
+
+	store := NewStore(pool)
+
+	res, err := store.RequestWithdrawal(ctx, "legacy@test.local", "200", "Banco X, cuenta 123456")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if err := store.SetWithdrawalStatus(ctx, res.ID, "approved", "admin@test.local"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Baja legacy: status='banned' y el flag EXPRESAMENTE en false, que es lo que
+	// deja la carga del backup. blacklisted=false no puede ser un permiso de pago.
+	if _, err := pool.Exec(ctx,
+		`UPDATE mlm.person SET status='banned', blacklisted=false WHERE id = 1`); err != nil {
+		t.Fatalf("ban legacy: %v", err)
+	}
+	var blk bool
+	if err := pool.QueryRow(ctx, `SELECT blacklisted FROM mlm.person WHERE id=1`).Scan(&blk); err != nil {
+		t.Fatalf("verificar flag: %v", err)
+	}
+	if blk {
+		t.Fatal("el fixture debe tener blacklisted=false; si no, el test pasaría por la otra mitad del predicado")
+	}
+
+	if err := store.SetWithdrawalStatus(ctx, res.ID, "paid", "admin@test.local"); !errors.Is(err, ErrSuspended) {
+		t.Fatalf("pay err = %v, want ErrSuspended", err)
+	}
+
+	// El retiro sigue en 'approved' y NO se posteó débito (concepto 1013).
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status::text FROM mlm.withdrawal_request WHERE id=$1`, res.ID).Scan(&status); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status != "approved" {
+		t.Fatalf("status = %q, want approved", status)
+	}
+	if n := countWithdrawalDebits(t, pool, ctx, res.ID); n != 0 {
+		t.Fatalf("débitos del retiro %d = %d, want 0", res.ID, n)
+	}
+	var debits int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM mlm.wallet_movement WHERE concept_id = $1`,
+		withdrawalDebitConceptID).Scan(&debits); err != nil {
+		t.Fatalf("count debits: %v", err)
+	}
+	if debits != 0 {
+		t.Fatalf("debits = %d, want 0", debits)
+	}
+}
+
 // status='suspended' bloquea igual que blacklisted: son las dos mitades del
 // mismo predicado, y sólo probar blacklisted dejaría la otra sin cubrir.
 func TestPersonSuspendedByEmail_StatusSuspended(t *testing.T) {
