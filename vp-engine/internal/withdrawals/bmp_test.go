@@ -8,10 +8,26 @@ import (
 	"testing"
 )
 
+// Contrato real de BMP, verificado contra producción: los headers de
+// credenciales llevan prefijo x- obligatorio y la ruta NO lleva el segmento
+// "be-". La documentación (developer_apis.pdf) dice otra cosa y está
+// equivocada; manda el servicio real. TestVerifyUser_RequestContract fija esto
+// con aserciones explícitas — no cambies estas constantes para "arreglar" un
+// test que falla: si fallan, es que bmp.go dejó de hablar el contrato real.
+const (
+	bmpHeaderClientID     = "x-client-id"
+	bmpHeaderClientSecret = "x-client-secret"
+	bmpWantPath           = "/api/v1/mindpower/user-verification"
+
+	bmpTestClientID     = "cid"
+	bmpTestClientSecret = "csec"
+)
+
 func bmpServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Client-Id") != "cid" || r.Header.Get("Client-Secret") != "csec" {
+		if r.Header.Get(bmpHeaderClientID) != bmpTestClientID ||
+			r.Header.Get(bmpHeaderClientSecret) != bmpTestClientSecret {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -258,6 +274,68 @@ func TestVerifyUser_AuthError_WrapsErrBMPAuth(t *testing.T) {
 				t.Fatalf("errors.Is(err, ErrBMPAuth) = %v, want %v (err=%v)", got, tc.wantErr, err)
 			}
 		})
+	}
+}
+
+// El contrato de transporte con BMP (nombres de header y ruta) es tan parte del
+// contrato como el JSON de respuesta, y es igual de fácil de romper sin querer:
+// el prefijo x- y el segmento "mindpower" (no "be-mindpower") salieron de
+// verificar contra producción, contra lo que dice el PDF.
+//
+// El resto de los tests solo lo comprueba de forma INDIRECTA: el fake devuelve
+// 401 y el fallo aparece como "bmp: status 401: credenciales rechazadas", que
+// describe el síntoma y no la causa. Aquí se afirma de forma explícita, para
+// que un cambio accidental diga exactamente qué se rompió.
+func TestVerifyUser_RequestContract(t *testing.T) {
+	var called bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+
+		// t.Errorf (no Fatalf): el handler corre en otra goroutine, donde
+		// Fatalf no detendría el test y además dejaría la respuesta sin
+		// escribir.
+		if got := r.URL.Path; got != bmpWantPath {
+			t.Errorf("ruta del endpoint BMP = %q, want %q\n"+
+				"  → verificationPath en bmp.go dejó de coincidir con la ruta real de BMP.", got, bmpWantPath)
+		}
+		if got := r.Header.Get(bmpHeaderClientID); got != bmpTestClientID {
+			t.Errorf("header %q = %q, want %q\n"+
+				"  → BMP exige el prefijo x-; sin él responde 401 \"Missing client credentials\".", bmpHeaderClientID, got, bmpTestClientID)
+		}
+		if got := r.Header.Get(bmpHeaderClientSecret); got != bmpTestClientSecret {
+			t.Errorf("header %q = %q, want %q\n"+
+				"  → BMP exige el prefijo x-; sin él responde 401 \"Missing client credentials\".", bmpHeaderClientSecret, got, bmpTestClientSecret)
+		}
+
+		// Los nombres SIN prefijo son los que documentaba el PDF. Si aparecen,
+		// alguien revirtió el fix contra producción: dilo con todas las letras.
+		for _, stale := range []string{"Client-Id", "Client-Secret"} {
+			if v := r.Header.Get(stale); v != "" {
+				t.Errorf("se envió el header obsoleto %q = %q\n"+
+					"  → la API de BMP no lo reconoce; usa x-client-id / x-client-secret.", stale, v)
+			}
+		}
+
+		// El email viaja como query param, en minúsculas.
+		if got := r.URL.Query().Get("email"); got != "a@b.com" {
+			t.Errorf("query email = %q, want %q", got, "a@b.com")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(bmpFullyOK))
+	}))
+	defer srv.Close()
+
+	v, err := NewBMPClient(srv.URL, bmpTestClientID, bmpTestClientSecret).
+		VerifyUser(context.Background(), "A@B.com")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !called {
+		t.Fatal("BMP nunca fue llamado: el contrato no se verificó")
+	}
+	if !v.CanWithdraw {
+		t.Fatalf("CanWithdraw = false (reason %q), want true", v.BlockReason)
 	}
 }
 

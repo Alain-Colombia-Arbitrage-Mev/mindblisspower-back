@@ -129,7 +129,7 @@ func TestBMPStatusEndpoint_RequiresServiceToken(t *testing.T) {
 // logBMPError — el fallo de NUESTRAS credenciales se distingue del resto
 // ---------------------------------------------------------------------------
 
-// Un 401/403 de BMP significa que nuestro Client-Id/Client-Secret venció o fue
+// Un 401/403 de BMP significa que nuestro x-client-id/x-client-secret venció o fue
 // revocado: bloquea la verificación de TODOS los afiliados, no de uno. Debe
 // distinguirse PROGRAMÁTICAMENTE (errors.Is, no substring del mensaje) y salir
 // con nivel Error, para que la alerta operativa se dispare.
