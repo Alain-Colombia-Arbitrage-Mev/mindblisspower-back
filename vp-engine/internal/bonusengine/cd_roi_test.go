@@ -9,9 +9,18 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// bizTZ es la zona de negocio del plan; las fechas de los CD son de Bogota.
+// Los tests siembran y afirman en esta zona, NO en el TimeZone de la sesión
+// Postgres (UTC), que es un detalle de infraestructura.
+const bizTZ = DefaultTimezone
+
 // seedCD crea person+affiliate (root, sin parent) con una wallet USD y un
 // investment_cd con principal/tier dados, start_at hace `daysAgo` días y sin
 // devengo previo. Devuelve el cd_id y el affiliate_id.
+//
+// start_at/matures_at se anclan a MEDIANOCHE DE UNA FECHA BOGOTA explícita
+// (no a `now() - N días`): así el conteo de días queda atado a la semántica de
+// negocio y no a la hora en que corra la suite.
 func seedCD(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string, principal float64, tierID int, daysAgo, lockDays int) (cdID, affID int64) {
 	t.Helper()
 	// Catalogs mínimos (idempotentes entre llamadas).
@@ -34,22 +43,61 @@ func seedCD(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string,
 
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO mlm.investment_cd (affiliate_id, principal_usd, roi_tier_id, start_at, matures_at)
-		VALUES ($1, $2, $3, now() - ($4 * interval '1 day'), now() + ($5 * interval '1 day'))
-		RETURNING id`, affID, principal, tierID, daysAgo, lockDays).Scan(&cdID); err != nil {
+		VALUES ($1, $2, $3,
+		        ((((now() AT TIME ZONE $5)::date - $4::int))::timestamp AT TIME ZONE $5),
+		        ((((now() AT TIME ZONE $5)::date + $6::int))::timestamp AT TIME ZONE $5))
+		RETURNING id`, affID, principal, tierID, daysAgo, bizTZ, lockDays).Scan(&cdID); err != nil {
 		t.Fatalf("investment_cd: %v", err)
 	}
 	return cdID, affID
 }
 
-// TestCDROIAccrual_Base verifica el devengo a tasa base (sin directos calificantes):
-// principal 500, tier 1 (base 25%), 10 días → 500*0.25/365*10 = 3.42.
+// expectedROI deriva el devengo esperado del CATÁLOGO (mlm.cd_roi_tier) en vez
+// de escribir la cifra a mano: el test verifica la propiedad "devengo diario
+// proporcional" (principal × tasa_anual / 365 × días) y no se rompe si alguien
+// cambia una tasa del catálogo.
+func expectedROI(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tierID int, principal float64, days int, qualified bool) string {
+	t.Helper()
+	col := "base_annual_rate"
+	if qualified {
+		col = "qualified_annual_rate"
+	}
+	var rate decimal.Decimal
+	if err := pool.QueryRow(ctx,
+		`SELECT `+col+` FROM mlm.cd_roi_tier WHERE id = $1`, tierID).Scan(&rate); err != nil {
+		t.Fatalf("tier %d %s: %v", tierID, col, err)
+	}
+	if rate.Sign() <= 0 {
+		t.Fatalf("tier %d tiene %s = %s (esperaba > 0)", tierID, col, rate)
+	}
+	return decimal.NewFromFloat(principal).Mul(rate).
+		Div(decimal.NewFromInt(365)).
+		Mul(decimal.NewFromInt(int64(days))).RoundDown(2).StringFixed(2)
+}
+
+// bogotaDate renderiza una columna timestamptz como fecha de calendario BOGOTA,
+// independiente del TimeZone de la sesión.
+func bogotaDate(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, args ...any) string {
+	t.Helper()
+	var s string
+	if err := pool.QueryRow(ctx, query, args...).Scan(&s); err != nil {
+		t.Fatalf("bogotaDate %q: %v", query, err)
+	}
+	return s
+}
+
+// TestCDROIAccrual_Base verifica el devengo a tasa base (sin directos
+// calificantes): principal 500, tier 1, 10 días. El valor esperado sale del
+// catálogo (500 × base_annual_rate / 365 × 10).
 func TestCDROIAccrual_Base(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
 	eng := newTestEngine(pool)
 
-	cdID, affID := seedCD(t, ctx, pool, "base@t.local", 500, 1, 10, 365)
+	const days = 10
+	cdID, affID := seedCD(t, ctx, pool, "base@t.local", 500, 1, days, 365)
+	want := expectedROI(t, ctx, pool, 1, 500, days, false)
 
 	res, err := eng.AccrueCDROIDaily(ctx)
 	if err != nil {
@@ -58,30 +106,29 @@ func TestCDROIAccrual_Base(t *testing.T) {
 	if res.Posted != 1 {
 		t.Fatalf("expected 1 posted, got %d", res.Posted)
 	}
-	// 500 * 0.25 / 365 * 10 = 3.4246… → RoundDown(2) = 3.42
-	if got := res.TotalUSD.StringFixed(2); got != "3.42" {
-		t.Fatalf("expected 3.42 base ROI, got %s", got)
+	if got := res.TotalUSD.StringFixed(2); got != want {
+		t.Fatalf("expected %s base ROI (%d días a tasa base tier 1), got %s", want, days, got)
 	}
 
 	// El movimiento queda BLOQUEADO hasta matures_at (no madurado todavía).
-	var avail string
-	if err := pool.QueryRow(ctx, `
+	// Ambas fechas se comparan en zona Bogota: available_at es una fecha de
+	// negocio, no la proyección UTC de matures_at.
+	avail := bogotaDate(t, ctx, pool, `
 		SELECT to_char(available_at,'YYYY-MM-DD') FROM mlm.wallet_movement
-		 WHERE affiliate_id=$1 AND concept_id=1006 LIMIT 1`, affID).Scan(&avail); err != nil {
-		t.Fatalf("movement: %v", err)
-	}
-	var matures string
-	_ = pool.QueryRow(ctx, `SELECT to_char(matures_at,'YYYY-MM-DD') FROM mlm.investment_cd WHERE id=$1`, cdID).Scan(&matures)
+		 WHERE affiliate_id=$1 AND concept_id=1006 LIMIT 1`, affID)
+	matures := bogotaDate(t, ctx, pool, `
+		SELECT to_char(matures_at AT TIME ZONE $2,'YYYY-MM-DD')
+		  FROM mlm.investment_cd WHERE id=$1`, cdID, bizTZ)
 	if avail != matures {
-		t.Fatalf("ROI available_at (%s) debe = matures_at (%s) [bloqueado 365d]", avail, matures)
+		t.Fatalf("ROI available_at (%s) debe = matures_at Bogota (%s) [bloqueado 365d]", avail, matures)
 	}
 
 	// roi_accrued_usd y last_accrual_date actualizados.
 	var accrued decimal.Decimal
 	var lastNull bool
 	_ = pool.QueryRow(ctx, `SELECT roi_accrued_usd, last_accrual_date IS NULL FROM mlm.investment_cd WHERE id=$1`, cdID).Scan(&accrued, &lastNull)
-	if accrued.StringFixed(2) != "3.42" || lastNull {
-		t.Fatalf("read model mal: accrued=%s lastNull=%v", accrued.StringFixed(2), lastNull)
+	if accrued.StringFixed(2) != want || lastNull {
+		t.Fatalf("read model mal: accrued=%s (esperaba %s) lastNull=%v", accrued.StringFixed(2), want, lastNull)
 	}
 }
 
@@ -112,15 +159,16 @@ func TestCDROIAccrual_Idempotent(t *testing.T) {
 }
 
 // TestCDROIAccrual_Qualified: con 1 directo activo a cada lado (tier ≥), aplica
-// la tasa calificada. principal 1000, tier 2 (base 25% / qualified 35%), 10 días
-// → 1000*0.35/365*10 = 9.58.
+// la tasa calificada del tier 2 sobre 1000 durante 10 días.
 func TestCDROIAccrual_Qualified(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
 	eng := newTestEngine(pool)
 
-	cdID, ownerAff := seedCD(t, ctx, pool, "owner@t.local", 1000, 2, 10, 365)
+	const days = 10
+	cdID, ownerAff := seedCD(t, ctx, pool, "owner@t.local", 1000, 2, days, 365)
+	want := expectedROI(t, ctx, pool, 2, 1000, days, true)
 
 	// Dos directos (sponsor = owner) colocados en el subtree, uno a cada pierna,
 	// cada uno con un CD activo de tier ≥ 2 → califican el uplift. El trigger
@@ -134,19 +182,23 @@ func TestCDROIAccrual_Qualified(t *testing.T) {
 			VALUES ($1,$2,$3,$2,'active',1) RETURNING id`, pid, ownerAff, side).Scan(&aid); err != nil {
 			t.Fatalf("direct %s: %v", side, err)
 		}
-		_, _ = pool.Exec(ctx, `INSERT INTO mlm.investment_cd (affiliate_id, principal_usd, roi_tier_id, matures_at)
-			VALUES ($1, 1000, 2, now()+interval '365 days')`, aid)
+		// CD del directo: arranca HOY (Bogota) → no devenga en esta corrida.
+		_, _ = pool.Exec(ctx, `
+			INSERT INTO mlm.investment_cd (affiliate_id, principal_usd, roi_tier_id, start_at, matures_at)
+			VALUES ($1, 1000, 2,
+			        (((now() AT TIME ZONE $2)::date)::timestamp AT TIME ZONE $2),
+			        (((now() AT TIME ZONE $2)::date + 365)::timestamp AT TIME ZONE $2))`, aid, bizTZ)
 	}
 
 	res, err := eng.AccrueCDROIDaily(ctx)
 	if err != nil {
 		t.Fatalf("accrue: %v", err)
 	}
-	// Owner: 1000*0.35/365*10 = 9.589 → 9.58. (Los directos tienen CD de hoy → días=0.)
 	var ownerROI decimal.Decimal
 	_ = pool.QueryRow(ctx, `SELECT roi_accrued_usd FROM mlm.investment_cd WHERE id=$1`, cdID).Scan(&ownerROI)
-	if ownerROI.StringFixed(2) != "9.58" {
-		t.Fatalf("esperaba ROI calificado 9.58 (tasa 35%%), got %s — ¿v_cd_qualification?", ownerROI.StringFixed(2))
+	if ownerROI.StringFixed(2) != want {
+		t.Fatalf("esperaba ROI calificado %s (qualified_annual_rate tier 2, %d días), got %s — ¿v_cd_qualification?",
+			want, days, ownerROI.StringFixed(2))
 	}
 	if res.Posted < 1 {
 		t.Fatalf("esperaba al menos 1 movimiento")
@@ -175,5 +227,85 @@ func TestCDROIAccrual_Matures(t *testing.T) {
 	_ = pool.QueryRow(ctx, `SELECT status FROM mlm.investment_cd WHERE id=$1`, cdID).Scan(&status)
 	if status != "matured" {
 		t.Fatalf("esperaba status matured, got %s", status)
+	}
+	// Devengó exactamente start→vencimiento (365 días), no start→hoy (400).
+	want := expectedROI(t, ctx, pool, 1, 500, 365, false)
+	var accrued decimal.Decimal
+	_ = pool.QueryRow(ctx, `SELECT roi_accrued_usd FROM mlm.investment_cd WHERE id=$1`, cdID).Scan(&accrued)
+	if accrued.StringFixed(2) != want {
+		t.Fatalf("el devengo debe cortarse en matures_at: esperaba %s (365 días), got %s", want, accrued.StringFixed(2))
+	}
+}
+
+// poolWithSessionTimezone abre un pool contra la misma DB pero forzando el
+// TimeZone de la SESIÓN Postgres. Sirve para probar que el motor no depende de
+// él (producción lo fija en UTC; ver internal/shared/db/pool.go).
+func poolWithSessionTimezone(t *testing.T, ctx context.Context, connString, tz string) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.ConnConfig.RuntimeParams["timezone"] = tz
+	p, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("pool tz=%s: %v", tz, err)
+	}
+	return p
+}
+
+// TestCDROIAccrual_SessionTimezoneInvariant es el test de regresión del bug de
+// zona horaria: el devengo debe dar EXACTAMENTE lo mismo sea cual sea el
+// TimeZone de la sesión Postgres. El bug original mezclaba "hoy" en Bogota con
+// `cd.start_at::date` resuelto en la zona de la sesión (UTC), lo que desfasaba
+// `days` en un día.
+//
+// Nota sobre la elección de zonas: con start_at anclado a medianoche Bogota
+// (= 05:00Z), las fechas UTC y Bogota COINCIDEN, así que UTC vs Bogota solo
+// delataría el bug en la franja 19:00–23:59 Bogota. Por eso la tabla incluye
+// zonas con offset fuera de ±5h (Pacific/Pago_Pago = UTC−11, Pacific/Kiritimati
+// = UTC+14): con el código roto al menos una de ellas cae en otra fecha de
+// calendario y el test falla A CUALQUIER HORA.
+func TestCDROIAccrual_SessionTimezoneInvariant(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	dsn := pool.Config().ConnString()
+
+	const (
+		days      = 10
+		principal = 500.0
+		tierID    = 1
+	)
+	want := expectedROI(t, ctx, pool, tierID, principal, days, false)
+
+	sessionTZs := []string{
+		"UTC",                // el de producción (shared/db/pool.go)
+		bizTZ,                // el de negocio
+		"Pacific/Pago_Pago",  // UTC−11
+		"Pacific/Kiritimati", // UTC+14
+	}
+
+	for i, tz := range sessionTZs {
+		tzPool := poolWithSessionTimezone(t, ctx, dsn, tz)
+		eng := newTestEngine(tzPool)
+
+		// Un CD idéntico por zona. Los CD de iteraciones previas ya devengaron
+		// hoy → los salta la idempotencia, así que res.TotalUSD aísla el nuevo.
+		seedCD(t, ctx, tzPool, fmt.Sprintf("tz%d@t.local", i), principal, tierID, days, 365)
+
+		res, err := eng.AccrueCDROIDaily(ctx)
+		tzPool.Close()
+		if err != nil {
+			t.Fatalf("accrue con session TimeZone=%s: %v", tz, err)
+		}
+		if res.Posted != 1 {
+			t.Fatalf("session TimeZone=%s: esperaba 1 posteo (el CD nuevo), got %d", tz, res.Posted)
+		}
+		if got := res.TotalUSD.StringFixed(2); got != want {
+			t.Fatalf("el devengo depende del TimeZone de la sesión: con TimeZone=%s dio %s, esperaba %s (%d días). "+
+				"Las fechas del CD son de %s y deben castearse en esa zona, no en la de la sesión.",
+				tz, got, want, days, bizTZ)
+		}
 	}
 }
