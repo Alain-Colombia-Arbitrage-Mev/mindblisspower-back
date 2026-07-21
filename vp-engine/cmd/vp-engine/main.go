@@ -91,7 +91,7 @@ func run() error {
 
 	// Modules
 	ledgerSvc := ledger.New(pool, nc, logger)
-	engine := bonusengine.New(pool, nc, logger)
+	engine := bonusengine.New(pool, nc, logger, bonusengine.WithTimezone(cfg.BonusEngineTimezone))
 	bridge := walletbridge.New(pool, nc, logger)
 	invariants := bonusengine.NewInvariants(pool, logger)
 	scheduler, err := bonusengine.NewScheduler(engine, invariants, pool, logger, cfg.BonusEngineBinaryCycleEnabled)

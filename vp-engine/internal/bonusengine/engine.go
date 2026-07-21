@@ -28,29 +28,51 @@ var (
 	ErrNoActivePlanConfig = errors.New("no active plan_config")
 )
 
+// DefaultTimezone es la zona de negocio del plan (Bogota, UTC−5 sin DST). Todas
+// las fechas de calendario (devengo diario, disponibilidad, vencimiento) se
+// interpretan en esta zona; el TimeZone de la sesión Postgres (UTC, ver
+// shared/db.pool) es un detalle de infraestructura que NO debe filtrarse al
+// cálculo. Override por BONUS_ENGINE_TIMEZONE vía Option WithTimezone.
+const DefaultTimezone = "America/Bogota"
+
+// Option configura el Engine en New.
+type Option func(*Engine)
+
+// WithTimezone fija la zona de negocio usada para resolver fechas de calendario.
+// Vacío = se conserva DefaultTimezone.
+func WithTimezone(tz string) Option {
+	return func(e *Engine) {
+		if tz != "" {
+			e.tz = tz
+		}
+	}
+}
+
 // Engine ejecuta los runs de bonos. Una sola instancia compartida.
 type Engine struct {
 	db   *pgxpool.Pool
 	nats *nats.Conn
 	log  zerolog.Logger
+	tz   string // zona de negocio para fechas de calendario
 
 	// Métricas (ADR 0011)
-	closeRunDuration   prometheus.Histogram
-	candidatesCounter  prometheus.Counter
-	payoutsTotalUSD    prometheus.Counter
-	thetaGauge         prometheus.Gauge
-	solvencyBreaches   prometheus.Counter
-	roiRunDuration     prometheus.Histogram
-	lastBinaryClose    prometheus.Gauge
-	lastROIRun         prometheus.Gauge
+	closeRunDuration  prometheus.Histogram
+	candidatesCounter prometheus.Counter
+	payoutsTotalUSD   prometheus.Counter
+	thetaGauge        prometheus.Gauge
+	solvencyBreaches  prometheus.Counter
+	roiRunDuration    prometheus.Histogram
+	lastBinaryClose   prometheus.Gauge
+	lastROIRun        prometheus.Gauge
 }
 
 // New initializes the engine and registers metrics.
-func New(db *pgxpool.Pool, nc *nats.Conn, log zerolog.Logger) *Engine {
+func New(db *pgxpool.Pool, nc *nats.Conn, log zerolog.Logger, opts ...Option) *Engine {
 	e := &Engine{
 		db:   db,
 		nats: nc,
 		log:  log.With().Str("component", "bonusengine").Logger(),
+		tz:   DefaultTimezone,
 
 		closeRunDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "binary",
@@ -87,6 +109,10 @@ func New(db *pgxpool.Pool, nc *nats.Conn, log zerolog.Logger) *Engine {
 			Namespace: "bonus_run", Name: "last_completed_roi_seconds",
 			Help: "Unix timestamp del último ROI run exitoso.",
 		}),
+	}
+
+	for _, opt := range opts {
+		opt(e)
 	}
 
 	metrics.MustRegister(

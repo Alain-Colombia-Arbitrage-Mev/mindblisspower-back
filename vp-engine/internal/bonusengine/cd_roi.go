@@ -23,14 +23,14 @@ type CDROIResult struct {
 
 // cdAccrualRow: estado mínimo de un CD activo para devengar.
 type cdAccrualRow struct {
-	id, affID    int64
-	principal    decimal.Decimal
-	startDate    time.Time
-	maturesDate  time.Time
-	lastAccrual  *time.Time
-	baseRate     decimal.Decimal
-	qualRate     decimal.Decimal
-	qualifies    bool
+	id, affID   int64
+	principal   decimal.Decimal
+	startDate   time.Time
+	maturesDate time.Time
+	lastAccrual *time.Time
+	baseRate    decimal.Decimal
+	qualRate    decimal.Decimal
+	qualifies   bool
 }
 
 // AccrueCDROIDaily devenga el ROI diario de todos los investment_cd activos.
@@ -55,22 +55,29 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // safe tras Commit
 
-	// "Hoy" en zona Bogota (consistente con available_at/liquidación).
+	// "Hoy" en la zona de negocio (consistente con available_at/liquidación).
 	var today time.Time
-	if err := tx.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'America/Bogota')::date`).Scan(&today); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT (now() AT TIME ZONE $1)::date`, e.tz).Scan(&today); err != nil {
 		return res, fmt.Errorf("today: %w", err)
 	}
 
+	// start_at/matures_at son timestamptz: un `::date` pelado los resuelve en el
+	// TimeZone de la SESIÓN (UTC, shared/db.pool), no en la zona de negocio, y
+	// restarlos contra `today` (zona de negocio) desfasa `days` en un día durante
+	// la franja en que ambas fechas divergen. Se castean en la misma zona que
+	// `today`. last_accrual_date ya es `date` — no depende de la sesión.
 	rows, err := tx.Query(ctx, `
 		SELECT cd.id, cd.affiliate_id, cd.principal_usd,
-		       cd.start_at::date, cd.matures_at::date, cd.last_accrual_date,
+		       (cd.start_at   AT TIME ZONE $1)::date,
+		       (cd.matures_at AT TIME ZONE $1)::date,
+		       cd.last_accrual_date,
 		       t.base_annual_rate, t.qualified_annual_rate,
 		       COALESCE(q.qualifies_uplift, false)
 		  FROM mlm.investment_cd cd
 		  JOIN mlm.cd_roi_tier t ON t.id = cd.roi_tier_id
 		  LEFT JOIN mlm.v_cd_qualification q ON q.investment_cd_id = cd.id
 		 WHERE cd.status = 'active'
-		 ORDER BY cd.id`)
+		 ORDER BY cd.id`, e.tz)
 	if err != nil {
 		return res, fmt.Errorf("query active CDs: %w", err)
 	}
