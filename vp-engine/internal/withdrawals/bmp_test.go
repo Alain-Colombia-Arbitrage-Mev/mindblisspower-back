@@ -347,3 +347,78 @@ func TestBMPClient_Enabled(t *testing.T) {
 		t.Fatal("Enabled = false con credenciales")
 	}
 }
+
+// Respuesta REAL de producción para tahirahmad543@yopmail.com: cuenta virtual
+// activa en ethereum, Bridge activo y withdrawalStatus allowed. Es el único
+// caso de la suite con datos capturados del servicio en vivo, así que fija el
+// contrato tal como BMP lo emite de verdad — incluidos los null de paycrypto.
+const bmpRealEligible = `{
+  "exists": true,
+  "user": {"userId":"5802c9e8-06d4-4679-9c44-1c6355feba3d","email":"tahirahmad543@yopmail.com","username":"tahirahmad963"},
+  "virtualAccountActivated": true,
+  "virtualAccountWalletAddress": "0x74c78e1ac0493cfb51e10efa732322344daee1cb",
+  "virtualAccountWalletNetwork": "ethereum",
+  "cardActivated": true,
+  "paycryptoAccountId": "567510",
+  "paycryptoCardStatus": null,
+  "isFullyActivated": true,
+  "withdrawalStatus": "allowed",
+  "restrictionReason": null,
+  "bridgeCustomerId": "3a8c28e1-84f2-4e0f-81bc-f236025924ea",
+  "bridgeCustomerStatus": "active"
+}`
+
+func TestVerifyUser_RealEligible_ExponeDestinoDelDeposito(t *testing.T) {
+	srv := bmpServer(t, 200, bmpRealEligible)
+	defer srv.Close()
+
+	v, err := NewBMPClient(srv.URL, "cid", "csec").VerifyUser(context.Background(), "tahirahmad543@yopmail.com")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !v.CanWithdraw {
+		t.Fatalf("CanWithdraw = false (reason %q), want true", v.BlockReason)
+	}
+	if v.BlockReason != "" {
+		t.Fatalf("BlockReason = %q, want vacío", v.BlockReason)
+	}
+	// Sin la red, la dirección es ambigua: ops no sabe a qué cadena enviar.
+	if v.VirtualAccountWalletNetwork != "ethereum" {
+		t.Fatalf("network = %q, want ethereum", v.VirtualAccountWalletNetwork)
+	}
+	if v.VirtualAccountWalletAddress != "0x74c78e1ac0493cfb51e10efa732322344daee1cb" {
+		t.Fatalf("address = %q", v.VirtualAccountWalletAddress)
+	}
+	if v.UserID != "5802c9e8-06d4-4679-9c44-1c6355feba3d" {
+		t.Fatalf("UserID = %q", v.UserID)
+	}
+}
+
+// BMP manda null en los campos de la cuenta virtual mientras no esté activada.
+// Un *string mal deshecho entra en pánico; un decode que los rechace deja la
+// verificación en unavailable y bloquea al afiliado sin motivo.
+func TestVerifyUser_CamposDeWalletNull_NoRompe(t *testing.T) {
+	srv := bmpServer(t, 200, `{
+	  "exists": true,
+	  "user": {"userId":"u-1"},
+	  "virtualAccountActivated": false,
+	  "virtualAccountWalletAddress": null,
+	  "virtualAccountWalletNetwork": null,
+	  "withdrawalStatus": "blocked",
+	  "restrictionReason": null,
+	  "bridgeCustomerStatus": "active"
+	}`)
+	defer srv.Close()
+
+	v, err := NewBMPClient(srv.URL, "cid", "csec").VerifyUser(context.Background(), "a@b.com")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if v.VirtualAccountWalletAddress != "" || v.VirtualAccountWalletNetwork != "" {
+		t.Fatalf("null debe traducirse a vacío, got %q/%q",
+			v.VirtualAccountWalletAddress, v.VirtualAccountWalletNetwork)
+	}
+	if v.BlockReason != BlockVAIncomplete {
+		t.Fatalf("BlockReason = %q, want %q", v.BlockReason, BlockVAIncomplete)
+	}
+}

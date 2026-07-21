@@ -54,6 +54,13 @@ type BMPVerification struct {
 	BridgeCustomerStatus    string `json:"bridge_customer_status"`
 	WithdrawalStatus        string `json:"withdrawal_status"`
 	RestrictionReason       string `json:"restriction_reason"`
+
+	// Destino del depósito: dónde y en qué red recibe el afiliado. NO participan
+	// del candado, pero son lo que ops necesita para ejecutar la transferencia —
+	// una dirección sin su red es ambigua (la misma address existe en varias
+	// cadenas EVM). Vienen vacíos mientras la cuenta virtual no esté activada.
+	VirtualAccountWalletAddress string `json:"virtual_account_wallet_address"`
+	VirtualAccountWalletNetwork string `json:"virtual_account_wallet_network"`
 }
 
 // bmpRawResponse mapea la respuesta cruda documentada en developer_apis.pdf.
@@ -64,13 +71,17 @@ type bmpRawResponse struct {
 		Email    string `json:"email"`
 		Username string `json:"username"`
 	} `json:"user"`
-	VirtualAccountActivated bool   `json:"virtualAccountActivated"`
-	CardActivated           bool   `json:"cardActivated"`
-	IsFullyActivated        bool   `json:"isFullyActivated"`
-	WithdrawalStatus        string `json:"withdrawalStatus"`
-	RestrictionReason       string `json:"restrictionReason"`
-	BridgeCustomerID        string `json:"bridgeCustomerId"`
-	BridgeCustomerStatus    string `json:"bridgeCustomerStatus"`
+	VirtualAccountActivated bool `json:"virtualAccountActivated"`
+	// null cuando la cuenta virtual no está activada; *string para no confundir
+	// "sin dato" con cadena vacía.
+	VirtualAccountWalletAddress *string `json:"virtualAccountWalletAddress"`
+	VirtualAccountWalletNetwork *string `json:"virtualAccountWalletNetwork"`
+	CardActivated               bool    `json:"cardActivated"`
+	IsFullyActivated            bool    `json:"isFullyActivated"`
+	WithdrawalStatus            string  `json:"withdrawalStatus"`
+	RestrictionReason           string  `json:"restrictionReason"`
+	BridgeCustomerID            string  `json:"bridgeCustomerId"`
+	BridgeCustomerStatus        string  `json:"bridgeCustomerStatus"`
 }
 
 type BMPClient struct {
@@ -164,6 +175,9 @@ func translate(raw bmpRawResponse) BMPVerification {
 		BridgeCustomerStatus:    raw.BridgeCustomerStatus,
 		WithdrawalStatus:        raw.WithdrawalStatus,
 		RestrictionReason:       raw.RestrictionReason,
+
+		VirtualAccountWalletAddress: deref(raw.VirtualAccountWalletAddress),
+		VirtualAccountWalletNetwork: deref(raw.VirtualAccountWalletNetwork),
 	}
 
 	switch {
@@ -179,4 +193,14 @@ func translate(raw bmpRawResponse) BMPVerification {
 		v.CanWithdraw = true
 	}
 	return v
+}
+
+// deref convierte un *string de la respuesta de BMP en string. BMP devuelve
+// null en los campos de la cuenta virtual mientras no esté activada, y null y
+// "" significan lo mismo para nosotros: sin dato.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
