@@ -2,6 +2,7 @@ package withdrawals
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -90,7 +91,41 @@ func LoadConfig() (Config, error) {
 	if cfg.Env == "production" && strings.TrimSpace(os.Getenv("BMP_BASE_URL")) == "" {
 		return cfg, fmt.Errorf("BMP_BASE_URL requerido en producción (ENV=production): el default apunta al backend de dev de BMP")
 	}
+	if err := validateBMPBaseURL(cfg.BMPBaseURL); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// validateBMPBaseURL exige que BMP_BASE_URL sea SOLO el origen (esquema + host).
+//
+// El cliente le concatena verificationPath, así que un valor con ruta produce
+// una URL duplicada —.../api/v1/mindpower/api/v1/mindpower/user-verification—
+// y BMP responde 404 en TODAS las verificaciones. Con el candado en enforce eso
+// significa que nadie cobra.
+//
+// Falla al arrancar en vez de normalizar en silencio: la confusión es fácil de
+// cometer (en .env.local conviven BMP_BASE_URL y BASE_ENDPOINT_BMP_USER_VERIFICATION,
+// que sí es la URL completa) y un arranque roto se diagnostica en segundos,
+// mientras que un 404 en cada verificación se ve como "BMP no reconoce a nadie".
+func validateBMPBaseURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("BMP_BASE_URL inválida (%q): %w", raw, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("BMP_BASE_URL debe ser una URL absoluta (esquema + host), got %q", raw)
+	}
+	if p := strings.Trim(u.Path, "/"); p != "" {
+		return fmt.Errorf(
+			"BMP_BASE_URL debe ser SOLO el host, sin ruta: got %q (sobra %q). "+
+				"El código agrega %s. Usa https://%s",
+			raw, "/"+p, verificationPath, u.Host)
+	}
+	if u.RawQuery != "" {
+		return fmt.Errorf("BMP_BASE_URL no debe llevar query string: got %q", raw)
+	}
+	return nil
 }
 
 func getenv(k, def string) string {

@@ -60,3 +60,48 @@ func TestLoadConfig_NonProduction_DefaultsToDevBMPBaseURL(t *testing.T) {
 		t.Fatalf("BMPBaseURL = %q, want default de dev", cfg.BMPBaseURL)
 	}
 }
+
+// BMP_BASE_URL debe ser SOLO el origen. Un valor con ruta produce una URL
+// duplicada y BMP responde 404 en todas las verificaciones; con el candado en
+// enforce, nadie cobra. Se rechaza al arrancar, no en el primer pago.
+func TestValidateBMPBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"host_pelado", "https://apis.be-mindpower.net", false},
+		{"host_con_barra", "https://apis.be-mindpower.net/", false},
+		{"dev", "https://dev-backend.be-mindpower.net", false},
+		{"con_puerto", "http://localhost:8080", false},
+
+		// El valor que estaba en .env.local: trae el prefijo de la ruta.
+		{"con_prefijo_de_ruta", "https://apis.be-mindpower.net/api/v1/mindpower", true},
+		// La URL completa del endpoint, que vive en otra variable.
+		{"url_completa", "https://apis.be-mindpower.net/api/v1/mindpower/user-verification", true},
+		{"con_query", "https://apis.be-mindpower.net?email=x", true},
+		{"sin_esquema", "apis.be-mindpower.net", true},
+		{"vacia", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBMPBaseURL(tc.raw)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateBMPBaseURL(%q) = nil, want error", tc.raw)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateBMPBaseURL(%q) = %v, want nil", tc.raw, err)
+			}
+		})
+	}
+}
+
+// El error debe decir qué poner, no solo que está mal.
+func TestValidateBMPBaseURL_ErrorGuia(t *testing.T) {
+	err := validateBMPBaseURL("https://apis.be-mindpower.net/api/v1/mindpower")
+	if err == nil {
+		t.Fatal("err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "https://apis.be-mindpower.net") {
+		t.Fatalf("el error no sugiere el valor correcto: %v", err)
+	}
+}
