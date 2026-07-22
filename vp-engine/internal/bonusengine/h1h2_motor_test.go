@@ -318,3 +318,95 @@ func TestH1_ROICappedAtRemaining(t *testing.T) {
 		t.Fatalf("package_cap_state.closed_at debe quedar seteado (cap agotado, trg_enforce_package_cap auto-close)")
 	}
 }
+
+// El ROI posteado en la ventana del período debe sumarse a total_paid, para que
+// el candado de solvencia (fn_verify_period_solvency) vea el gasto real.
+//
+// DESVIACIÓN vs brief: el brief proponía `total_paid >= 33` como aserción.
+// Verificado por mutación: ese umbral YA pasa hoy (pre-fix, sin sumar el ROI)
+// porque el binario+v2 del seed por sí solos ya pagan más de $33 — no es un
+// discriminador real (falso verde). En su lugar comparamos DOS cierres
+// idénticos (mismo seed, misma ventana relativa) en pools/contenedores
+// independientes — uno sin ROI (base) y otro con exactamente $33 de ROI en la
+// ventana — y exigimos que la diferencia sea exactamente 33. Esto sí falla
+// pre-fix (diff=0, el ROI no se ve) y pasa post-fix (diff=33).
+func TestH1_ROIVisibleInT1(t *testing.T) {
+	ctx := context.Background()
+
+	// Cierre base: mismo seed y misma ventana relativa, SIN ROI.
+	poolBase, cleanupBase := pgContainer(t)
+	defer cleanupBase()
+	_, _, _, cIDBase, dIDBase := seedV2Tree(t, ctx, poolBase)
+	engBase := newTestEngine(poolBase)
+	if err := runH1H2Close(t, ctx, poolBase, engBase, cIDBase, dIDBase, 0); err != nil {
+		t.Fatalf("cierre base: %v", err)
+	}
+	var totalPaidBaseStr string
+	poolBase.QueryRow(ctx, `
+		SELECT total_paid::text FROM mlm.binary_period
+		 WHERE status='closed' ORDER BY id DESC LIMIT 1`).Scan(&totalPaidBaseStr)
+	totalPaidBase, _ := decimal.NewFromString(totalPaidBaseStr)
+
+	// Cierre con ROI: mismo seed, en un contenedor/pool independiente, +
+	// $33 de ROI (concepto 1006) posteado dentro de la ventana del período.
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+	eng := newTestEngine(pool)
+
+	var txnID string
+	pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
+		VALUES ('cdroi:test:1', 'roi test', 'posted', now()) RETURNING id`).Scan(&txnID)
+	pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		SELECT $1, w.id, $2, 1006, 33.00, now(), current_date FROM mlm.wallet w WHERE w.affiliate_id=$2`,
+		txnID, bID)
+
+	if err := runH1H2Close(t, ctx, pool, eng, cID, dID, 0); err != nil {
+		t.Fatalf("cierre: %v", err)
+	}
+
+	var totalPaidStr string
+	pool.QueryRow(ctx, `
+		SELECT total_paid::text FROM mlm.binary_period
+		 WHERE status='closed' ORDER BY id DESC LIMIT 1`).Scan(&totalPaidStr)
+	totalPaid, _ := decimal.NewFromString(totalPaidStr)
+
+	diff := totalPaid.Sub(totalPaidBase)
+	if !diff.Equal(decimal.NewFromInt(33)) {
+		t.Fatalf("total_paid con ROI (%s) - total_paid base sin ROI (%s) = %s; esperaba exactamente 33 "+
+			"(el ROI de la ventana debe sumarse íntegro a total_paid)", totalPaidStr, totalPaidBaseStr, diff)
+	}
+}
+
+// D4: cuando el ROI+binario exceden α×inflows, T1 NO aborta el cierre — alerta y
+// deja que θ module. El período se cierra igual (la red cobra lo que θ permitió).
+func TestH1_T1AlertsDoesNotAbort(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+	eng := newTestEngine(pool)
+
+	// ROI enorme dentro de la ventana → total_paid >> α×inflows → breach.
+	var txnID string
+	pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
+		VALUES ('cdroi:test:breach', 'roi breach', 'posted', now()) RETURNING id`).Scan(&txnID)
+	pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
+		SELECT $1, w.id, $2, 1006, 999999.00, now(), current_date FROM mlm.wallet w WHERE w.affiliate_id=$2`,
+		txnID, bID)
+
+	// El cierre debe COMPLETAR sin error (no abortar por el breach).
+	if err := runH1H2Close(t, ctx, pool, eng, cID, dID, 0); err != nil {
+		t.Fatalf("el cierre abortó por el breach (D4: debe alertar, no abortar): %v", err)
+	}
+	// El período quedó cerrado.
+	var st string
+	pool.QueryRow(ctx, `SELECT status FROM mlm.binary_period ORDER BY id DESC LIMIT 1`).Scan(&st)
+	if st != "closed" {
+		t.Fatalf("período status=%s, want closed (D4)", st)
+	}
+}

@@ -263,6 +263,19 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 	e.payoutsTotalUSD.Add(v2PaidF)
 	log.Info().Str("v2_paid", v2Paid.String()).Msg("v2 streams paid")
 
+	// H1-T1: el ROI del CD (concepto 1006) posteado en la ventana del período
+	// entra a total_paid para que fn_verify_period_solvency vea el gasto real.
+	// El ROI NO pasa por θ (D2): se suma completo, ya devengado en el job diario.
+	var roiWindow decimal.Decimal
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(wm.amount),0)
+		  FROM mlm.wallet_movement wm
+		 WHERE wm.concept_id = 1006
+		   AND wm.posted_at >= $1 AND wm.posted_at < $2`, pStart, pEnd).Scan(&roiWindow); err != nil {
+		return fmt.Errorf("sum roi window: %w", err)
+	}
+	totalPaid = totalPaid.Add(roiWindow)
+
 	// R3 — acumular los puntos de ESTE período DESPUÉS del pago+reset, para
 	// que no los borre el reset. Se difieren al siguiente ciclo (H2: antes
 	// se acumulaban antes del reset y el período de cadencia perdía sus
@@ -298,8 +311,15 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 		return fmt.Errorf("verify solvency: %w", err)
 	}
 	if t1Status != "OK" {
+		// D4: el ROI es acreedor prioritario. Un breach causado por el ROI NO
+		// tumba el pago de la red (que θ ya moduló). Se ALERTA y se deja pasar.
 		e.solvencyBreaches.Inc()
-		return fmt.Errorf("%w: paid=%s max=%s", ErrSolvencyBreach, t1Paid, t1Max)
+		log.Error().
+			Str("total_paid", t1Paid.String()).
+			Str("max_allowed", t1Max.String()).
+			Int64("period_id", periodID).
+			Msg("SOLVENCY BREACH (T1): total_paid excede alpha*inflows; el ROI es acreedor prioritario, el cierre NO se aborta (D4). Revisar tesorería.")
+		// NO return: el cierre continúa y commitea.
 	}
 
 	if err := tx.Commit(ctx); err != nil {
