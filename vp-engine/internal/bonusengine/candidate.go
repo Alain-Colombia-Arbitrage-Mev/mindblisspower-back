@@ -250,8 +250,11 @@ func EnumerateCandidates(
 		  LEFT JOIN LATERAL (
 		        SELECT ap2.id, ap2.package_id
 		          FROM mlm.affiliate_package ap2
-		         WHERE ap2.affiliate_id = a.id AND ap2.status = 'active'
-		         ORDER BY ap2.id LIMIT 1) ap ON true
+		          JOIN mlm.package_cap_state cs ON cs.affiliate_package_id = ap2.id
+		         WHERE ap2.affiliate_id = a.id
+		           AND ap2.status = 'active'
+		           AND cs.closed_at IS NULL
+		         ORDER BY ap2.id DESC LIMIT 1) ap ON true
 		  LEFT JOIN mlm.package p  ON p.id = ap.package_id
 		  LEFT JOIN mlm.rank r     ON r.id = a.current_rank_id
 		  LEFT JOIN mlm.affiliate_payout_state ps ON ps.affiliate_id = a.id
