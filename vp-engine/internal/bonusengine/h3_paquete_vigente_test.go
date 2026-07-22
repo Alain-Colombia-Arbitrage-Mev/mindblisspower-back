@@ -451,3 +451,76 @@ func TestH3_TwoOpenPackages_PrefersNewest(t *testing.T) {
 			usedAP, newAP, oldAP)
 	}
 }
+
+// Caso de la tabla spec §3 que ningún test cubría: viejo ABIERTO + nuevo
+// AGOTADO → debe resolver el VIEJO (abierto), no el nuevo (cerrado).
+//
+// El pack $1000 original de B (package_id=1) se deja abierto. Se le agrega
+// un pack $6000 nuevo (package_id=2, id mayor) y se agota su cap de
+// inmediato. El filtro `cs.closed_at IS NULL` del LATERAL (candidate.go)
+// descarta el nuevo agotado aunque tenga id mayor, y `ORDER BY ap2.id DESC`
+// sobre lo que queda se queda con el viejo — el único abierto.
+//
+// Señal elegida (igual que TestH3_TwoOpenPackages_PrefersNewest): el
+// affiliate_package_id efectivamente registrado en el wallet_movement del
+// bono binario de B (vicionario_package_id), no el monto. Se descarta el
+// monto porque el period-cap T3 del pack viejo ($1000 × 0.5 = $500) capa el
+// gross de B (fundador, 10% × $6000 de matched = $600) a $500 — el dólar
+// exacto es una señal derivada del cap, no de qué paquete resolvió; el id
+// del paquete es la señal directa e inequívoca.
+func TestH3_NewestExhausted_FallsBackToOpenOlder(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+
+	// Pack $1000 original de B: se deja ABIERTO (no se agota).
+	var oldAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo de B: %v", err)
+	}
+
+	// Pack $6000 nuevo (id mayor), pero se agota de inmediato: queda cerrado.
+	newAP := seedExtraPackage(t, ctx, pool, bID, 2, 6000)
+	exhaustPackageCap(t, ctx, pool, newAP)
+
+	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// B debe haber ganado algo > 0 (contra el viejo abierto, no 0 contra el
+	// nuevo agotado).
+	var paidToB string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(wm.amount),0)::text
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		  JOIN mlm.wallet w ON w.id = wm.wallet_id
+		 WHERE w.affiliate_id = $1 AND c.kind = 'binary_bonus'`, bID).Scan(&paidToB); err != nil {
+		t.Fatalf("sumar binario de B: %v", err)
+	}
+	if paidToB == "0" || paidToB == "0.00000000" {
+		t.Fatalf("B ganó %s en binario, want > 0 (debe caer al viejo abierto, no quedar en 0 contra el nuevo agotado)", paidToB)
+	}
+
+	// Señal directa e inequívoca: el affiliate_package_id usado debe ser el
+	// viejo abierto ($1000), NO el nuevo agotado ($6000).
+	var usedAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT wm.vicionario_package_id
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		  JOIN mlm.wallet w ON w.id = wm.wallet_id
+		 WHERE w.affiliate_id = $1 AND c.kind = 'binary_bonus'
+		 ORDER BY wm.id LIMIT 1`, bID).Scan(&usedAP); err != nil {
+		t.Fatalf("localizar affiliate_package_id usado por B: %v", err)
+	}
+	if usedAP != oldAP {
+		t.Fatalf("B resolvió affiliate_package_id=%d, want %d (el viejo $1000 abierto); nuevo agotado=%d",
+			usedAP, oldAP, newAP)
+	}
+}
