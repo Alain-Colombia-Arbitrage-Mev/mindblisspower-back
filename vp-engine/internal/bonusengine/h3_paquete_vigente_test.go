@@ -252,3 +252,171 @@ func TestH3_PointsEarnAgainstNewestOpenPackage(t *testing.T) {
 		t.Fatalf("B cobró %s en puntos, want > 0 (bug: resuelve el pack viejo agotado)", paidPoints)
 	}
 }
+
+// GARANTÍA DEL DUEÑO (spec §4): el fix no debe alterar el rango de carrera ni
+// el nivel/posición del afiliado. Se captura current_rank_id, depth y path
+// ANTES y DESPUÉS del cierre y se exige igualdad.
+//
+// ranks_enabled se apaga para ESTE test: runH3Close acredita $6000 a cada
+// pierna de B (left_pv_lifetime=right_pv_lifetime=6000), lo que cruza
+// legítimamente BRONZE(1000)/SILVER(2500)/GOLD(5000) — un ascenso de rango
+// real por volumen, no relacionado con el fix de paquete-vigente. Sin apagar
+// ranks_enabled este test fallaría siempre (current_rank_id nil→GOLD) incluso
+// con el fix correctamente aplicado, lo cual no sería una señal del bug que
+// se quiere atrapar. Apagando ranks_enabled se aísla exactamente lo que la
+// garantía promete: que resolver el paquete vigente (T2/T3) no toca
+// current_rank_id/depth/path del afiliado.
+func TestH3_RankAndLevelUnchanged(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+
+	// UPDATE directo sobre plan_config exige approval_request_id (ADR-0010
+	// four-eyes) salvo bypass explícito — mismo patrón que el INSERT de
+	// seedV2Tree.
+	if _, err := pool.Exec(ctx, `
+		BEGIN;
+		SET LOCAL app.bypass_approval = 'on';
+		UPDATE mlm.plan_config SET ranks_enabled = false WHERE version_label='v2-test';
+		COMMIT;`); err != nil {
+		t.Fatalf("apagar ranks_enabled: %v", err)
+	}
+
+	var oldAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo: %v", err)
+	}
+	exhaustPackageCap(t, ctx, pool, oldAP)
+	seedExtraPackage(t, ctx, pool, bID, 2, 5000)
+
+	type snap struct {
+		rankID *int64
+		depth  int
+		path   string
+	}
+	read := func() snap {
+		var s snap
+		if err := pool.QueryRow(ctx, `
+			SELECT current_rank_id, depth, path::text
+			  FROM mlm.affiliate WHERE id=$1`, bID).Scan(&s.rankID, &s.depth, &s.path); err != nil {
+			t.Fatalf("leer afiliado: %v", err)
+		}
+		return s
+	}
+
+	before := read()
+	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	after := read()
+
+	if (before.rankID == nil) != (after.rankID == nil) ||
+		(before.rankID != nil && *before.rankID != *after.rankID) {
+		t.Fatalf("current_rank_id cambió: %v → %v", before.rankID, after.rankID)
+	}
+	if before.depth != after.depth {
+		t.Fatalf("depth cambió: %d → %d", before.depth, after.depth)
+	}
+	if before.path != after.path {
+		t.Fatalf("path cambió: %q → %q", before.path, after.path)
+	}
+}
+
+// Consunción serial (ADR-0013): si TODOS los paquetes activos del afiliado
+// tienen el cap agotado, no aparece en candidatos y no gana — debe recomprar.
+// El fix NO debe hacer que "caiga" a un paquete cerrado ni sume caps.
+func TestH3_AllPackagesExhausted_EarnsNothing(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+
+	// Agotar el pack $1000 y un pack $5000 nuevo — ambos cerrados.
+	var oldAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo: %v", err)
+	}
+	exhaustPackageCap(t, ctx, pool, oldAP)
+	newAP := seedExtraPackage(t, ctx, pool, bID, 2, 5000)
+	exhaustPackageCap(t, ctx, pool, newAP)
+
+	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var paidToB string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(wm.amount),0)::text
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		  JOIN mlm.wallet w ON w.id = wm.wallet_id
+		 WHERE w.affiliate_id = $1 AND c.kind = 'binary_bonus'`, bID).Scan(&paidToB); err != nil {
+		t.Fatalf("sumar binario: %v", err)
+	}
+	if paidToB != "0" && paidToB != "0.00000000" {
+		t.Fatalf("B ganó %s con todos los paquetes agotados, want 0 (debe recomprar)", paidToB)
+	}
+}
+
+// Caso de borde de la Task 2 (hallazgo de revisión): con DOS paquetes de B
+// simultáneamente con cap ABIERTO (el viejo $1000 y un nuevo $6000, ninguno
+// agotado), el motor debe resolver el MÁS NUEVO, no el más viejo por más que
+// ambos estén disponibles.
+//
+// Señal elegida: el affiliate_package_id efectivamente registrado en el
+// wallet_movement del bono binario de B (columna vicionario_package_id =
+// c.AffiliatePackageID en binary_close.go), comparado contra el id del pack
+// $6000 devuelto por seedExtraPackage. Se descartó comparar el monto pagado
+// (viejo: period-cap T3 = 0.5×$1000=$500; nuevo: 0.5×$6000=$3000) porque el
+// neto real = gross × θ, y θ (ComputeTheta) depende de projected/inflows del
+// período — que a su vez depende de qué paquete resolvió el candidato — así
+// que el dólar exacto no es una señal estable entre una corrida "buena" y una
+// mutada; el affiliate_package_id sí lo es, sin ambigüedad.
+func TestH3_TwoOpenPackages_PrefersNewest(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+
+	// Pack $1000 original de B: se deja ABIERTO (no se agota).
+	var oldAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo de B: %v", err)
+	}
+
+	// Pack $6000 nuevo, TAMBIÉN abierto: dos paquetes con cap abierto al
+	// mismo tiempo.
+	newAP := seedExtraPackage(t, ctx, pool, bID, 2, 6000)
+
+	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var usedAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT wm.vicionario_package_id
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.concept c ON c.id = wm.concept_id
+		  JOIN mlm.wallet w ON w.id = wm.wallet_id
+		 WHERE w.affiliate_id = $1 AND c.kind = 'binary_bonus'
+		 ORDER BY wm.id LIMIT 1`, bID).Scan(&usedAP); err != nil {
+		t.Fatalf("localizar affiliate_package_id usado por B: %v", err)
+	}
+	if usedAP != newAP {
+		t.Fatalf("B resolvió affiliate_package_id=%d, want %d (el nuevo $6000 abierto); viejo abierto=%d",
+			usedAP, newAP, oldAP)
+	}
+}
