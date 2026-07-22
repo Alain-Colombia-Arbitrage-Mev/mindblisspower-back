@@ -136,9 +136,9 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 	}
 
 	totalPaid := decimal.Zero
-	postedAt := pEnd // todos los pagos del período al instante de cierre lógico
-	walletCache := map[int64]int64{}  // caché wallet USD por afiliado
-	retWallets := map[int64]int64{}   // caché wallet USD-RET por afiliado (separado del USD)
+	postedAt := pEnd                 // todos los pagos del período al instante de cierre lógico
+	walletCache := map[int64]int64{} // caché wallet USD por afiliado
+	retWallets := map[int64]int64{}  // caché wallet USD-RET por afiliado (separado del USD)
 
 	for _, c := range candidates {
 		net := c.GrossAmount.Mul(theta).RoundDown(2)
@@ -251,13 +251,9 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 		e.payoutsTotalUSD.Add(netF)
 	}
 
-	// R3 — acumular puntos por los bloques binarios efectivamente pagados.
-	if err := AccruePoints(ctx, tx, plan, candidates, theta); err != nil {
-		return fmt.Errorf("accrue points: %w", err)
-	}
-
 	// Pagar streams v2 (yield, conversión de puntos, rangos, referido,
-	// regalía) con el MISMO θ del período.
+	// regalía) con el MISMO θ del período. PayV2Streams paga sobre el
+	// snapshot de puntos previo a este período y resetea points_accrued=0.
 	v2Paid, err := PayV2Streams(ctx, tx, plan, periodID, v2, theta, postedAt)
 	if err != nil {
 		return fmt.Errorf("pay v2 streams: %w", err)
@@ -266,6 +262,14 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 	v2PaidF, _ := v2Paid.Float64()
 	e.payoutsTotalUSD.Add(v2PaidF)
 	log.Info().Str("v2_paid", v2Paid.String()).Msg("v2 streams paid")
+
+	// R3 — acumular los puntos de ESTE período DESPUÉS del pago+reset, para
+	// que no los borre el reset. Se difieren al siguiente ciclo (H2: antes
+	// se acumulaban antes del reset y el período de cadencia perdía sus
+	// propios puntos).
+	if err := AccruePoints(ctx, tx, plan, candidates, theta); err != nil {
+		return fmt.Errorf("accrue points: %w", err)
+	}
 
 	// Snapshot de cierre
 	if _, err := tx.Exec(ctx, `
@@ -320,4 +324,3 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 		Msg("binary period closed")
 	return nil
 }
-
