@@ -24,6 +24,7 @@ type CDROIResult struct {
 // cdAccrualRow: estado mínimo de un CD activo para devengar.
 type cdAccrualRow struct {
 	id, affID   int64
+	affPkgID    int64 // affiliate_package que originó el CD (0/NULL: sin cap que consumir)
 	principal   decimal.Decimal
 	startDate   time.Time
 	maturesDate time.Time
@@ -67,7 +68,7 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 	// la franja en que ambas fechas divergen. Se castean en la misma zona que
 	// `today`. last_accrual_date ya es `date` — no depende de la sesión.
 	rows, err := tx.Query(ctx, `
-		SELECT cd.id, cd.affiliate_id, cd.principal_usd,
+		SELECT cd.id, cd.affiliate_id, cd.affiliate_package_id, cd.principal_usd,
 		       (cd.start_at   AT TIME ZONE $1)::date,
 		       (cd.matures_at AT TIME ZONE $1)::date,
 		       cd.last_accrual_date,
@@ -84,10 +85,17 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 	var cds []cdAccrualRow
 	for rows.Next() {
 		var c cdAccrualRow
-		if err := rows.Scan(&c.id, &c.affID, &c.principal, &c.startDate, &c.maturesDate,
+		// affiliate_package_id es nullable (CDs legacy/seed sin paquete que los
+		// originó): escanear a un puntero y dejar affPkgID=0 como sentinel de
+		// "sin cap que consumir" evita un error de scan NULL→int64.
+		var affPkgID *int64
+		if err := rows.Scan(&c.id, &c.affID, &affPkgID, &c.principal, &c.startDate, &c.maturesDate,
 			&c.lastAccrual, &c.baseRate, &c.qualRate, &c.qualifies); err != nil {
 			rows.Close()
 			return res, fmt.Errorf("scan cd: %w", err)
+		}
+		if affPkgID != nil {
+			c.affPkgID = *affPkgID
 		}
 		cds = append(cds, c)
 	}
@@ -119,6 +127,30 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 			// ROI bruto del tramo = principal × tasa_anual / 365 × días.
 			gross := c.principal.Mul(rate).Div(decimal.NewFromInt(365)).
 				Mul(decimal.NewFromInt(int64(days))).RoundDown(2)
+
+			// H1-T2: el ROI consume el cap de por vida del paquete del CD. Se
+			// pre-capa al remaining para que el trigger fn_enforce_package_cap
+			// nunca aborte. FOR UPDATE serializa contra el cierre binario (que
+			// también actualiza paid_total los lunes).
+			if c.affPkgID != 0 && gross.Sign() > 0 {
+				var capTotal, paidTotal decimal.Decimal
+				err := tx.QueryRow(ctx, `
+					SELECT cap_total, paid_total FROM mlm.package_cap_state
+					 WHERE affiliate_package_id = $1 FOR UPDATE`, c.affPkgID).Scan(&capTotal, &paidTotal)
+				if errors.Is(err, pgx.ErrNoRows) {
+					gross = decimal.Zero // sin cap state: no paga (paquete cerrado/no init)
+				} else if err != nil {
+					return res, fmt.Errorf("lock cap state pkg %d: %w", c.affPkgID, err)
+				} else {
+					remaining := capTotal.Sub(paidTotal)
+					if remaining.Sign() <= 0 {
+						gross = decimal.Zero // cap agotado
+					} else if gross.GreaterThan(remaining) {
+						gross = remaining // capar al remaining
+					}
+				}
+			}
+
 			if gross.Sign() > 0 {
 				walletID, werr := e.ensureUSDWallet(ctx, tx, c.affID, wallets)
 				if werr != nil {
@@ -132,6 +164,15 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 				if posted {
 					res.Posted++
 					res.TotalUSD = res.TotalUSD.Add(gross)
+					// H1-T2: consumir el cap del paquete del CD.
+					if c.affPkgID != 0 {
+						if _, err := tx.Exec(ctx, `
+							UPDATE mlm.package_cap_state
+							   SET paid_total = paid_total + $2
+							 WHERE affiliate_package_id = $1`, c.affPkgID, gross); err != nil {
+							return res, fmt.Errorf("consume cap pkg %d: %w", c.affPkgID, err)
+						}
+					}
 					// Read model del CD: acumular ROI + avanzar corte + sellar calificación.
 					if _, err := tx.Exec(ctx, `
 						UPDATE mlm.investment_cd

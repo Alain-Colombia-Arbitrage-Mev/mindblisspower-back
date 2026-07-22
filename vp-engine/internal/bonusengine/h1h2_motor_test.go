@@ -2,6 +2,7 @@ package bonusengine
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -154,4 +155,166 @@ func pointsAccrued(t *testing.T, ctx context.Context, pool *pgxpool.Pool, affID 
 	}
 	d, _ := decimal.NewFromString(s)
 	return d
+}
+
+// seedAffiliateWithCD crea person+affiliate+wallet USD, un mlm.package (id
+// explícito, la PK no es identity) con amount_usd = packageAmount, un
+// mlm.affiliate_package 'active' ligado a ese package (el trigger
+// trg_init_package_cap crea mlm.package_cap_state con cap_total =
+// packageAmount × lifetime_cap_factor — 2.0 por defecto sin plan_config
+// vigente, ver schema_payouts.sql fn_init_package_cap), y un
+// mlm.investment_cd 'active' con affiliate_package_id ligado a ese paquete,
+// principal_usd = cdPrincipal (deliberadamente independiente de packageAmount
+// para poder construir tramos de ROI grandes contra un cap chico en los
+// tests de capado), roi_tier_id = tierID, start_at hace `daysAgo` días
+// (Bogota, medianoche — mismo patrón que seedCD en cd_roi_test.go),
+// matures_at en `lockDays` días, last_accrual_date NULL (nunca devengó).
+// Devuelve el affiliate_id y el affiliate_package_id.
+func seedAffiliateWithCD(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string, packageID int, packageAmount, cdPrincipal float64, tierID int, daysAgo, lockDays int) (affID, apID int64) {
+	t.Helper()
+	_, _ = pool.Exec(ctx, `INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia') ON CONFLICT DO NOTHING`)
+	_, _ = pool.Exec(ctx, `INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2) ON CONFLICT DO NOTHING`)
+
+	var personID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.person (first_name, last_name, email, phone_number, status)
+		VALUES ('cap','test',$1,'0000000000','active') RETURNING id`, email).Scan(&personID); err != nil {
+		t.Fatalf("person: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, current_rank_id)
+		VALUES ($1, NULL, NULL, 'active', 1) RETURNING id`, personID).Scan(&affID); err != nil {
+		t.Fatalf("affiliate: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance) VALUES ($1,1,$2,0)`,
+		affID, fmt.Sprintf("cap-w%d", affID)); err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type)
+		VALUES ($1, 'Cap-Test', $2, 1, 'enrollment') ON CONFLICT (id) DO NOTHING`,
+		packageID, packageAmount); err != nil {
+		t.Fatalf("package: %v", err)
+	}
+
+	// affiliate_package activo → trg_init_package_cap (AFTER INSERT ... status
+	// active) crea la fila en mlm.package_cap_state.
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate_package (
+			affiliate_id, package_id, status, payment_method, transaction_hash,
+			pv_remaining, activated_at, current_period_date)
+		VALUES ($1, $2, 'active', 'stripe', $3, 0, now(), (now() AT TIME ZONE $4)::date)
+		RETURNING id`, affID, packageID, fmt.Sprintf("cap-test:%d", affID), bizTZ).Scan(&apID); err != nil {
+		t.Fatalf("affiliate_package: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.investment_cd (affiliate_id, affiliate_package_id, principal_usd, roi_tier_id, start_at, matures_at)
+		VALUES ($1, $2, $3, $4,
+		        ((((now() AT TIME ZONE $6)::date - $5::int))::timestamp AT TIME ZONE $6),
+		        ((((now() AT TIME ZONE $6)::date + $7::int))::timestamp AT TIME ZONE $6))`,
+		affID, apID, cdPrincipal, tierID, daysAgo, bizTZ, lockDays); err != nil {
+		t.Fatalf("investment_cd: %v", err)
+	}
+	return affID, apID
+}
+
+// El ROI del CD consume el cap de por vida del paquete que lo originó, y se capa
+// al remaining. Con el bug (ROI no toca package_cap_state) paid_total no cambia.
+func TestH1_ROIConsumesPackageCap(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// package_id=900: cap chico (amount_usd=100 → cap_total=200 con el factor
+	// default 2.0), CD principal=100 tier 1, arrancó hace 10 días.
+	_, apID := seedAffiliateWithCD(t, ctx, pool, "roicap1@t.local", 900, 100, 100, 1, 10, 365)
+
+	var capBefore, paidBefore string
+	if err := pool.QueryRow(ctx, `SELECT cap_total::text, paid_total::text FROM mlm.package_cap_state WHERE affiliate_package_id=$1`, apID).Scan(&capBefore, &paidBefore); err != nil {
+		t.Fatalf("cap state before: %v", err)
+	}
+
+	eng := newTestEngine(pool)
+	if _, err := eng.AccrueCDROIDaily(ctx); err != nil {
+		t.Fatalf("accrue roi: %v", err)
+	}
+
+	var paidAfter string
+	if err := pool.QueryRow(ctx, `SELECT paid_total::text FROM mlm.package_cap_state WHERE affiliate_package_id=$1`, apID).Scan(&paidAfter); err != nil {
+		t.Fatalf("cap state after: %v", err)
+	}
+
+	pb, _ := decimal.NewFromString(paidBefore)
+	pa, _ := decimal.NewFromString(paidAfter)
+	if !pa.GreaterThan(pb) {
+		t.Fatalf("paid_total no subió con el ROI (%s → %s): el ROI no consume cap", paidBefore, paidAfter)
+	}
+	// El ROI no debe exceder el cap.
+	cap, _ := decimal.NewFromString(capBefore)
+	if pa.GreaterThan(cap) {
+		t.Fatalf("paid_total %s excede cap_total %s: el ROI no se capó", paidAfter, capBefore)
+	}
+}
+
+// Un CD cuyo tramo de ROI excede el remaining del cap: el ROI posteado se capa
+// EXACTAMENTE al remaining (no lo excede, no aborta la transacción), y el
+// paquete queda cerrado (paid_total == cap_total, closed_at set por
+// fn_enforce_package_cap).
+func TestH1_ROICappedAtRemaining(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// package_id=901: amount_usd=100 → cap_total=200. CD principal=100000
+	// tier 5 (base_annual_rate 0.25 igual en todos los tiers del seed), 30
+	// días de devengo pendiente → gross bruto ≈ 100000×0.25/365×30 ≈ 2054.79,
+	// muy por encima de cualquier remaining chico.
+	affID, apID := seedAffiliateWithCD(t, ctx, pool, "roicap2@t.local", 901, 100, 100000, 5, 30, 365)
+
+	// Casi lleno: deja remaining=10 (paid_total=190 de un cap_total=200).
+	if _, err := pool.Exec(ctx, `UPDATE mlm.package_cap_state SET paid_total = 190 WHERE affiliate_package_id=$1`, apID); err != nil {
+		t.Fatalf("prime cap state: %v", err)
+	}
+
+	eng := newTestEngine(pool)
+	res, err := eng.AccrueCDROIDaily(ctx)
+	if err != nil {
+		t.Fatalf("accrue roi: %v", err)
+	}
+	if res.Posted != 1 {
+		t.Fatalf("esperaba 1 movimiento posteado, got %d", res.Posted)
+	}
+
+	var movedAmount string
+	if err := pool.QueryRow(ctx, `
+		SELECT amount::text FROM mlm.wallet_movement
+		 WHERE affiliate_id=$1 AND concept_id=1006 LIMIT 1`, affID).Scan(&movedAmount); err != nil {
+		t.Fatalf("movimiento roi: %v", err)
+	}
+	// amount es numeric(20,8) → ::text trae 8 decimales; comparar por valor,
+	// no por string literal.
+	moved, err := decimal.NewFromString(movedAmount)
+	if err != nil {
+		t.Fatalf("parse moved amount %q: %v", movedAmount, err)
+	}
+	if moved.StringFixed(2) != "10.00" {
+		t.Fatalf("el ROI posteado debe capar al remaining exacto (10.00), got %s (el tramo bruto ~2054.79 sin capar)", moved.StringFixed(2))
+	}
+
+	var capTotal, paidTotal string
+	var closedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT cap_total::text, paid_total::text, closed_at
+		  FROM mlm.package_cap_state WHERE affiliate_package_id=$1`, apID).Scan(&capTotal, &paidTotal, &closedAt); err != nil {
+		t.Fatalf("cap state after: %v", err)
+	}
+	if paidTotal != capTotal {
+		t.Fatalf("paid_total (%s) debe quedar == cap_total (%s): el paquete se agotó exactamente", paidTotal, capTotal)
+	}
+	if closedAt == nil {
+		t.Fatalf("package_cap_state.closed_at debe quedar seteado (cap agotado, trg_enforce_package_cap auto-close)")
+	}
 }
