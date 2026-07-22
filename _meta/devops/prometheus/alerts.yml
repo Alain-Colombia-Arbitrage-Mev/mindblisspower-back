@@ -56,12 +56,18 @@ groups:
           component: bonusengine
           page: oncall
         annotations:
-          summary: "T1 violado durante un cierre"
+          summary: "Breach de solvencia T1 detectado en un cierre"
           description: |
-            CloseBinaryPeriod abortó porque total_paid > alpha × inflows.
-            Esto NO debería ocurrir nunca (theta protege). Si pasa indica
-            bug en el cálculo o race condition. Revisar logs del último
-            cierre y bloquear nuevos cierres hasta análisis.
+            fn_verify_period_solvency reportó total_paid > alpha × inflows en
+            un cierre. Tras D4 el cierre NO aborta: detecta el breach, incrementa
+            binary_close_solvency_breaches_total, lo registra (log Error) y
+            CONTINÚA hasta commitear (el ROI del CD es acreedor prioritario y
+            se paga completo, sin pasar por theta). Es una condición a
+            investigar, no un "nunca debería pasar": el ROI acreedor superó el
+            tope alpha del período. Acción: revisar tesorería y el ROI posteado
+            en la ventana del cierre, confirmar que theta moduló el resto de
+            streams, y evaluar si el ritmo de ROI/inflows exige ajuste. NO se
+            bloquean cierres automáticamente.
 
       - alert: VPThetaSustainedThrottle
         expr: avg_over_time(binary_close_theta[28d]) < 0.7

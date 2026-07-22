@@ -24,7 +24,6 @@ import (
 var (
 	ErrPeriodNotOpen      = errors.New("period is not in open status")
 	ErrConcurrentClose    = errors.New("another close is already in progress")
-	ErrSolvencyBreach     = errors.New("calculated payouts breach treasury alpha")
 	ErrNoActivePlanConfig = errors.New("no active plan_config")
 )
 

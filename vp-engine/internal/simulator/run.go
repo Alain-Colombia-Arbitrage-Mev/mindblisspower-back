@@ -196,9 +196,13 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 
 		// 4b. R2 yield candidates (25%/year, paid every YieldCadencePeriods).
 		// D2: yield is paid IN FULL — it does NOT go through θ, same contract
-		// as the production CD-ROI stream (cd_roi.go, H1). D3: it DOES count
-		// against T2 (package lifetime cap), pre-capped to the node's
-		// remaining cap — see the yield payment loop below.
+		// as the production CD-ROI stream (cd_roi.go, H1). Consecuencia clave:
+		// el yield tampoco cuenta en `projected` (el denominador de θ) — se
+		// excluye igual que el concepto 1006 en producción, que se suma a
+		// total_paid después de θ y nunca a projected (binary_close.go). Ver la
+		// construcción de projected más abajo. D3: it DOES count against T2
+		// (package lifetime cap), pre-capped to the node's remaining cap — see
+		// the yield payment loop below.
 		yieldCands := computeYieldCandidates(tree, rootID, s.Plan, p)
 
 		// 4c. R3 points bonus candidates (1 punto / block, $1/punto, monthly).
@@ -235,13 +239,19 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 		refCands, royCands := computeReferralRoyalty(tree, events, s.Plan)
 
 		// 5. θ over projected total post-caps
-		//    (blocks + yield + points + rangos + referido + regalía)
+		//    (blocks + points + rangos + referido + regalía).
+		//
+		// El yield NO entra en projected (D2): se paga completo, sin θ, así que
+		// NO debe inflar el denominador de θ. Esto refleja EXACTAMENTE a
+		// producción, donde el CD-ROI (concepto 1006) se suma a total_paid
+		// DESPUÉS de θ y nunca a projected (binary_close.go: roiWindow). Si el
+		// yield contara aquí, deprimiría θ (θ_sim < θ_prod) y estrangularía los
+		// demás streams → el simulador pagaría de MENOS y subestimaría el breach.
+		// Los demás streams v2 (puntos, rangos, referido, regalía) SÍ entran a
+		// projected — igual que v2.ProjectedTotal() en producción.
 		projected := decimal.Zero
 		for _, c := range afterCaps {
 			projected = projected.Add(c.GrossAmount)
-		}
-		for _, y := range yieldCands {
-			projected = projected.Add(y.Amount)
 		}
 		for _, c := range pointsAfterCaps {
 			projected = projected.Add(c.GrossAmount)
@@ -423,7 +433,13 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 			}
 		}
 
-		br.ThetaReducedUSD = projected.Sub(totalPaid).Sub(yieldPaid).Sub(pointsBonusPaid).
+		// θ-haircut = gross proyectado − neto pagado de los streams SUJETOS a θ
+		// − diversiones por pausa. El yield NO entra (ni en projected ni aquí):
+		// se paga completo sin θ, así que no participa en la reducción por θ. Sí
+		// se descuenta el resto de streams θ-sujetos. (Antes projected incluía
+		// el yield y se restaba yieldPaid; ahora ambos salen juntos para que la
+		// métrica siga significando "lo que θ retuvo".)
+		br.ThetaReducedUSD = projected.Sub(totalPaid).Sub(pointsBonusPaid).
 			Sub(rankBonusPaid).Sub(referralPaid).Sub(royaltyPaid).
 			Sub(pausedRouted).Sub(reductionLost)
 		// Released P-B carry is real money out of the company this period.
