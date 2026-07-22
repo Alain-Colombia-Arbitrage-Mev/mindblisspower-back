@@ -253,77 +253,108 @@ func TestH3_PointsEarnAgainstNewestOpenPackage(t *testing.T) {
 	}
 }
 
-// GARANTÍA DEL DUEÑO (spec §4): el fix no debe alterar el rango de carrera ni
-// el nivel/posición del afiliado. Se captura current_rank_id, depth y path
-// ANTES y DESPUÉS del cierre y se exige igualdad.
+// GARANTÍA DEL DUEÑO (spec §4): el fix H3 (resolver el paquete VIGENTE en vez
+// del más viejo para T2/T3) no debe alterar el rango de carrera ni el
+// nivel/posición del afiliado.
 //
-// ranks_enabled se apaga para ESTE test: runH3Close acredita $6000 a cada
-// pierna de B (left_pv_lifetime=right_pv_lifetime=6000), lo que cruza
-// legítimamente BRONZE(1000)/SILVER(2500)/GOLD(5000) — un ascenso de rango
-// real por volumen, no relacionado con el fix de paquete-vigente. Sin apagar
-// ranks_enabled este test fallaría siempre (current_rank_id nil→GOLD) incluso
-// con el fix correctamente aplicado, lo cual no sería una señal del bug que
-// se quiere atrapar. Apagando ranks_enabled se aísla exactamente lo que la
-// garantía promete: que resolver el paquete vigente (T2/T3) no toca
-// current_rank_id/depth/path del afiliado.
+// ranks_enabled queda ENCENDIDO (es el default de seedV2Tree) — apagarlo,
+// como hacía la versión anterior de este test, vuelve el aserto una
+// tautología: con ranks apagado current_rank_id nunca puede cambiar (el
+// INSERT a affiliate_rank_achieved vive dentro de `if plan.RanksEnabled`,
+// v2_streams.go:256) y además B arranca con current_rank_id=NULL, así que
+// "nil == nil" no prueba nada. Revertir el fix H3 deja este test en PASS de
+// todos modos — no protege la garantía.
+//
+// El rango se calcula EXCLUSIVAMENTE de left/right_pv_lifetime + baseline
+// vs rank.required_points (schema_ranks.sql §3/§4) — nunca referencia qué
+// affiliate_package se resolvió para bonos. runH3Close acredita $6000 fijos
+// a cada pierna de B vía tree_event (pv_credit de C y D), sin importar la
+// estructura de paquetes de B. Por eso el fix H3 estructuralmente no puede
+// tocar el rango, y esta prueba lo demuestra por COMPARACIÓN (Opción A, la
+// más fuerte): dos afiliados B independientes, mismo volumen entrante
+// ($6000/$6000 vía runH3Close), uno en el escenario H3 (pack $1000 agotado +
+// pack $5000 nuevo abierto) y otro de control (un solo pack $1000, intacto).
+// Si la resolución de paquete contaminara el cálculo de rango, divergirían
+// aquí; con el fix correcto (y con el bug original) ambos llegan al MISMO
+// current_rank_id — GOLD (5000 ≤ 6000 < 10000 PLATINUM) — porque el rango
+// depende sólo del PV, no del paquete. Se usan dos contenedores Postgres
+// independientes (no dos llamadas a seedV2Tree sobre el mismo pool) porque
+// seedV2Tree inserta un plan_config con version_label='v2-test' fijo; una
+// segunda llamada en el mismo pool duplicaría la fila y volvería ambiguo
+// runH3Close.
+//
+// depth/path se conservan como defensa barata adicional (antes/después del
+// cierre en el escenario H3): un cierre nunca los toca, aunque no son la
+// señal principal de esta garantía.
 func TestH3_RankAndLevelUnchanged(t *testing.T) {
-	pool, cleanup := pgContainer(t)
-	defer cleanup()
 	ctx := context.Background()
-
-	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
-
-	// UPDATE directo sobre plan_config exige approval_request_id (ADR-0010
-	// four-eyes) salvo bypass explícito — mismo patrón que el INSERT de
-	// seedV2Tree.
-	if _, err := pool.Exec(ctx, `
-		BEGIN;
-		SET LOCAL app.bypass_approval = 'on';
-		UPDATE mlm.plan_config SET ranks_enabled = false WHERE version_label='v2-test';
-		COMMIT;`); err != nil {
-		t.Fatalf("apagar ranks_enabled: %v", err)
-	}
-
-	var oldAP int64
-	if err := pool.QueryRow(ctx, `
-		SELECT id FROM mlm.affiliate_package
-		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
-		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
-		t.Fatalf("localizar pack viejo: %v", err)
-	}
-	exhaustPackageCap(t, ctx, pool, oldAP)
-	seedExtraPackage(t, ctx, pool, bID, 2, 5000)
 
 	type snap struct {
 		rankID *int64
 		depth  int
 		path   string
 	}
-	read := func() snap {
+	readSnap := func(pool *pgxpool.Pool, affID int64) snap {
+		t.Helper()
 		var s snap
 		if err := pool.QueryRow(ctx, `
 			SELECT current_rank_id, depth, path::text
-			  FROM mlm.affiliate WHERE id=$1`, bID).Scan(&s.rankID, &s.depth, &s.path); err != nil {
+			  FROM mlm.affiliate WHERE id=$1`, affID).Scan(&s.rankID, &s.depth, &s.path); err != nil {
 			t.Fatalf("leer afiliado: %v", err)
 		}
 		return s
 	}
 
-	before := read()
-	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	after := read()
+	// ---- Escenario H3: pack $1000 agotado + pack $5000 nuevo abierto ------
+	poolH3, cleanupH3 := pgContainer(t)
+	defer cleanupH3()
+	_, _, bH3, cH3, dH3 := seedV2Tree(t, ctx, poolH3)
 
-	if (before.rankID == nil) != (after.rankID == nil) ||
-		(before.rankID != nil && *before.rankID != *after.rankID) {
-		t.Fatalf("current_rank_id cambió: %v → %v", before.rankID, after.rankID)
+	var oldAP int64
+	if err := poolH3.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bH3).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo de B: %v", err)
 	}
-	if before.depth != after.depth {
-		t.Fatalf("depth cambió: %d → %d", before.depth, after.depth)
+	exhaustPackageCap(t, ctx, poolH3, oldAP)
+	seedExtraPackage(t, ctx, poolH3, bH3, 2, 5000)
+
+	beforeH3 := readSnap(poolH3, bH3)
+	if err := runH3Close(t, ctx, poolH3, cH3, dH3); err != nil {
+		t.Fatalf("close H3: %v", err)
 	}
-	if before.path != after.path {
-		t.Fatalf("path cambió: %q → %q", before.path, after.path)
+	afterH3 := readSnap(poolH3, bH3)
+
+	if beforeH3.depth != afterH3.depth {
+		t.Fatalf("depth cambió: %d → %d", beforeH3.depth, afterH3.depth)
+	}
+	if beforeH3.path != afterH3.path {
+		t.Fatalf("path cambió: %q → %q", beforeH3.path, afterH3.path)
+	}
+
+	// ---- Escenario control: un solo pack $1000, intacto -------------------
+	poolCtl, cleanupCtl := pgContainer(t)
+	defer cleanupCtl()
+	_, _, bCtl, cCtl, dCtl := seedV2Tree(t, ctx, poolCtl)
+
+	if err := runH3Close(t, ctx, poolCtl, cCtl, dCtl); err != nil {
+		t.Fatalf("close control: %v", err)
+	}
+	afterCtl := readSnap(poolCtl, bCtl)
+
+	// GARANTÍA: mismo volumen entrante en ambos escenarios ⇒ mismo rango,
+	// sin importar qué paquete resolvió el fix H3 para bonos. Se exige
+	// además que ninguno quede NULL: si el volumen sembrado no cruzara
+	// ningún umbral, ambos lados serían nil==nil y el aserto de igualdad
+	// quedaría vacío otra vez.
+	if afterH3.rankID == nil || afterCtl.rankID == nil {
+		t.Fatalf("current_rank_id quedó NULL (H3=%v, control=%v); la garantía necesita volumen que cruce un umbral de rango real",
+			afterH3.rankID, afterCtl.rankID)
+	}
+	if *afterH3.rankID != *afterCtl.rankID {
+		t.Fatalf("current_rank_id diverge entre escenarios: H3=%d, control=%d (la resolución de paquete-vigente contaminó el rango)",
+			*afterH3.rankID, *afterCtl.rankID)
 	}
 }
 
