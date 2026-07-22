@@ -200,3 +200,55 @@ func TestH3_TriggerAndEngineResolveSamePackage_NoCapBreach(t *testing.T) {
 		t.Fatalf("el cierre abortó (¿trigger resuelve otro paquete?): %v", err)
 	}
 }
+
+// Mismo bug que el binario, en el stream de puntos R3: con pack viejo agotado +
+// pack nuevo abierto, el afiliado con points_accrued > 0 debe cobrar puntos
+// contra el cap del paquete nuevo, no cero.
+//
+// Con el código actual (v2_streams resuelve el más viejo) FALLA: pkgID resuelve
+// el $1000 agotado → pkgRem 0 → continue.
+func TestH3_PointsEarnAgainstNewestOpenPackage(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+
+	var oldAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo: %v", err)
+	}
+	exhaustPackageCap(t, ctx, pool, oldAP)
+	seedExtraPackage(t, ctx, pool, bID, 2, 5000)
+
+	// Sembrar points_accrued para B (simula puntos ya devengados por bloques).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.affiliate_payout_state (affiliate_id, points_accrued)
+		VALUES ($1, 50)
+		ON CONFLICT (affiliate_id) DO UPDATE SET points_accrued = 50`, bID); err != nil {
+		t.Fatalf("sembrar puntos: %v", err)
+	}
+
+	// Ejecutar el cierre (mismo disparo real que Task 1/2).
+	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// B debe haber cobrado puntos: el ExtRef de los movimientos de puntos R3
+	// es "r3:<period>:<aff>" (v2_streams.go, ExtRef del stream de puntos).
+	var paidPoints string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(wm.amount),0)::text
+		  FROM mlm.wallet_movement wm
+		  JOIN mlm.transaction tx ON tx.id = wm.transaction_id
+		  JOIN mlm.wallet w ON w.id = wm.wallet_id
+		 WHERE w.affiliate_id = $1 AND tx.external_ref LIKE 'r3:%'`, bID).Scan(&paidPoints); err != nil {
+		t.Fatalf("sumar puntos de B: %v", err)
+	}
+	if paidPoints == "0" || paidPoints == "0.00000000" {
+		t.Fatalf("B cobró %s en puntos, want > 0 (bug: resuelve el pack viejo agotado)", paidPoints)
+	}
+}

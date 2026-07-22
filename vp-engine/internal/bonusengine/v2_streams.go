@@ -180,8 +180,10 @@ func ComputeV2Streams(
 			  JOIN mlm.affiliate a ON a.id = ps.affiliate_id AND a.status = 'active'
 			  LEFT JOIN LATERAL (
 			        SELECT ap2.id, ap2.package_id FROM mlm.affiliate_package ap2
+			          JOIN mlm.package_cap_state cs ON cs.affiliate_package_id = ap2.id
 			         WHERE ap2.affiliate_id = a.id AND ap2.status = 'active'
-			         ORDER BY ap2.id LIMIT 1) ap ON true
+			           AND cs.closed_at IS NULL
+			         ORDER BY ap2.id DESC LIMIT 1) ap ON true
 			  LEFT JOIN mlm.package p ON p.id = ap.package_id
 			  LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
 			 WHERE ps.points_accrued > 0
