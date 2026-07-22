@@ -71,6 +71,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/schema_payouts_v1.2.sql",
 		"_meta/schema_ranks.sql",
 		"_meta/schema_payouts_v1.3.sql",
+		"_meta/migration/51_h3_paquete_vigente.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {
