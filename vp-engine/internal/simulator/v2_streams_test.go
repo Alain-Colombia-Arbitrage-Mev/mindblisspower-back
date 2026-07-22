@@ -188,7 +188,27 @@ func TestReferralRoyalty_Generations(t *testing.T) {
 
 // --- Invariantes con todo encendido ---------------------------------------
 
-func TestV2_T1HoldsWithAllStreams(t *testing.T) {
+// TestV2_NoAbortWithAllStreams — D4: el cierre nunca debe abortar ni producir
+// montos inválidos, incluso con todos los streams v2 encendidos y T1
+// (SolvencyOK) roto en algunos períodos.
+//
+// Este test se llamaba TestV2_T1HoldsWithAllStreams y afirmaba SolvencyOK en
+// TODOS los períodos. Esa aserción probaba el bug H1: en el simulador viejo
+// el yield se escalaba por θ igual que cualquier otro stream, así que
+// TotalPaid ≈ θ×projected ≤ α×inflows se cumplía por construcción — T1 era
+// trivialmente cierto, sin importar cuánto yield se pagara.
+//
+// Tras D2 (el yield/ROI se paga COMPLETO, sin pasar por θ — ver el comentario
+// en run.go junto al bucle de yield y cd_roi.go H1 en producción) eso ya no
+// es una garantía estructural: en un período con θ<1, el yield paga de más
+// respecto a lo que θ "presupuestó" para él en `projected`, y TotalPaid puede
+// superar α×inflows. Éste es exactamente el comportamiento documentado en D4
+// ("T1 no aborta el cierre — alerta y deja que θ module"), verificado en
+// producción por bonusengine.TestH1_T1AlertsDoesNotAbort. Por eso este test
+// ya NO exige SolvencyOK en cada período; sólo exige que el cierre complete
+// sin error y sin montos negativos, y registra cuántos períodos rompieron T1
+// (informativo, para que el sweep de la Task 5 lo cuantifique).
+func TestV2_NoAbortWithAllStreams(t *testing.T) {
 	s := Default()
 	s.InitialAffiliates = 1000
 	s.Periods = 26
@@ -199,12 +219,20 @@ func TestV2_T1HoldsWithAllStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(results) != s.Periods {
+		t.Fatalf("esperaba %d períodos, got %d", s.Periods, len(results))
+	}
+	var breaches int
 	for _, r := range results {
 		if !r.SolvencyOK {
-			t.Fatalf("T1 roto en period %d: paid=%s inflows=%s theta=%s",
-				r.Period, r.TotalPaid, r.Inflows, r.Theta)
+			breaches++
+		}
+		if r.TotalPaid.IsNegative() {
+			t.Fatalf("p=%d: TotalPaid negativo (%s) — el cierre nunca debe pagar de menos que cero", r.Period, r.TotalPaid)
 		}
 	}
+	t.Logf("%d/%d períodos con SolvencyOK=false (D4: esperado — el yield sin θ puede romper T1 en períodos con θ<1)",
+		breaches, len(results))
 }
 
 func TestV2_Determinism(t *testing.T) {

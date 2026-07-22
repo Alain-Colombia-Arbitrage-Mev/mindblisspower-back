@@ -195,8 +195,10 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 		afterCaps, br := applyCaps(candidates, tree, s.Plan)
 
 		// 4b. R2 yield candidates (25%/year, paid every YieldCadencePeriods).
-		// Yield is subject to θ alongside block payments, but does NOT count
-		// against T2/T3 caps — it's a capital return, not a commission.
+		// D2: yield is paid IN FULL — it does NOT go through θ, same contract
+		// as the production CD-ROI stream (cd_roi.go, H1). D3: it DOES count
+		// against T2 (package lifetime cap), pre-capped to the node's
+		// remaining cap — see the yield payment loop below.
 		yieldCands := computeYieldCandidates(tree, rootID, s.Plan, p)
 
 		// 4c. R3 points bonus candidates (1 punto / block, $1/punto, monthly).
@@ -265,6 +267,10 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 		totalPaid := decimal.Zero
 		pausedRouted := decimal.Zero  // P-B: stashed into carry
 		reductionLost := decimal.Zero // P-C: kept by company
+		// R3 — points earned from blocks paid THIS period, collected here and
+		// applied to Node.PointsAccrued only AFTER the points-bonus
+		// reset below (H2 fix, see that section for why).
+		pointsToAccrue := map[int64]decimal.Decimal{}
 		for _, c := range afterCaps {
 			net := c.GrossAmount.Mul(theta).RoundDown(2)
 			if net.Sign() <= 0 {
@@ -304,29 +310,48 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 			}
 			totalPaid = totalPaid.Add(net)
 
-			// R3 — accrue points based on blocks actually paid (after θ floor).
+			// R3 — compute points earned from blocks actually paid (after θ
+			// floor). NOT applied to anc.PointsAccrued here — collected into
+			// pointsToAccrue and applied AFTER the points-bonus reset below,
+			// so this period's own points survive into the next cadence
+			// cycle instead of being wiped by the reset (H2 fix).
 			if s.Plan.PointsBonusEnabled && c.NewBlocks > 0 {
 				effBlocks := decimal.NewFromInt(int64(c.NewBlocks)).Mul(theta).Floor()
 				if effBlocks.Sign() > 0 {
-					anc.PointsAccrued = anc.PointsAccrued.Add(
+					pointsToAccrue[c.AncestorID] = pointsToAccrue[c.AncestorID].Add(
 						effBlocks.Mul(s.Plan.PointsPerBlock))
 				}
 			}
 		}
 		binaryPaid := totalPaid
-		// R2 yield payments — same θ, no T2/T3 caps.
+		// R2 yield payments (D2: paid in full, no θ; D3: consumes T2, capped
+		// to remaining — same contract as cd_roi.go's H1-T2 handling).
 		yieldPaid := decimal.Zero
 		for _, y := range yieldCands {
-			net := y.Amount.Mul(theta).RoundDown(2)
-			if net.Sign() <= 0 {
-				continue
-			}
 			anc := tree.Get(y.NodeID)
 			if anc == nil {
 				continue
 			}
-			// Yield credits the affiliate. Does NOT bump PeriodPaid (T3) or
-			// PackagePaid (T2) — these track binary commissions only.
+			capTotal := s.Plan.LifetimeCapFactor.Mul(anc.PackagePrice)
+			remaining := capTotal.Sub(anc.PackagePaid)
+			if remaining.Sign() <= 0 {
+				continue // T2 already exhausted
+			}
+			net := y.Amount
+			if net.GreaterThan(remaining) {
+				net = remaining // pre-cap to remaining, like cd_roi.go
+			}
+			if net.Sign() <= 0 {
+				continue
+			}
+			// Yield credits the affiliate and consumes T2 (PackagePaid),
+			// same as any other stream that counts against the lifetime
+			// cap. Does NOT bump PeriodPaid (T3) — that tracks per-period
+			// binary commissions only, unrelated to the lifetime cap.
+			anc.PackagePaid = anc.PackagePaid.Add(net)
+			if anc.PackagePaid.GreaterThanOrEqual(capTotal) {
+				anc.PackageClosed = true
+			}
 			yieldPaid = yieldPaid.Add(net)
 		}
 
@@ -355,6 +380,19 @@ func RunScenario(s Scenario, w io.Writer) ([]PeriodResult, error) {
 			// Reset accrued points after payout (whether paid or not — caps
 			// destroy excess, same as block bonus over T2/T3).
 			resetPointsAccrued(tree, rootID)
+		}
+
+		// R3 — apply points earned from blocks paid THIS period, AFTER the
+		// reset above (H2 fix). Doing this before the reset was the bug: the
+		// cadence period's own points-earning payments got wiped by the same
+		// period's reset instead of surviving to be paid on the NEXT cadence
+		// boundary. Runs every period (not gated on cadence), same as
+		// production's AccruePoints call placement in binary_close.go
+		// (after PayV2Streams).
+		for ancID, pts := range pointsToAccrue {
+			if anc := tree.Get(ancID); anc != nil {
+				anc.PointsAccrued = anc.PointsAccrued.Add(pts)
+			}
 		}
 
 		// Carrera de rangos — cuotas que vencen este período × θ. El hito ya
