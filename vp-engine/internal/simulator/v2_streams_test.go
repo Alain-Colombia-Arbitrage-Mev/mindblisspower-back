@@ -233,6 +233,18 @@ func TestV2_NoAbortWithAllStreams(t *testing.T) {
 	}
 	t.Logf("%d/%d períodos con SolvencyOK=false (D4: esperado — el yield sin θ puede romper T1 en períodos con θ<1)",
 		breaches, len(results))
+
+	// D2 pin: con este escenario (1000 afiliados, growth 0.04, streams v2
+	// completos, 26 períodos) el yield sin θ empuja TotalPaid por encima de
+	// α×inflows en al menos un período con θ<1 — es precisamente el
+	// mecanismo documentado arriba (P_yield×(1-θ) no absorbido por el
+	// escalado de los demás streams). Si el yield volviera a escalarse por
+	// θ (reintroduciendo H1), totalPaid = θ×projected ≤ α×inflows por
+	// construcción y breaches sería 0 en este mismo escenario — esta
+	// aserción detectaría esa re-desalineación.
+	if breaches == 0 {
+		t.Fatal("esperaba al menos 1 período con SolvencyOK=false (D2: yield sin θ debe poder romper T1 cuando θ<1); breaches=0 sugiere que el yield volvió a escalarse por θ (regresión H1)")
+	}
 }
 
 func TestV2_Determinism(t *testing.T) {
