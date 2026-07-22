@@ -57,10 +57,23 @@ func exhaustPackageCap(t *testing.T, ctx context.Context, pool *pgxpool.Pool, af
 // runH3Close replica el patrón de disparo de cierre de
 // TestCloseBinaryPeriod_V2Streams (binary_close_v2_test.go): abre un
 // binary_period sobre el plan_config 'v2-test' sembrado por seedV2Tree,
-// registra compras ($1000) de cID y dID (concepto 1004) con sus tree_event
+// registra compras ($6000) de cID y dID (concepto 1004) con sus tree_event
 // pv_credit correspondientes (generan los bloques binarios de B), y corre
 // el cierre. Devuelve el error de CloseBinaryPeriod para que el llamador
 // decida cómo fallar.
+//
+// El monto ($6000, no $1000) es deliberado: B es FUNDADOR, así que su gross
+// binario usa founder_binary_matched_rate (10% del matched volume) en vez de
+// bonus_per_block. Con matched=6000 → 60 bloques → gross=$600. Ese monto es
+// el mínimo necesario para que el test de acoplamiento
+// (TestH3_TriggerAndEngineResolveSamePackage_NoCapBreach) sea significativo:
+// con matched=1000 (gross=$100) el pago no cruza NINGUNO de los dos period-caps
+// posibles (viejo: 0.5×$1000=$500; vigente: 0.5×$5000=$2500), así que el
+// trigger nunca abortaría el cierre sin importar qué paquete resuelva — el
+// test pasaría siempre, incluso con el trigger viejo (falso verde). Con
+// $600 sí cruza el cap viejo (500) pero no el vigente (2500): el trigger
+// viejo aborta con 'Daily cap breach' y el nuevo no, que es exactamente el
+// acoplamiento que este test debe verificar.
 func runH3Close(t *testing.T, ctx context.Context, pool *pgxpool.Pool, cID, dID int64) error {
 	t.Helper()
 
@@ -89,20 +102,20 @@ func runH3Close(t *testing.T, ctx context.Context, pool *pgxpool.Pool, cID, dID 
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO mlm.wallet_movement
 			  (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at)
-			SELECT $1, w.id, $2, 1004, 1000, $3
+			SELECT $1, w.id, $2, 1004, 6000, $3
 			  FROM mlm.wallet w WHERE w.affiliate_id = $2`,
 			txnID, buyer, inWindow); err != nil {
 			t.Fatalf("purchase movement: %v", err)
 		}
 	}
 
-	// Eventos PV: C y D acreditan 1000 a su línea (trigger actualiza
+	// Eventos PV: C y D acreditan 6000 a su línea (trigger actualiza
 	// lifetimes de B).
 	for i, src := range []int64{cID, dID} {
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO mlm.tree_event (external_ref, kind, affiliate_id,
 			  pv_delta_left, pv_delta_right, occurred_at)
-			VALUES ($1, 'pv_credit', $2, 1000, 0, $3)`,
+			VALUES ($1, 'pv_credit', $2, 6000, 0, $3)`,
 			fmt.Sprintf("test:h3:pv:%d", i), src, inWindow); err != nil {
 			t.Fatalf("tree_event: %v", err)
 		}
@@ -154,5 +167,36 @@ func TestH3_BinaryEarnsAgainstNewestOpenPackage(t *testing.T) {
 	}
 	if paidToB == "0" || paidToB == "0.00000000" {
 		t.Fatalf("B ganó %s en binario, want > 0 (el bug lo congela en 0 resolviendo el pack viejo agotado)", paidToB)
+	}
+}
+
+// El binario (Task 2) ya resuelve el pack nuevo $5000 y calcula el period-cap
+// contra ese monto. Si el trigger fn_enforce_daily_cap sigue resolviendo el pack
+// viejo $1000, valida el pago contra un period-cap más chico y hace
+// RAISE EXCEPTION 'Daily cap breach' → aborta el cierre. Este test verifica que
+// el cierre COMPLETA sin excepción cuando ambos resuelven el mismo paquete.
+//
+// Con el trigger viejo (placeholder / ORDER BY id LIMIT 1) este test FALLA con
+// la excepción del trigger. Con la migración 51 PASA.
+func TestH3_TriggerAndEngineResolveSamePackage_NoCapBreach(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _, bID, cID, dID := seedV2Tree(t, ctx, pool)
+
+	var oldAP int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM mlm.affiliate_package
+		 WHERE affiliate_id=$1 AND package_id=1 AND status='active'
+		 ORDER BY id ASC LIMIT 1`, bID).Scan(&oldAP); err != nil {
+		t.Fatalf("localizar pack viejo: %v", err)
+	}
+	exhaustPackageCap(t, ctx, pool, oldAP)
+	seedExtraPackage(t, ctx, pool, bID, 2, 5000)
+
+	// Ejecutar el cierre. Debe completar SIN error de "Daily cap breach".
+	if err := runH3Close(t, ctx, pool, cID, dID); err != nil {
+		t.Fatalf("el cierre abortó (¿trigger resuelve otro paquete?): %v", err)
 	}
 }
