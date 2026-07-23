@@ -123,10 +123,7 @@ func (s *Scheduler) runBinaryCycle(ctx context.Context) {
 	log.Info().Msg("starting weekly binary cycle")
 
 	// 1. Cerrar el período actualmente open (el que acaba de terminar).
-	var openPeriodID int64
-	err := s.db.QueryRow(ctx,
-		"SELECT id FROM mlm.binary_period WHERE status = 'open' "+
-			"ORDER BY period_end ASC LIMIT 1").Scan(&openPeriodID)
+	openPeriodID, err := pickPeriodToClose(ctx, s.db)
 	if err != nil {
 		log.Warn().Err(err).Msg("no open period to close (may be first run)")
 	} else {
@@ -149,4 +146,23 @@ func (s *Scheduler) runBinaryCycle(ctx context.Context) {
 		return
 	}
 	log.Info().Int64("period_id", newPeriodID).Msg("next period open")
+}
+
+// pickPeriodToClose elige el período abierto que YA terminó (period_end <= now()).
+//
+// La guarda `period_end <= now()` evita una race entre-boxes: runBinaryCycle corre
+// en 2 boxes el lunes 02:00 sin lock cross-box para la SELECCIÓN (el
+// pg_advisory_xact_lock de CloseBinaryPeriod sólo protege el cierre de un periodID
+// dado, no cuál se elige). Sin la guarda, si el box A ya cerró el período terminado
+// y abrió el de la semana en curso (period_end futuro), el box B rezagado vería ese
+// nuevo período como el único 'open' y lo cerraría prematuramente, dejando la semana
+// sin período. Con la guarda, el período recién abierto (period_end futuro) nunca se
+// elige; sólo se cierra el que realmente terminó. Retorna pgx.ErrNoRows si no hay
+// ninguno terminado por cerrar (p. ej. sólo existe el de la semana en curso).
+func pickPeriodToClose(ctx context.Context, db *pgxpool.Pool) (int64, error) {
+	var id int64
+	err := db.QueryRow(ctx,
+		"SELECT id FROM mlm.binary_period WHERE status = 'open' AND period_end <= now() "+
+			"ORDER BY period_end ASC LIMIT 1").Scan(&id)
+	return id, err
 }
