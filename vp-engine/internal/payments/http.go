@@ -176,6 +176,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
 	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)
 	mux.HandleFunc("/api/registration/precheck", h.handleRegistrationPrecheck)
+	mux.HandleFunc("/api/auth/user-exists", h.handleAuthUserExists)
 	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
 	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
 	mux.HandleFunc("/api/admin/network/sustainability", h.handleNetworkSustainability)
@@ -580,6 +581,34 @@ func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
 
 // svcAuth valida el token de servicio (compartido con el BFF). Devuelve false
 // y responde 401 si no coincide.
+// handleAuthUserExists: GET /api/auth/user-exists?email= — el BFF del login OTP
+// consulta si el email existe en el pool para enrutar usuarios nuevos a registro
+// (el passwordless de Cognito no envía código a inexistentes y no lo revela).
+// Gated por service token: solo el BFF lo llama, y el BFF rate-limita. Si el
+// cliente admin de Cognito no está configurado, responde exists=true+checked=
+// false (fail-safe: el login OTP sigue su curso normal, no rompemos nada).
+func (h *Handler) handleAuthUserExists(w http.ResponseWriter, r *http.Request) {
+	if !h.svcAuth(w, r) {
+		return
+	}
+	email := strings.TrimSpace(r.URL.Query().Get("email"))
+	if email == "" {
+		writeErr(w, http.StatusBadRequest, "missing_email")
+		return
+	}
+	if h.cognitoAdmin == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"exists": true, "checked": false})
+		return
+	}
+	exists, err := h.cognitoAdmin.UserExists(r.Context(), email)
+	if err != nil {
+		h.log.Error().Err(err).Msg("user exists check")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"exists": exists, "checked": true})
+}
+
 func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")

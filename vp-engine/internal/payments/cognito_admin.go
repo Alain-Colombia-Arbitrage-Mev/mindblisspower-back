@@ -44,6 +44,27 @@ func cognitoUsername(email string) string {
 	return "mp_" + hex.EncodeToString(sum[:])[:40]
 }
 
+// UserExists indica si existe un usuario con ese email en el pool (AdminGetUser
+// sobre el username determinístico). UserNotFoundException ⇒ (false, nil). Lo
+// usa el BFF de login OTP para detectar usuarios nuevos y enrutarlos a registro:
+// el flujo passwordless de Cognito NO envía código a un usuario inexistente y,
+// con PreventUserExistenceErrors activo, tampoco lo revela — de ahí el "código
+// que nunca llega". Aquí sí lo resolvemos (endpoint gated por service token).
+func (c *CognitoAdmin) UserExists(ctx context.Context, email string) (bool, error) {
+	username := cognitoUsername(email)
+	_, err := c.client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{
+		UserPoolId: &c.poolID, Username: &username,
+	})
+	if err != nil {
+		var notFound *ciptypes.UserNotFoundException
+		if errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("cognito user exists (%s): %w", email, err)
+	}
+	return true, nil
+}
+
 // SetEnabled habilita (true) o deshabilita (false) el login del usuario por
 // email. UserNotFoundException ⇒ no-op (migrados sin cuenta Cognito): devuelve
 // (false, nil). Devuelve (true, nil) si el cambio se aplicó.
