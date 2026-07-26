@@ -64,6 +64,32 @@ type memberContext struct {
 // Cache-aside 10 min: se consulta en CADA carga del dashboard y el código es
 // inmutable una vez generado — sin cache, la carga pesada de registros
 // martillea RDS con esta query.
+// HasActiveMembership indica si el usuario (por email) ya tiene ESA membresía
+// (package_id) activa con cupo abierto. Las membresías son de PAGO ÚNICO, no
+// suscripción: si ya está activa no se debe permitir pagarla otra vez (evita el
+// doble cobro por doble-click o reintento). Un paquete AGOTADO (package_cap_state
+// cerrado) NO cuenta como activo, así que la recompra serial (ADR-0013) sigue
+// permitida. Lee del primario (no réplica) para ver una activación recién hecha.
+func (s *Store) HasActiveMembership(ctx context.Context, email string, packageID int) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM mlm.person p
+			  JOIN mlm.affiliate a ON a.person_id = p.id
+			  JOIN mlm.affiliate_package ap ON ap.affiliate_id = a.id
+			  JOIN mlm.package_cap_state cs ON cs.affiliate_package_id = ap.id
+			 WHERE lower(p.email) = lower($1)
+			   AND ap.package_id = $2
+			   AND ap.status = 'active'
+			   AND cs.closed_at IS NULL
+		)`, email, packageID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has active membership: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code string, err error) {
 	ckey := "refctx:" + strings.ToLower(strings.TrimSpace(email))
 	var cached memberContext

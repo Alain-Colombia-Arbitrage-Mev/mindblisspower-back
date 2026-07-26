@@ -914,6 +914,18 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pago único: si el usuario YA tiene esta membresía activa (cupo abierto), no
+	// se permite pagarla otra vez (evita doble cobro por doble-click/reintento).
+	// Las membresías no son suscripción. Un paquete agotado sí permite recompra.
+	// Fail-open ante error de infra (no bloqueamos una compra legítima por un
+	// fallo transitorio; la activación sigue siendo idempotente por payment_intent).
+	if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
+		h.log.Error().Err(err).Str("email", req.Email).Int("package_id", req.PackageID).Msg("check active membership (fail-open)")
+	} else if active {
+		writeErr(w, http.StatusConflict, "Ya tienes esta membresía activa. Las membresías son de pago único.")
+		return
+	}
+
 	// Auto-provisión: usuario nuevo de Cognito sin fila en RDS → crear mlm.person
 	// (idempotente) para que el checkout pueda proceder. La colocación en el árbol
 	// la hace la activación.
