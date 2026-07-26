@@ -14,6 +14,27 @@ set -euo pipefail
 REGION="${REGION:-us-east-1}"
 REGISTRY="522814703714.dkr.ecr.${REGION}.amazonaws.com"
 
+# Auto-provisión de dependencias: en hosts recién levantados (p.ej. staging) el
+# deploy fallaba con "aws: command not found" o sin el plugin `docker compose`.
+# Se instalan aquí si faltan (idempotente; en hosts ya provisionados es no-op),
+# para que el deploy no dependa de un provisioning manual previo del box.
+if ! command -v aws >/dev/null 2>&1; then
+  echo "==> aws-cli ausente: instalando AWS CLI v2"
+  tmpd=$(mktemp -d)
+  arch=$(uname -m); case "$arch" in aarch64|arm64) awsarch=aarch64 ;; *) awsarch=x86_64 ;; esac
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awsarch}.zip" -o "$tmpd/awscliv2.zip"
+  (cd "$tmpd" && unzip -q awscliv2.zip && sudo ./aws/install --update)
+  rm -rf "$tmpd"
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "==> plugin 'docker compose' ausente: instalando"
+  sudo mkdir -p /usr/lib/docker/cli-plugins
+  dcarch=$(uname -m); case "$dcarch" in aarch64|arm64) dcbin=aarch64 ;; *) dcbin=x86_64 ;; esac
+  sudo curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${dcbin}" \
+    -o /usr/lib/docker/cli-plugins/docker-compose
+  sudo chmod +x /usr/lib/docker/cli-plugins/docker-compose
+fi
+
 # ECR login
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$REGISTRY"
