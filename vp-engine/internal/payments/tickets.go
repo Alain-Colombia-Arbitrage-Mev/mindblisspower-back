@@ -79,6 +79,44 @@ func (s *Store) ListTickets(ctx context.Context, status string, limit, offset in
 	return out, total, rows.Err()
 }
 
+// ListMemberTickets pagina los tickets de UN miembro (scoped por email). Mismo
+// shape/orden que ListTickets pero WHERE lower(email)=lower($1): el miembro sólo
+// ve SUS tickets (el email lo aporta el caller ya verificado, nunca del query).
+func (s *Store) ListMemberTickets(ctx context.Context, email string, limit, offset int) ([]Ticket, int64, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	email = strings.TrimSpace(email)
+	var total int64
+	if err := s.reader().QueryRow(ctx, `
+		SELECT count(*) FROM support.ticket WHERE lower(email) = lower($1)`, email).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count member tickets: %w", err)
+	}
+	rows, err := s.reader().Query(ctx, `
+		SELECT id, email, subject, body, status,
+		       COALESCE(answer,''), COALESCE(answered_by,''),
+		       COALESCE(to_char(answered_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),''),
+		       to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SSZ')
+		  FROM support.ticket
+		 WHERE lower(email) = lower($1)
+		 ORDER BY created_at DESC
+		 LIMIT $2 OFFSET $3`, email, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list member tickets: %w", err)
+	}
+	defer rows.Close()
+	out := []Ticket{}
+	for rows.Next() {
+		var t Ticket
+		if err := rows.Scan(&t.ID, &t.Email, &t.Subject, &t.Body, &t.Status,
+			&t.Answer, &t.AnsweredBy, &t.AnsweredAt, &t.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan member ticket: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, total, rows.Err()
+}
+
 // ReplyTicket registra la respuesta del admin y marca answered.
 func (s *Store) ReplyTicket(ctx context.Context, id int64, answer, adminEmail string) (Ticket, error) {
 	var t Ticket
@@ -227,4 +265,29 @@ func (h *Handler) handleMemberTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "open"})
+}
+
+// handleMemberTickets: GET /api/support/tickets — el BFF del growth-hub lista los
+// tickets del miembro autenticado. Scoped por el email VERIFICADO del id token
+// (resolveIdentity), nunca por el query: un miembro sólo ve SUS tickets.
+func (h *Handler) handleMemberTickets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	if !ok {
+		return
+	}
+	tickets, total, err := h.store.ListMemberTickets(r.Context(), email,
+		atoiDefault(r.URL.Query().Get("limit"), 25), atoiDefault(r.URL.Query().Get("offset"), 0))
+	if err != nil {
+		h.log.Error().Err(err).Msg("list member tickets")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tickets": tickets, "total": total})
 }
