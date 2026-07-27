@@ -27,9 +27,16 @@ type MoneyflowRow struct {
 // AdminFinance es el tablero financiero de la red: todo el dinero en un vistazo.
 type AdminFinance struct {
 	// Entrante (caja real vía nuestro checkout Stripe).
-	InflowsUSD string `json:"inflows_usd"` // Σ(amount+fee) de compras paid|activated
+	InflowsUSD string `json:"inflows_usd"` // Σ(amount+fee) de compras paid|activated (BRUTO cobrado vía Stripe)
 	PacksPaid  int64  `json:"packs_paid"`  // # de packs pagados
-	FeesUSD    string `json:"fees_usd"`    // Σ del 1% de manejo
+	FeesUSD    string `json:"fees_usd"`    // Σ del 1% de manejo (fee interno de activación)
+
+	// Costos y retención de Stripe sobre el entrante BRUTO. La empresa NO recibe
+	// el 100%: Stripe cobra ~3% de comisión (se va, no vuelve) y retiene un 30%
+	// como reserva de seguridad (queda congelado en Stripe y se libera después).
+	StripeFeeUSD     string `json:"stripe_fee_usd"`     // 3% comisión Stripe (costo real)
+	StripeReserveUSD string `json:"stripe_reserve_usd"` // 30% reserva retenida por Stripe (no disponible aún)
+	NetSettledUSD    string `json:"net_settled_usd"`    // entrante − comisión Stripe − reserva = caja realmente disponible hoy
 
 	// Distribuido a la red (ledger).
 	CommissionsDistributedUSD string `json:"commissions_distributed_usd"` // Σ créditos a miembros (todos los bonos)
@@ -65,13 +72,20 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 
 	// Entrante real (nuestro endpoint Stripe). Excluye cargos no verificados en
 	// Stripe live (stripe_present=false, p.ej. pruebas) para no inflar ingresos.
+	// Nota: 3% comisión Stripe + 30% reserva de seguridad se computan sobre el
+	// entrante bruto (amount+fee = lo realmente cobrado a la tarjeta). net_settled
+	// = 67% (1 − 0.03 − 0.30). Tasas fijas por acuerdo del negocio.
 	if err := s.reader().QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount_usd + fee_usd),0)::text,
 		       COALESCE(count(*),0),
-		       COALESCE(SUM(fee_usd),0)::text
+		       COALESCE(SUM(fee_usd),0)::text,
+		       COALESCE(round(SUM(amount_usd + fee_usd) * 0.03, 2),0)::text,
+		       COALESCE(round(SUM(amount_usd + fee_usd) * 0.30, 2),0)::text,
+		       COALESCE(round(SUM(amount_usd + fee_usd) * 0.67, 2),0)::text
 		  FROM payments.purchase_intent
 		 WHERE status IN ('paid','activated') AND stripe_present IS DISTINCT FROM false
-	`).Scan(&f.InflowsUSD, &f.PacksPaid, &f.FeesUSD); err != nil {
+	`).Scan(&f.InflowsUSD, &f.PacksPaid, &f.FeesUSD,
+		&f.StripeFeeUSD, &f.StripeReserveUSD, &f.NetSettledUSD); err != nil {
 		return f, fmt.Errorf("inflows: %w", err)
 	}
 
