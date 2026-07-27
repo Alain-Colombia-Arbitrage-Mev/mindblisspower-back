@@ -1041,13 +1041,49 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "checkout.session.async_payment_failed", "payment_intent.payment_failed":
-		h.log.Info().Str("event", event.ID).Str("type", string(event.Type)).Msg("payment failed/expired")
+		h.markIntentFromEvent(r.Context(), event, "failed")
+	case "checkout.session.expired":
+		h.markIntentFromEvent(r.Context(), event, "expired")
 	default:
 		h.log.Debug().Str("type", string(event.Type)).Msg("unhandled event type")
 	}
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"received":true}`))
+}
+
+// markIntentFromEvent extrae el session/payment_intent id de un evento Stripe de
+// fallo o expiración y marca el purchase_intent correspondiente (failed/expired).
+// Best-effort: loguea y NO falla el webhook (respondemos 200; Stripe no reintenta
+// estos eventos). Saca el id según el tipo de objeto del evento.
+func (h *Handler) markIntentFromEvent(ctx context.Context, event stripe.Event, newStatus string) {
+	var sessionID, piID string
+	if strings.HasPrefix(string(event.Type), "checkout.session.") {
+		var cs stripe.CheckoutSession
+		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
+			h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal checkout.session (fail/expire)")
+			return
+		}
+		sessionID = cs.ID
+		if cs.PaymentIntent != nil {
+			piID = cs.PaymentIntent.ID
+		}
+	} else {
+		var pi stripe.PaymentIntent
+		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
+			h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal payment_intent (fail)")
+			return
+		}
+		piID = pi.ID
+	}
+	n, err := h.store.MarkIntentStatus(ctx, sessionID, piID, newStatus)
+	if err != nil {
+		h.log.Error().Err(err).Str("event", event.ID).Str("status", newStatus).Msg("mark intent status")
+		return
+	}
+	if n > 0 {
+		h.log.Info().Str("event", event.ID).Str("status", newStatus).Int64("intents", n).Msg("payment intent marked")
+	}
 }
 
 func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {

@@ -171,6 +171,30 @@ type PurchaseIntent struct {
 }
 
 // CreatePurchaseIntent inserta un intent en estado 'created' y devuelve su id.
+// MarkIntentStatus marca un purchase_intent como 'failed' o 'expired' cuando
+// Stripe reporta que el pago no prosperó (tarjeta rechazada, sesión expirada,
+// pantalla cerrada). Solo afecta intents en 'created' — nunca pisa
+// 'activated'/'needs_placement'. Matchea por session id (eventos
+// checkout.session) o por payment_intent id (eventos payment_intent); como el
+// WHERE sólo toca filas de NUESTRA tabla, un evento de otro producto de la
+// cuenta Stripe compartida no matchea nada (guard implícito). Idempotente.
+// Sacar el intent de 'created' evita: recordatorios de carrito a tarjetas
+// rechazadas, re-poll inútil del sweep, y que el panel de ventas nunca vea
+// failed/expired.
+func (s *Store) MarkIntentStatus(ctx context.Context, sessionID, paymentIntentID, newStatus string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE payments.purchase_intent
+		   SET status = $3, updated_at = now()
+		 WHERE status = 'created'
+		   AND ( ($1 <> '' AND stripe_session_id = $1)
+		      OR ($2 <> '' AND stripe_payment_intent_id = $2) )`,
+		sessionID, paymentIntentID, newStatus)
+	if err != nil {
+		return 0, fmt.Errorf("mark intent %s: %w", newStatus, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (string, error) {
 	var id string
 	err := s.db.QueryRow(ctx, `
