@@ -17,6 +17,12 @@ services:
     network_mode: host
     user: "0"
     env_file: [/run/vicionpower/vp-engine.env]
+    # El cron del cierre binario (lunes 02:00) corre SOLO en server1. Como el env
+    # de vp-engine se rinde desde el MISMO path SSM para ambos boxes, este override
+    # por-compose (precede al env_file, solo en este WORKER) evita el doble
+    # scheduler de forma permanente. server1.yml NO lo lleva ⇒ conserva el ciclo.
+    environment:
+      BONUS_ENGINE_BINARY_CYCLE_ENABLED: "false"
     volumes:
       - /etc/vp-engine/tls:/etc/vp-engine/tls:ro
     stop_grace_period: 20s
