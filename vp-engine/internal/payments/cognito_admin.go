@@ -65,6 +65,24 @@ func (c *CognitoAdmin) UserExists(ctx context.Context, email string) (bool, erro
 	return true, nil
 }
 
+// GetUserStatus devuelve si el usuario existe en el pool y, si existe, si está
+// habilitado y su estado Cognito (CONFIRMED, UNCONFIRMED, ...). Lo usa el
+// inspector de usuario del panel admin. UserNotFoundException ⇒ (false,...,nil).
+func (c *CognitoAdmin) GetUserStatus(ctx context.Context, email string) (exists, enabled bool, status string, err error) {
+	username := cognitoUsername(email)
+	out, err := c.client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{
+		UserPoolId: &c.poolID, Username: &username,
+	})
+	if err != nil {
+		var notFound *ciptypes.UserNotFoundException
+		if errors.As(err, &notFound) {
+			return false, false, "", nil
+		}
+		return false, false, "", fmt.Errorf("cognito user status (%s): %w", email, err)
+	}
+	return true, out.Enabled, string(out.UserStatus), nil
+}
+
 // SetEnabled habilita (true) o deshabilita (false) el login del usuario por
 // email. UserNotFoundException ⇒ no-op (migrados sin cuenta Cognito): devuelve
 // (false, nil). Devuelve (true, nil) si el cambio se aplicó.
