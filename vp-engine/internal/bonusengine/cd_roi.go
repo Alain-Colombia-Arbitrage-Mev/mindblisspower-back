@@ -152,7 +152,7 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 			}
 
 			if gross.Sign() > 0 {
-				walletID, werr := e.ensureUSDWallet(ctx, tx, c.affID, wallets)
+				walletID, werr := ensureUSDWallet(ctx, tx, c.affID, wallets)
 				if werr != nil {
 					return res, werr
 				}
@@ -234,7 +234,9 @@ func (e *Engine) postCDROI(ctx context.Context, tx pgx.Tx, walletID, affID int64
 
 // ensureUSDWallet resuelve (cacheado) la wallet USD del afiliado; la crea si no
 // existe (ledger interno). address es un placeholder determinístico.
-func (e *Engine) ensureUSDWallet(ctx context.Context, tx pgx.Tx, affID int64, cache map[int64]int64) (int64, error) {
+// Compartida por el ROI diario, el cierre binario y los streams v2 (H3: una
+// wallet faltante no debe abortar el cierre entero con ErrNoRows).
+func ensureUSDWallet(ctx context.Context, tx pgx.Tx, affID int64, cache map[int64]int64) (int64, error) {
 	if id, ok := cache[affID]; ok {
 		return id, nil
 	}

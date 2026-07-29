@@ -52,7 +52,9 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 	defer tx.Rollback(ctx) // safe after Commit
 
 	// Advisory lock per-period; waits for any concurrent close to finish.
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", periodID); err != nil {
+	// Clase 1 = cierre binario (la colocación usa clase 2; evita colisión de
+	// keyspace: el period id chocaba con las activaciones bajo el afiliado 1).
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(1, $1::int)", periodID); err != nil {
 		return fmt.Errorf("advisory lock: %w", err)
 	}
 	// Re-check status under lock
@@ -164,6 +166,20 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 			return fmt.Errorf("upsert txn (%s): %w", extRef, err)
 		}
 
+		// Idempotencia defensiva: la transaction se upsertea por external_ref,
+		// pero el wallet_movement no tiene guard propio — una reapertura manual
+		// del período re-acreditaría el movimiento y re-sumaría node_state y
+		// package_cap_state. Si ya hay movimiento, saltar el candidato entero.
+		var yaAcreditado bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM mlm.wallet_movement WHERE transaction_id = $1)`,
+			txnID).Scan(&yaAcreditado); err != nil {
+			return fmt.Errorf("check movement (%s): %w", extRef, err)
+		}
+		if yaAcreditado {
+			continue
+		}
+
 		// 2. wallet_movement — ruteo 401k: toRet va al plan, toWd al billetera.
 		pct, err := pctToPlanFor(ctx, tx, c.AffiliateID, "binary_bonus")
 		if err != nil {
@@ -174,16 +190,11 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 			return fmt.Errorf("retirement contribution (%s): %w", extRef, err)
 		}
 		if toWd.Sign() > 0 {
-			walletID, ok := walletCache[c.AffiliateID]
-			if !ok {
-				if err := tx.QueryRow(ctx, `
-					SELECT w.id FROM mlm.wallet w
-					  JOIN mlm.asset s ON s.id = w.asset_id
-					 WHERE w.affiliate_id = $1 AND s.symbol = 'USD'
-					 LIMIT 1`, c.AffiliateID).Scan(&walletID); err != nil {
-					return fmt.Errorf("wallet for affiliate %d: %w", c.AffiliateID, err)
-				}
-				walletCache[c.AffiliateID] = walletID
+			// Wallet USD get-or-create (defensa: un afiliado sin wallet no
+			// tumba el cierre entero con ErrNoRows).
+			walletID, err := ensureUSDWallet(ctx, tx, c.AffiliateID, walletCache)
+			if err != nil {
+				return fmt.Errorf("wallet for affiliate %d: %w", c.AffiliateID, err)
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO mlm.wallet_movement

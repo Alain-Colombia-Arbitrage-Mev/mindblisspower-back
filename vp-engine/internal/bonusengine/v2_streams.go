@@ -1,7 +1,8 @@
 // Streams v2 del cierre de período (ADR-0015/0016/0017/0018):
 //
-//	R2 yield      — 25% anual / 12, cadencia mensual, gate "1 directo ACTIVO
-//	                a cada lado" re-verificado por período. T1 sólo.
+//	R2 yield      — 25% anual prorrateado por días del tramo (7×cadencia/365),
+//	                gate "1 directo ACTIVO a cada lado" re-verificado por
+//	                período. T1 sólo.
 //	R3 puntos     — acumulados por bloque pagado (post-θ), convertidos a USD
 //	                en cadencia. T1 + T2 + T3.
 //	Rangos        — bono one-time fijo al cruzar hito de puntos-por-pierna.
@@ -18,6 +19,7 @@ package bonusengine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -147,7 +149,12 @@ func ComputeV2Streams(
 		if err != nil {
 			return nil, fmt.Errorf("yield candidates: %w", err)
 		}
-		monthly := plan.YieldAnnualRate.Div(decimal.NewFromInt(12))
+		// Prorrateo por días reales del tramo: tasa_anual × (7×cadencia)/365.
+		// (Antes era tasa/12 cada cadencia: con cadencia 4 son 13 pagos/año
+		// = 27.08% efectivo en vez del 25% nominal. Aprobado por negocio.)
+		cycleRate := plan.YieldAnnualRate.
+			Mul(decimal.NewFromInt(int64(7 * plan.YieldCadencePeriods))).
+			Div(decimal.NewFromInt(365))
 		for rows.Next() {
 			var affID int64
 			var pkgAmount decimal.Decimal
@@ -155,7 +162,7 @@ func ComputeV2Streams(
 				rows.Close()
 				return nil, err
 			}
-			gross := pkgAmount.Mul(monthly).RoundDown(2)
+			gross := pkgAmount.Mul(cycleRate).RoundDown(2)
 			if gross.Sign() > 0 {
 				out.Yield = append(out.Yield, streamEntry{
 					AffiliateID: affID,
@@ -474,14 +481,22 @@ func postStreamPayment(
 		RETURNING id`, extRef, description, postedAt).Scan(&txnID); err != nil {
 		return "", fmt.Errorf("upsert txn (%s): %w", extRef, err)
 	}
-	walletID, ok := walletCache[affiliateID]
-	if !ok {
-		if err := tx.QueryRow(ctx, `
-			SELECT w.id FROM mlm.wallet w JOIN mlm.asset s ON s.id = w.asset_id
-			 WHERE w.affiliate_id = $1 AND s.symbol = 'USD' LIMIT 1`, affiliateID).Scan(&walletID); err != nil {
-			return "", fmt.Errorf("wallet for affiliate %d: %w", affiliateID, err)
-		}
-		walletCache[affiliateID] = walletID
+	// Idempotencia defensiva: la transaction se upsertea por external_ref, pero
+	// el wallet_movement no tiene guard propio — una reapertura manual del
+	// período re-acreditaría. Si el movimiento ya existe, no duplicar.
+	var yaAcreditado bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM mlm.wallet_movement WHERE transaction_id = $1)`,
+		txnID).Scan(&yaAcreditado); err != nil {
+		return "", fmt.Errorf("check movement (%s): %w", extRef, err)
+	}
+	if yaAcreditado {
+		return txnID, nil
+	}
+	// Wallet USD get-or-create (defensa: un afiliado sin wallet no tumba el cierre).
+	walletID, err := ensureUSDWallet(ctx, tx, affiliateID, walletCache)
+	if err != nil {
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO mlm.wallet_movement (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at, available_at)
@@ -541,6 +556,27 @@ func PayV2Streams(
 			net := e.Gross.Mul(theta).RoundDown(2)
 			if net.Sign() <= 0 {
 				continue
+			}
+			// H1-T2 (puntos): ComputeV2Streams capó contra el remaining ANTES
+			// de que el loop binario sumara a paid_total en esta MISMA tx.
+			// Re-leer el remaining REAL con FOR UPDATE (patrón cd_roi.go) y
+			// capar el net, para que el trigger trg_enforce_package_cap no
+			// aborte el cierre entero por doble consumo binario+puntos.
+			var capTotal, paidTotal decimal.Decimal
+			err := tx.QueryRow(ctx, `
+				SELECT cap_total, paid_total FROM mlm.package_cap_state
+				 WHERE affiliate_package_id = $1 FOR UPDATE`, e.PackageID).Scan(&capTotal, &paidTotal)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue // sin cap state: no paga (paquete cerrado/no init)
+			} else if err != nil {
+				return total, fmt.Errorf("lock cap state pkg %d: %w", e.PackageID, err)
+			}
+			remaining := capTotal.Sub(paidTotal)
+			if remaining.Sign() <= 0 {
+				continue // cap agotado por el binario de este mismo cierre
+			}
+			if net.GreaterThan(remaining) {
+				net = remaining
 			}
 			if _, err := postStreamPayment(ctx, tx, cid, "r3_points", e.AffiliateID, net,
 				e.ExtRef, fmt.Sprintf("R3 points period=%d", periodID), postedAt, plan.RetirementAge, wallets, retWallets); err != nil {

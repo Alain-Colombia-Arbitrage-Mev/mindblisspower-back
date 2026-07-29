@@ -109,10 +109,12 @@ func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch ri.Status {
-	case "paid", "activated":
+	case "paid", "activated", "needs_placement":
+		// needs_placement = dinero YA recibido (el webhook lo marcó pagado y
+		// quedó pendiente de colocación): NO regenerar checkout (doble cobro).
 		writeJSON(w, http.StatusOK, map[string]any{"status": "already_paid", "url": h.successURL})
 		return
-	case "created", "expired", "needs_placement":
+	case "created", "expired":
 		// resumible
 	default:
 		writeErr(w, http.StatusConflict, "not_resumable")
@@ -292,7 +294,8 @@ func (h *Handler) handleAdminCartRemind(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if status == "paid" || status == "activated" {
+	// needs_placement también es dinero ya recibido: no se "recuerda" un pago hecho.
+	if status == "paid" || status == "activated" || status == "needs_placement" {
 		writeErr(w, http.StatusConflict, "already_paid")
 		return
 	}

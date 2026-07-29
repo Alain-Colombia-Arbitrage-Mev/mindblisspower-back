@@ -113,11 +113,11 @@ func seedV2Tree(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (root, aI
 
 // TestCloseBinaryPeriod_V2Streams: cierre E2E con todos los streams v2.
 //
-// Esperado con θ=1 (inflows $2000, projected $370.83 < $900 = 45%×2000):
+// Esperado con θ=1 (inflows $2000, projected $354.79 < $900 = 45%×2000):
 //
 //	binario B (fundador) : 10% × 1000 matched = $100.00
 //	rango B (Bronce)     : min(1000,1000) ≥ 1000 → $100.00 one-time
-//	yield B (R2)         : 1000 × 0.25/12 = $20.83
+//	yield B (R2)         : 1000 × 0.25 × 7/365 = $4.79 (prorrateo por días)
 //	referido B (gen-1)   : 10% fundador × compras de C y D... C y D son
 //	                       directos de B → 10% × $2000 = $200.00... ver abajo
 //	regalía A (gen-2)    : 5% × $2000 = $100.00
@@ -244,9 +244,10 @@ func TestCloseBinaryPeriod_V2Streams(t *testing.T) {
 		t.Errorf("current_rank_id de B debía ser 1 (BRONZE), es %v", curRank)
 	}
 
-	// Yield R2 para B (gate: C activo en L, D activo en R): 1000×0.25/12.
-	if got := sumByConcept("r2_yield", bID); !got.Equal(decimal.RequireFromString("20.83")) {
-		t.Errorf("yield B esperado $20.83, fue %s", got)
+	// Yield R2 para B (gate: C activo en L, D activo en R): prorrateo por
+	// días del tramo (cadencia 1) = 1000 × 0.25 × 7/365 = $4.79.
+	if got := sumByConcept("r2_yield", bID); !got.Equal(decimal.RequireFromString("4.79")) {
+		t.Errorf("yield B esperado $4.79, fue %s", got)
 	}
 
 	// Referido fundador 10% de las compras de C y D → B.
@@ -283,9 +284,9 @@ func TestCloseBinaryPeriod_V2Streams(t *testing.T) {
 		t.Errorf("%d movimientos de bono sin available_at (liquidación +1m+1d)", nullAvail)
 	}
 
-	// total_paid coherente: binario 100 + cuota rango 25 + yield 20.83
-	// + referido 200 + regalía 100 = 445.83.
-	if want := decimal.RequireFromString("445.83"); !totalPaid.Equal(want) {
+	// total_paid coherente: binario 100 + cuota rango 25 + yield 4.79
+	// + referido 200 + regalía 100 = 429.79.
+	if want := decimal.RequireFromString("429.79"); !totalPaid.Equal(want) {
 		t.Errorf("total_paid esperado %s, fue %s", want, totalPaid)
 	}
 

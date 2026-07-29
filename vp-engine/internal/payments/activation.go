@@ -287,7 +287,9 @@ Este es un mensaje automático; por favor no respondas a este correo.`,
 // pg_advisory_xact_lock(sponsor) + FOR UPDATE al descender. Port fiel de
 // backend/app/src/server/affiliate.ts::autoPlaceAffiliate.
 func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64) (int64, error) {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, sponsorID); err != nil {
+	// Clase 2 = colocación (el cierre binario usa clase 1; evita colisión de
+	// keyspace con el period id — el afiliado 1 = la empresa chocaba el lunes).
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2, $1::int)`, sponsorID); err != nil {
 		return 0, fmt.Errorf("advisory lock: %w", err)
 	}
 
