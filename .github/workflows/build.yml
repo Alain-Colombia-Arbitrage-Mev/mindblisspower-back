@@ -25,6 +25,19 @@ jobs:
         working-directory: vp-engine
       - run: go vet ./...
         working-directory: vp-engine
+      # Tests deterministas del motor (sin Docker; verificados verdes): θ y
+      # config. BLOQUEANTES: si fallan, no se publican imágenes.
+      - name: go test (unit, bloqueante)
+        run: go test -count=1 -timeout 180s -run 'Theta' ./internal/bonusengine/ && go test -count=1 -timeout 120s ./internal/shared/config/...
+        working-directory: vp-engine
+      # Suite completa (incluye integración con testcontainers/Postgres — los
+      # runners de GitHub traen Docker). OBSERVACIONAL por ahora
+      # (continue-on-error): cuando acumule corridas verdes, quitar el
+      # continue-on-error para hacerla bloqueante.
+      - name: go test (full, observacional)
+        continue-on-error: true
+        run: go test -count=1 -timeout 15m ./...
+        working-directory: vp-engine
   push:
     needs: test
     runs-on: ubuntu-latest

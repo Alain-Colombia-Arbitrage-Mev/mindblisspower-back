@@ -34,9 +34,16 @@ jobs:
 
       - name: resolve target
         id: t
+        # Inputs por env var (no interpolados en el shell) + validación estricta:
+        # un typo en environment ya no cae a staging en silencio.
+        env:
+          ENV: ${{ inputs.environment }}
+          TAG: ${{ inputs.tag }}
         run: |
-          ENV="${{ inputs.environment }}"
-          TAG="${{ inputs.tag }}"
+          case "$ENV" in prod|staging) ;; *) echo "environment inválido: '$ENV' (usa prod|staging)"; exit 1 ;; esac
+          if ! printf '%s' "$TAG" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "tag inválido: '$TAG' (debe ser un git SHA en hex)"; exit 1
+          fi
           echo "env=$ENV" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           # Formato targets: "inst|compose|svc1 svc2;inst|compose|svc1 svc2"
