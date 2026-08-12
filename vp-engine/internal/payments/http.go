@@ -23,6 +23,10 @@ const maxWebhookBody = int64(1 << 18) // 256 KiB
 // para que el backend re-verifique la identidad (defensa en profundidad, H-2).
 const idTokenHeader = "X-VP-Id-Token"
 
+// actAsHeader: un super_admin autenticado solicita "ver como" otro usuario
+// (impersonación de solo lectura desde el panel admin) enviando el email objetivo.
+const actAsHeader = "X-VP-Act-As"
+
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
 	store            *Store
@@ -687,17 +691,46 @@ func (h *Handler) resolveIdentity(w http.ResponseWriter, r *http.Request, claime
 	return claimed, true
 }
 
+// effectiveIdentity resuelve la identidad REAL (token verificado) y, cuando un
+// super_admin lo solicita vía X-VP-Act-As en una request de LECTURA (GET), la
+// identidad EFECTIVA para los gates de datos del panel. Reglas:
+//   - Sin act-as ⇒ efectiva = real.
+//   - Con act-as pero el real NO es super_admin ⇒ se ignora (efectiva = real).
+//   - Con act-as, real super_admin, método != GET ⇒ 403 impersonation_read_only.
+//   - Con act-as, real super_admin, GET ⇒ efectiva = objetivo (auditoría).
+// La AUTORIZACIÓN a impersonar se decide con la identidad REAL, nunca la efectiva.
+func (h *Handler) effectiveIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (real, effective string, ok bool) {
+	real, ok = h.resolveIdentity(w, r, claimedEmail)
+	if !ok {
+		return "", "", false
+	}
+	actAs := strings.ToLower(strings.TrimSpace(r.Header.Get(actAsHeader)))
+	if actAs == "" {
+		return real, real, true
+	}
+	if !h.isSuperAdmin(real) {
+		h.log.Warn().Str("real", real).Str("act_as", actAs).Str("path", r.URL.Path).Msg("act-as ignorado: el llamante no es super_admin")
+		return real, real, true
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusForbidden, "impersonation_read_only")
+		return "", "", false
+	}
+	h.log.Info().Str("real", real).Str("act_as", actAs).Str("path", r.URL.Path).Msg("impersonación (ver como)")
+	return real, actAs, true
+}
+
 // requireAdmin valida token de servicio + identidad verificada (o fallback) +
 // que el email resultante sea admin.
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if !h.svcAuth(w, r) {
 		return "", false
 	}
-	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	_, eff, ok := h.effectiveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
 		return "", false
 	}
-	admin, err := h.isAdminEmail(r.Context(), email)
+	admin, err := h.isAdminEmail(r.Context(), eff)
 	if err != nil {
 		h.log.Error().Err(err).Msg("is_admin")
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -707,14 +740,14 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, 
 		writeErr(w, http.StatusForbidden, "not_admin")
 		return "", false
 	}
-	return email, true
+	return eff, true
 }
 
 func (h *Handler) handleAdminCheck(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	_, email, ok := h.effectiveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
 		return
 	}

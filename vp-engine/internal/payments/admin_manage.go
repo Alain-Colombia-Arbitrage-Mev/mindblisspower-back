@@ -62,15 +62,15 @@ func (h *Handler) requireSuperAdmin(w http.ResponseWriter, r *http.Request) (str
 	if !h.svcAuth(w, r) {
 		return "", false
 	}
-	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
+	_, eff, ok := h.effectiveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
 		return "", false
 	}
-	if !h.isSuperAdmin(email) {
+	if !h.isSuperAdmin(eff) {
 		writeErr(w, http.StatusForbidden, "not_super_admin")
 		return "", false
 	}
-	return email, true
+	return eff, true
 }
 
 // handleAdminAdmins: GET /api/admin/admins — lista de administradores (super_admin).
@@ -140,7 +140,7 @@ func (h *Handler) handleAdminAdminRole(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	caller, ok := h.resolveIdentity(w, r, req.Email)
+	_, caller, ok := h.effectiveIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}

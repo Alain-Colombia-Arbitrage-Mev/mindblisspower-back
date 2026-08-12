@@ -534,7 +534,7 @@ func (h *Handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	caller, ok := h.resolveIdentity(w, r, req.Email)
+	_, caller, ok := h.effectiveIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
@@ -641,7 +641,7 @@ func (h *Handler) handleAdminUserDelete(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	caller, ok := h.resolveIdentity(w, r, req.Email)
+	_, caller, ok := h.effectiveIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
