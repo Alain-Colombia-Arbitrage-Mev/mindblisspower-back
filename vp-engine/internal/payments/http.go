@@ -181,6 +181,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/tickets/action", h.handleAdminTicketAction)
 	mux.HandleFunc("/api/admin/email", h.handleAdminEmail)
 	mux.HandleFunc("/api/admin/news", h.handleAdminNews)
+	mux.HandleFunc("/api/support/access-help", h.handleAccessHelp)
 	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
 	mux.HandleFunc("/api/support/tickets", h.handleMemberTickets)
 	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)

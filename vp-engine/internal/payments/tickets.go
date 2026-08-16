@@ -44,6 +44,46 @@ func (s *Store) CreateTicket(ctx context.Context, email, subject, body string) (
 	return id, nil
 }
 
+// handleAccessHelp abre un ticket de "ayuda de acceso" SIN requerir identidad de
+// miembro: lo llama el BFF del login cuando el usuario no recibe el código por
+// ningún canal (email/SMS). Gated sólo por service token (el BFF lo rate-limita);
+// el email es el que tecleó en el login. El asesor valida identidad y habilita el
+// acceso manualmente. Así el código nunca es un dead-end para el usuario.
+func (h *Handler) handleAccessHelp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	var req struct {
+		Email string `json:"email"`
+		Phone string `json:"phone"`
+		Note  string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if email == "" || !strings.Contains(email, "@") {
+		writeErr(w, http.StatusBadRequest, "invalid_email")
+		return
+	}
+	body := fmt.Sprintf("El usuario no recibe el código de acceso por ningún canal (email/SMS).\n"+
+		"Email: %s\nTeléfono: %s\nNota: %s\n\n"+
+		"Acción sugerida: validar identidad y habilitar el acceso manualmente.",
+		email, strings.TrimSpace(req.Phone), strings.TrimSpace(req.Note))
+	id, err := h.store.CreateTicket(r.Context(), email, "Ayuda de acceso — no recibe código", body)
+	if err != nil {
+		h.log.Error().Err(err).Msg("access help ticket")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "open"})
+}
+
 // ListTickets pagina tickets (filtro por status; "" = todos).
 func (s *Store) ListTickets(ctx context.Context, status string, limit, offset int) ([]Ticket, int64, error) {
 	if limit <= 0 || limit > 100 {
