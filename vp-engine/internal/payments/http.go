@@ -609,13 +609,22 @@ func (h *Handler) handleAuthUserExists(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"exists": true, "checked": false})
 		return
 	}
-	exists, err := h.cognitoAdmin.UserExists(r.Context(), email)
+	// GetUserStatus además del existe: el BFF del login OTP necesita distinguir
+	// CONFIRMED de UNCONFIRMED. Un usuario UNCONFIRMED existe (por eso el login
+	// no lo enruta a registro) pero el passwordless de Cognito no le envía código
+	// hasta confirmar → quedaba atascado. Con "confirmed" el BFF reenvía el
+	// código de confirmación en vez de fallar.
+	exists, _, status, err := h.cognitoAdmin.GetUserStatus(r.Context(), email)
 	if err != nil {
 		h.log.Error().Err(err).Msg("user exists check")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"exists": exists, "checked": true})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exists":    exists,
+		"checked":   true,
+		"confirmed": exists && status == "CONFIRMED",
+	})
 }
 
 func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
