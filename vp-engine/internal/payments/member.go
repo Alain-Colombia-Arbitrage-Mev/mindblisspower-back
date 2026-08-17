@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
 	"github.com/vicionpower/vp-engine/internal/withdrawals"
@@ -137,16 +138,28 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 
 // GetMemberSummary arma el resumen para el miembro identificado por email.
 func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSummary, error) {
+	return s.getMemberSummary(ctx, email, false)
+}
+
+// GetMemberSummaryFresh fuerza lectura en el primario y salta el cache-read.
+// Se usa justo después de Stripe Checkout para que la UI vea el commit de
+// activación aunque la réplica RDS aún esté atrasada.
+func (s *Store) GetMemberSummaryFresh(ctx context.Context, email string) (MemberSummary, error) {
+	return s.getMemberSummary(ctx, email, true)
+}
+
+func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) (MemberSummary, error) {
 	var out MemberSummary
 	ckey := "member:" + strings.ToLower(strings.TrimSpace(email))
-	if s.cache.get(ctx, ckey, &out) {
+	if !fresh && s.cache.get(ctx, ckey, &out) {
 		return out, nil
 	}
+	reader := s.memberSummaryReader(fresh)
 
 	// Identidad → person + affiliate + rango + perfil + fecha de ingreso.
 	var personID int64
 	var affiliateID *int64
-	err := s.reader().QueryRow(ctx, `
+	err := reader.QueryRow(ctx, `
 		SELECT p.id, a.id,
 		       COALESCE(r.name_es, '—') AS rank,
 		       p.profile::text AS plan,
@@ -167,7 +180,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	out.Positioned = affiliateID != nil
 
 	// Pagos del miembro (por email; user_id guarda el email).
-	rows, err := s.reader().Query(ctx, `
+	rows, err := reader.Query(ctx, `
 		SELECT id::text, package_id, amount_usd::text, fee_usd::text,
 		       (amount_usd + fee_usd)::text, status,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'),
@@ -210,7 +223,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	}
 
 	// Paquetes activos.
-	if err := s.reader().QueryRow(ctx, `
+	if err := reader.QueryRow(ctx, `
 		SELECT count(*) FROM mlm.affiliate_package
 		 WHERE affiliate_id = $1 AND status = 'active'
 	`, *affiliateID).Scan(&out.ActivePackages); err != nil {
@@ -228,7 +241,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	// son asientos de la compra, no dinero retirable del comprador.
 	// Scoped al wallet USD (JOIN wallet+asset symbol='USD') para excluir la wallet
 	// USD-RET de jubilación y evitar que el saldo 401k se muestre como retirable.
-	err = s.reader().QueryRow(ctx, `
+	err = reader.QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (
 		     WHERE NOT wm.is_frozen AND (wm.available_at IS NULL OR wm.available_at <= current_date)
@@ -249,7 +262,7 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 	}
 
 	// Retiros del miembro + disponible neto de pendientes.
-	wrows, err := s.reader().Query(ctx, `
+	wrows, err := reader.Query(ctx, `
 		SELECT id, amount_usd::text, status::text,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
 		  FROM mlm.withdrawal_request
@@ -289,4 +302,11 @@ func (s *Store) GetMemberSummary(ctx context.Context, email string) (MemberSumma
 
 	s.cache.set(ctx, ckey, out, memberCacheTTL)
 	return out, nil
+}
+
+func (s *Store) memberSummaryReader(fresh bool) *pgxpool.Pool {
+	if fresh {
+		return s.db
+	}
+	return s.reader()
 }

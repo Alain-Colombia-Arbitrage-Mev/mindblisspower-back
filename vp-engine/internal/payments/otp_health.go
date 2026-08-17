@@ -90,11 +90,10 @@ func (h *Handler) handleAdminOtpCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var exists, enabled bool
-	var status string
+	var access CognitoUserAccessStatus
 	if h.cognitoAdmin != nil {
 		var cerr error
-		exists, enabled, status, cerr = h.cognitoAdmin.GetUserStatus(r.Context(), email)
+		access, cerr = h.cognitoAdmin.GetUserAccessStatus(r.Context(), email)
 		if cerr != nil {
 			h.log.Warn().Err(cerr).Str("email", email).Msg("otp check: cognito status")
 		}
@@ -106,22 +105,29 @@ func (h *Handler) handleAdminOtpCheck(w http.ResponseWriter, r *http.Request) {
 	// Diagnóstico legible del problema más probable.
 	diagnosis := "ok"
 	switch {
-	case !exists && isActiveAffiliate:
+	case !access.Exists && isActiveAffiliate:
 		diagnosis = "legacy_sin_cognito" // afiliado activo pero nunca creó acceso digital
-	case !exists:
+	case !access.Exists:
 		diagnosis = "no_registrado"
-	case status != "CONFIRMED":
+	case access.Status != "CONFIRMED":
 		diagnosis = "sin_confirmar" // registró pero no confirmó → OTP de login no se envía
-	case !enabled:
+	case !access.Enabled:
 		diagnosis = "deshabilitado"
+	case !access.PhoneLinked:
+		diagnosis = "telefono_no_vinculado"
+	case !access.PhoneVerified:
+		diagnosis = "telefono_sin_validar"
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"email":             email,
-		"cognito_exists":    exists,
-		"cognito_confirmed": exists && status == "CONFIRMED",
-		"cognito_enabled":   enabled,
-		"cognito_status":    status,
+		"cognito_exists":    access.Exists,
+		"cognito_confirmed": access.Exists && access.Status == "CONFIRMED",
+		"cognito_enabled":   access.Enabled,
+		"cognito_status":    access.Status,
+		"phone_linked":      access.PhoneLinked,
+		"phone_verified":    access.PhoneVerified,
+		"phone_destination": maskPhoneNumber(access.PhoneNumber),
 		"active_affiliate":  isActiveAffiliate,
 		"diagnosis":         diagnosis,
 	})

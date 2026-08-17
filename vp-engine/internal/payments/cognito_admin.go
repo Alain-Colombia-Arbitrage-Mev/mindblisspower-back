@@ -22,6 +22,17 @@ type CognitoAdmin struct {
 	poolID string
 }
 
+// CognitoUserAccessStatus resume lo que el BFF necesita para explicar problemas
+// de OTP sin exponer atributos sensibles completos.
+type CognitoUserAccessStatus struct {
+	Exists        bool
+	Enabled       bool
+	Status        string
+	PhoneNumber   string
+	PhoneLinked   bool
+	PhoneVerified bool
+}
+
 // NewCognitoAdmin crea el cliente cognito-idp con la cadena de credenciales
 // estándar (env → shared config → rol de instancia IMDS), la misma que KYC/S3.
 func NewCognitoAdmin(ctx context.Context, poolID, region string) (*CognitoAdmin, error) {
@@ -65,10 +76,9 @@ func (c *CognitoAdmin) UserExists(ctx context.Context, email string) (bool, erro
 	return true, nil
 }
 
-// GetUserStatus devuelve si el usuario existe en el pool y, si existe, si está
-// habilitado y su estado Cognito (CONFIRMED, UNCONFIRMED, ...). Lo usa el
-// inspector de usuario del panel admin. UserNotFoundException ⇒ (false,...,nil).
-func (c *CognitoAdmin) GetUserStatus(ctx context.Context, email string) (exists, enabled bool, status string, err error) {
+// GetUserAccessStatus devuelve estado Cognito + teléfono vinculado/verificado.
+// UserNotFoundException ⇒ Exists=false, nil.
+func (c *CognitoAdmin) GetUserAccessStatus(ctx context.Context, email string) (CognitoUserAccessStatus, error) {
 	username := cognitoUsername(email)
 	out, err := c.client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{
 		UserPoolId: &c.poolID, Username: &username,
@@ -76,11 +86,59 @@ func (c *CognitoAdmin) GetUserStatus(ctx context.Context, email string) (exists,
 	if err != nil {
 		var notFound *ciptypes.UserNotFoundException
 		if errors.As(err, &notFound) {
-			return false, false, "", nil
+			return CognitoUserAccessStatus{}, nil
 		}
-		return false, false, "", fmt.Errorf("cognito user status (%s): %w", email, err)
+		return CognitoUserAccessStatus{}, fmt.Errorf("cognito user status (%s): %w", email, err)
 	}
-	return true, out.Enabled, string(out.UserStatus), nil
+	status := CognitoUserAccessStatus{
+		Exists:  true,
+		Enabled: out.Enabled,
+		Status:  string(out.UserStatus),
+	}
+	for _, attr := range out.UserAttributes {
+		name, value := "", ""
+		if attr.Name != nil {
+			name = *attr.Name
+		}
+		if attr.Value != nil {
+			value = strings.TrimSpace(*attr.Value)
+		}
+		switch name {
+		case "phone_number":
+			status.PhoneNumber = value
+			status.PhoneLinked = value != ""
+		case "phone_number_verified":
+			status.PhoneVerified = strings.EqualFold(value, "true")
+		}
+	}
+	return status, nil
+}
+
+// GetUserStatus devuelve si el usuario existe en el pool y, si existe, si está
+// habilitado y su estado Cognito (CONFIRMED, UNCONFIRMED, ...). Lo usa el
+// inspector de usuario del panel admin. UserNotFoundException ⇒ (false,...,nil).
+func (c *CognitoAdmin) GetUserStatus(ctx context.Context, email string) (exists, enabled bool, status string, err error) {
+	access, err := c.GetUserAccessStatus(ctx, email)
+	if err != nil {
+		return false, false, "", err
+	}
+	return access.Exists, access.Enabled, access.Status, nil
+}
+
+func maskPhoneNumber(phone string) string {
+	digits := make([]rune, 0, len(phone))
+	for _, r := range strings.TrimSpace(phone) {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+		}
+	}
+	if len(digits) == 0 {
+		return ""
+	}
+	if len(digits) <= 4 {
+		return "***" + string(digits)
+	}
+	return "+***" + string(digits[len(digits)-4:])
 }
 
 // SetEnabled habilita (true) o deshabilita (false) el login del usuario por

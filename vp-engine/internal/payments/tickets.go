@@ -58,9 +58,10 @@ func (h *Handler) handleAccessHelp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Email string `json:"email"`
-		Phone string `json:"phone"`
-		Note  string `json:"note"`
+		Email  string `json:"email"`
+		Phone  string `json:"phone"`
+		Note   string `json:"note"`
+		Reason string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request")
@@ -72,9 +73,9 @@ func (h *Handler) handleAccessHelp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := fmt.Sprintf("El usuario no recibe el código de acceso por ningún canal (email/SMS).\n"+
-		"Email: %s\nTeléfono: %s\nNota: %s\n\n"+
+		"Email: %s\nTeléfono reportado: %s\nMotivo técnico: %s\nNota: %s\n\n"+
 		"Acción sugerida: validar identidad y habilitar el acceso manualmente.",
-		email, strings.TrimSpace(req.Phone), strings.TrimSpace(req.Note))
+		email, cleanTicketField(req.Phone, 40), cleanTicketField(req.Reason, 80), cleanTicketField(req.Note, 500))
 	id, err := h.store.CreateTicket(r.Context(), email, "Ayuda de acceso — no recibe código", body)
 	if err != nil {
 		h.log.Error().Err(err).Msg("access help ticket")
@@ -82,6 +83,15 @@ func (h *Handler) handleAccessHelp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "open"})
+}
+
+func cleanTicketField(value string, max int) string {
+	out := strings.TrimSpace(value)
+	runes := []rune(out)
+	if max > 0 && len(runes) > max {
+		return string(runes[:max])
+	}
+	return out
 }
 
 // ListTickets pagina tickets (filtro por status; "" = todos).

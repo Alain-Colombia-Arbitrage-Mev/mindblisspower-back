@@ -617,16 +617,19 @@ func (h *Handler) handleAuthUserExists(w http.ResponseWriter, r *http.Request) {
 	// no lo enruta a registro) pero el passwordless de Cognito no le envía código
 	// hasta confirmar → quedaba atascado. Con "confirmed" el BFF reenvía el
 	// código de confirmación en vez de fallar.
-	exists, _, status, err := h.cognitoAdmin.GetUserStatus(r.Context(), email)
+	access, err := h.cognitoAdmin.GetUserAccessStatus(r.Context(), email)
 	if err != nil {
 		h.log.Error().Err(err).Msg("user exists check")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"exists":    exists,
-		"checked":   true,
-		"confirmed": exists && status == "CONFIRMED",
+		"exists":            access.Exists,
+		"checked":           true,
+		"confirmed":         access.Exists && access.Status == "CONFIRMED",
+		"phone_linked":      access.PhoneLinked,
+		"phone_verified":    access.PhoneVerified,
+		"phone_destination": maskPhoneNumber(access.PhoneNumber),
 	})
 }
 
@@ -710,6 +713,7 @@ func (h *Handler) resolveIdentity(w http.ResponseWriter, r *http.Request, claime
 //   - Con act-as pero el real NO es super_admin ⇒ se ignora (efectiva = real).
 //   - Con act-as, real super_admin, método != GET ⇒ 403 impersonation_read_only.
 //   - Con act-as, real super_admin, GET ⇒ efectiva = objetivo (auditoría).
+//
 // La AUTORIZACIÓN a impersonar se decide con la identidad REAL, nunca la efectiva.
 func (h *Handler) effectiveIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (real, effective string, ok bool) {
 	real, ok = h.resolveIdentity(w, r, claimedEmail)
@@ -886,7 +890,13 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	summary, err := h.store.GetMemberSummary(r.Context(), email)
+	var summary MemberSummary
+	var err error
+	if r.URL.Query().Get("fresh") == "1" {
+		summary, err = h.store.GetMemberSummaryFresh(r.Context(), email)
+	} else {
+		summary, err = h.store.GetMemberSummary(r.Context(), email)
+	}
 	if errors.Is(err, ErrBuyerNotFound) {
 		// Usuario registrado en Cognito que aún no está provisionado en la red
 		// (no ha comprado). No es un error: devolvemos un resumen vacío 200 para

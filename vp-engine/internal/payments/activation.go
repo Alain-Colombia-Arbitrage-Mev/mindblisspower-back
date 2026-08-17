@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -34,6 +35,7 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 
 	var (
 		intentID    string
+		userID      string
 		personID    int64
 		affiliateID *int64
 		sponsorID   *int64
@@ -42,11 +44,11 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		status      string
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT id::text, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status
+		SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status
 		  FROM payments.purchase_intent
 		 WHERE stripe_session_id = $1
 		 FOR UPDATE
-	`, sessionID).Scan(&intentID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status)
+	`, sessionID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActivationResult{}, ErrIntentNotFound
 	}
@@ -55,7 +57,11 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 	}
 
 	if status == "activated" {
-		return ActivationResult{Status: "replay"}, tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return ActivationResult{}, err
+		}
+		s.invalidateMemberCaches(ctx, userID)
+		return ActivationResult{Status: "replay"}, nil
 	}
 
 	// Marcar pagado (idempotente). stripe_present=true: este pago llegó por el
@@ -85,6 +91,7 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 			if cerr := tx.Commit(ctx); cerr != nil {
 				return ActivationResult{}, cerr
 			}
+			s.invalidateMemberCaches(ctx, userID)
 			// Dinero recibido aunque sin colocar: comprobante + evento (best-effort).
 			s.afterPaymentConfirmed(ctx, intentID, "payment.paid", nil)
 			return ActivationResult{Status: "needs_placement"}, nil
@@ -198,9 +205,18 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 	// Nueva compra/activación → cambian inflows, packs y el período → invalidar
 	// los agregados cacheados (el resumen del miembro se refresca por TTL).
 	s.cache.del(ctx, "fin:admin", "solvency")
+	s.invalidateMemberCaches(ctx, userID)
 	// Evento de dominio enriquecido (feed) + comprobante al cliente (best-effort).
 	s.afterPaymentConfirmed(ctx, intentID, "payment.activated", &affID)
 	return ActivationResult{Status: "activated", AffiliateID: affID}, nil
+}
+
+func (s *Store) invalidateMemberCaches(ctx context.Context, email string) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return
+	}
+	s.cache.del(ctx, "member:"+email, "refctx:"+email)
 }
 
 // afterPaymentConfirmed corre TRAS el commit de un pago confirmado (best-effort):
