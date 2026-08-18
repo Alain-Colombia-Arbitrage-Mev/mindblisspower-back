@@ -153,6 +153,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/webhooks/stripe", h.handleWebhook)
 	mux.HandleFunc("/api/admin/check", h.handleAdminCheck)
 	mux.HandleFunc("/api/admin/users", h.handleAdminUsers)
+	mux.HandleFunc("/api/admin/users/export", h.handleAdminUsersExport)
 	mux.HandleFunc("/api/admin/user", h.handleAdminUser)
 	mux.HandleFunc("/api/admin/user/branch-tree", h.handleAdminUserBranchTree)
 	mux.HandleFunc("/api/admin/summary", h.handleAdminSummary)
