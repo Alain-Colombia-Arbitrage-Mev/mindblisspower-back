@@ -264,21 +264,39 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 	return nil, nil
 }
 
-// SetBlocked bloquea/desbloquea un usuario (blacklisted + status).
+// SetBlocked bloquea/desbloquea un usuario en persona y afiliado. El árbol no se
+// re-cablea: el nodo conserva trazabilidad financiera, pero deja de ser activo
+// para el motor binario y los filtros operativos.
 func (s *Store) SetBlocked(ctx context.Context, personID int64, blocked bool) error {
 	status := "active"
 	if blocked {
 		status = "suspended"
 	}
-	_, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set blocked begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
 		UPDATE mlm.person
 		   SET blacklisted=$2,
 		       status=$3::mlm.person_status,
 		       updated_at=now()
 		 WHERE id=$1
-	`, personID, blocked, status)
-	if err != nil {
+	`, personID, blocked, status); err != nil {
 		return fmt.Errorf("set blocked: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET status=$2::mlm.person_status,
+		       updated_at=now()
+		 WHERE person_id=$1
+	`, personID, status); err != nil {
+		return fmt.Errorf("set blocked affiliate: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("set blocked commit: %w", err)
 	}
 	return nil
 }

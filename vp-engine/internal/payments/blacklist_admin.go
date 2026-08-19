@@ -137,7 +137,7 @@ func (s *Store) PersonIDByEmail(ctx context.Context, email string) (int64, bool,
 func (s *Store) PersonSuspendedByEmail(ctx context.Context, email string) (bool, error) {
 	var suspended bool
 	err := s.db.QueryRow(ctx,
-		`SELECT COALESCE(blacklisted,false) OR status='suspended'
+		`SELECT COALESCE(blacklisted,false) OR status IN ('suspended','banned','deleted')
 		   FROM mlm.person WHERE lower(email)=lower($1) LIMIT 1`, email).Scan(&suspended)
 	if err != nil {
 		if strings.Contains(err.Error(), "no rows") {
