@@ -184,13 +184,34 @@ type PurchaseIntent struct {
 func (s *Store) MarkIntentStatus(ctx context.Context, sessionID, paymentIntentID, newStatus string) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE payments.purchase_intent
-		   SET status = $3, updated_at = now()
+		   SET status = $3,
+		       stripe_payment_intent_id = COALESCE(NULLIF($2, ''), stripe_payment_intent_id),
+		       updated_at = now()
 		 WHERE status = 'created'
 		   AND ( ($1 <> '' AND stripe_session_id = $1)
 		      OR ($2 <> '' AND stripe_payment_intent_id = $2) )`,
 		sessionID, paymentIntentID, newStatus)
 	if err != nil {
 		return 0, fmt.Errorf("mark intent %s: %w", newStatus, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkIntentStatusByIntentID cubre webhooks de payment_intent donde Stripe ya
+// trae nuestro purchase_intent_id en metadata, pero aún no teníamos guardado el
+// stripe_payment_intent_id/session_id. Mantiene el mismo gate: solo toca
+// intents 'created', así un fallo tardío no revierte compras ya pagadas.
+func (s *Store) MarkIntentStatusByIntentID(ctx context.Context, intentID, paymentIntentID, newStatus string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE payments.purchase_intent
+		   SET status = $3,
+		       stripe_payment_intent_id = COALESCE(NULLIF($2, ''), stripe_payment_intent_id),
+		       updated_at = now()
+		 WHERE id = $1::uuid
+		   AND status = 'created'`,
+		intentID, paymentIntentID, newStatus)
+	if err != nil {
+		return 0, fmt.Errorf("mark intent %s by id: %w", newStatus, err)
 	}
 	return tag.RowsAffected(), nil
 }

@@ -1071,7 +1071,8 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.store.AttachSession(ctx, intentID, sessionID); err != nil {
 		h.log.Error().Err(err).Msg("attach session")
-		// La sesión ya existe en Stripe; no abortamos. El webhook resuelve por session_id.
+		// La sesión ya existe en Stripe; no abortamos. El webhook resuelve por
+		// session_id o por purchase_intent_id en metadata si el attach falló.
 	}
 
 	writeJSON(w, http.StatusOK, checkoutResponse{
@@ -1138,7 +1139,7 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 // Best-effort: loguea y NO falla el webhook (respondemos 200; Stripe no reintenta
 // estos eventos). Saca el id según el tipo de objeto del evento.
 func (h *Handler) markIntentFromEvent(ctx context.Context, event stripe.Event, newStatus string) {
-	var sessionID, piID string
+	var sessionID, piID, intentID string
 	if strings.HasPrefix(string(event.Type), "checkout.session.") {
 		var cs stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
@@ -1149,6 +1150,9 @@ func (h *Handler) markIntentFromEvent(ctx context.Context, event stripe.Event, n
 		if cs.PaymentIntent != nil {
 			piID = cs.PaymentIntent.ID
 		}
+		if cs.Metadata[MetadataProductTag] == MetadataProductVal {
+			intentID = strings.TrimSpace(cs.Metadata["purchase_intent_id"])
+		}
 	} else {
 		var pi stripe.PaymentIntent
 		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
@@ -1156,8 +1160,14 @@ func (h *Handler) markIntentFromEvent(ctx context.Context, event stripe.Event, n
 			return
 		}
 		piID = pi.ID
+		if pi.Metadata[MetadataProductTag] == MetadataProductVal {
+			intentID = strings.TrimSpace(pi.Metadata["purchase_intent_id"])
+		}
 	}
 	n, err := h.store.MarkIntentStatus(ctx, sessionID, piID, newStatus)
+	if err == nil && n == 0 && intentID != "" {
+		n, err = h.store.MarkIntentStatusByIntentID(ctx, intentID, piID, newStatus)
+	}
 	if err != nil {
 		h.log.Error().Err(err).Str("event", event.ID).Str("status", newStatus).Msg("mark intent status")
 		return
@@ -1267,9 +1277,10 @@ func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {
 	if piID == "" {
 		piID = "sess:" + cs.ID // fallback de idempotencia si no llegó el payment_intent
 	}
+	intentID := strings.TrimSpace(cs.Metadata["purchase_intent_id"])
 
 	// Activación atómica e idempotente (marca pagado + coloca + liga paquete + PV).
-	res, err := h.store.ActivatePaidPurchase(ctx, cs.ID, piID)
+	res, err := h.store.ActivatePaidPurchaseForIntent(ctx, cs.ID, piID, intentID)
 	if errors.Is(err, ErrIntentNotFound) {
 		// Sesión desconocida (creada fuera de este servicio). No reintentar.
 		h.log.Warn().Str("session", cs.ID).Msg("paid session has no purchase_intent; skipping")
