@@ -973,8 +973,10 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	// Wallet congelada: un usuario baneado/suspendido no puede comprar.
-	if h.rejectIfSuspended(ctx, w, req.Email) {
+	// Wallet congelada: un usuario baneado/suspendido no puede comprar. Se
+	// evalúa email + señales del token Cognito para bloquear también teléfono y
+	// nombre exacto normalizado.
+	if h.rejectIfBanned(ctx, w, BanCandidate{Email: req.Email, Phone: req.Phone, Name: req.Name}) {
 		return
 	}
 	pack, err := h.store.LookupPack(ctx, req.PackageID)
@@ -1282,6 +1284,8 @@ func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {
 	case "needs_placement":
 		// Pago OK pero sin sponsor para colocar: requiere acción de ops/sponsor.
 		h.log.Warn().Str("session", cs.ID).Str("pi", piID).Msg("paid but NEEDS MANUAL PLACEMENT (no sponsor)")
+	case "security_blocked":
+		h.log.Warn().Str("session", cs.ID).Str("pi", piID).Msg("paid session blocked by ban engine; not placed in tree")
 	case "replay":
 		h.log.Info().Str("session", cs.ID).Msg("activation replay (already activated)")
 	}

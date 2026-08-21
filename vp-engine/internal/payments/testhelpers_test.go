@@ -49,7 +49,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	for _, r := range []string{"engine_write", "engine_read"} {
+	for _, r := range []string{"engine_write", "engine_read", "vp_engine"} {
 		if _, err := pool.Exec(ctx,
 			fmt.Sprintf(`DO $$ BEGIN CREATE ROLE %s NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`, r)); err != nil {
 			_ = c.Terminate(ctx)
@@ -69,6 +69,8 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/schema_payouts_v1.3.sql",
 		"_meta/migration/30_payments.sql",
 		"_meta/migration/41_kyc_documents.sql",
+		"_meta/migration/43_blacklist.sql",
+		"_meta/migration/56_ban_engine_name_match.sql",
 		"_meta/migration/44_receipt_and_verify.sql",
 		"_meta/migration/45_cart_reminders.sql",
 		"_meta/migration/46_kyc_ocr.sql",

@@ -77,7 +77,8 @@ func (s *Store) ListBlacklist(ctx context.Context, q string, limit, offset int) 
 }
 
 // AddBlacklist inserta una entrada normalizando con las funciones SQL. Devuelve
-// el id nuevo. birthdate vacío ⇒ NULL. source='admin_panel'.
+// el id nuevo. birthdate vacío ⇒ NULL. source='admin_panel'. Una fila solo con
+// fullname crea un veto exacto por nombre normalizado.
 func (s *Store) AddBlacklist(ctx context.Context, fullname, email, phone, birthdate, motive string) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(ctx, `
@@ -133,24 +134,15 @@ func (s *Store) PersonIDByEmail(ctx context.Context, email string) (int64, bool,
 	return id, true, nil
 }
 
-// PersonSuspendedByEmail: ¿la cuenta está baneada/suspendida? La blacklist es
-// autoritativa aunque todavía no exista fila en mlm.person.
+// PersonSuspendedByEmail: ¿la cuenta está baneada/suspendida? Usa el motor
+// unificado: email directo, señales guardadas en mlm.person y blacklist por
+// nombre exacto si aplica.
 func (s *Store) PersonSuspendedByEmail(ctx context.Context, email string) (bool, error) {
-	var suspended bool
-	err := s.db.QueryRow(ctx,
-		`SELECT EXISTS (
-		       SELECT 1 FROM mlm.person p
-		        WHERE lower(p.email)=lower($1)
-		          AND (COALESCE(p.blacklisted,false) OR p.status IN ('suspended','banned','deleted'))
-		     ) OR EXISTS (
-		       SELECT 1 FROM mlm.blacklist b
-		        WHERE b.email_norm IS NOT NULL
-		          AND b.email_norm = mlm.norm_email($1)
-		     )`, email).Scan(&suspended)
+	decision, err := s.BanDecisionFor(ctx, BanCandidate{Email: email})
 	if err != nil {
 		return false, fmt.Errorf("person suspended: %w", err)
 	}
-	return suspended, nil
+	return decision.Blocked, nil
 }
 
 // applyAccountBan aplica el efecto "cuenta activa" al banear/desbanear por email:
@@ -183,16 +175,21 @@ func (h *Handler) applyAccountBan(ctx context.Context, email string, banned bool
 // está baneada/suspendida. Ante error de infra falla cerrado: no se permite
 // operar sin validar el estado de acceso.
 func (h *Handler) rejectIfSuspended(ctx context.Context, w http.ResponseWriter, email string) bool {
+	return h.rejectIfBanned(ctx, w, BanCandidate{Email: email})
+}
+
+func (h *Handler) rejectIfBanned(ctx context.Context, w http.ResponseWriter, c BanCandidate) bool {
 	if h.store == nil || h.store.db == nil {
 		return false
 	}
-	susp, err := h.store.PersonSuspendedByEmail(ctx, email)
+	decision, err := h.store.BanDecisionFor(ctx, c)
 	if err != nil {
-		h.log.Error().Err(err).Str("email", email).Msg("suspended check")
+		h.log.Error().Err(err).Str("email", c.Email).Msg("ban engine check")
 		writeErr(w, http.StatusServiceUnavailable, "account_status_unavailable")
 		return true
 	}
-	if susp {
+	if decision.Blocked {
+		h.log.Warn().Str("email", strings.ToLower(strings.TrimSpace(c.Email))).Str("reason", decision.Reason).Msg("request blocked by ban engine")
 		writeErr(w, http.StatusForbidden, "account_suspended")
 		return true
 	}
@@ -232,9 +229,10 @@ func (h *Handler) handleAdminBlacklist(w http.ResponseWriter, r *http.Request) {
 		req.Phone = strings.TrimSpace(req.Phone)
 		req.Fullname = strings.TrimSpace(req.Fullname)
 		req.Birthdate = strings.TrimSpace(req.Birthdate)
-		// Requiere un identificador fuerte: email o teléfono (o nombre+fecha).
-		if req.Email == "" && req.Phone == "" && !(req.Fullname != "" && req.Birthdate != "") {
-			writeErr(w, http.StatusBadRequest, "need_email_phone_or_name_birth")
+		// Email/teléfono son identificadores fuertes. Nombre exacto también se
+		// permite para vetos operativos explícitos desde admin.
+		if req.Email == "" && req.Phone == "" && req.Fullname == "" {
+			writeErr(w, http.StatusBadRequest, "need_email_phone_or_name")
 			return
 		}
 		id, err := h.store.AddBlacklist(r.Context(), req.Fullname, req.Email, req.Phone, req.Birthdate, req.Motive)

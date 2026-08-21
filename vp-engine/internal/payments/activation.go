@@ -11,7 +11,7 @@ import (
 
 // ActivationResult describe el desenlace de activar una compra pagada.
 type ActivationResult struct {
-	Status      string // "activated" | "needs_placement" | "replay"
+	Status      string // "activated" | "needs_placement" | "security_blocked" | "replay"
 	AffiliateID int64
 }
 
@@ -62,6 +62,33 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		}
 		s.invalidateMemberCaches(ctx, userID)
 		return ActivationResult{Status: "replay"}, nil
+	}
+
+	// Defensa en profundidad: checkout bloquea cuentas vetadas antes de crear
+	// Stripe, pero una sesión antigua puede pagarse después. En ese caso no se
+	// crea afiliado, paquete, wallet ni PV; se conserva el cargo para revisión o
+	// reembolso operativo.
+	decision, err := banDecisionFor(ctx, tx, BanCandidate{Email: userID})
+	if err != nil {
+		return ActivationResult{}, fmt.Errorf("ban decision: %w", err)
+	}
+	if decision.Blocked {
+		if _, err := tx.Exec(ctx, `
+			UPDATE payments.purchase_intent
+			   SET status = 'security_blocked',
+			       stripe_payment_intent_id = $2,
+			       paid_at = COALESCE(paid_at, now()),
+			       stripe_present = true,
+			       updated_at = now()
+			 WHERE id = $1
+		`, intentID, paymentIntentID); err != nil {
+			return ActivationResult{}, fmt.Errorf("mark security_blocked: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ActivationResult{}, err
+		}
+		s.invalidateMemberCaches(ctx, userID)
+		return ActivationResult{Status: "security_blocked"}, nil
 	}
 
 	// Marcar pagado (idempotente). stripe_present=true: este pago llegó por el

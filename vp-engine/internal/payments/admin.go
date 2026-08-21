@@ -251,7 +251,14 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 	// 1) match exacto
 	var id int64
 	err := s.db.QueryRow(ctx,
-		`SELECT id FROM mlm.affiliate WHERE invitation_link = $1 LIMIT 1`, code).Scan(&id)
+		`SELECT a.id
+		   FROM mlm.affiliate a
+		   JOIN mlm.person p ON p.id = a.person_id
+		  WHERE a.invitation_link = $1
+		    AND a.status::text = 'active'
+		    AND p.status::text = 'active'
+		    AND NOT COALESCE(p.blacklisted,false)
+		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
 	}
@@ -261,7 +268,14 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 
 	// 2) match case-insensitive
 	err = s.db.QueryRow(ctx,
-		`SELECT id FROM mlm.affiliate WHERE lower(invitation_link) = lower($1) LIMIT 1`, code).Scan(&id)
+		`SELECT a.id
+		   FROM mlm.affiliate a
+		   JOIN mlm.person p ON p.id = a.person_id
+		  WHERE lower(a.invitation_link) = lower($1)
+		    AND a.status::text = 'active'
+		    AND p.status::text = 'active'
+		    AND NOT COALESCE(p.blacklisted,false)
+		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
 	}
@@ -273,7 +287,14 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 	if m := mpCodeRe.FindStringSubmatch(code); m != nil {
 		if n, perr := strconv.ParseInt(m[1], 10, 64); perr == nil {
 			err = s.db.QueryRow(ctx,
-				`SELECT id FROM mlm.affiliate WHERE id = $1`, n).Scan(&id)
+				`SELECT a.id
+				   FROM mlm.affiliate a
+				   JOIN mlm.person p ON p.id = a.person_id
+				  WHERE a.id = $1
+				    AND a.status::text = 'active'
+				    AND p.status::text = 'active'
+				    AND NOT COALESCE(p.blacklisted,false)
+				  LIMIT 1`, n).Scan(&id)
 			if err == nil {
 				return &id, nil
 			}
