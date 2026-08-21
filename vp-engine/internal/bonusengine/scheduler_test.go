@@ -75,3 +75,42 @@ func TestPickPeriodToClose_PicksEndedNotCurrent(t *testing.T) {
 		t.Fatalf("eligió period %d; esperaba el terminado %d (nunca el de la semana en curso %d)", got, endedID, currentID)
 	}
 }
+
+func TestPickPeriodsToClose_PicksAllEndedInOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires docker / testcontainers")
+	}
+	ctx := context.Background()
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+
+	seedMinimalTree(t, ctx, pool)
+	now := time.Now().UTC()
+
+	insertPeriod := func(start, end time.Time) int64 {
+		t.Helper()
+		var id int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO mlm.binary_period (plan_config_id, period_start, period_end, status)
+			SELECT id, $1, $2, 'open' FROM mlm.plan_config WHERE version_label='v1-test'
+			RETURNING id`, start, end).Scan(&id); err != nil {
+			t.Fatalf("insert period: %v", err)
+		}
+		return id
+	}
+
+	firstEnded := insertPeriod(now.Add(-21*24*time.Hour), now.Add(-14*24*time.Hour))
+	secondEnded := insertPeriod(now.Add(-14*24*time.Hour), now.Add(-7*24*time.Hour))
+	current := insertPeriod(now.Add(-24*time.Hour), now.Add(6*24*time.Hour))
+
+	got, err := pickPeriodsToClose(ctx, pool)
+	if err != nil {
+		t.Fatalf("pickPeriodsToClose: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("esperaba 2 períodos vencidos, got %v (current=%d)", got, current)
+	}
+	if got[0] != firstEnded || got[1] != secondEnded {
+		t.Fatalf("orden incorrecto: got %v, want [%d %d]", got, firstEnded, secondEnded)
+	}
+}
