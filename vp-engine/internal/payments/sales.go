@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/shopspring/decimal"
 )
 
 const securityPendingChargeUSD = "70.00"
@@ -54,15 +57,34 @@ type SalesCashSummary struct {
 // generan un cobro pendiente fijo de $70: rechazadas/fallidas, bloqueadas por
 // seguridad, disputas, chargebacks y reembolsos.
 type SecurityPendingChargeSummary struct {
-	UnitChargeUSD    string `json:"unit_charge_usd"`
-	AffectedSales    int64  `json:"affected_sales"`
-	PendingChargeUSD string `json:"pending_charge_usd"`
-	FailedSales      int64  `json:"failed_sales"`
-	SecurityBlocked  int64  `json:"security_blocked_sales"`
-	DisputedSales    int64  `json:"disputed_sales"`
-	ChargebackSales  int64  `json:"chargeback_sales"`
-	RefundedSales    int64  `json:"refunded_sales"`
+	UnitChargeUSD     string `json:"unit_charge_usd"`
+	AffectedSales     int64  `json:"affected_sales"`
+	PendingChargeUSD  string `json:"pending_charge_usd"`
+	FailedSales       int64  `json:"failed_sales"`
+	SecurityBlocked   int64  `json:"security_blocked_sales"`
+	DisputedSales     int64  `json:"disputed_sales"`
+	ChargebackSales   int64  `json:"chargeback_sales"`
+	RefundedSales     int64  `json:"refunded_sales"`
+	ManualAdjustments int64  `json:"manual_adjustments"`
+	ManualChargeUSD   string `json:"manual_charge_usd"`
 }
+
+type OperationalChargeAdjustment struct {
+	ID             string `json:"id"`
+	ChargeType     string `json:"charge_type"`
+	Quantity       int64  `json:"quantity"`
+	UnitAmountUSD  string `json:"unit_amount_usd"`
+	TotalAmountUSD string `json:"total_amount_usd"`
+	Reason         string `json:"reason"`
+	CreatedBy      string `json:"created_by"`
+	OccurredAt     string `json:"occurred_at"`
+}
+
+var (
+	ErrOperationalChargeType     = errors.New("invalid operational charge type")
+	ErrOperationalChargeQuantity = errors.New("invalid operational charge quantity")
+	ErrOperationalChargeReason   = errors.New("operational charge reason required")
+)
 
 // SalesReport agrega ventas por paquete (solo membresías MindBliss: la fuente es
 // payments.purchase_intent, que únicamente contiene checkouts del PACK MINDBLISS)
@@ -139,6 +161,7 @@ func (s *Store) SalesCashSummary(ctx context.Context, from time.Time) (SalesCash
 func (s *Store) SecurityPendingChargeSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
 	var c SecurityPendingChargeSummary
 	c.UnitChargeUSD = securityPendingChargeUSD
+	c.ManualChargeUSD = "0.00"
 	if err := s.reader().QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status IN (`+riskChargeStatusesSQL+`)),
 		       COALESCE((count(*) FILTER (WHERE status IN (`+riskChargeStatusesSQL+`)) * 70.00)::numeric(14,2), 0)::text,
@@ -155,7 +178,172 @@ func (s *Store) SecurityPendingChargeSummary(ctx context.Context, from time.Time
 	); err != nil {
 		return SecurityPendingChargeSummary{}, fmt.Errorf("security pending charges: %w", err)
 	}
+	manual, err := s.manualOperationalChargeSummary(ctx, from)
+	if err != nil {
+		return SecurityPendingChargeSummary{}, err
+	}
+	mergeSecurityChargeSummary(&c, manual)
 	return c, nil
+}
+
+func mergeSecurityChargeSummary(dst *SecurityPendingChargeSummary, manual SecurityPendingChargeSummary) {
+	if manual.AffectedSales == 0 {
+		return
+	}
+	dst.AffectedSales += manual.AffectedSales
+	dst.FailedSales += manual.FailedSales
+	dst.SecurityBlocked += manual.SecurityBlocked
+	dst.DisputedSales += manual.DisputedSales
+	dst.ChargebackSales += manual.ChargebackSales
+	dst.RefundedSales += manual.RefundedSales
+	dst.ManualAdjustments += manual.AffectedSales
+	dst.ManualChargeUSD = moneyAdd(dst.ManualChargeUSD, manual.PendingChargeUSD)
+	dst.PendingChargeUSD = moneyAdd(dst.PendingChargeUSD, manual.PendingChargeUSD)
+}
+
+func (s *Store) manualOperationalChargeSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
+	var c SecurityPendingChargeSummary
+	c.UnitChargeUSD = securityPendingChargeUSD
+	c.ManualChargeUSD = "0.00"
+	err := s.reader().QueryRow(ctx, `
+		SELECT COALESCE(sum(quantity),0),
+		       COALESCE(sum(total_amount_usd),0)::numeric(14,2)::text,
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'failed'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'security_blocked'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'disputed'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'chargeback'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'refunded'),0)
+		  FROM payments.operational_charge_adjustment
+		 WHERE occurred_at >= $1
+	`, from).Scan(
+		&c.AffectedSales, &c.PendingChargeUSD, &c.FailedSales, &c.SecurityBlocked,
+		&c.DisputedSales, &c.ChargebackSales, &c.RefundedSales,
+	)
+	if isUndefinedTable(err) {
+		c.PendingChargeUSD = "0.00"
+		return c, nil
+	}
+	if err != nil {
+		return SecurityPendingChargeSummary{}, fmt.Errorf("manual operational charges: %w", err)
+	}
+	c.ManualAdjustments = c.AffectedSales
+	c.ManualChargeUSD = c.PendingChargeUSD
+	return c, nil
+}
+
+func (s *Store) RecordOperationalCharge(ctx context.Context, chargeType string, quantity int64, reason, adminEmail string, occurredAt time.Time) (OperationalChargeAdjustment, error) {
+	chargeType = normalizeOperationalChargeType(chargeType)
+	reason = strings.TrimSpace(reason)
+	adminEmail = strings.ToLower(strings.TrimSpace(adminEmail))
+	if !validOperationalChargeType(chargeType) {
+		return OperationalChargeAdjustment{}, ErrOperationalChargeType
+	}
+	if quantity <= 0 || quantity > 10000 {
+		return OperationalChargeAdjustment{}, ErrOperationalChargeQuantity
+	}
+	if len(reason) < 3 || len(reason) > 500 {
+		return OperationalChargeAdjustment{}, ErrOperationalChargeReason
+	}
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return OperationalChargeAdjustment{}, fmt.Errorf("operational charge begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var out OperationalChargeAdjustment
+	err = tx.QueryRow(ctx, `
+		INSERT INTO payments.operational_charge_adjustment (
+			charge_type, quantity, unit_amount_usd, reason, created_by, occurred_at
+		) VALUES ($1, $2, $3::numeric, $4, $5, $6)
+		RETURNING id::text, charge_type, quantity::bigint, unit_amount_usd::text,
+		          total_amount_usd::text, reason, created_by,
+		          to_char(occurred_at,'YYYY-MM-DD"T"HH24:MI:SSZ')
+	`, chargeType, quantity, securityPendingChargeUSD, reason, adminEmail, occurredAt).Scan(
+		&out.ID, &out.ChargeType, &out.Quantity, &out.UnitAmountUSD,
+		&out.TotalAmountUSD, &out.Reason, &out.CreatedBy, &out.OccurredAt,
+	)
+	if err != nil {
+		return OperationalChargeAdjustment{}, fmt.Errorf("insert operational charge: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit.activity_log (entity_type, entity_id, action, after_data)
+		VALUES (
+			'payments.operational_charge_adjustment',
+			$1,
+			'created',
+			jsonb_build_object(
+				'charge_type', $2::text,
+				'quantity', $3::bigint,
+				'unit_amount_usd', $4::text,
+				'total_amount_usd', $5::text,
+				'reason', $6::text,
+				'created_by', $7::text,
+				'occurred_at', $8::text
+			)
+		)
+	`, out.ID, out.ChargeType, out.Quantity, out.UnitAmountUSD, out.TotalAmountUSD, out.Reason, out.CreatedBy, out.OccurredAt); err != nil {
+		return OperationalChargeAdjustment{}, fmt.Errorf("audit operational charge: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OperationalChargeAdjustment{}, fmt.Errorf("operational charge commit: %w", err)
+	}
+	s.cache.del(ctx, "fin:admin")
+	s.cache.PublishEvent(ctx, "admin.operational_charge.created", map[string]any{
+		"id":               out.ID,
+		"charge_type":      out.ChargeType,
+		"quantity":         out.Quantity,
+		"total_amount_usd": out.TotalAmountUSD,
+		"created_by":       out.CreatedBy,
+	})
+	return out, nil
+}
+
+func normalizeOperationalChargeType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "failed", "rejected", "declined", "rechazado", "rechazada", "rechazo":
+		return "failed"
+	case "refund", "refunded", "reembolso", "reembolsado", "reembolsada":
+		return "refunded"
+	case "security", "security_blocked", "blocked", "bloqueo", "bloqueado":
+		return "security_blocked"
+	case "dispute", "disputed", "disputa":
+		return "disputed"
+	case "chargeback", "contracargo":
+		return "chargeback"
+	default:
+		return strings.ToLower(strings.TrimSpace(v))
+	}
+}
+
+func validOperationalChargeType(v string) bool {
+	switch v {
+	case "failed", "refunded", "security_blocked", "disputed", "chargeback":
+		return true
+	default:
+		return false
+	}
+}
+
+func moneyAdd(a, b string) string {
+	da, err := decimal.NewFromString(strings.TrimSpace(a))
+	if err != nil {
+		da = decimal.Zero
+	}
+	db, err := decimal.NewFromString(strings.TrimSpace(b))
+	if err != nil {
+		db = decimal.Zero
+	}
+	return da.Add(db).StringFixed(2)
+}
+
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
 // DBSalesTotal es el agregado interno (fuente de verdad) de intents ACTIVADOS
@@ -255,6 +443,71 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 		"security_charges": securityCharges,
 		"since":            time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+func (h *Handler) handleAdminOperationalCharge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	adminEmail, ok := h.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if !h.isSuperAdmin(adminEmail) {
+		writeErr(w, http.StatusForbidden, "super_admin_required")
+		return
+	}
+	var req struct {
+		ChargeType string `json:"charge_type"`
+		Quantity   int64  `json:"quantity"`
+		Reason     string `json:"reason"`
+		OccurredAt string `json:"occurred_at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	occurredAt, err := parseOperationalChargeOccurredAt(req.OccurredAt)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_occurred_at")
+		return
+	}
+	adj, err := h.store.RecordOperationalCharge(r.Context(), req.ChargeType, req.Quantity, req.Reason, adminEmail, occurredAt)
+	switch {
+	case errors.Is(err, ErrOperationalChargeType):
+		writeErr(w, http.StatusBadRequest, "invalid_charge_type")
+	case errors.Is(err, ErrOperationalChargeQuantity):
+		writeErr(w, http.StatusBadRequest, "invalid_quantity")
+	case errors.Is(err, ErrOperationalChargeReason):
+		writeErr(w, http.StatusBadRequest, "reason_required")
+	case err != nil:
+		h.log.Error().Err(err).Str("admin", adminEmail).Msg("record operational charge")
+		writeErr(w, http.StatusInternalServerError, "internal")
+	default:
+		h.log.Info().
+			Str("id", adj.ID).
+			Str("charge_type", adj.ChargeType).
+			Int64("quantity", adj.Quantity).
+			Str("total_amount_usd", adj.TotalAmountUSD).
+			Str("admin", adminEmail).
+			Msg("admin operational charge recorded")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "charge": adj})
+	}
+}
+
+func parseOperationalChargeOccurredAt(v string) (time.Time, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Now().UTC(), nil
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse("2006-01-02", v); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid occurred_at")
 }
 
 // SalesTransaction es una venta individual de membresía MindBliss para el

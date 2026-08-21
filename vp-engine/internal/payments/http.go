@@ -175,6 +175,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/sales/report", h.handleAdminSalesReport)
 	mux.HandleFunc("/api/admin/sales/transactions", h.handleAdminSalesTransactions)
 	mux.HandleFunc("/api/admin/sales/verify", h.handleAdminSalesVerify)
+	mux.HandleFunc("/api/admin/operational-charges", h.handleAdminOperationalCharge)
 	mux.HandleFunc("/api/admin/carts/remind", h.handleAdminCartRemind)
 	mux.HandleFunc("/api/admin/carts/summary", h.handleAdminCartsSummary)
 	mux.HandleFunc("/api/admin/sales/reconcile", h.handleAdminSalesReconcile)
