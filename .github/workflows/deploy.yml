@@ -3,12 +3,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "git-SHA a desplegar (rollback)"
+        description: "git-SHA a desplegar (completo o corto para rollback)"
         required: true
       environment:
-        description: "prod|staging"
+        description: "prod|production|staging"
         required: true
         default: prod
+        type: choice
+        options:
+          - prod
+          - production
+          - staging
 
 permissions:
   id-token: write
@@ -16,6 +21,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  REGISTRY: 522814703714.dkr.ecr.us-east-1.amazonaws.com
 
 concurrency:
   group: deploy-${{ github.ref_name }}
@@ -26,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -40,19 +48,57 @@ jobs:
           ENV: ${{ inputs.environment }}
           TAG: ${{ inputs.tag }}
         run: |
-          case "$ENV" in prod|staging) ;; *) echo "environment inválido: '$ENV' (usa prod|staging)"; exit 1 ;; esac
-          if ! printf '%s' "$TAG" | grep -Eq '^[0-9a-f]{7,40}$'; then
-            echo "tag inválido: '$TAG' (debe ser un git SHA en hex)"; exit 1
+          env_norm="$(printf '%s' "$ENV" | tr '[:upper:]' '[:lower:]')"
+          case "$env_norm" in
+            prod|production) env_norm=prod ;;
+            staging|stage) env_norm=staging ;;
+            *) echo "environment inválido: '$ENV' (usa prod|production|staging)"; exit 1 ;;
+          esac
+
+          tag_norm="$(printf '%s' "$TAG" | tr '[:upper:]' '[:lower:]')"
+          if ! printf '%s' "$tag_norm" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "tag inválido: '$TAG' (debe ser un git SHA en hex, corto o completo)"; exit 1
           fi
-          echo "env=$ENV" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          full_tag="$(git rev-parse --verify "${tag_norm}^{commit}" 2>/dev/null || true)"
+          if [ -z "$full_tag" ]; then
+            echo "tag inválido: '$TAG' no existe en este repositorio"; exit 1
+          fi
+          full_tag="$(git rev-parse "$full_tag")"
+
+          echo "env=$env_norm" >> "$GITHUB_OUTPUT"
+          echo "tag=$full_tag" >> "$GITHUB_OUTPUT"
           # Formato targets: "inst|compose|svc1 svc2;inst|compose|svc1 svc2"
           # Campos por '|' (inst, compose, svcs); múltiples targets separados por ';'
-          if [ "$ENV" = "prod" ]; then
+          if [ "$env_norm" = "prod" ]; then
             echo "targets=i-060e76a6c26bded35|deploy/compose/server1.yml|vp-engine vp-payments vp-withdrawals;i-02fcc4d2329040711|deploy/compose/server2.yml|api vp-engine qdrant vp-support vp-kb-indexer" >> "$GITHUB_OUTPUT"
           else
             echo "targets=i-0f7f6c73503537d73|deploy/compose/staging.yml|api vp-payments vp-engine" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: validate ECR images
+        env:
+          TAG: ${{ steps.t.outputs.tag }}
+          TARGETS: ${{ steps.t.outputs.targets }}
+        run: |
+          set -euo pipefail
+          repos=""
+          IFS=';' read -ra targets <<< "$TARGETS"
+          for target in "${targets[@]}"; do
+            services="${target##*|}"
+            for svc in $services; do
+              case "$svc" in
+                api|vp-engine|vp-payments|vp-withdrawals) repos="$repos vp/$svc" ;;
+              esac
+            done
+          done
+          for repo in $(printf '%s\n' $repos | sort -u); do
+            echo "checking $repo:$TAG"
+            aws ecr describe-images \
+              --repository-name "$repo" \
+              --image-ids imageTag="$TAG" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text >/dev/null
+          done
 
       - name: deploy via SSM
         run: bash _meta/devops/scripts/ci-ssm-deploy.sh "${{ steps.t.outputs.env }}" "${{ steps.t.outputs.tag }}" "${{ steps.t.outputs.targets }}"

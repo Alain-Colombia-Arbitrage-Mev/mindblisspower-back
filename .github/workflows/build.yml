@@ -20,7 +20,9 @@ jobs:
       - run: bun run typecheck
         working-directory: app
       - uses: actions/setup-go@v5
-        with: { go-version-file: vp-engine/go.mod }
+        with:
+          go-version-file: vp-engine/go.mod
+          cache-dependency-path: vp-engine/go.sum
       - run: go build ./...
         working-directory: vp-engine
       - run: go vet ./...
