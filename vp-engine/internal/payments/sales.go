@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
@@ -202,6 +203,21 @@ func mergeSecurityChargeSummary(dst *SecurityPendingChargeSummary, manual Securi
 }
 
 func (s *Store) manualOperationalChargeSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
+	c, err := s.manualOperationalChargeTableSummary(ctx, from)
+	if err != nil {
+		return SecurityPendingChargeSummary{}, err
+	}
+	fallback, err := s.manualOperationalChargeAuditFallbackSummary(ctx, from)
+	if err != nil {
+		return SecurityPendingChargeSummary{}, err
+	}
+	mergeSecurityChargeSummary(&c, fallback)
+	c.ManualAdjustments = c.AffectedSales
+	c.ManualChargeUSD = c.PendingChargeUSD
+	return c, nil
+}
+
+func (s *Store) manualOperationalChargeTableSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
 	var c SecurityPendingChargeSummary
 	c.UnitChargeUSD = securityPendingChargeUSD
 	c.ManualChargeUSD = "0.00"
@@ -219,12 +235,40 @@ func (s *Store) manualOperationalChargeSummary(ctx context.Context, from time.Ti
 		&c.AffectedSales, &c.PendingChargeUSD, &c.FailedSales, &c.SecurityBlocked,
 		&c.DisputedSales, &c.ChargebackSales, &c.RefundedSales,
 	)
-	if isUndefinedTable(err) {
+	if isOperationalChargeTableUnavailable(err) {
 		c.PendingChargeUSD = "0.00"
 		return c, nil
 	}
 	if err != nil {
 		return SecurityPendingChargeSummary{}, fmt.Errorf("manual operational charges: %w", err)
+	}
+	c.ManualAdjustments = c.AffectedSales
+	c.ManualChargeUSD = c.PendingChargeUSD
+	return c, nil
+}
+
+func (s *Store) manualOperationalChargeAuditFallbackSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
+	var c SecurityPendingChargeSummary
+	c.UnitChargeUSD = securityPendingChargeUSD
+	c.ManualChargeUSD = "0.00"
+	if err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(sum((after_data->>'quantity')::bigint),0),
+		       COALESCE(sum((after_data->>'total_amount_usd')::numeric),0)::numeric(14,2)::text,
+		       COALESCE(sum((after_data->>'quantity')::bigint) FILTER (WHERE after_data->>'charge_type' = 'failed'),0),
+		       COALESCE(sum((after_data->>'quantity')::bigint) FILTER (WHERE after_data->>'charge_type' = 'security_blocked'),0),
+		       COALESCE(sum((after_data->>'quantity')::bigint) FILTER (WHERE after_data->>'charge_type' = 'disputed'),0),
+		       COALESCE(sum((after_data->>'quantity')::bigint) FILTER (WHERE after_data->>'charge_type' = 'chargeback'),0),
+		       COALESCE(sum((after_data->>'quantity')::bigint) FILTER (WHERE after_data->>'charge_type' = 'refunded'),0)
+		  FROM audit.activity_log
+		 WHERE entity_type = 'payments.operational_charge_adjustment'
+		   AND action = 'created'
+		   AND occurred_at >= $1
+		   AND after_data->>'source' = 'audit_fallback'
+	`, from).Scan(
+		&c.AffectedSales, &c.PendingChargeUSD, &c.FailedSales, &c.SecurityBlocked,
+		&c.DisputedSales, &c.ChargebackSales, &c.RefundedSales,
+	); err != nil {
+		return SecurityPendingChargeSummary{}, fmt.Errorf("audit fallback operational charges: %w", err)
 	}
 	c.ManualAdjustments = c.AffectedSales
 	c.ManualChargeUSD = c.PendingChargeUSD
@@ -248,6 +292,14 @@ func (s *Store) RecordOperationalCharge(ctx context.Context, chargeType string, 
 		occurredAt = time.Now().UTC()
 	}
 
+	out, err := s.recordOperationalChargeTable(ctx, chargeType, quantity, reason, adminEmail, occurredAt)
+	if isOperationalChargeTableUnavailable(err) {
+		return s.recordOperationalChargeAuditFallback(ctx, chargeType, quantity, reason, adminEmail, occurredAt)
+	}
+	return out, err
+}
+
+func (s *Store) recordOperationalChargeTable(ctx context.Context, chargeType string, quantity int64, reason, adminEmail string, occurredAt time.Time) (OperationalChargeAdjustment, error) {
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return OperationalChargeAdjustment{}, fmt.Errorf("operational charge begin: %w", err)
@@ -303,6 +355,53 @@ func (s *Store) RecordOperationalCharge(ctx context.Context, chargeType string, 
 	return out, nil
 }
 
+func (s *Store) recordOperationalChargeAuditFallback(ctx context.Context, chargeType string, quantity int64, reason, adminEmail string, occurredAt time.Time) (OperationalChargeAdjustment, error) {
+	unit, err := decimal.NewFromString(securityPendingChargeUSD)
+	if err != nil {
+		unit = decimal.NewFromInt(70)
+	}
+	out := OperationalChargeAdjustment{
+		ID:             uuid.NewString(),
+		ChargeType:     chargeType,
+		Quantity:       quantity,
+		UnitAmountUSD:  unit.StringFixed(2),
+		TotalAmountUSD: unit.Mul(decimal.NewFromInt(quantity)).StringFixed(2),
+		Reason:         reason,
+		CreatedBy:      adminEmail,
+		OccurredAt:     occurredAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	if _, err := s.db.Exec(ctx, `
+		INSERT INTO audit.activity_log (entity_type, entity_id, action, after_data, occurred_at)
+		VALUES (
+			'payments.operational_charge_adjustment',
+			$1,
+			'created',
+			jsonb_build_object(
+				'source', 'audit_fallback',
+				'charge_type', $2::text,
+				'quantity', $3::bigint,
+				'unit_amount_usd', $4::text,
+				'total_amount_usd', $5::text,
+				'reason', $6::text,
+				'created_by', $7::text,
+				'occurred_at', $8::text
+			),
+			$9
+		)
+	`, out.ID, out.ChargeType, out.Quantity, out.UnitAmountUSD, out.TotalAmountUSD, out.Reason, out.CreatedBy, out.OccurredAt, occurredAt); err != nil {
+		return OperationalChargeAdjustment{}, fmt.Errorf("audit fallback operational charge: %w", err)
+	}
+	s.cache.del(ctx, "fin:admin")
+	s.cache.PublishEvent(ctx, "admin.operational_charge.created", map[string]any{
+		"id":               out.ID,
+		"charge_type":      out.ChargeType,
+		"quantity":         out.Quantity,
+		"total_amount_usd": out.TotalAmountUSD,
+		"created_by":       out.CreatedBy,
+	})
+	return out, nil
+}
+
 func normalizeOperationalChargeType(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "failed", "rejected", "declined", "rechazado", "rechazada", "rechazo":
@@ -341,9 +440,9 @@ func moneyAdd(a, b string) string {
 	return da.Add(db).StringFixed(2)
 }
 
-func isUndefinedTable(err error) bool {
+func isOperationalChargeTableUnavailable(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+	return errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501")
 }
 
 // DBSalesTotal es el agregado interno (fuente de verdad) de intents ACTIVADOS

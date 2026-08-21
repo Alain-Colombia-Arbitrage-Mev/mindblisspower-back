@@ -53,3 +53,35 @@ func TestSecurityPendingChargeSummary_IncludesManualOperationalCharges(t *testin
 		t.Fatalf("audit rows = %d, want 2", auditRows)
 	}
 }
+
+func TestSecurityPendingChargeSummary_UsesAuditFallbackWithoutAdjustmentTable(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `DROP TABLE payments.operational_charge_adjustment`); err != nil {
+		t.Fatalf("drop adjustment table: %v", err)
+	}
+
+	store := NewStore(pool)
+	_, err := store.RecordOperationalCharge(
+		ctx,
+		"rejected",
+		6,
+		"processor report without DDL table",
+		"admin@test.local",
+		time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("record fallback charge: %v", err)
+	}
+
+	sum, err := store.SecurityPendingChargeSummary(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if sum.AffectedSales != 6 || sum.PendingChargeUSD != "420.00" || sum.FailedSales != 6 || sum.ManualAdjustments != 6 {
+		t.Fatalf("summary = affected %d pending %s failed %d manual %d, want 6/420.00/6/6",
+			sum.AffectedSales, sum.PendingChargeUSD, sum.FailedSales, sum.ManualAdjustments)
+	}
+}
