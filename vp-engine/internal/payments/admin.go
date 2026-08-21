@@ -125,7 +125,7 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 		SELECT pk.id, pk.name, pk.amount_usd::text,
 		       COALESCE(count(pi.id) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0) AS sold,
 		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0)::text AS revenue,
-		       COALESCE((SUM(pi.refund_cents) FILTER (WHERE pi.refund_cents > 0))::numeric / 100, 0)::text AS refunded
+		       COALESCE((SUM(pi.total_cents) FILTER (WHERE pi.status = 'refunded'))::numeric / 100, 0)::text AS refunded
 		  FROM mlm.package pk
 		  LEFT JOIN payments.purchase_intent pi ON pi.package_id=pk.id
 		 WHERE pk.is_active
@@ -153,7 +153,7 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	_ = s.db.QueryRow(ctx, `
 		SELECT COALESCE(count(*) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0),
 		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0)::text,
-		       COALESCE((SUM(refund_cents) FILTER (WHERE refund_cents > 0))::numeric / 100, 0)::text
+		       COALESCE((SUM(total_cents) FILTER (WHERE status = 'refunded'))::numeric / 100, 0)::text
 		  FROM payments.purchase_intent`).Scan(&sum.TotalSold, &sum.TotalRevenUSD, &sum.RefundedUSD)
 	_ = s.db.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE blacklisted) FROM mlm.person`).
 		Scan(&sum.TotalUsers, &sum.BlockedUsers)
@@ -207,11 +207,11 @@ func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offse
 		       pi.status, COALESCE(pi.stripe_payment_intent_id,''),
 		       to_char(pi.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
 		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),''),
-		       COALESCE(pi.refund_cents, 0),
-		       COALESCE((pi.refund_cents::numeric / 100)::text, '0'),
-		       COALESCE(to_char(pi.refunded_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),''),
-		       COALESCE(pi.stripe_refund_id,''),
-		       COALESCE(pi.refund_reason,'')
+		       CASE WHEN pi.status = 'refunded' THEN pi.total_cents ELSE 0 END,
+		       CASE WHEN pi.status = 'refunded' THEN (pi.total_cents::numeric / 100)::text ELSE '0' END,
+		       '',
+		       '',
+		       ''
 		  FROM payments.purchase_intent pi
 		 WHERE ($1='' OR pi.status=$1) AND ($2='' OR lower(pi.user_id) ILIKE '%'||lower($2)||'%')
 		 ORDER BY pi.created_at DESC

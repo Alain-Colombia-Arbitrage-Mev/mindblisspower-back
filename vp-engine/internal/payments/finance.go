@@ -30,8 +30,8 @@ type AdminFinance struct {
 	InflowsUSD       string `json:"inflows_usd"`       // Σ(amount+fee) de compras paid|activated (BRUTO cobrado vía Stripe)
 	PacksPaid        int64  `json:"packs_paid"`        // # de packs pagados
 	FeesUSD          string `json:"fees_usd"`          // Σ del 1% de manejo (fee interno de activación)
-	RefundedUSD      string `json:"refunded_usd"`      // Σ refund_cents registrado en payments.purchase_intent
-	RefundedPayments int64  `json:"refunded_payments"` // # de pagos con refund_cents > 0
+	RefundedUSD      string `json:"refunded_usd"`      // Σ total_cents de purchase_intent en status refunded
+	RefundedPayments int64  `json:"refunded_payments"` // # de pagos en status refunded
 
 	// Costos, retención y dinero por recibir de Stripe sobre el entrante BRUTO.
 	// La empresa NO recibe el 100% de inmediato: Stripe cobra ~3% de comisión,
@@ -108,8 +108,8 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	f.StripeReceivableUSD = f.NetSettledUSD
 	f.StripeReceivableETA = "Periodo estimado: 2 semanas"
 	if err := s.reader().QueryRow(ctx, `
-		SELECT COALESCE((SUM(refund_cents) FILTER (WHERE refund_cents > 0))::numeric / 100, 0)::text,
-		       COALESCE(count(*) FILTER (WHERE refund_cents > 0),0)
+		SELECT COALESCE((SUM(total_cents) FILTER (WHERE status = 'refunded'))::numeric / 100, 0)::text,
+		       COALESCE(count(*) FILTER (WHERE status = 'refunded'),0)
 		  FROM payments.purchase_intent
 	`).Scan(&f.RefundedUSD, &f.RefundedPayments); err != nil {
 		return f, fmt.Errorf("refund totals: %w", err)

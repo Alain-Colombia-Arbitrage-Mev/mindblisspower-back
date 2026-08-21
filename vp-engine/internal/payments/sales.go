@@ -84,7 +84,7 @@ func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, er
 		       count(*) FILTER (WHERE pi.status = 'activated' AND pi.stripe_present IS DISTINCT FROM false),
 		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status NOT IN ('refunded','security_blocked','disputed','chargeback') AND pi.stripe_present IS DISTINCT FROM false), 0)::text,
 		       COALESCE(sum(pi.amount_usd + pi.fee_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status NOT IN ('refunded','security_blocked','disputed','chargeback') AND pi.stripe_present IS DISTINCT FROM false), 0)::text,
-		       COALESCE((sum(pi.refund_cents) FILTER (WHERE pi.refund_cents > 0))::numeric / 100, 0)::text
+		       COALESCE((sum(pi.total_cents) FILTER (WHERE pi.status = 'refunded'))::numeric / 100, 0)::text
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1
@@ -118,8 +118,8 @@ func (s *Store) SalesCashSummary(ctx context.Context, from time.Time) (SalesCash
 		       COALESCE(round(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false) * 0.03, 2), 0)::text,
 		       COALESCE(round(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false) * 0.30, 2), 0)::text,
 		       COALESCE(round(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false) * 0.67, 2), 0)::text,
-		       COALESCE(count(*) FILTER (WHERE refund_cents > 0),0),
-		       COALESCE((sum(refund_cents) FILTER (WHERE refund_cents > 0))::numeric / 100, 0)::text
+		       COALESCE(count(*) FILTER (WHERE status = 'refunded'),0),
+		       COALESCE((sum(total_cents) FILTER (WHERE status = 'refunded'))::numeric / 100, 0)::text
 		  FROM payments.purchase_intent
 		 WHERE created_at >= $1
 	`, from).Scan(
@@ -312,8 +312,8 @@ func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q
 		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
 		       COALESCE(to_char(pi.activated_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
 		       pi.affiliate_id, pi.stripe_present,
-		       COALESCE((pi.refund_cents::numeric / 100)::text, '0'),
-		       COALESCE(to_char(pi.refunded_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), '')
+		       CASE WHEN pi.status = 'refunded' THEN (pi.total_cents::numeric / 100)::text ELSE '0' END,
+		       ''
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1

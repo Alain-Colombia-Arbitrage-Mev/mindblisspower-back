@@ -111,12 +111,11 @@ func (s *Store) RefundPurchaseIntent(ctx context.Context, gw *StripeGateway, int
 	var res RefundResult
 	var totalCents int64
 	err = tx.QueryRow(ctx, `
-		SELECT id::text, status, COALESCE(stripe_payment_intent_id,''), total_cents,
-		       COALESCE(refund_cents, 0), COALESCE((refund_cents::numeric / 100)::text, '0')
+		SELECT id::text, status, COALESCE(stripe_payment_intent_id,''), total_cents
 		  FROM payments.purchase_intent
 		 WHERE id = $1::uuid
 		 FOR UPDATE
-	`, intentID).Scan(&res.IntentID, &res.PreviousStatus, &res.PaymentIntentID, &totalCents, &res.AmountCents, &res.RefundUSD)
+	`, intentID).Scan(&res.IntentID, &res.PreviousStatus, &res.PaymentIntentID, &totalCents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RefundResult{}, ErrIntentNotFound
 	}
@@ -126,6 +125,8 @@ func (s *Store) RefundPurchaseIntent(ctx context.Context, gw *StripeGateway, int
 
 	if res.PreviousStatus == "refunded" {
 		res.Status = "refunded"
+		res.AmountCents = totalCents
+		res.RefundUSD = centsToUSD(totalCents)
 		res.AlreadyRefunded = true
 		return res, nil
 	}
@@ -157,14 +158,9 @@ func (s *Store) RefundPurchaseIntent(ctx context.Context, gw *StripeGateway, int
 		UPDATE payments.purchase_intent
 		   SET status = 'refunded',
 		       stripe_present = true,
-		       refund_cents = $2,
-		       refunded_at = now(),
-		       stripe_refund_id = $3,
-		       refund_reason = NULLIF($4, ''),
-		       refunded_by = lower(NULLIF($5, '')),
 		       updated_at = now()
 		 WHERE id = $1::uuid
-	`, intentID, amountCents, refundID, strings.TrimSpace(note), strings.TrimSpace(adminEmail)); err != nil {
+	`, intentID); err != nil {
 		return res, fmt.Errorf("refund mark intent: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
