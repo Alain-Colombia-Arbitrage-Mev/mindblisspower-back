@@ -212,6 +212,11 @@ func (s *Store) manualOperationalChargeSummary(ctx context.Context, from time.Ti
 		return SecurityPendingChargeSummary{}, err
 	}
 	mergeSecurityChargeSummary(&c, fallback)
+	eventFallback, err := s.manualOperationalChargeEventFallbackSummary(ctx, from)
+	if err != nil {
+		return SecurityPendingChargeSummary{}, err
+	}
+	mergeSecurityChargeSummary(&c, eventFallback)
 	c.ManualAdjustments = c.AffectedSales
 	c.ManualChargeUSD = c.PendingChargeUSD
 	return c, nil
@@ -251,7 +256,7 @@ func (s *Store) manualOperationalChargeAuditFallbackSummary(ctx context.Context,
 	var c SecurityPendingChargeSummary
 	c.UnitChargeUSD = securityPendingChargeUSD
 	c.ManualChargeUSD = "0.00"
-	if err := s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		SELECT COALESCE(sum((after_data->>'quantity')::bigint),0),
 		       COALESCE(sum((after_data->>'total_amount_usd')::numeric),0)::numeric(14,2)::text,
 		       COALESCE(sum((after_data->>'quantity')::bigint) FILTER (WHERE after_data->>'charge_type' = 'failed'),0),
@@ -267,8 +272,52 @@ func (s *Store) manualOperationalChargeAuditFallbackSummary(ctx context.Context,
 	`, from).Scan(
 		&c.AffectedSales, &c.PendingChargeUSD, &c.FailedSales, &c.SecurityBlocked,
 		&c.DisputedSales, &c.ChargebackSales, &c.RefundedSales,
-	); err != nil {
+	)
+	if isOperationalChargeTableUnavailable(err) {
+		c.PendingChargeUSD = "0.00"
+		return c, nil
+	}
+	if err != nil {
 		return SecurityPendingChargeSummary{}, fmt.Errorf("audit fallback operational charges: %w", err)
+	}
+	c.ManualAdjustments = c.AffectedSales
+	c.ManualChargeUSD = c.PendingChargeUSD
+	return c, nil
+}
+
+func (s *Store) manualOperationalChargeEventFallbackSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
+	var c SecurityPendingChargeSummary
+	c.UnitChargeUSD = securityPendingChargeUSD
+	c.ManualChargeUSD = "0.00"
+	err := s.db.QueryRow(ctx, `
+		WITH parsed AS (
+			SELECT split_part(type, ':', 2) AS charge_type,
+			       split_part(type, ':', 3)::bigint AS quantity,
+			       split_part(type, ':', 4)::numeric AS total_amount_usd
+			  FROM payments.stripe_event
+			 WHERE received_at >= $1
+			   AND type LIKE 'manual_operational_charge:%'
+			   AND split_part(type, ':', 3) ~ '^[0-9]+$'
+			   AND split_part(type, ':', 4) ~ '^[0-9]+(\.[0-9]{1,2})?$'
+		)
+		SELECT COALESCE(sum(quantity),0),
+		       COALESCE(sum(total_amount_usd),0)::numeric(14,2)::text,
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'failed'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'security_blocked'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'disputed'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'chargeback'),0),
+		       COALESCE(sum(quantity) FILTER (WHERE charge_type = 'refunded'),0)
+		  FROM parsed
+	`, from).Scan(
+		&c.AffectedSales, &c.PendingChargeUSD, &c.FailedSales, &c.SecurityBlocked,
+		&c.DisputedSales, &c.ChargebackSales, &c.RefundedSales,
+	)
+	if isOperationalChargeTableUnavailable(err) {
+		c.PendingChargeUSD = "0.00"
+		return c, nil
+	}
+	if err != nil {
+		return SecurityPendingChargeSummary{}, fmt.Errorf("event fallback operational charges: %w", err)
 	}
 	c.ManualAdjustments = c.AffectedSales
 	c.ManualChargeUSD = c.PendingChargeUSD
@@ -294,7 +343,10 @@ func (s *Store) RecordOperationalCharge(ctx context.Context, chargeType string, 
 
 	out, err := s.recordOperationalChargeTable(ctx, chargeType, quantity, reason, adminEmail, occurredAt)
 	if isOperationalChargeTableUnavailable(err) {
-		return s.recordOperationalChargeAuditFallback(ctx, chargeType, quantity, reason, adminEmail, occurredAt)
+		out, err = s.recordOperationalChargeAuditFallback(ctx, chargeType, quantity, reason, adminEmail, occurredAt)
+		if isOperationalChargeTableUnavailable(err) {
+			return s.recordOperationalChargeEventFallback(ctx, chargeType, quantity, reason, adminEmail, occurredAt)
+		}
 	}
 	return out, err
 }
@@ -390,6 +442,41 @@ func (s *Store) recordOperationalChargeAuditFallback(ctx context.Context, charge
 		)
 	`, out.ID, out.ChargeType, out.Quantity, out.UnitAmountUSD, out.TotalAmountUSD, out.Reason, out.CreatedBy, out.OccurredAt, occurredAt); err != nil {
 		return OperationalChargeAdjustment{}, fmt.Errorf("audit fallback operational charge: %w", err)
+	}
+	s.cache.del(ctx, "fin:admin")
+	s.cache.PublishEvent(ctx, "admin.operational_charge.created", map[string]any{
+		"id":               out.ID,
+		"charge_type":      out.ChargeType,
+		"quantity":         out.Quantity,
+		"total_amount_usd": out.TotalAmountUSD,
+		"created_by":       out.CreatedBy,
+	})
+	return out, nil
+}
+
+func (s *Store) recordOperationalChargeEventFallback(ctx context.Context, chargeType string, quantity int64, reason, adminEmail string, occurredAt time.Time) (OperationalChargeAdjustment, error) {
+	unit, err := decimal.NewFromString(securityPendingChargeUSD)
+	if err != nil {
+		unit = decimal.NewFromInt(70)
+	}
+	out := OperationalChargeAdjustment{
+		ID:             uuid.NewString(),
+		ChargeType:     chargeType,
+		Quantity:       quantity,
+		UnitAmountUSD:  unit.StringFixed(2),
+		TotalAmountUSD: unit.Mul(decimal.NewFromInt(quantity)).StringFixed(2),
+		Reason:         reason,
+		CreatedBy:      adminEmail,
+		OccurredAt:     occurredAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	eventID := "manual_operational_charge:" + out.ID
+	eventType := "manual_operational_charge:" + out.ChargeType + ":" + fmt.Sprint(out.Quantity) + ":" + out.TotalAmountUSD + ":" + out.UnitAmountUSD
+	if _, err := s.db.Exec(ctx, `
+		INSERT INTO payments.stripe_event (event_id, type, received_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (event_id) DO NOTHING
+	`, eventID, eventType, occurredAt); err != nil {
+		return OperationalChargeAdjustment{}, fmt.Errorf("event fallback operational charge: %w", err)
 	}
 	s.cache.del(ctx, "fin:admin")
 	s.cache.PublishEvent(ctx, "admin.operational_charge.created", map[string]any{

@@ -85,3 +85,32 @@ func TestSecurityPendingChargeSummary_UsesAuditFallbackWithoutAdjustmentTable(t 
 			sum.AffectedSales, sum.PendingChargeUSD, sum.FailedSales, sum.ManualAdjustments)
 	}
 }
+
+func TestSecurityPendingChargeSummary_UsesEventFallback(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO payments.stripe_event (event_id, type)
+		VALUES
+			('opcharge:test:failed:5', 'manual_operational_charge:failed:5:350.00:70.00'),
+			('opcharge:test:refunded:1', 'manual_operational_charge:refunded:1:70.00:70.00'),
+			('opcharge:test:invalid', 'manual_operational_charge:failed:bad:bad:70.00')
+	`); err != nil {
+		t.Fatalf("insert fallback events: %v", err)
+	}
+
+	store := NewStore(pool)
+	sum, err := store.SecurityPendingChargeSummary(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if sum.AffectedSales != 6 || sum.PendingChargeUSD != "420.00" {
+		t.Fatalf("summary affected/pending = %d/%s, want 6/420.00", sum.AffectedSales, sum.PendingChargeUSD)
+	}
+	if sum.FailedSales != 5 || sum.RefundedSales != 1 || sum.ManualAdjustments != 6 || sum.ManualChargeUSD != "420.00" {
+		t.Fatalf("summary breakdown = failed %d refunded %d manual %d manualUSD %s, want 5/1/6/420.00",
+			sum.FailedSales, sum.RefundedSales, sum.ManualAdjustments, sum.ManualChargeUSD)
+	}
+}
