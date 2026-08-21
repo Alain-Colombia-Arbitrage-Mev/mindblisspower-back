@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -98,20 +99,24 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 
 // ProductSales: total vendido por producto (vía Stripe, status activated).
 type ProductSales struct {
-	PackageID  int    `json:"package_id"`
-	Name       string `json:"name"`
-	AmountUSD  string `json:"amount_usd"`
-	Sold       int64  `json:"sold"`
-	RevenueUSD string `json:"revenue_usd"`
+	PackageID   int    `json:"package_id"`
+	Name        string `json:"name"`
+	AmountUSD   string `json:"amount_usd"`
+	Sold        int64  `json:"sold"`
+	RevenueUSD  string `json:"revenue_usd"`
+	RefundedUSD string `json:"refunded_usd"`
 }
 
 // AdminSummary agrega ventas por producto + totales.
 type AdminSummary struct {
-	Products      []ProductSales `json:"products"`
-	TotalSold     int64          `json:"total_sold"`
-	TotalRevenUSD string         `json:"total_revenue_usd"`
-	TotalUsers    int64          `json:"total_users"`
-	BlockedUsers  int64          `json:"blocked_users"`
+	Products                  []ProductSales `json:"products"`
+	TotalSold                 int64          `json:"total_sold"`
+	TotalRevenUSD             string         `json:"total_revenue_usd"`
+	TotalUsers                int64          `json:"total_users"`
+	BlockedUsers              int64          `json:"blocked_users"`
+	RefundedUSD               string         `json:"refunded_usd"`
+	SecurityPendingCharges    int64          `json:"security_pending_charges"`
+	SecurityPendingChargesUSD string         `json:"security_pending_charges_usd"`
 }
 
 func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
@@ -119,7 +124,8 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
 		       COALESCE(count(pi.id) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0) AS sold,
-		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0)::text AS revenue
+		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0)::text AS revenue,
+		       COALESCE((SUM(pi.refund_cents) FILTER (WHERE pi.refund_cents > 0))::numeric / 100, 0)::text AS refunded
 		  FROM mlm.package pk
 		  LEFT JOIN payments.purchase_intent pi ON pi.package_id=pk.id
 		 WHERE pk.is_active
@@ -133,7 +139,7 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	sum.Products = []ProductSales{}
 	for rows.Next() {
 		var p ProductSales
-		if err := rows.Scan(&p.PackageID, &p.Name, &p.AmountUSD, &p.Sold, &p.RevenueUSD); err != nil {
+		if err := rows.Scan(&p.PackageID, &p.Name, &p.AmountUSD, &p.Sold, &p.RevenueUSD, &p.RefundedUSD); err != nil {
 			return sum, err
 		}
 		sum.Products = append(sum.Products, p)
@@ -146,12 +152,17 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	// transacciones de prueba) del total de ingresos y ventas.
 	_ = s.db.QueryRow(ctx, `
 		SELECT COALESCE(count(*) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0),
-		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0)::text
-		  FROM payments.purchase_intent`).Scan(&sum.TotalSold, &sum.TotalRevenUSD)
+		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0)::text,
+		       COALESCE((SUM(refund_cents) FILTER (WHERE refund_cents > 0))::numeric / 100, 0)::text
+		  FROM payments.purchase_intent`).Scan(&sum.TotalSold, &sum.TotalRevenUSD, &sum.RefundedUSD)
 	_ = s.db.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE blacklisted) FROM mlm.person`).
 		Scan(&sum.TotalUsers, &sum.BlockedUsers)
 	if sum.TotalRevenUSD == "" {
 		sum.TotalRevenUSD = "0"
+	}
+	if securityCharges, err := s.SecurityPendingChargeSummary(ctx, time.Time{}); err == nil {
+		sum.SecurityPendingCharges = securityCharges.AffectedSales
+		sum.SecurityPendingChargesUSD = securityCharges.PendingChargeUSD
 	}
 	return sum, nil
 }
@@ -169,6 +180,11 @@ type AdminPayment struct {
 	PaymentIntentID string `json:"payment_intent_id"`
 	CreatedAt       string `json:"created_at"`
 	PaidAt          string `json:"paid_at"`
+	RefundCents     int64  `json:"refund_cents"`
+	RefundUSD       string `json:"refund_usd"`
+	RefundedAt      string `json:"refunded_at"`
+	StripeRefundID  string `json:"stripe_refund_id"`
+	RefundReason    string `json:"refund_reason"`
 }
 
 // ListPayments lista los pagos hechos por NUESTRO checkout/webhook
@@ -190,7 +206,12 @@ func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offse
 		       pi.package_id, pi.amount_usd::text, pi.fee_usd::text, (pi.amount_usd+pi.fee_usd)::text,
 		       pi.status, COALESCE(pi.stripe_payment_intent_id,''),
 		       to_char(pi.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
-		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),'')
+		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),''),
+		       COALESCE(pi.refund_cents, 0),
+		       COALESCE((pi.refund_cents::numeric / 100)::text, '0'),
+		       COALESCE(to_char(pi.refunded_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),''),
+		       COALESCE(pi.stripe_refund_id,''),
+		       COALESCE(pi.refund_reason,'')
 		  FROM payments.purchase_intent pi
 		 WHERE ($1='' OR pi.status=$1) AND ($2='' OR lower(pi.user_id) ILIKE '%'||lower($2)||'%')
 		 ORDER BY pi.created_at DESC
@@ -204,7 +225,8 @@ func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offse
 	for rows.Next() {
 		var p AdminPayment
 		if err := rows.Scan(&p.ID, &p.Email, &p.Name, &p.PackageID, &p.AmountUSD, &p.FeeUSD, &p.TotalUSD,
-			&p.Status, &p.PaymentIntentID, &p.CreatedAt, &p.PaidAt); err != nil {
+			&p.Status, &p.PaymentIntentID, &p.CreatedAt, &p.PaidAt, &p.RefundCents, &p.RefundUSD,
+			&p.RefundedAt, &p.StripeRefundID, &p.RefundReason); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, p)

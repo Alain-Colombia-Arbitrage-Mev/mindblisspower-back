@@ -195,6 +195,24 @@ func (s *Store) MarkIntentStatus(ctx context.Context, sessionID, paymentIntentID
 	return tag.RowsAffected(), nil
 }
 
+// MarkIntentRiskStatus marca un pago ya creado/cobrado con un estado de riesgo
+// posterior: bloqueo de seguridad, disputa o chargeback. A diferencia de
+// MarkIntentStatus, no limita a status='created' porque estos eventos llegan
+// después del cobro inicial. Matchea solo nuestros intents por PaymentIntent.
+func (s *Store) MarkIntentRiskStatus(ctx context.Context, paymentIntentID, newStatus string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE payments.purchase_intent
+		   SET status = $2, updated_at = now()
+		 WHERE $1 <> ''
+		   AND stripe_payment_intent_id = $1
+		   AND status <> $2`,
+		paymentIntentID, newStatus)
+	if err != nil {
+		return 0, fmt.Errorf("mark intent risk %s: %w", newStatus, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (string, error) {
 	var id string
 	err := s.db.QueryRow(ctx, `

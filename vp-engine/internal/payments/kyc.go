@@ -173,6 +173,9 @@ func (h *Handler) handleKYCUploadURL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "kyc-unconfigured")
 		return
 	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
+		return
+	}
 	if msg := validateKYCUpload(req.DocType, req.FileName, req.Mime, req.Size); msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
 		return
@@ -253,6 +256,9 @@ func (h *Handler) handleKYCConfirm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "kyc-unconfigured")
 		return
 	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
+		return
+	}
 	buyer, err := h.store.ResolveBuyer(r.Context(), email)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "person-not-found")
@@ -304,6 +310,9 @@ func (h *Handler) handleKYCDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
+		return
+	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
 		return
 	}
 	buyer, err := h.store.ResolveBuyer(r.Context(), email)

@@ -12,16 +12,56 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const securityPendingChargeUSD = "70.00"
+
+const riskChargeStatusesSQL = "'failed','refunded','security_blocked','disputed','chargeback'"
+
 // SalesRow es el desglose de ventas de un paquete (tier de precio del producto
 // Stripe PACK MINDBLISS) en el período consultado.
 type SalesRow struct {
-	PackageID  int64  `json:"package_id"`
-	Name       string `json:"name"`
-	AmountUSD  string `json:"amount_usd"`
-	Created    int64  `json:"created"`
-	Paid       int64  `json:"paid"`
-	Activated  int64  `json:"activated"`
-	RevenueUSD string `json:"revenue_usd"` // suma de intents activados
+	PackageID   int64  `json:"package_id"`
+	Name        string `json:"name"`
+	AmountUSD   string `json:"amount_usd"`
+	Created     int64  `json:"created"`
+	Paid        int64  `json:"paid"`
+	Activated   int64  `json:"activated"`
+	RevenueUSD  string `json:"revenue_usd"` // suma de intents activados
+	GrossUSD    string `json:"gross_usd"`   // amount+fee cobrado exitosamente
+	RefundedUSD string `json:"refunded_usd"`
+}
+
+// SalesCashSummary muestra la caja Stripe del período consultado. Se calcula
+// sobre cobros exitosos verificados: paid_at presente, no reembolsados y no
+// marcados como inexistentes en Stripe live.
+type SalesCashSummary struct {
+	TotalStarted             int64  `json:"total_started"`
+	SuccessfulCharges        int64  `json:"successful_charges"`
+	ActivatedSales           int64  `json:"activated_sales"`
+	PackageSalesUSD          string `json:"package_sales_usd"`
+	ActivationFeesUSD        string `json:"activation_fees_usd"`
+	GrossChargedUSD          string `json:"gross_charged_usd"`
+	StripeFeeUSD             string `json:"stripe_fee_usd"`
+	StripeSecurityReserveUSD string `json:"stripe_security_reserve_usd"`
+	StripeReceivableUSD      string `json:"stripe_receivable_usd"`
+	StripeReceivableETA      string `json:"stripe_receivable_eta"`
+	PendingStripePayoutUSD   string `json:"pending_stripe_payout_usd"`
+	AvailableAfterStripeUSD  string `json:"available_after_stripe_usd"`
+	RefundedCharges          int64  `json:"refunded_charges"`
+	RefundedUSD              string `json:"refunded_usd"`
+}
+
+// SecurityPendingChargeSummary totaliza las ventas con riesgo operativo que
+// generan un cobro pendiente fijo de $70: rechazadas/fallidas, bloqueadas por
+// seguridad, disputas, chargebacks y reembolsos.
+type SecurityPendingChargeSummary struct {
+	UnitChargeUSD    string `json:"unit_charge_usd"`
+	AffectedSales    int64  `json:"affected_sales"`
+	PendingChargeUSD string `json:"pending_charge_usd"`
+	FailedSales      int64  `json:"failed_sales"`
+	SecurityBlocked  int64  `json:"security_blocked_sales"`
+	DisputedSales    int64  `json:"disputed_sales"`
+	ChargebackSales  int64  `json:"chargeback_sales"`
+	RefundedSales    int64  `json:"refunded_sales"`
 }
 
 // SalesReport agrega ventas por paquete (solo membresías MindBliss: la fuente es
@@ -40,9 +80,11 @@ func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, er
 	rows, err := s.reader().Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
 		       count(*),
-		       count(*) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded' AND pi.stripe_present IS DISTINCT FROM false),
+		       count(*) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status NOT IN ('refunded','security_blocked','disputed','chargeback') AND pi.stripe_present IS DISTINCT FROM false),
 		       count(*) FILTER (WHERE pi.status = 'activated' AND pi.stripe_present IS DISTINCT FROM false),
-		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status <> 'refunded' AND pi.stripe_present IS DISTINCT FROM false), 0)::text
+		       COALESCE(sum(pi.amount_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status NOT IN ('refunded','security_blocked','disputed','chargeback') AND pi.stripe_present IS DISTINCT FROM false), 0)::text,
+		       COALESCE(sum(pi.amount_usd + pi.fee_usd) FILTER (WHERE pi.paid_at IS NOT NULL AND pi.status NOT IN ('refunded','security_blocked','disputed','chargeback') AND pi.stripe_present IS DISTINCT FROM false), 0)::text,
+		       COALESCE((sum(pi.refund_cents) FILTER (WHERE pi.refund_cents > 0))::numeric / 100, 0)::text
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1
@@ -56,12 +98,64 @@ func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, er
 	out := []SalesRow{}
 	for rows.Next() {
 		var r SalesRow
-		if err := rows.Scan(&r.PackageID, &r.Name, &r.AmountUSD, &r.Created, &r.Paid, &r.Activated, &r.RevenueUSD); err != nil {
+		if err := rows.Scan(&r.PackageID, &r.Name, &r.AmountUSD, &r.Created, &r.Paid, &r.Activated, &r.RevenueUSD, &r.GrossUSD, &r.RefundedUSD); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) SalesCashSummary(ctx context.Context, from time.Time) (SalesCashSummary, error) {
+	var c SalesCashSummary
+	if err := s.reader().QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false),
+		       count(*) FILTER (WHERE status = 'activated' AND stripe_present IS DISTINCT FROM false),
+		       COALESCE(sum(amount_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false), 0)::text,
+		       COALESCE(sum(fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false), 0)::text,
+		       COALESCE(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false), 0)::text,
+		       COALESCE(round(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false) * 0.03, 2), 0)::text,
+		       COALESCE(round(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false) * 0.30, 2), 0)::text,
+		       COALESCE(round(sum(amount_usd + fee_usd) FILTER (WHERE paid_at IS NOT NULL AND status NOT IN ('refunded','security_blocked','disputed','chargeback') AND stripe_present IS DISTINCT FROM false) * 0.67, 2), 0)::text,
+		       COALESCE(count(*) FILTER (WHERE refund_cents > 0),0),
+		       COALESCE((sum(refund_cents) FILTER (WHERE refund_cents > 0))::numeric / 100, 0)::text
+		  FROM payments.purchase_intent
+		 WHERE created_at >= $1
+	`, from).Scan(
+		&c.TotalStarted, &c.SuccessfulCharges, &c.ActivatedSales,
+		&c.PackageSalesUSD, &c.ActivationFeesUSD, &c.GrossChargedUSD,
+		&c.StripeFeeUSD, &c.StripeSecurityReserveUSD, &c.StripeReceivableUSD,
+		&c.RefundedCharges, &c.RefundedUSD,
+	); err != nil {
+		return SalesCashSummary{}, fmt.Errorf("sales cash summary: %w", err)
+	}
+	c.StripeReceivableETA = "Periodo estimado: 2 semanas"
+	c.PendingStripePayoutUSD = c.StripeReceivableUSD
+	c.AvailableAfterStripeUSD = c.StripeReceivableUSD // alias legacy: no significa dinero ya disponible en banco
+	return c, nil
+}
+
+func (s *Store) SecurityPendingChargeSummary(ctx context.Context, from time.Time) (SecurityPendingChargeSummary, error) {
+	var c SecurityPendingChargeSummary
+	c.UnitChargeUSD = securityPendingChargeUSD
+	if err := s.reader().QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE status IN (`+riskChargeStatusesSQL+`)),
+		       COALESCE((count(*) FILTER (WHERE status IN (`+riskChargeStatusesSQL+`)) * 70.00)::numeric(14,2), 0)::text,
+		       count(*) FILTER (WHERE status = 'failed'),
+		       count(*) FILTER (WHERE status = 'security_blocked'),
+		       count(*) FILTER (WHERE status = 'disputed'),
+		       count(*) FILTER (WHERE status = 'chargeback'),
+		       count(*) FILTER (WHERE status = 'refunded')
+		  FROM payments.purchase_intent
+		 WHERE created_at >= $1
+	`, from).Scan(
+		&c.AffectedSales, &c.PendingChargeUSD, &c.FailedSales, &c.SecurityBlocked,
+		&c.DisputedSales, &c.ChargebackSales, &c.RefundedSales,
+	); err != nil {
+		return SecurityPendingChargeSummary{}, fmt.Errorf("security pending charges: %w", err)
+	}
+	return c, nil
 }
 
 // DBSalesTotal es el agregado interno (fuente de verdad) de intents ACTIVADOS
@@ -141,11 +235,25 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	cash, err := h.store.SalesCashSummary(r.Context(), from)
+	if err != nil {
+		h.log.Error().Err(err).Msg("sales cash summary")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	securityCharges, err := h.store.SecurityPendingChargeSummary(r.Context(), from)
+	if err != nil {
+		h.log.Error().Err(err).Msg("security pending charges")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"from":  from.Format("2006-01-02"),
-		"days":  days,
-		"rows":  report,
-		"since": time.Now().UTC().Format(time.RFC3339),
+		"from":             from.Format("2006-01-02"),
+		"days":             days,
+		"rows":             report,
+		"cash_summary":     cash,
+		"security_charges": securityCharges,
+		"since":            time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -169,6 +277,8 @@ type SalesTransaction struct {
 	ActivatedAt  string `json:"activated_at"`
 	AffiliateID  *int64 `json:"affiliate_id"`   // colocación en el árbol (null = sin colocar)
 	StripeVerify *bool  `json:"stripe_present"` // verificación Stripe live (null = sin verificar)
+	RefundUSD    string `json:"refund_usd"`
+	RefundedAt   string `json:"refunded_at"`
 }
 
 // SalesTransactions lista las ventas individuales de membresías desde `from`,
@@ -201,7 +311,9 @@ func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q
 		       pi.status, COALESCE(pi.stripe_payment_intent_id, ''),
 		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
 		       COALESCE(to_char(pi.activated_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
-		       pi.affiliate_id, pi.stripe_present
+		       pi.affiliate_id, pi.stripe_present,
+		       COALESCE((pi.refund_cents::numeric / 100)::text, '0'),
+		       COALESCE(to_char(pi.refunded_at,'YYYY-MM-DD"T"HH24:MI:SSZ'), '')
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
 		 WHERE pi.created_at >= $1
@@ -219,7 +331,7 @@ func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q
 		var t SalesTransaction
 		if err := rows.Scan(&t.ID, &t.CreatedAt, &t.Email, &t.Name, &t.Plan,
 			&t.AmountUSD, &t.FeeUSD, &t.TotalUSD, &t.Status, &t.Reference, &t.PaidAt,
-			&t.ActivatedAt, &t.AffiliateID, &t.StripeVerify); err != nil {
+			&t.ActivatedAt, &t.AffiliateID, &t.StripeVerify, &t.RefundUSD, &t.RefundedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, t)
@@ -241,7 +353,7 @@ func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Re
 	}
 	status := strings.TrimSpace(qv.Get("status"))
 	switch status {
-	case "", "created", "paid", "activated", "needs_placement", "failed", "expired", "refunded":
+	case "", "created", "paid", "activated", "needs_placement", "failed", "expired", "refunded", "security_blocked", "disputed", "chargeback":
 	default:
 		status = "" // status desconocido ⇒ sin filtro (no error)
 	}

@@ -103,6 +103,9 @@ func (h *Handler) handleMemberProfile(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		if h.rejectIfSuspended(r.Context(), w, email) {
+			return
+		}
 		p, err := h.store.GetProfile(r.Context(), email)
 		if errors.Is(err, ErrBuyerNotFound) {
 			writeJSON(w, http.StatusOK, MemberProfile{}) // registrado sin persona aún
@@ -129,6 +132,9 @@ func (h *Handler) handleMemberProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	email, ok := h.resolveIdentity(w, r, req.Email)
 	if !ok {
+		return
+	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
 		return
 	}
 

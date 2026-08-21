@@ -10,9 +10,8 @@ import (
 )
 
 // IsBlacklisted consulta la lista negra de registro (mlm.is_blacklisted): email o
-// teléfono coinciden, o nombre + fecha de nacimiento. birth vacío ⇒ solo
-// email/phone. Falla-cerrado NO: ante error devuelve (false, err) y el caller
-// decide; el registro nunca debe bloquearse por un fallo de infra (se loguea).
+// teléfono coinciden, o nombre + fecha de nacimiento. birth vacío => solo
+// email/phone. Devuelve el error para que el caller falle cerrado.
 func (s *Store) IsBlacklisted(ctx context.Context, email, phone, name, birth string) (bool, error) {
 	var birthArg any
 	if b := strings.TrimSpace(birth); b != "" {
@@ -34,9 +33,8 @@ func (s *Store) IsBlacklisted(ctx context.Context, email, phone, name, birth str
 // handleRegistrationPrecheck: POST /api/registration/precheck — el BFF de registro
 // lo invoca (token de servicio) ANTES del SignUp Cognito. Si el candidato está en
 // la lista negra devuelve {"blacklisted":true} y el front muestra el popup de
-// baneo. Ante error de infra devuelve {"blacklisted":false} (fail-open: no
-// bloqueamos registros legítimos por un fallo transitorio; el barrido posterior
-// captura cualquier colado).
+// baneo. Ante error de infra falla cerrado: no se crea una cuenta sin poder
+// validar blacklist.
 func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -57,8 +55,8 @@ func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Requ
 	}
 	banned, err := h.store.IsBlacklisted(r.Context(), req.Email, req.Phone, req.Name, req.BirthDate)
 	if err != nil {
-		h.log.Error().Err(err).Msg("registration precheck (fail-open)")
-		writeJSON(w, http.StatusOK, map[string]bool{"blacklisted": false})
+		h.log.Error().Err(err).Msg("registration precheck")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"blacklisted": false, "error": "precheck_unavailable"})
 		return
 	}
 	if banned {

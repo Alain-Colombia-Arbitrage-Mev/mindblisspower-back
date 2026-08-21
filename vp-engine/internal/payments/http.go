@@ -163,6 +163,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/admins", h.handleAdminAdmins)
 	mux.HandleFunc("/api/admin/admins/role", h.handleAdminAdminRole)
 	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
+	mux.HandleFunc("/api/admin/payments/refund", h.handleAdminPaymentRefund)
 	mux.HandleFunc("/api/admin/finance", h.handleAdminFinance)
 	mux.HandleFunc("/api/admin/solvency", h.handleAdminSolvency)
 	mux.HandleFunc("/api/admin/plan", h.handleAdminPlan)
@@ -747,6 +748,9 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, 
 	if !ok {
 		return "", false
 	}
+	if h.rejectIfSuspended(r.Context(), w, eff) {
+		return "", false
+	}
 	admin, err := h.isAdminEmail(r.Context(), eff)
 	if err != nil {
 		h.log.Error().Err(err).Msg("is_admin")
@@ -766,6 +770,9 @@ func (h *Handler) handleAdminCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	_, email, ok := h.effectiveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
+		return
+	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
 		return
 	}
 	admin, err := h.isAdminEmail(r.Context(), email)
@@ -869,6 +876,9 @@ func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
+		return
+	}
 	name, code, err := h.store.GetMemberContext(r.Context(), email)
 	if err != nil {
 		h.log.Error().Err(err).Msg("member context")
@@ -889,6 +899,9 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
+		return
+	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
 		return
 	}
 	var summary MemberSummary
@@ -1105,6 +1118,10 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		h.markIntentFromEvent(r.Context(), event, "failed")
 	case "checkout.session.expired":
 		h.markIntentFromEvent(r.Context(), event, "expired")
+	case "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed":
+		h.markRiskFromDispute(r.Context(), event)
+	case "review.closed":
+		h.markRiskFromReview(r.Context(), event)
 	default:
 		h.log.Debug().Str("type", string(event.Type)).Msg("unhandled event type")
 	}
@@ -1145,6 +1162,77 @@ func (h *Handler) markIntentFromEvent(ctx context.Context, event stripe.Event, n
 	if n > 0 {
 		h.log.Info().Str("event", event.ID).Str("status", newStatus).Int64("intents", n).Msg("payment intent marked")
 	}
+}
+
+func (h *Handler) markRiskFromDispute(ctx context.Context, event stripe.Event) {
+	var d stripe.Dispute
+	if err := json.Unmarshal(event.Data.Raw, &d); err != nil {
+		h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal dispute")
+		return
+	}
+
+	status := "disputed"
+	switch d.Status {
+	case stripe.DisputeStatusLost:
+		status = "chargeback"
+	case stripe.DisputeStatusPrevented:
+		status = "security_blocked"
+	}
+
+	piID := paymentIntentID(d.PaymentIntent)
+	if piID == "" && d.Charge != nil {
+		piID = paymentIntentID(d.Charge.PaymentIntent)
+	}
+	h.markRiskStatus(ctx, event.ID, piID, status)
+}
+
+func (h *Handler) markRiskFromReview(ctx context.Context, event stripe.Event) {
+	var r stripe.Review
+	if err := json.Unmarshal(event.Data.Raw, &r); err != nil {
+		h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal review")
+		return
+	}
+
+	status := ""
+	switch r.ClosedReason {
+	case stripe.ReviewClosedReasonDisputed:
+		status = "disputed"
+	case stripe.ReviewClosedReasonCanceled,
+		stripe.ReviewClosedReasonPaymentNeverSettled,
+		stripe.ReviewClosedReasonRefunded,
+		stripe.ReviewClosedReasonRefundedAsFraud:
+		status = "security_blocked"
+	default:
+		return
+	}
+
+	piID := paymentIntentID(r.PaymentIntent)
+	if piID == "" && r.Charge != nil {
+		piID = paymentIntentID(r.Charge.PaymentIntent)
+	}
+	h.markRiskStatus(ctx, event.ID, piID, status)
+}
+
+func (h *Handler) markRiskStatus(ctx context.Context, eventID, paymentIntentID, status string) {
+	if paymentIntentID == "" {
+		h.log.Warn().Str("event", eventID).Str("status", status).Msg("risk event without payment_intent")
+		return
+	}
+	n, err := h.store.MarkIntentRiskStatus(ctx, paymentIntentID, status)
+	if err != nil {
+		h.log.Error().Err(err).Str("event", eventID).Str("pi", paymentIntentID).Str("status", status).Msg("mark intent risk status")
+		return
+	}
+	if n > 0 {
+		h.log.Info().Str("event", eventID).Str("pi", paymentIntentID).Str("status", status).Int64("intents", n).Msg("payment intent risk marked")
+	}
+}
+
+func paymentIntentID(pi *stripe.PaymentIntent) string {
+	if pi == nil {
+		return ""
+	}
+	return pi.ID
 }
 
 func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {

@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS payments.purchase_intent (
 
   -- Estado + referencias Stripe.
   status                text        NOT NULL DEFAULT 'created'
-                          CHECK (status IN ('created','paid','activated','needs_placement','failed','expired','refunded')),
+                          CHECK (status IN ('created','paid','activated','needs_placement','failed','expired','refunded','security_blocked','disputed','chargeback')),
   stripe_session_id        text UNIQUE,
   stripe_payment_intent_id text,
   paid_at               timestamptz,

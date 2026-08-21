@@ -133,16 +133,21 @@ func (s *Store) PersonIDByEmail(ctx context.Context, email string) (int64, bool,
 	return id, true, nil
 }
 
-// PersonSuspendedByEmail: ¿la persona está baneada/suspendida? false si no existe.
+// PersonSuspendedByEmail: ¿la cuenta está baneada/suspendida? La blacklist es
+// autoritativa aunque todavía no exista fila en mlm.person.
 func (s *Store) PersonSuspendedByEmail(ctx context.Context, email string) (bool, error) {
 	var suspended bool
 	err := s.db.QueryRow(ctx,
-		`SELECT COALESCE(blacklisted,false) OR status IN ('suspended','banned','deleted')
-		   FROM mlm.person WHERE lower(email)=lower($1) LIMIT 1`, email).Scan(&suspended)
+		`SELECT EXISTS (
+		       SELECT 1 FROM mlm.person p
+		        WHERE lower(p.email)=lower($1)
+		          AND (COALESCE(p.blacklisted,false) OR p.status IN ('suspended','banned','deleted'))
+		     ) OR EXISTS (
+		       SELECT 1 FROM mlm.blacklist b
+		        WHERE b.email_norm IS NOT NULL
+		          AND b.email_norm = mlm.norm_email($1)
+		     )`, email).Scan(&suspended)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
-			return false, nil
-		}
 		return false, fmt.Errorf("person suspended: %w", err)
 	}
 	return suspended, nil
@@ -174,14 +179,18 @@ func (h *Handler) applyAccountBan(ctx context.Context, email string, banned bool
 	return affected
 }
 
-// rejectIfSuspended escribe 403 account_suspended y devuelve true si la persona
-// (por email) está baneada/suspendida — no puede comprar ni retirar ("congelar
-// wallet"). Ante error de infra: fail-open (loguea y deja continuar).
+// rejectIfSuspended escribe 403 account_suspended y devuelve true si la cuenta
+// está baneada/suspendida. Ante error de infra falla cerrado: no se permite
+// operar sin validar el estado de acceso.
 func (h *Handler) rejectIfSuspended(ctx context.Context, w http.ResponseWriter, email string) bool {
+	if h.store == nil || h.store.db == nil {
+		return false
+	}
 	susp, err := h.store.PersonSuspendedByEmail(ctx, email)
 	if err != nil {
-		h.log.Error().Err(err).Str("email", email).Msg("suspended check (fail-open)")
-		return false
+		h.log.Error().Err(err).Str("email", email).Msg("suspended check")
+		writeErr(w, http.StatusServiceUnavailable, "account_status_unavailable")
+		return true
 	}
 	if susp {
 		writeErr(w, http.StatusForbidden, "account_suspended")

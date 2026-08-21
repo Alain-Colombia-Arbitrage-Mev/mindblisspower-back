@@ -108,6 +108,9 @@ func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if h.rejectIfSuspended(ctx, w, ri.Email) {
+		return
+	}
 	switch ri.Status {
 	case "paid", "activated", "needs_placement":
 		// needs_placement = dinero YA recibido (el webhook lo marcó pagado y
@@ -174,7 +177,16 @@ func (s *Store) AbandonedCartsForReminder(ctx context.Context, cutoff time.Time,
 		   AND pi.created_at >= now() - interval '7 days'
 		   AND pi.reminder_count < $2
 		   AND (pi.reminder_sent_at IS NULL OR pi.reminder_sent_at <= now() - interval '24 hours')
-		   AND NOT EXISTS (SELECT 1 FROM mlm.person p WHERE p.id = pi.person_id AND (p.blacklisted OR p.status = 'suspended'))
+		   AND NOT EXISTS (
+		         SELECT 1 FROM mlm.person p
+		          WHERE p.id = pi.person_id
+		            AND (p.blacklisted OR p.status IN ('suspended','banned','deleted'))
+		       )
+		   AND NOT EXISTS (
+		         SELECT 1 FROM mlm.blacklist b
+		          WHERE b.email_norm IS NOT NULL
+		            AND b.email_norm = mlm.norm_email(pi.user_id)
+		       )
 		 ORDER BY pi.created_at
 		 LIMIT $3
 	`, cutoff, maxCount, limit)
@@ -310,22 +322,41 @@ func (h *Handler) handleAdminCartRemind(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"status": "sent", "to": c.Email})
 }
 
-// CartsSummary son las métricas de carritos abandonados del período.
+// CartsSummary son las métricas de pagos no realizados del período. Los nombres
+// abandoned_* se mantienen por compatibilidad con el endpoint histórico.
 type CartsSummary struct {
-	AbandonedCount int64  `json:"abandoned_count"`
-	AbandonedUSD   string `json:"abandoned_usd"`
-	RecoveredCount int64  `json:"recovered_count"`
+	AbandonedCount   int64  `json:"abandoned_count"`
+	AbandonedUSD     string `json:"abandoned_usd"`
+	UncollectedCount int64  `json:"uncollected_count"`
+	UncollectedUSD   string `json:"uncollected_usd"`
+	CreatedCount     int64  `json:"created_count"`
+	CreatedUSD       string `json:"created_usd"`
+	FailedCount      int64  `json:"failed_count"`
+	FailedUSD        string `json:"failed_usd"`
+	RecoveredCount   int64  `json:"recovered_count"`
 }
 
 func (s *Store) CartsSummary(ctx context.Context, from time.Time) (CartsSummary, error) {
 	var cs CartsSummary
 	if err := s.reader().QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE status='created'),
+		SELECT count(*) FILTER (WHERE status IN ('created','failed')),
+		       COALESCE(sum(amount_usd) FILTER (WHERE status IN ('created','failed')),0)::text,
+		       count(*) FILTER (WHERE status IN ('created','failed')),
+		       COALESCE(sum(amount_usd) FILTER (WHERE status IN ('created','failed')),0)::text,
+		       count(*) FILTER (WHERE status='created'),
 		       COALESCE(sum(amount_usd) FILTER (WHERE status='created'),0)::text,
-		       count(*) FILTER (WHERE reminder_count>0 AND status IN ('paid','activated'))
+		       count(*) FILTER (WHERE status='failed'),
+		       COALESCE(sum(amount_usd) FILTER (WHERE status='failed'),0)::text,
+		       count(*) FILTER (WHERE reminder_count>0 AND status IN ('paid','activated','needs_placement'))
 		  FROM payments.purchase_intent
 		 WHERE created_at >= $1
-	`, from).Scan(&cs.AbandonedCount, &cs.AbandonedUSD, &cs.RecoveredCount); err != nil {
+	`, from).Scan(
+		&cs.AbandonedCount, &cs.AbandonedUSD,
+		&cs.UncollectedCount, &cs.UncollectedUSD,
+		&cs.CreatedCount, &cs.CreatedUSD,
+		&cs.FailedCount, &cs.FailedUSD,
+		&cs.RecoveredCount,
+	); err != nil {
 		return CartsSummary{}, fmt.Errorf("carts summary: %w", err)
 	}
 	return cs, nil
