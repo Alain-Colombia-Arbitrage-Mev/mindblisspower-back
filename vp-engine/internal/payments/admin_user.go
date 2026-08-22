@@ -303,9 +303,26 @@ func (s *Store) EmailTakenByOther(ctx context.Context, email string, personID in
 }
 
 // UpdatePersonIdentity actualiza solo los campos presentes (nil ⇒ conservar,
-// vía COALESCE). Devuelve filas afectadas (0 ⇒ persona inexistente).
-func (s *Store) UpdatePersonIdentity(ctx context.Context, personID int64, firstName, lastName, email, phone *string) (int64, error) {
-	tag, err := s.db.Exec(ctx, `
+// vía COALESCE). Si cambia el email, también mueve los purchase_intent ligados a
+// la persona para que panel y dashboard sigan mostrando pagos históricos.
+// Devuelve filas de persona y filas de purchase_intent afectadas.
+func (s *Store) UpdatePersonIdentity(ctx context.Context, personID int64, firstName, lastName, email, phone *string) (int64, int64, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("update person identity begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var prevEmail string
+	err = tx.QueryRow(ctx, `SELECT email::text FROM mlm.person WHERE id = $1 FOR UPDATE`, personID).Scan(&prevEmail)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("lookup person identity: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE mlm.person
 		   SET first_name   = COALESCE($2, first_name),
 		       last_name    = COALESCE($3, last_name),
@@ -315,9 +332,27 @@ func (s *Store) UpdatePersonIdentity(ctx context.Context, personID int64, firstN
 		 WHERE id = $1
 	`, personID, firstName, lastName, email, phone)
 	if err != nil {
-		return 0, fmt.Errorf("update person identity: %w", err)
+		return 0, 0, fmt.Errorf("update person identity: %w", err)
 	}
-	return tag.RowsAffected(), nil
+
+	var paymentRows int64
+	if email != nil && !strings.EqualFold(strings.TrimSpace(prevEmail), strings.TrimSpace(*email)) {
+		ptag, err := tx.Exec(ctx, `
+			UPDATE payments.purchase_intent
+			   SET user_id = $2, updated_at = now()
+			 WHERE person_id = $1
+			    OR (person_id IS NULL AND lower(user_id) = lower($3))
+		`, personID, *email, prevEmail)
+		if err != nil {
+			return 0, 0, fmt.Errorf("update purchase intent email: %w", err)
+		}
+		paymentRows = ptag.RowsAffected()
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("update person identity commit: %w", err)
+	}
+	return tag.RowsAffected(), paymentRows, nil
 }
 
 // PersonDeleteGuards: condiciones que impiden el soft-delete automático —
@@ -522,8 +557,8 @@ func normPtr(p *string) *string {
 }
 
 // handleAdminUserUpdate: PUT /api/admin/user — editar identidad. Solo actualiza
-// los campos presentes. Cambiar el email en DB NO cambia el login de Cognito
-// (el username es determinístico sobre el email original): se devuelve
+// los campos presentes. Cambiar el email en DB sincroniza purchase_intent por
+// person_id, pero NO cambia el usuario de acceso en Cognito: se devuelve
 // cognito_note para que el front lo muestre.
 func (h *Handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
@@ -588,7 +623,7 @@ func (h *Handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	n, err := h.store.UpdatePersonIdentity(r.Context(), req.PersonID, firstName, lastName, newEmail, phone)
+	n, paymentRows, err := h.store.UpdatePersonIdentity(r.Context(), req.PersonID, firstName, lastName, newEmail, phone)
 	if err != nil {
 		h.log.Error().Err(err).Msg("admin user update")
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -600,7 +635,10 @@ func (h *Handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// El nombre/código cacheados del miembro quedan viejos tras la edición.
-	h.store.cache.del(r.Context(), "refctx:"+strings.ToLower(strings.TrimSpace(prev.Email)))
+	h.store.invalidateMemberCaches(r.Context(), prev.Email)
+	if newEmail != nil {
+		h.store.invalidateMemberCaches(r.Context(), *newEmail)
+	}
 
 	changed := []string{}
 	for f, p := range map[string]*string{
@@ -617,6 +655,7 @@ func (h *Handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request) 
 
 	resp := map[string]any{"ok": true, "person_id": req.PersonID, "updated_fields": changed}
 	if newEmail != nil {
+		resp["payment_user_ids_updated"] = paymentRows
 		resp["cognito_note"] = "el email de acceso (Cognito) no cambia automáticamente"
 	}
 	writeJSON(w, http.StatusOK, resp)
