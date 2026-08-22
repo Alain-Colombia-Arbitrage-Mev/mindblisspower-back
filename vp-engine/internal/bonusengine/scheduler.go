@@ -97,6 +97,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return fmt.Errorf("register cd-roi-daily: %w", err)
 	}
 
+	// Catch-up on startup: if the engine was down for one or more Mondays, do
+	// not wait a week per missed period. Close all ended open periods now, then
+	// ensure the current period exists.
+	if s.binaryCycleEnabled {
+		s.runBinaryCycle(ctx)
+	}
+
 	s.sched.Start()
 	s.log.Info().Msg("scheduler started")
 
@@ -122,16 +129,21 @@ func (s *Scheduler) runBinaryCycle(ctx context.Context) {
 	log := s.log.With().Str("job", "binary-period-cycle").Logger()
 	log.Info().Msg("starting weekly binary cycle")
 
-	// 1. Cerrar el período actualmente open (el que acaba de terminar).
-	openPeriodID, err := pickPeriodToClose(ctx, s.db)
+	// 1. Cerrar todos los períodos abiertos que ya terminaron, en orden. Esto
+	// permite recuperar backlog tras downtime sin saltarse semanas contables.
+	openPeriodIDs, err := pickPeriodsToClose(ctx, s.db)
 	if err != nil {
-		log.Warn().Err(err).Msg("no open period to close (may be first run)")
+		log.Warn().Err(err).Msg("could not list open periods to close")
+	} else if len(openPeriodIDs) == 0 {
+		log.Info().Msg("no ended open period to close")
 	} else {
-		if err := s.engine.CloseBinaryPeriod(ctx, openPeriodID); err != nil {
-			log.Error().Err(err).Int64("period_id", openPeriodID).Msg("CloseBinaryPeriod failed")
-			// No abortamos el ciclo — abrimos el próximo igualmente para no
-			// quedarnos sin período activo. Operaciones revisará el período fallido.
-		} else {
+		for _, openPeriodID := range openPeriodIDs {
+			if err := s.engine.CloseBinaryPeriod(ctx, openPeriodID); err != nil {
+				log.Error().Err(err).Int64("period_id", openPeriodID).Msg("CloseBinaryPeriod failed")
+				// Stop catch-up on the first failed period: closing later periods
+				// while an older one remains open would break chronological audit.
+				break
+			}
 			log.Info().Int64("period_id", openPeriodID).Msg("period closed")
 			s.engine.lastBinaryClose.SetToCurrentTime()
 		}
@@ -165,4 +177,24 @@ func pickPeriodToClose(ctx context.Context, db *pgxpool.Pool) (int64, error) {
 		"SELECT id FROM mlm.binary_period WHERE status = 'open' AND period_end <= now() "+
 			"ORDER BY period_end ASC LIMIT 1").Scan(&id)
 	return id, err
+}
+
+func pickPeriodsToClose(ctx context.Context, db *pgxpool.Pool) ([]int64, error) {
+	rows, err := db.Query(ctx,
+		"SELECT id FROM mlm.binary_period WHERE status = 'open' AND period_end <= now() "+
+			"ORDER BY period_end ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

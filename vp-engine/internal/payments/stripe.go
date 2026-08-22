@@ -9,6 +9,7 @@ import (
 	stripe "github.com/stripe/stripe-go/v85"
 	"github.com/stripe/stripe-go/v85/checkout/session"
 	"github.com/stripe/stripe-go/v85/paymentintent"
+	"github.com/stripe/stripe-go/v85/refund"
 	"github.com/stripe/stripe-go/v85/webhook"
 )
 
@@ -169,6 +170,29 @@ func (g *StripeGateway) VerifyPaymentIntent(piID string) (PaymentIntentPresence,
 		return PIPresenceUnknown, fmt.Errorf("stripe payment_intent get: %w", err)
 	}
 	return PIPresent, nil
+}
+
+// RefundPaymentIntent crea un reembolso sobre un PaymentIntent Stripe.
+// El caller valida autorización e idempotencia en la base antes de llamar aquí.
+func (g *StripeGateway) RefundPaymentIntent(piID string, amountCents int64, reason string, metadata map[string]string) (string, error) {
+	piID = strings.TrimSpace(piID)
+	if piID == "" || !strings.HasPrefix(piID, "pi_") {
+		return "", fmt.Errorf("stripe refund requires payment_intent")
+	}
+	reason = strings.TrimSpace(reason)
+	params := &stripe.RefundParams{
+		PaymentIntent: stripe.String(piID),
+		Reason:        stripe.String(reason),
+		Metadata:      metadata,
+	}
+	if amountCents > 0 {
+		params.Amount = stripe.Int64(amountCents)
+	}
+	r, err := refund.New(params)
+	if err != nil {
+		return "", fmt.Errorf("stripe refund create: %w", err)
+	}
+	return r.ID, nil
 }
 
 // SessionPaid consulta a Stripe el estado de una Checkout Session concreta (para

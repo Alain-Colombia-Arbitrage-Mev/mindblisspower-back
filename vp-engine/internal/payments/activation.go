@@ -11,7 +11,7 @@ import (
 
 // ActivationResult describe el desenlace de activar una compra pagada.
 type ActivationResult struct {
-	Status      string // "activated" | "needs_placement" | "replay"
+	Status      string // "activated" | "needs_placement" | "security_blocked" | "replay"
 	AffiliateID int64
 }
 
@@ -27,6 +27,14 @@ type ActivationResult struct {
 // concilia aparte. Idempotente: re-ejecutar (reintento de Stripe) no duplica
 // — dedupe por status='activated' y por transaction_hash/external_ref.
 func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentIntentID string) (ActivationResult, error) {
+	return s.ActivatePaidPurchaseForIntent(ctx, sessionID, paymentIntentID, "")
+}
+
+// ActivatePaidPurchaseForIntent permite activar usando el id interno del
+// purchase_intent que viaja en metadata de Stripe. Es el fallback para una sesión
+// creada correctamente en Stripe cuyo stripe_session_id no alcanzó a guardarse
+// en RDS por un fallo transitorio después de CreateCheckout.
+func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, paymentIntentID, purchaseIntentID string) (ActivationResult, error) {
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return ActivationResult{}, fmt.Errorf("begin tx: %w", err)
@@ -43,12 +51,23 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		pv          int
 		status      string
 	)
-	err = tx.QueryRow(ctx, `
+	const lockIntentBySession = `
 		SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status
 		  FROM payments.purchase_intent
 		 WHERE stripe_session_id = $1
 		 FOR UPDATE
-	`, sessionID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status)
+	`
+	err = tx.QueryRow(ctx, lockIntentBySession, sessionID).Scan(
+		&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status,
+	)
+	if errors.Is(err, pgx.ErrNoRows) && strings.TrimSpace(purchaseIntentID) != "" {
+		err = tx.QueryRow(ctx, `
+			SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status
+			  FROM payments.purchase_intent
+			 WHERE id = $1::uuid
+			 FOR UPDATE
+		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActivationResult{}, ErrIntentNotFound
 	}
@@ -64,6 +83,33 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		return ActivationResult{Status: "replay"}, nil
 	}
 
+	// Defensa en profundidad: checkout bloquea cuentas vetadas antes de crear
+	// Stripe, pero una sesión antigua puede pagarse después. En ese caso no se
+	// crea afiliado, paquete, wallet ni PV; se conserva el cargo para revisión o
+	// reembolso operativo.
+	decision, err := banDecisionFor(ctx, tx, BanCandidate{Email: userID})
+	if err != nil {
+		return ActivationResult{}, fmt.Errorf("ban decision: %w", err)
+	}
+	if decision.Blocked {
+		if _, err := tx.Exec(ctx, `
+			UPDATE payments.purchase_intent
+			   SET status = 'security_blocked',
+			       stripe_payment_intent_id = $2,
+			       paid_at = COALESCE(paid_at, now()),
+			       stripe_present = true,
+			       updated_at = now()
+			 WHERE id = $1
+		`, intentID, paymentIntentID); err != nil {
+			return ActivationResult{}, fmt.Errorf("mark security_blocked: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ActivationResult{}, err
+		}
+		s.invalidateMemberCaches(ctx, userID)
+		return ActivationResult{Status: "security_blocked"}, nil
+	}
+
 	// Marcar pagado (idempotente). stripe_present=true: este pago llegó por el
 	// webhook de Stripe live, así que el cargo es real (a diferencia de registros
 	// de prueba sembrados que quedan con stripe_present NULL/false).
@@ -71,11 +117,12 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 		UPDATE payments.purchase_intent
 		   SET status = 'paid',
 		       stripe_payment_intent_id = $2,
+		       stripe_session_id = CASE WHEN $3 <> '' THEN $3 ELSE stripe_session_id END,
 		       paid_at = COALESCE(paid_at, now()),
 		       stripe_present = true,
 		       updated_at = now()
 		 WHERE id = $1 AND status <> 'paid'
-	`, intentID, paymentIntentID); err != nil {
+	`, intentID, paymentIntentID, sessionID); err != nil {
 		return ActivationResult{}, fmt.Errorf("mark paid: %w", err)
 	}
 

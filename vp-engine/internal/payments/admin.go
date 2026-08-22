@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -98,20 +99,24 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 
 // ProductSales: total vendido por producto (vía Stripe, status activated).
 type ProductSales struct {
-	PackageID  int    `json:"package_id"`
-	Name       string `json:"name"`
-	AmountUSD  string `json:"amount_usd"`
-	Sold       int64  `json:"sold"`
-	RevenueUSD string `json:"revenue_usd"`
+	PackageID   int    `json:"package_id"`
+	Name        string `json:"name"`
+	AmountUSD   string `json:"amount_usd"`
+	Sold        int64  `json:"sold"`
+	RevenueUSD  string `json:"revenue_usd"`
+	RefundedUSD string `json:"refunded_usd"`
 }
 
 // AdminSummary agrega ventas por producto + totales.
 type AdminSummary struct {
-	Products      []ProductSales `json:"products"`
-	TotalSold     int64          `json:"total_sold"`
-	TotalRevenUSD string         `json:"total_revenue_usd"`
-	TotalUsers    int64          `json:"total_users"`
-	BlockedUsers  int64          `json:"blocked_users"`
+	Products                  []ProductSales `json:"products"`
+	TotalSold                 int64          `json:"total_sold"`
+	TotalRevenUSD             string         `json:"total_revenue_usd"`
+	TotalUsers                int64          `json:"total_users"`
+	BlockedUsers              int64          `json:"blocked_users"`
+	RefundedUSD               string         `json:"refunded_usd"`
+	SecurityPendingCharges    int64          `json:"security_pending_charges"`
+	SecurityPendingChargesUSD string         `json:"security_pending_charges_usd"`
 }
 
 func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
@@ -119,7 +124,8 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
 		       COALESCE(count(pi.id) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0) AS sold,
-		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0)::text AS revenue
+		       COALESCE(SUM(pi.amount_usd+pi.fee_usd) FILTER (WHERE pi.status='activated' AND pi.stripe_present IS DISTINCT FROM false),0)::text AS revenue,
+		       COALESCE((SUM(pi.total_cents) FILTER (WHERE pi.status = 'refunded'))::numeric / 100, 0)::text AS refunded
 		  FROM mlm.package pk
 		  LEFT JOIN payments.purchase_intent pi ON pi.package_id=pk.id
 		 WHERE pk.is_active
@@ -133,7 +139,7 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	sum.Products = []ProductSales{}
 	for rows.Next() {
 		var p ProductSales
-		if err := rows.Scan(&p.PackageID, &p.Name, &p.AmountUSD, &p.Sold, &p.RevenueUSD); err != nil {
+		if err := rows.Scan(&p.PackageID, &p.Name, &p.AmountUSD, &p.Sold, &p.RevenueUSD, &p.RefundedUSD); err != nil {
 			return sum, err
 		}
 		sum.Products = append(sum.Products, p)
@@ -146,12 +152,17 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 	// transacciones de prueba) del total de ingresos y ventas.
 	_ = s.db.QueryRow(ctx, `
 		SELECT COALESCE(count(*) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0),
-		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0)::text
-		  FROM payments.purchase_intent`).Scan(&sum.TotalSold, &sum.TotalRevenUSD)
+		       COALESCE(SUM(amount_usd+fee_usd) FILTER (WHERE status='activated' AND stripe_present IS DISTINCT FROM false),0)::text,
+		       COALESCE((SUM(total_cents) FILTER (WHERE status = 'refunded'))::numeric / 100, 0)::text
+		  FROM payments.purchase_intent`).Scan(&sum.TotalSold, &sum.TotalRevenUSD, &sum.RefundedUSD)
 	_ = s.db.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE blacklisted) FROM mlm.person`).
 		Scan(&sum.TotalUsers, &sum.BlockedUsers)
 	if sum.TotalRevenUSD == "" {
 		sum.TotalRevenUSD = "0"
+	}
+	if securityCharges, err := s.SecurityPendingChargeSummary(ctx, time.Time{}); err == nil {
+		sum.SecurityPendingCharges = securityCharges.AffectedSales
+		sum.SecurityPendingChargesUSD = securityCharges.PendingChargeUSD
 	}
 	return sum, nil
 }
@@ -169,6 +180,11 @@ type AdminPayment struct {
 	PaymentIntentID string `json:"payment_intent_id"`
 	CreatedAt       string `json:"created_at"`
 	PaidAt          string `json:"paid_at"`
+	RefundCents     int64  `json:"refund_cents"`
+	RefundUSD       string `json:"refund_usd"`
+	RefundedAt      string `json:"refunded_at"`
+	StripeRefundID  string `json:"stripe_refund_id"`
+	RefundReason    string `json:"refund_reason"`
 }
 
 // ListPayments lista los pagos hechos por NUESTRO checkout/webhook
@@ -190,7 +206,12 @@ func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offse
 		       pi.package_id, pi.amount_usd::text, pi.fee_usd::text, (pi.amount_usd+pi.fee_usd)::text,
 		       pi.status, COALESCE(pi.stripe_payment_intent_id,''),
 		       to_char(pi.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
-		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),'')
+		       COALESCE(to_char(pi.paid_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),''),
+		       CASE WHEN pi.status = 'refunded' THEN pi.total_cents ELSE 0 END,
+		       CASE WHEN pi.status = 'refunded' THEN (pi.total_cents::numeric / 100)::text ELSE '0' END,
+		       '',
+		       '',
+		       ''
 		  FROM payments.purchase_intent pi
 		 WHERE ($1='' OR pi.status=$1) AND ($2='' OR lower(pi.user_id) ILIKE '%'||lower($2)||'%')
 		 ORDER BY pi.created_at DESC
@@ -204,7 +225,8 @@ func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offse
 	for rows.Next() {
 		var p AdminPayment
 		if err := rows.Scan(&p.ID, &p.Email, &p.Name, &p.PackageID, &p.AmountUSD, &p.FeeUSD, &p.TotalUSD,
-			&p.Status, &p.PaymentIntentID, &p.CreatedAt, &p.PaidAt); err != nil {
+			&p.Status, &p.PaymentIntentID, &p.CreatedAt, &p.PaidAt, &p.RefundCents, &p.RefundUSD,
+			&p.RefundedAt, &p.StripeRefundID, &p.RefundReason); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, p)
@@ -229,7 +251,14 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 	// 1) match exacto
 	var id int64
 	err := s.db.QueryRow(ctx,
-		`SELECT id FROM mlm.affiliate WHERE invitation_link = $1 LIMIT 1`, code).Scan(&id)
+		`SELECT a.id
+		   FROM mlm.affiliate a
+		   JOIN mlm.person p ON p.id = a.person_id
+		  WHERE a.invitation_link = $1
+		    AND a.status::text = 'active'
+		    AND p.status::text = 'active'
+		    AND NOT COALESCE(p.blacklisted,false)
+		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
 	}
@@ -239,7 +268,14 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 
 	// 2) match case-insensitive
 	err = s.db.QueryRow(ctx,
-		`SELECT id FROM mlm.affiliate WHERE lower(invitation_link) = lower($1) LIMIT 1`, code).Scan(&id)
+		`SELECT a.id
+		   FROM mlm.affiliate a
+		   JOIN mlm.person p ON p.id = a.person_id
+		  WHERE lower(a.invitation_link) = lower($1)
+		    AND a.status::text = 'active'
+		    AND p.status::text = 'active'
+		    AND NOT COALESCE(p.blacklisted,false)
+		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
 	}
@@ -251,7 +287,14 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 	if m := mpCodeRe.FindStringSubmatch(code); m != nil {
 		if n, perr := strconv.ParseInt(m[1], 10, 64); perr == nil {
 			err = s.db.QueryRow(ctx,
-				`SELECT id FROM mlm.affiliate WHERE id = $1`, n).Scan(&id)
+				`SELECT a.id
+				   FROM mlm.affiliate a
+				   JOIN mlm.person p ON p.id = a.person_id
+				  WHERE a.id = $1
+				    AND a.status::text = 'active'
+				    AND p.status::text = 'active'
+				    AND NOT COALESCE(p.blacklisted,false)
+				  LIMIT 1`, n).Scan(&id)
 			if err == nil {
 				return &id, nil
 			}
@@ -264,21 +307,39 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 	return nil, nil
 }
 
-// SetBlocked bloquea/desbloquea un usuario (blacklisted + status).
+// SetBlocked bloquea/desbloquea un usuario en persona y afiliado. El árbol no se
+// re-cablea: el nodo conserva trazabilidad financiera, pero deja de ser activo
+// para el motor binario y los filtros operativos.
 func (s *Store) SetBlocked(ctx context.Context, personID int64, blocked bool) error {
 	status := "active"
 	if blocked {
 		status = "suspended"
 	}
-	_, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set blocked begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
 		UPDATE mlm.person
 		   SET blacklisted=$2,
 		       status=$3::mlm.person_status,
 		       updated_at=now()
 		 WHERE id=$1
-	`, personID, blocked, status)
-	if err != nil {
+	`, personID, blocked, status); err != nil {
 		return fmt.Errorf("set blocked: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET status=$2::mlm.person_status,
+		       updated_at=now()
+		 WHERE person_id=$1
+	`, personID, status); err != nil {
+		return fmt.Errorf("set blocked affiliate: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("set blocked commit: %w", err)
 	}
 	return nil
 }

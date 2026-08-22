@@ -304,6 +304,9 @@ func (h *Handler) handleMemberTicket(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
+		return
+	}
 	if strings.TrimSpace(req.Subject) == "" || strings.TrimSpace(req.Body) == "" {
 		writeErr(w, http.StatusBadRequest, "subject_and_body_required")
 		return
@@ -330,6 +333,9 @@ func (h *Handler) handleMemberTickets(w http.ResponseWriter, r *http.Request) {
 	}
 	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
 	if !ok {
+		return
+	}
+	if h.rejectIfSuspended(r.Context(), w, email) {
 		return
 	}
 	tickets, total, err := h.store.ListMemberTickets(r.Context(), email,

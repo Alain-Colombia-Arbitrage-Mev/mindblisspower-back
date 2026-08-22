@@ -107,7 +107,15 @@ const directGateSQL = `
 		  LEFT JOIN mlm.affiliate_payout_state dps ON dps.affiliate_id = d.id
 		 WHERE d.sponsor_id = a.id
 		   AND d.status = 'active'
-		   AND substring(ltree2text(subpath(d.path, a.depth + 1, 1)) from 1 for 1) = %s
+		   AND EXISTS (
+		         SELECT 1
+		           FROM mlm.affiliate leg
+		           JOIN mlm.affiliate_closure lc
+		             ON lc.ancestor_id = leg.id
+		            AND lc.descendant_id = d.id
+		          WHERE leg.parent_id = a.id
+		            AND leg.position = %s::mlm.tree_position
+		       )
 		   AND EXISTS (SELECT 1 FROM mlm.affiliate_package dap
 		                WHERE dap.affiliate_id = d.id AND dap.status = 'active')
 		   AND (NOT $%d OR (dps.last_purchase_at IS NOT NULL AND dps.last_purchase_at >= $%d))
@@ -265,8 +273,8 @@ func ComputeV2Streams(
 		//    el pago vive en las cuotas) y programar las N cuotas. La primera
 		//    vence en ESTE cierre.
 		type pending struct {
-			affID            int64
-			rankID           int16
+			affID             int64
+			rankID            int16
 			gross, ptsL, ptsR decimal.Decimal
 		}
 		rows, err := tx.Query(ctx, `

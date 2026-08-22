@@ -27,10 +27,25 @@ type ccSummary struct {
 }
 
 type ccKPIs struct {
-	Inflows       float64 `json:"inflows"`
-	BonusOutflows float64 `json:"bonusOutflows"`
-	Margin        float64 `json:"margin"`
-	Withdrawals   float64 `json:"withdrawals"`
+	Inflows              float64 `json:"inflows"`
+	SuccessfulSales      float64 `json:"successfulSales"`
+	StripeFee            float64 `json:"stripeFee"`
+	SecurityReserve      float64 `json:"securityReserve"`
+	SecurityRetention    float64 `json:"securityRetention"`
+	StripeReceivable     float64 `json:"stripeReceivable"`
+	StripeReceivableETA  string  `json:"stripeReceivableEta"`
+	PendingStripePayout  float64 `json:"pendingStripePayout"`
+	AvailableAfterStripe float64 `json:"availableAfterStripe"`
+	SecurityChargeCount  int64   `json:"securityChargeCount"`
+	SecurityChargeUSD    float64 `json:"securityChargeUSD"`
+	SecurityChargeUnit   float64 `json:"securityChargeUnit"`
+	DisputedSales        int64   `json:"disputedSales"`
+	ChargebackSales      int64   `json:"chargebackSales"`
+	BonusOutflows        float64 `json:"bonusOutflows"`
+	PendingNetworkPayout float64 `json:"pendingNetworkPayout"`
+	Margin               float64 `json:"margin"`
+	CashMargin           float64 `json:"cashMargin"`
+	Withdrawals          float64 `json:"withdrawals"`
 }
 
 type ccNetwork struct {
@@ -63,13 +78,33 @@ func (h *Handler) handleCommandCenterSummary(w http.ResponseWriter, r *http.Requ
 	}
 
 	inflows := parseFloatOr0(fin.InflowsUSD)
+	receivable := parseFloatOr0(fin.StripeReceivableUSD)
+	if receivable == 0 && fin.StripeReceivableUSD == "" {
+		receivable = parseFloatOr0(fin.NetSettledUSD)
+	}
+	reserve := parseFloatOr0(fin.StripeReserveUSD)
 	bonus := parseFloatOr0(fin.CommissionsDistributedUSD)
 	writeJSON(w, http.StatusOK, ccSummary{
 		KPIs: ccKPIs{
-			Inflows:       inflows,
-			BonusOutflows: bonus,
-			Margin:        inflows - bonus,
-			Withdrawals:   parseFloatOr0(fin.WithdrawalsPaidUSD),
+			Inflows:              inflows,
+			SuccessfulSales:      inflows,
+			StripeFee:            parseFloatOr0(fin.StripeFeeUSD),
+			SecurityReserve:      reserve,
+			SecurityRetention:    reserve,
+			StripeReceivable:     receivable,
+			StripeReceivableETA:  fin.StripeReceivableETA,
+			PendingStripePayout:  receivable,
+			AvailableAfterStripe: receivable,
+			SecurityChargeCount:  fin.SecurityPendingCharges,
+			SecurityChargeUSD:    parseFloatOr0(fin.SecurityPendingChargesUSD),
+			SecurityChargeUnit:   parseFloatOr0(fin.SecurityChargeUnitUSD),
+			DisputedSales:        fin.DisputedSales,
+			ChargebackSales:      fin.ChargebackSales,
+			BonusOutflows:        bonus,
+			PendingNetworkPayout: parseFloatOr0(fin.PendingPayoutUSD),
+			Margin:               inflows - bonus,
+			CashMargin:           receivable - bonus,
+			Withdrawals:          parseFloatOr0(fin.WithdrawalsPaidUSD),
 		},
 		CompanyFund: parseFloatOr0(fin.TreasuryUSD),
 		Network: ccNetwork{

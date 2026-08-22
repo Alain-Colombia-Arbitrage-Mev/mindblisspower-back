@@ -230,7 +230,15 @@ func EnumerateCandidates(
 		           ON dc.ancestor_id = a.id AND dc.descendant_id = d.id AND dc.distance > 0
 		         WHERE d.sponsor_id = a.id
 		           AND d.status = 'active'
-		           AND substring(ltree2text(subpath(d.path, a.depth + 1, 1)) from 1 for 1) = 'L'
+		           AND EXISTS (
+		                 SELECT 1
+		                   FROM mlm.affiliate leg
+		                   JOIN mlm.affiliate_closure lc
+		                     ON lc.ancestor_id = leg.id
+		                    AND lc.descendant_id = d.id
+		                  WHERE leg.parent_id = a.id
+		                    AND leg.position = 'L'
+		               )
 		           AND EXISTS (SELECT 1 FROM mlm.affiliate_package dap
 		                        WHERE dap.affiliate_id = d.id AND dap.status = 'active')) AS sponsored_l,
 		       (SELECT count(*) FROM mlm.affiliate d
@@ -238,7 +246,15 @@ func EnumerateCandidates(
 		           ON dc.ancestor_id = a.id AND dc.descendant_id = d.id AND dc.distance > 0
 		         WHERE d.sponsor_id = a.id
 		           AND d.status = 'active'
-		           AND substring(ltree2text(subpath(d.path, a.depth + 1, 1)) from 1 for 1) = 'R'
+		           AND EXISTS (
+		                 SELECT 1
+		                   FROM mlm.affiliate leg
+		                   JOIN mlm.affiliate_closure lc
+		                     ON lc.ancestor_id = leg.id
+		                    AND lc.descendant_id = d.id
+		                  WHERE leg.parent_id = a.id
+		                    AND leg.position = 'R'
+		               )
 		           AND EXISTS (SELECT 1 FROM mlm.affiliate_package dap
 		                        WHERE dap.affiliate_id = d.id AND dap.status = 'active')) AS sponsored_r,
 		       COALESCE((SELECT sum(ns.blocks_paid_left + ns.blocks_paid_right)
