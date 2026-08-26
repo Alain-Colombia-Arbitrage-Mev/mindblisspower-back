@@ -119,6 +119,17 @@ type Config struct {
 	SupportAIServiceToken string
 	SupportAIAutoDraft    bool
 	SupportAIAutoReply    bool
+
+	// ── Agente de voz / WhatsApp (Twilio) ───────────────────────────────────
+	// Twilio firma cada webhook con el Auth Token de la cuenta. Mantener la
+	// verificacion activa en staging/prod; desactivarla solo para pruebas locales.
+	TwilioWebhookAuthToken string
+	TwilioWebhookBaseURL   string
+	TwilioVerifySignature  bool
+	VoiceAgentMaxTurns     int
+	VoiceSayLanguage       string
+	VoiceGatherLanguage    string
+	VoiceGatherTimeoutSec  int
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -187,6 +198,13 @@ func LoadConfig() (*Config, error) {
 		SupportAIServiceToken:   firstEnv("PAYMENTS_SUPPORT_AI_SERVICE_TOKEN", "SUPPORT_AI_SERVICE_TOKEN"),
 		SupportAIAutoDraft:      envBool("PAYMENTS_SUPPORT_AI_AUTO_DRAFT", true),
 		SupportAIAutoReply:      envBool("PAYMENTS_SUPPORT_AI_AUTO_REPLY", false),
+		TwilioWebhookAuthToken:  env("PAYMENTS_TWILIO_AUTH_TOKEN", ""),
+		TwilioWebhookBaseURL:    env("PAYMENTS_TWILIO_WEBHOOK_BASE_URL", ""),
+		TwilioVerifySignature:   envBool("PAYMENTS_TWILIO_VERIFY_SIGNATURE", true),
+		VoiceAgentMaxTurns:      envInt("PAYMENTS_VOICE_AGENT_MAX_TURNS", 6),
+		VoiceSayLanguage:        env("PAYMENTS_VOICE_AGENT_SAY_LANGUAGE", "es-MX"),
+		VoiceGatherLanguage:     env("PAYMENTS_VOICE_AGENT_GATHER_LANGUAGE", "es-CO"),
+		VoiceGatherTimeoutSec:   envInt("PAYMENTS_VOICE_AGENT_GATHER_TIMEOUT_SEC", 5),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"

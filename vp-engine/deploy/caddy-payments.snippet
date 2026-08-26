@@ -1,8 +1,8 @@
 # Bloque Caddy para app.mindblisspower.com
 #
 # REGLA DE ROUTING (importante):
-#   - SOLO /api/webhooks/stripe va al servicio Go (lo llama Stripe; se autentica
-#     por firma, no por Cognito).
+#   - SOLO /api/webhooks/stripe y los webhooks publicos de Twilio van al
+#     servicio Go; ambos se autentican por firma del proveedor, no por Cognito.
 #   - /api/payments/checkout y /api/payments/me los sirve el NEXT (BFF): valida
 #     Cognito y llama a Go por loopback (VP_PAYMENTS_URL=http://127.0.0.1:9095).
 #     => NO enrutar esos paths a Go en Caddy, o te saltarías la auth del BFF.
@@ -15,7 +15,15 @@ app.mindblisspower.com {
         reverse_proxy 127.0.0.1:9095
     }
 
-    # 2) Todo lo demás → app Next (incluye el BFF /api/payments/checkout y /me)
+    # 2) Twilio Voice / WhatsApp Calling / WhatsApp Messaging → servicio Go.
+    handle /api/support/voice/twilio* {
+        reverse_proxy 127.0.0.1:9095
+    }
+    handle /api/support/whatsapp/twilio {
+        reverse_proxy 127.0.0.1:9095
+    }
+
+    # 3) Todo lo demás → app Next (incluye el BFF /api/payments/checkout y /me)
     handle {
         reverse_proxy 127.0.0.1:3000
     }

@@ -80,6 +80,15 @@ func run() error {
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
 	handler.SetSupportAI(cfg.SupportAIURL, cfg.SupportAIServiceToken, cfg.SupportAIAutoDraft, cfg.SupportAIAutoReply)
+	handler.SetTwilioSupportChannels(
+		cfg.TwilioWebhookAuthToken,
+		cfg.TwilioWebhookBaseURL,
+		cfg.TwilioVerifySignature,
+		cfg.VoiceAgentMaxTurns,
+		cfg.VoiceSayLanguage,
+		cfg.VoiceGatherLanguage,
+		cfg.VoiceGatherTimeoutSec,
+	)
 	if cfg.SupportAIServiceToken != "" {
 		logger.Info().
 			Str("url", cfg.SupportAIURL).
@@ -88,6 +97,17 @@ func run() error {
 			Msg("support AI ticket drafts enabled")
 	} else {
 		logger.Info().Msg("support AI token not set; ticket AI drafts disabled")
+	}
+	if cfg.TwilioWebhookAuthToken != "" {
+		logger.Info().
+			Bool("verify_signature", cfg.TwilioVerifySignature).
+			Str("base_url", cfg.TwilioWebhookBaseURL).
+			Int("max_turns", cfg.VoiceAgentMaxTurns).
+			Msg("Twilio voice/WhatsApp support webhooks enabled")
+	} else if cfg.TwilioVerifySignature {
+		logger.Info().Msg("Twilio support webhooks mounted but disabled until PAYMENTS_TWILIO_AUTH_TOKEN is set")
+	} else {
+		logger.Warn().Msg("Twilio signature verification disabled; use only for local development")
 	}
 
 	// Verificación independiente de identidad (defensa en profundidad, H-2): el

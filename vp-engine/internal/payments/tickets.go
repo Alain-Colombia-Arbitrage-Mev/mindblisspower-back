@@ -1150,6 +1150,7 @@ func normalizeSupportText(s string) string {
 
 var validTicketSources = map[string]bool{
 	"member": true, "email": true, "access_help": true, "admin": true, "chatwoot": true, "ai": true,
+	"voice": true, "whatsapp": true, "whatsapp_call": true,
 }
 
 func normalizeTicketSource(source string) string {
