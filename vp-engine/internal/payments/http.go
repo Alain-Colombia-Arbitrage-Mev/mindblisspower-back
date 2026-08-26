@@ -69,6 +69,16 @@ type Handler struct {
 	supportAIToken     string
 	supportAIAutoDraft bool
 	supportAIAutoReply bool
+
+	// Webhooks de Twilio para agente de voz y WhatsApp. Las llamadas entran por
+	// rutas publicas especificas y se autentican con X-Twilio-Signature.
+	twilioAuthToken       string
+	twilioWebhookBaseURL  string
+	twilioVerifySignature bool
+	voiceAgentMaxTurns    int
+	voiceSayLanguage      string
+	voiceGatherLanguage   string
+	voiceGatherTimeoutSec int
 }
 
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
@@ -196,6 +206,10 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/news", h.handleAdminNews)
 	mux.HandleFunc("/api/support/access-help", h.handleAccessHelp)
 	mux.HandleFunc("/api/support/email/ingest", h.handleSupportEmailIngest)
+	mux.HandleFunc("/api/support/voice/twilio", h.handleTwilioVoice)
+	mux.HandleFunc("/api/support/voice/twilio/process", h.handleTwilioVoiceProcess)
+	mux.HandleFunc("/api/support/voice/twilio/status", h.handleTwilioVoiceStatus)
+	mux.HandleFunc("/api/support/whatsapp/twilio", h.handleTwilioWhatsApp)
 	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
 	mux.HandleFunc("/api/support/tickets", h.handleMemberTickets)
 	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)
