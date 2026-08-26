@@ -91,7 +91,7 @@ jobs:
             for spec in $services; do
               svc="${spec%%@*}"
               case "$svc" in
-                api|vp-engine|vp-payments|vp-withdrawals|vp-support|vp-kb-indexer) repos="$repos vp/$svc" ;;
+                api|vp-engine|vp-payments|vp-withdrawals|vp-support|vp-kb-indexer|vp-voice-agent) repos="$repos vp/$svc" ;;
               esac
             done
           done

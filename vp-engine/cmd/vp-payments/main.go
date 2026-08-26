@@ -89,6 +89,7 @@ func run() error {
 		cfg.VoiceGatherLanguage,
 		cfg.VoiceGatherTimeoutSec,
 	)
+	handler.SetPipecatVoiceAgent(cfg.VoiceAgentMode, cfg.PipecatStreamURL, cfg.PipecatStreamSecret)
 	if cfg.SupportAIServiceToken != "" {
 		logger.Info().
 			Str("url", cfg.SupportAIURL).
@@ -103,6 +104,7 @@ func run() error {
 			Bool("verify_signature", cfg.TwilioVerifySignature).
 			Str("base_url", cfg.TwilioWebhookBaseURL).
 			Int("max_turns", cfg.VoiceAgentMaxTurns).
+			Str("voice_mode", cfg.VoiceAgentMode).
 			Msg("Twilio voice/WhatsApp support webhooks enabled")
 	} else if cfg.TwilioVerifySignature {
 		logger.Info().Msg("Twilio support webhooks mounted but disabled until PAYMENTS_TWILIO_AUTH_TOKEN is set")

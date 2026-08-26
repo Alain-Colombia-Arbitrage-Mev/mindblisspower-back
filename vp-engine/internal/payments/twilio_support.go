@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -16,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -25,6 +29,9 @@ const (
 	defaultVoiceGatherLanguage   = "es-CO"
 	defaultVoiceGatherTimeoutSec = 5
 	defaultVoiceAgentMaxTurns    = 6
+	defaultVoiceAgentMode        = "gather"
+	voiceAgentModePipecat        = "pipecat"
+	pipecatStreamSignatureTTL    = 5 * time.Minute
 	maxTwilioWebhookBody         = int64(1 << 16)
 )
 
@@ -85,6 +92,14 @@ func (h *Handler) SetTwilioSupportChannels(authToken, baseURL string, verifySign
 	h.voiceGatherTimeoutSec = gatherTimeoutSec
 }
 
+// SetPipecatVoiceAgent activa opcionalmente Twilio Media Streams hacia Pipecat.
+// Sin URL wss o secreto HMAC, el handler conserva el flujo Gather como fallback.
+func (h *Handler) SetPipecatVoiceAgent(mode, streamURL, streamSecret string) {
+	h.voiceAgentMode = normalizeVoiceAgentMode(mode)
+	h.pipecatStreamURL = cleanPipecatStreamURL(streamURL)
+	h.pipecatStreamSecret = strings.TrimSpace(streamSecret)
+}
+
 func (h *Handler) handleTwilioVoice(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeTwiML(w, h.voiceHangupResponse("Metodo no permitido."))
@@ -108,6 +123,13 @@ func (h *Handler) handleTwilioVoice(w http.ResponseWriter, r *http.Request) {
 			writeTwiML(w, h.voiceHangupResponse("Soporte esta temporalmente no disponible. Intenta nuevamente en unos minutos."))
 			return
 		}
+	}
+	if h.voiceAgentMode == voiceAgentModePipecat {
+		if h.pipecatStreamingEnabled() {
+			writeTwiML(w, h.voicePipecatStreamResponse(callSID, channel))
+			return
+		}
+		h.log.Warn().Str("call_sid", callSID).Msg("pipecat voice mode requested but ws url/secret missing; falling back to gather")
 	}
 	writeTwiML(w, h.voiceGatherResponse(r, "Hola, soy el agente de soporte de Mindbliss Power. Cuentame en una frase el problema de tu cuenta, pago, acceso, arbol o comisiones."))
 }
@@ -285,6 +307,109 @@ func (h *Handler) handleTwilioWhatsApp(w http.ResponseWriter, r *http.Request) {
 	writeTwiML(w, messagingResponse(reply))
 }
 
+type internalVoiceTurnRequest struct {
+	CallSID     string `json:"call_sid"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Channel     string `json:"channel"`
+	UserMessage string `json:"user_message"`
+	AIAnswer    string `json:"ai_answer"`
+	Final       bool   `json:"final"`
+}
+
+func (h *Handler) handleInternalVoiceTurn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	if !h.storeUsable() {
+		writeErr(w, http.StatusServiceUnavailable, "store_unavailable")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTwilioWebhookBody)
+	var req internalVoiceTurnRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	callSID := cleanTicketField(req.CallSID, 80)
+	userMessage := cleanTicketText(req.UserMessage, 1800)
+	if callSID == "" || userMessage == "" {
+		writeErr(w, http.StatusBadRequest, "call_sid_and_user_message_required")
+		return
+	}
+	from := cleanTicketField(req.From, 80)
+	to := cleanTicketField(req.To, 80)
+	channel := normalizeCallChannel(req.Channel)
+	if channel == "voice" && (strings.HasPrefix(strings.ToLower(from), "whatsapp:") || strings.HasPrefix(strings.ToLower(to), "whatsapp:")) {
+		channel = "whatsapp_call"
+	}
+	aiAnswer := cleanTicketText(req.AIAnswer, 1800)
+	nextStatus := "in_progress"
+	if req.Final {
+		nextStatus = "completed"
+	}
+
+	ctx := r.Context()
+	session, err := h.store.UpsertCallSession(ctx, callSID, from, to, channel, 0)
+	if err != nil {
+		h.log.Error().Err(err).Str("call_sid", callSID).Msg("pipecat call session upsert")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+
+	triage := classifySupportTicket("Llamada de soporte Pipecat", userMessage)
+	supportRequest := triage.SupportRequest || session.TicketID > 0
+	var ticketID int64
+	if supportRequest {
+		t, terr := h.ensureCallTicket(ctx, session, callSID, from, to, channel, userMessage)
+		if terr != nil {
+			h.log.Error().Err(terr).Str("call_sid", callSID).Msg("pipecat call ticket")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		ticketID = t.ID
+		if session.TicketID > 0 {
+			if updated, uerr := h.store.AppendTicketBody(ctx, t.ID, "Nuevo mensaje de llamada Pipecat:\n"+userMessage); uerr != nil {
+				h.log.Warn().Err(uerr).Int64("ticket", t.ID).Msg("append pipecat voice ticket body")
+			} else {
+				t = updated
+			}
+		}
+		if aiAnswer != "" {
+			status := "drafted"
+			if containsAnyKeyword(normalizeSupportText(aiAnswer), []string{"agente", "soporte humano", "revision manual", "escalar"}) {
+				status = "escalate"
+			}
+			if _, serr := h.store.SaveTicketAIDraft(ctx, t.ID, status, aiAnswer, "", nil); serr != nil {
+				h.log.Warn().Err(serr).Int64("ticket", t.ID).Msg("save pipecat ai draft")
+			}
+		}
+	} else {
+		h.log.Info().Str("call_sid", callSID).Str("reason", triage.Reason).Msg("pipecat voice ignored by deterministic support filter")
+	}
+	if aiAnswer == "" {
+		aiAnswer = "Turno registrado."
+	}
+	session, err = h.store.AppendCallTurn(ctx, callSID, userMessage, aiAnswer, nextStatus)
+	if err != nil {
+		h.log.Warn().Err(err).Str("call_sid", callSID).Msg("append pipecat voice transcript")
+	}
+	if ticketID == 0 {
+		ticketID = session.TicketID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ticket_id":       ticketID,
+		"support_request": supportRequest,
+		"category":        triage.Category,
+		"priority":        triage.Priority,
+		"status":          session.Status,
+	})
+}
+
 func (h *Handler) ensureCallTicket(ctx context.Context, session CallSession, callSID, from, to, channel, speech string) (Ticket, error) {
 	if session.TicketID > 0 {
 		return h.store.GetTicket(ctx, session.TicketID)
@@ -400,6 +525,36 @@ func (h *Handler) voiceGatherResponse(r *http.Request, message string) string {
 		`</Response>`
 }
 
+func (h *Handler) pipecatStreamingEnabled() bool {
+	return h.voiceAgentMode == voiceAgentModePipecat && h.pipecatStreamURL != "" && h.pipecatStreamSecret != ""
+}
+
+func (h *Handler) voicePipecatStreamResponse(callSID, channel string) string {
+	channel = normalizeCallChannel(channel)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	sig := signPipecatStream(h.pipecatStreamSecret, callSID, ts, channel)
+	return `<Response><Connect><Stream url="` + html.EscapeString(h.pipecatStreamURL) + `">` +
+		twimlParameter("mb_call_sid", callSID) +
+		twimlParameter("mb_channel", channel) +
+		twimlParameter("mb_ts", ts) +
+		twimlParameter("mb_sig", sig) +
+		`</Stream></Connect></Response>`
+}
+
+func twimlParameter(name, value string) string {
+	return `<Parameter name="` + html.EscapeString(name) + `" value="` + html.EscapeString(value) + `"/>`
+}
+
+func signPipecatStream(secret, callSID, ts, channel string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(pipecatStreamSignaturePayload(callSID, ts, channel)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func pipecatStreamSignaturePayload(callSID, ts, channel string) string {
+	return cleanTicketField(callSID, 80) + "|" + strings.TrimSpace(ts) + "|" + normalizeCallChannel(channel)
+}
+
 func (h *Handler) voiceHangupResponse(message string) string {
 	return `<Response>` + twimlSay(message, h.voiceSayLanguage) + `<Hangup/></Response>`
 }
@@ -451,6 +606,29 @@ func cleanVoiceLanguage(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func normalizeVoiceAgentMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case voiceAgentModePipecat:
+		return voiceAgentModePipecat
+	default:
+		return defaultVoiceAgentMode
+	}
+}
+
+func cleanPipecatStreamURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "wss" || u.Host == "" {
+		return ""
+	}
+	u.User = nil
+	u.Fragment = ""
+	return u.String()
 }
 
 func (h *Handler) voiceGatherTimeout() int {

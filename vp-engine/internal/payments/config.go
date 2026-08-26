@@ -130,6 +130,9 @@ type Config struct {
 	VoiceSayLanguage       string
 	VoiceGatherLanguage    string
 	VoiceGatherTimeoutSec  int
+	VoiceAgentMode         string
+	PipecatStreamURL       string
+	PipecatStreamSecret    string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -205,6 +208,9 @@ func LoadConfig() (*Config, error) {
 		VoiceSayLanguage:        env("PAYMENTS_VOICE_AGENT_SAY_LANGUAGE", "es-MX"),
 		VoiceGatherLanguage:     env("PAYMENTS_VOICE_AGENT_GATHER_LANGUAGE", "es-CO"),
 		VoiceGatherTimeoutSec:   envInt("PAYMENTS_VOICE_AGENT_GATHER_TIMEOUT_SEC", 5),
+		VoiceAgentMode:          env("PAYMENTS_VOICE_AGENT_MODE", "gather"),
+		PipecatStreamURL:        env("PAYMENTS_PIPECAT_WS_URL", ""),
+		PipecatStreamSecret:     env("PAYMENTS_PIPECAT_STREAM_SECRET", ""),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"

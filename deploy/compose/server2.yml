@@ -56,6 +56,24 @@ services:
     env_file: [/run/vicionpower/vp-support.env]
     depends_on: [qdrant, falkordb]
     stop_grace_period: 20s
+  vp-voice-agent:
+    image: ${REGISTRY}/vp/vp-voice-agent:${IMAGE_TAG}
+    restart: unless-stopped
+    network_mode: host  # Caddy expone solo /api/support/voice/pipecat/*; puerto 7860 queda privado por SG.
+    env_file: [/run/vicionpower/vp-voice-agent.env]
+    environment:
+      PIPECAT_HOST: 0.0.0.0
+      PIPECAT_PORT: "7860"
+      PIPECAT_TRANSPORT: twilio
+      PIPECAT_PROXY_HOST: app.mindblisspower.com
+    depends_on: [vp-support]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:7860/status', timeout=2); sys.exit(0 if r.status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 20s
   vp-kb-indexer:
     image: ${REGISTRY}/vp/vp-kb-indexer:${IMAGE_TAG}
     restart: unless-stopped

@@ -1,0 +1,4 @@
+pipecat-ai[websocket,cartesia,silero,deepgram,runner,openrouter]>=1.4.0,<2
+aiohttp>=3.9,<4
+python-dotenv>=1.0,<2
+loguru>=0.7,<1
