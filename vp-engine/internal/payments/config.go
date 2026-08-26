@@ -110,6 +110,15 @@ type Config struct {
 	KYCOCRAPIKey string
 	// KYCOCRModel: modelo de visión de OpenRouter (default gemini-3.1-flash-lite).
 	KYCOCRModel string
+
+	// ── Soporte IA (tickets + mailbox ingest) ────────────────────────────────
+	// PAYMENTS_SUPPORT_AI_URL apunta a vp-support (/api/support/chat). El token
+	// debe ser el SERVICE_TOKEN de vp-support; si falta, el flujo solo crea y
+	// asigna tickets, sin borradores IA.
+	SupportAIURL          string
+	SupportAIServiceToken string
+	SupportAIAutoDraft    bool
+	SupportAIAutoReply    bool
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -174,6 +183,10 @@ func LoadConfig() (*Config, error) {
 		KYCRegion:               firstEnv("KYC_S3_REGION", "AWS_REGION", "COGNITO_REGION"),
 		KYCOCRAPIKey:            firstEnv("PAYMENTS_KYC_OCR_API_KEY", "OPENROUTER_API_RAG", "OPENROUTER_API_KEY"),
 		KYCOCRModel:             env("PAYMENTS_KYC_OCR_MODEL", ""),
+		SupportAIURL:            env("PAYMENTS_SUPPORT_AI_URL", "http://127.0.0.1:9096"),
+		SupportAIServiceToken:   firstEnv("PAYMENTS_SUPPORT_AI_SERVICE_TOKEN", "SUPPORT_AI_SERVICE_TOKEN"),
+		SupportAIAutoDraft:      envBool("PAYMENTS_SUPPORT_AI_AUTO_DRAFT", true),
+		SupportAIAutoReply:      envBool("PAYMENTS_SUPPORT_AI_AUTO_REPLY", false),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"

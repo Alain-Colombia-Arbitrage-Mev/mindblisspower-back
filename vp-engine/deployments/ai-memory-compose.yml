@@ -1,0 +1,79 @@
+# AI memory stack for support RAG.
+#
+# Production notes:
+# - Keep every port bound to 127.0.0.1. Do not open 6333/6334/6380/9096 in SGs.
+# - Qdrant is the derived vector index. Postgres support.kb_* stays canonical.
+# - FalkorDB is the graph memory layer for relationships/categories/entities.
+# - OpenRouter keys live only in the env file or Secrets Manager.
+#
+# Run:
+#   docker compose -f ai-memory-compose.yml --env-file /etc/vicion/ai-memory.env up -d
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    container_name: mindbrain-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?missing QDRANT_API_KEY}
+      QDRANT__SERVICE__READ_ONLY_API_KEY: ${QDRANT_READ_ONLY_API_KEY:?missing QDRANT_READ_ONLY_API_KEY}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  falkordb:
+    image: falkordb/falkordb-server:latest
+    container_name: mindbrain-falkordb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6380:6379"
+    environment:
+      FALKORDB_PASSWORD: ${FALKORDB_PASSWORD:?missing FALKORDB_PASSWORD}
+      REDIS_ARGS: "--requirepass ${FALKORDB_PASSWORD:?missing FALKORDB_PASSWORD} --appendonly yes --appendfsync everysec --maxmemory 768mb --maxmemory-policy allkeys-lru"
+      FALKORDB_ARGS: "THREAD_COUNT 2 CACHE_SIZE 25 TIMEOUT_MAX 30000 TIMEOUT_DEFAULT 10000 QUERY_MEM_CAPACITY 67108864"
+    volumes:
+      - falkordb_storage:/data
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$FALKORDB_PASSWORD\" ping | grep PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  vp-support:
+    image: ${REGISTRY:?missing REGISTRY}/vp/vp-support:${SUPPORT_IMAGE_TAG:-kb-v2}
+    container_name: mindbrain-vp-support
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9096:9096"
+    env_file:
+      - ${AI_MEMORY_ENV_FILE:-/etc/vicion/ai-memory.env}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    mem_limit: 512m
+
+  vp-kb-indexer:
+    image: ${REGISTRY:?missing REGISTRY}/vp/vp-kb-indexer:${INDEXER_IMAGE_TAG:-kb-v2}
+    container_name: mindbrain-vp-kb-indexer
+    restart: unless-stopped
+    env_file:
+      - ${AI_MEMORY_ENV_FILE:-/etc/vicion/ai-memory.env}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    mem_limit: 512m
+
+volumes:
+  qdrant_storage:
+  falkordb_storage:

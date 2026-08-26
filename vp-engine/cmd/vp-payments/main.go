@@ -79,6 +79,16 @@ func run() error {
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
+	handler.SetSupportAI(cfg.SupportAIURL, cfg.SupportAIServiceToken, cfg.SupportAIAutoDraft, cfg.SupportAIAutoReply)
+	if cfg.SupportAIServiceToken != "" {
+		logger.Info().
+			Str("url", cfg.SupportAIURL).
+			Bool("auto_draft", cfg.SupportAIAutoDraft).
+			Bool("auto_reply", cfg.SupportAIAutoReply).
+			Msg("support AI ticket drafts enabled")
+	} else {
+		logger.Info().Msg("support AI token not set; ticket AI drafts disabled")
+	}
 
 	// Verificación independiente de identidad (defensa en profundidad, H-2): el
 	// backend re-verifica el id token Cognito que reenvía el BFF en X-VP-Id-Token,

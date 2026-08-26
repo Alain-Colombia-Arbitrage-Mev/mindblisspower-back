@@ -67,16 +67,20 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/schema_payouts_v1.2.sql",
 		"_meta/schema_ranks.sql",
 		"_meta/schema_payouts_v1.3.sql",
+		"_meta/schema_support_kb.sql",
 		"_meta/migration/30_payments.sql",
 		"_meta/migration/41_kyc_documents.sql",
+		"_meta/migration/42_support_tickets.sql",
 		"_meta/migration/43_blacklist.sql",
 		"_meta/migration/56_ban_engine_name_match.sql",
 		"_meta/migration/44_receipt_and_verify.sql",
 		"_meta/migration/45_cart_reminders.sql",
 		"_meta/migration/46_kyc_ocr.sql",
 		"_meta/migration/49_withdrawal_bmp_and_fee.sql",
+		"_meta/migration/53_news.sql",
 		"_meta/migration/55_refund_accounting.sql",
 		"_meta/migration/57_operational_charge_adjustments.sql",
+		"_meta/migration/58_support_ticket_triage_ai.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {
