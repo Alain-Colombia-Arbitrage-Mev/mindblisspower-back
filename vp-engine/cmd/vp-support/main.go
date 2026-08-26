@@ -46,7 +46,11 @@ func run() error {
 
 	logger := log.New("vp-support", cfg.LogLevel)
 	logger.Info().Str("version", version).Str("commit", commit).Str("env", cfg.Env).
-		Str("chat_model", cfg.ChatModel).Str("collection", cfg.Collection).Msg("vp-support starting")
+		Str("chat_model", cfg.ChatModel).
+		Str("rerank_model", cfg.RerankModel).
+		Str("collection", cfg.Collection).
+		Str("falkor_graph", cfg.FalkorGraphName).
+		Msg("vp-support starting")
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -66,6 +70,26 @@ func run() error {
 	}
 
 	searcher := supportkb.NewSearcher(emb, qd)
+	if cfg.RerankEnabled {
+		searcher.SetReranker(
+			supportkb.NewReranker(cfg.OpenRouterAPIKey, cfg.RerankURL, cfg.RerankModel),
+			cfg.RerankCandidates,
+			cfg.RerankTopK,
+		)
+		logger.Info().Str("model", cfg.RerankModel).Int("candidates", cfg.RerankCandidates).Msg("rerank enabled")
+	}
+	graph, err := supportkb.NewFalkorDB(cfg.FalkorDBURL, cfg.FalkorGraphName, cfg.FalkorTimeout)
+	if err != nil {
+		logger.Warn().Err(err).Msg("FalkorDB config inválida; GraphRAG deshabilitado")
+	} else if graph != nil {
+		defer graph.Close()
+		if err := graph.Ping(rootCtx); err != nil {
+			logger.Warn().Err(err).Msg("FalkorDB no disponible al arrancar; GraphRAG deshabilitado")
+		} else {
+			searcher.SetGraph(graph, cfg.FalkorExpand)
+			logger.Info().Str("graph", cfg.FalkorGraphName).Int("expand", cfg.FalkorExpand).Msg("FalkorDB GraphRAG enabled")
+		}
+	}
 	bot := supportkb.NewBot(searcher, cfg.OpenRouterAPIKey, cfg.ChatURL, cfg.ChatModel, cfg.MinScore)
 	handler := supportkb.NewHandler(pool, searcher, bot, cfg.ServiceToken, cfg.AdminEmails, logger)
 

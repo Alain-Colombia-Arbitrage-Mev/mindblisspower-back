@@ -34,6 +34,11 @@ type Config struct {
 	QdrantAPIKey string
 	Collection   string
 
+	FalkorDBURL     string // redis://:password@127.0.0.1:6380 (bind privado)
+	FalkorGraphName string
+	FalkorTimeout   time.Duration
+	FalkorExpand    int // chunks relacionados a traer desde el grafo antes del rerank
+
 	BatchSize    int           // chunks por request de embeddings
 	PollInterval time.Duration // frecuencia del loop incremental
 
@@ -52,7 +57,13 @@ type Config struct {
 
 	ChatModel string // LLM del bot vía OpenRouter (iterable sin tocar embeddings)
 	ChatURL   string
-	MinScore  float64 // score coseno mínimo del top hit para intentar responder
+	MinScore  float64 // score mínimo del top hit para intentar responder
+
+	RerankEnabled    bool
+	RerankURL        string
+	RerankModel      string
+	RerankCandidates int // candidatos Qdrant a recuperar antes del rerank
+	RerankTopK       int // docs finales para contexto; 0 usa SearchOpts.TopK
 }
 
 // JWKSURL devuelve la URL del JWKS del user pool (issuer + /.well-known/jwks.json).
@@ -78,6 +89,11 @@ func LoadServiceConfig() (Config, error) {
 	cfg.ChatModel = getenv("SUPPORT_CHAT_MODEL", "openai/gpt-4o-mini")
 	cfg.ChatURL = getenv("OPENROUTER_CHAT_URL", "https://openrouter.ai/api/v1/chat/completions")
 	cfg.MinScore = getenvFloat("SUPPORT_MIN_SCORE", 0.45)
+	cfg.RerankEnabled = getenvBool("SUPPORT_RERANK_ENABLED", true)
+	cfg.RerankURL = getenv("OPENROUTER_RERANK_URL", "https://openrouter.ai/api/v1/rerank")
+	cfg.RerankModel = getenv("SUPPORT_RERANK_MODEL", "cohere/rerank-4-pro")
+	cfg.RerankCandidates = getenvInt("SUPPORT_RERANK_CANDIDATES", 20)
+	cfg.RerankTopK = getenvInt("SUPPORT_RERANK_TOP_K", 5)
 	if cfg.ServiceToken == "" {
 		return cfg, fmt.Errorf("SERVICE_TOKEN requerido")
 	}
@@ -103,6 +119,18 @@ func getenvFloat(k string, def float64) float64 {
 	return def
 }
 
+func getenvBool(k string, def bool) bool {
+	if v := os.Getenv(k); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "y", "on", "enabled":
+			return true
+		case "0", "false", "no", "n", "off", "disabled":
+			return false
+		}
+	}
+	return def
+}
+
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		Env:              getenv("APP_ENV", "dev"),
@@ -113,6 +141,10 @@ func LoadConfig() (Config, error) {
 		QdrantURL:        getenv("QDRANT_URL", "http://localhost:6333"),
 		QdrantAPIKey:     os.Getenv("QDRANT_API_KEY"),
 		Collection:       getenv("QDRANT_COLLECTION", "kb"),
+		FalkorDBURL:      os.Getenv("FALKORDB_URL"),
+		FalkorGraphName:  getenv("FALKORDB_GRAPH", "support_kb"),
+		FalkorTimeout:    getenvDur("FALKORDB_QUERY_TIMEOUT", 5*time.Second),
+		FalkorExpand:     getenvInt("FALKORDB_EXPAND_CHUNKS", 8),
 		BatchSize:        getenvInt("KB_BATCH_SIZE", 128),
 		PollInterval:     getenvDur("KB_POLL_INTERVAL", 30*time.Second),
 		DBMaxConns:       int32(getenvInt("DB_MAX_CONNS", 4)),

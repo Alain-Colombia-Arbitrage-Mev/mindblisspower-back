@@ -137,9 +137,10 @@ func roleFrom(r *http.Request) string {
 
 func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Query     string `json:"query"`
-		Categoria string `json:"categoria"`
-		TopK      int    `json:"top_k"`
+		Query      string `json:"query"`
+		Categoria  string `json:"categoria"`
+		TopK       int    `json:"top_k"`
+		CandidateK int    `json:"candidate_k"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Query) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query requerido"})
@@ -150,6 +151,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Lang:       "es",
 		Categoria:  req.Categoria,
 		TopK:       req.TopK,
+		CandidateK: req.CandidateK,
 	})
 	if err != nil {
 		h.logger.Error().Err(err).Msg("search failed")

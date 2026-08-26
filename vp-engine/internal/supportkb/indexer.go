@@ -17,12 +17,17 @@ type Indexer struct {
 	pool   *pgxpool.Pool
 	emb    *Embedder
 	qd     *Qdrant
+	graph  *FalkorDB
 	batch  int
 	logger zerolog.Logger
 }
 
 func NewIndexer(pool *pgxpool.Pool, emb *Embedder, qd *Qdrant, batch int, logger zerolog.Logger) *Indexer {
 	return &Indexer{pool: pool, emb: emb, qd: qd, batch: batch, logger: logger}
+}
+
+func (ix *Indexer) SetGraph(graph *FalkorDB) {
+	ix.graph = graph
 }
 
 type pendingChunk struct {
@@ -52,9 +57,15 @@ func (ix *Indexer) RunOnce(ctx context.Context) (int, error) {
 		}
 		total += n
 		if n < ix.batch { // no queda cola
-			return total, nil
+			break
 		}
 	}
+	if ix.graph != nil && ix.graph.Enabled() {
+		if _, err := ix.syncGraph(ctx); err != nil {
+			ix.logger.Warn().Err(err).Msg("sincronización FalkorDB falló; Qdrant queda operativo")
+		}
+	}
+	return total, nil
 }
 
 // Rebuild recrea la colección desde cero y re-embebe TODO (cambio de modelo,
@@ -66,6 +77,14 @@ func (ix *Indexer) Rebuild(ctx context.Context) (int, error) {
 	}
 	if err := ix.qd.EnsureCollection(ctx); err != nil {
 		return 0, err
+	}
+	if ix.graph != nil && ix.graph.Enabled() {
+		if err := ix.graph.DeleteGraph(ctx); err != nil {
+			ix.logger.Warn().Err(err).Msg("no se pudo recrear FalkorDB; continúa rebuild de Qdrant")
+		}
+		if _, err := ix.pool.Exec(ctx, `UPDATE support.kb_chunks SET graph_synced_at = NULL`); err != nil {
+			ix.logger.Warn().Err(err).Msg("no se pudo marcar FalkorDB como pendiente")
+		}
 	}
 	// Marcar todo como pendiente.
 	if _, err := ix.pool.Exec(ctx, `UPDATE support.kb_chunks SET embedded_at = NULL`); err != nil {
@@ -153,6 +172,63 @@ func (ix *Indexer) indexBatch(ctx context.Context) (int, error) {
 	return len(chunks), nil
 }
 
+func (ix *Indexer) syncGraph(ctx context.Context) (int, error) {
+	total := 0
+	for {
+		n, err := ix.syncGraphBatch(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < ix.batch {
+			return total, nil
+		}
+	}
+}
+
+func (ix *Indexer) syncGraphBatch(ctx context.Context) (int, error) {
+	rows, err := ix.pool.Query(ctx, `
+		SELECT c.id, c.doc_id, c.ord, c.texto,
+		       d.titulo, d.categoria, d.lang, d.rol_visible::text, d.version
+		FROM support.kb_chunks c
+		JOIN support.kb_documents d ON d.id = c.doc_id
+		WHERE d.activo
+		  AND (c.graph_synced_at IS NULL OR c.updated_at > c.graph_synced_at)
+		ORDER BY c.updated_at
+		LIMIT $1`, ix.batch)
+	if err != nil {
+		return 0, err
+	}
+	chunks, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (pendingChunk, error) {
+		var c pendingChunk
+		err := row.Scan(&c.ID, &c.DocID, &c.Ord, &c.Texto,
+			&c.Titulo, &c.Categoria, &c.Lang, &c.RolVisible, &c.Version)
+		return c, err
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(chunks) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]string, len(chunks))
+	for i, c := range chunks {
+		if err := ix.graph.SyncChunk(ctx, c); err != nil {
+			return 0, fmt.Errorf("falkordb sync chunk %s: %w", c.ID, err)
+		}
+		ids[i] = c.ID
+	}
+	if _, err := ix.pool.Exec(ctx, `
+		UPDATE support.kb_chunks
+		SET graph_synced_at = now()
+		WHERE id = ANY($1)`, ids); err != nil {
+		return 0, err
+	}
+	ix.logger.Info().Int("chunks", len(chunks)).Msg("batch FalkorDB sincronizado")
+	return len(chunks), nil
+}
+
 // purgeInactive elimina de Qdrant los puntos de documentos desactivados y
 // resetea su embedded_at (si se reactivan, se re-embeben).
 func (ix *Indexer) purgeInactive(ctx context.Context) error {
@@ -160,7 +236,8 @@ func (ix *Indexer) purgeInactive(ctx context.Context) error {
 		SELECT DISTINCT d.id
 		FROM support.kb_documents d
 		JOIN support.kb_chunks c ON c.doc_id = d.id
-		WHERE NOT d.activo AND c.embedded_at IS NOT NULL`)
+		WHERE NOT d.activo
+		  AND (c.embedded_at IS NOT NULL OR c.graph_synced_at IS NOT NULL)`)
 	if err != nil {
 		return err
 	}
@@ -172,8 +249,14 @@ func (ix *Indexer) purgeInactive(ctx context.Context) error {
 		if err := ix.qd.DeleteByDoc(ctx, id); err != nil {
 			return err
 		}
+		if ix.graph != nil && ix.graph.Enabled() {
+			if err := ix.graph.DeleteDoc(ctx, id); err != nil {
+				ix.logger.Warn().Err(err).Str("doc_id", id).Msg("doc inactivo no pudo purgarse de FalkorDB")
+			}
+		}
 		if _, err := ix.pool.Exec(ctx, `
-			UPDATE support.kb_chunks SET embedded_at = NULL, embed_model = NULL
+			UPDATE support.kb_chunks
+			SET embedded_at = NULL, embed_model = NULL, graph_synced_at = NULL
 			WHERE doc_id = $1`, id); err != nil {
 			return err
 		}

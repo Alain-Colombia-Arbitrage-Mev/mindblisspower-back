@@ -61,6 +61,8 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+      falkordb:
+        condition: service_healthy
     mem_limit: 512m
 
   vp-kb-indexer:
@@ -71,6 +73,8 @@ services:
       - ${AI_MEMORY_ENV_FILE:-/etc/vicion/ai-memory.env}
     depends_on:
       qdrant:
+        condition: service_healthy
+      falkordb:
         condition: service_healthy
     mem_limit: 512m
 
