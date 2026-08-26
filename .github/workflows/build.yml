@@ -7,6 +7,45 @@ env:
   AWS_REGION: us-east-1
   REGISTRY: 522814703714.dkr.ecr.us-east-1.amazonaws.com
 jobs:
+  ecr-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::522814703714:role/vp-gha-deploy
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Validate ECR access
+        run: |
+          set -euo pipefail
+          repos=(
+            vp/api
+            vp/vp-engine
+            vp/vp-payments
+            vp/vp-withdrawals
+            vp/vp-support
+            vp/vp-kb-indexer
+            vp/vp-voice-agent
+          )
+          for repo in "${repos[@]}"; do
+            echo "checking ECR permissions for $repo"
+            aws ecr describe-images --repository-name "$repo" --max-results 1 >/dev/null
+            manifest="$(aws ecr batch-get-image \
+              --repository-name "$repo" \
+              --image-ids imageTag=staging \
+              --query 'images[0].imageManifest' \
+              --output text 2>/dev/null || true)"
+            if [ -n "$manifest" ] && [ "$manifest" != "None" ]; then
+              digest="$(jq -r '.layers[0].digest // empty' <<< "$manifest")"
+              if [ -n "$digest" ]; then
+                aws ecr get-download-url-for-layer \
+                  --repository-name "$repo" \
+                  --layer-digest "$digest" \
+                  --query downloadUrl \
+                  --output text >/dev/null
+              fi
+            fi
+          done
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +81,7 @@ jobs:
         run: go test -count=1 -timeout 15m ./...
         working-directory: vp-engine
   push:
-    needs: test
+    needs: [ecr-preflight, test]
     runs-on: ubuntu-latest
     strategy:
       matrix:
