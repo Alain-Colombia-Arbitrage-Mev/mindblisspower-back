@@ -1,6 +1,7 @@
 name: build
 on:
   push: { branches: [main, staging] }
+  workflow_dispatch:
 permissions: { id-token: write, contents: read }
 env:
   AWS_REGION: us-east-1
