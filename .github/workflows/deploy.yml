@@ -68,9 +68,12 @@ jobs:
           echo "env=$env_norm" >> "$GITHUB_OUTPUT"
           echo "tag=$full_tag" >> "$GITHUB_OUTPUT"
           # Formato targets: "inst|compose|svc1 svc2;inst|compose|svc1 svc2"
-          # Campos por '|' (inst, compose, svcs); múltiples targets separados por ';'
+          # Campos por '|' (inst, compose, svcs); múltiples targets separados por ';'.
+          # Para overrides de config por host: servicio@path-ssm, donde el
+          # contenedor sigue llamándose "servicio" pero los secretos salen de
+          # /vicionpower/<env>/<path-ssm>/.
           if [ "$env_norm" = "prod" ]; then
-            echo "targets=i-060e76a6c26bded35|deploy/compose/server1.yml|vp-engine vp-payments vp-withdrawals;i-02fcc4d2329040711|deploy/compose/server2.yml|api vp-engine qdrant vp-support vp-kb-indexer" >> "$GITHUB_OUTPUT"
+            echo "targets=i-060e76a6c26bded35|deploy/compose/server1.yml|vp-engine@s1-vp-engine vp-payments vp-withdrawals;i-02fcc4d2329040711|deploy/compose/server2.yml|api vp-engine qdrant vp-support vp-kb-indexer" >> "$GITHUB_OUTPUT"
           else
             echo "targets=i-0f7f6c73503537d73|deploy/compose/staging.yml|api vp-payments vp-engine" >> "$GITHUB_OUTPUT"
           fi
@@ -85,7 +88,8 @@ jobs:
           IFS=';' read -ra targets <<< "$TARGETS"
           for target in "${targets[@]}"; do
             services="${target##*|}"
-            for svc in $services; do
+            for spec in $services; do
+              svc="${spec%%@*}"
               case "$svc" in
                 api|vp-engine|vp-payments|vp-withdrawals) repos="$repos vp/$svc" ;;
               esac

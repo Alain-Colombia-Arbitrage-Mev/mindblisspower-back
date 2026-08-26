@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Corre EN el host vía SSM Run Command.
 # Args por env: ENVN, IMAGE_TAG, COMPOSE_B64, COMPOSE_NAME, SERVICES (lista separada por espacios), REGION
+# SERVICES acepta entradas "servicio" o "servicio@path-ssm". Con override, Docker
+# opera el servicio real y los env/secrets se leen desde /vicionpower/<env>/<path-ssm>/.
 #
 # NOTA (Task 5 / validar en Task 11 — live deploy):
 #   (a) Los params SSM de vp-engine son la unión de server1 + server2; se inyectan vars extra en
@@ -49,8 +51,15 @@ fi
 # Directorio para env-files (solo accesible por root / docker daemon)
 install -d -m 700 /run/vicionpower
 
-for svc in $SERVICES; do
-  pfx="/vicionpower/$ENVN/$svc/"
+COMPOSE_SERVICES=""
+for spec in $SERVICES; do
+  svc="${spec%%@*}"
+  cfg_svc="$svc"
+  if [ "$spec" != "$svc" ]; then
+    cfg_svc="${spec#*@}"
+  fi
+  COMPOSE_SERVICES="$COMPOSE_SERVICES $svc"
+  pfx="/vicionpower/$ENVN/$cfg_svc/"
   : > "/run/vicionpower/$svc.env"
   chmod 600 "/run/vicionpower/$svc.env"
   # aws ssm get-parameters-by-path auto-pagina; --output text devuelve valores raw (sin quotes JSON)
@@ -69,24 +78,24 @@ for svc in $SERVICES; do
   # se omite en silencio → migración sin downtime (crear secreto → redeploy → borrar
   # el SecureString de SSM). Requiere jq en el host.
   sm=$(aws secretsmanager get-secret-value --region "$REGION" \
-        --secret-id "vicionpower/$ENVN/$svc" --query SecretString --output text 2>/dev/null || true)
+        --secret-id "vicionpower/$ENVN/$cfg_svc" --query SecretString --output text 2>/dev/null || true)
   if [ -n "${sm:-}" ] && [ "$sm" != "None" ]; then
     printf '%s' "$sm" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "/run/vicionpower/$svc.env"
-    echo "  (merged Secrets Manager secret for $svc)"
+    echo "  (merged Secrets Manager secret for $svc from $cfg_svc)"
   fi
 done
 
 export REGISTRY IMAGE_TAG="$IMAGE_TAG"
 
-docker compose -f "$COMPOSE" pull
-docker compose -f "$COMPOSE" up -d --remove-orphans
+docker compose -f "$COMPOSE" pull $COMPOSE_SERVICES
+docker compose -f "$COMPOSE" up -d --remove-orphans $COMPOSE_SERVICES
 
 # Health gate: dar tiempo a que los contenedores arranquen
 sleep 5
 docker compose -f "$COMPOSE" ps
 
 FAIL=0
-for svc in $SERVICES; do
+for svc in $COMPOSE_SERVICES; do
   cid=$(docker compose -f "$COMPOSE" ps -q "$svc" 2>/dev/null || true)
   if [ -z "$cid" ]; then
     echo "UNHEALTHY: $svc (contenedor no encontrado)"

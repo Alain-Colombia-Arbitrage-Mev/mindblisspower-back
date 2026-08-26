@@ -136,19 +136,14 @@ gh workflow run deploy.yml -f tag=<git-sha-anterior> -f environment=prod
 
 ## 5. Limitaciones conocidas / TODO
 
-### 5.1 Config per-host del vp-engine (CRÍTICO)
+### 5.1 Config per-host del vp-engine
 
-**Problema:** server1/vp-engine requiere la config en `/vicionpower/prod/s1-vp-engine/`
-(sin TLS), pero `remote-deploy.sh` lee por defecto de `/vicionpower/prod/vp-engine/`
-(= config de server2, con TLS). Un deploy automatizado a server1 inyectaría la config
-de server2 y el engine de server1 **crashearía**.
-
-**Mitigación actual:** el deploy es manual; el operador no ejecuta `deploy.yml` contra
-server1 con la config de vp-engine sin verificar el path correcto.
-
-**Fix pendiente:** que `remote-deploy.sh` / `ci-ssm-deploy.sh` acepten un override de
-path SSM per-host (p.ej. embebido en el target string del SSM Run Command), de modo que
-server1/vp-engine lea siempre de `s1-vp-engine/` y no de `vp-engine/`.
+server1/vp-engine requiere la config en `/vicionpower/prod/s1-vp-engine/`
+(sin TLS), mientras server2/vp-engine usa `/vicionpower/prod/vp-engine/`
+(con TLS). `deploy.yml` soporta overrides con formato `servicio@path-ssm`;
+el target productivo usa `vp-engine@s1-vp-engine` en server1, de modo que el
+contenedor sigue llamándose `vp-engine` pero sus env/secrets salen del path
+correcto.
 
 ---
 
