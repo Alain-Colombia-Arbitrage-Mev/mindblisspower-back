@@ -50,6 +50,8 @@ jobs:
           - { repo: vp/vp-engine,   context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile,  cmd: vp-engine }
           - { repo: vp/vp-payments, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile,  cmd: vp-payments }
           - { repo: vp/vp-withdrawals, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-withdrawals }
+          - { repo: vp/vp-support, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-support }
+          - { repo: vp/vp-kb-indexer, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-kb-indexer }
     steps:
       - uses: actions/checkout@v7
       - uses: aws-actions/configure-aws-credentials@v6

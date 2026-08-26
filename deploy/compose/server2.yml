@@ -36,17 +36,31 @@ services:
     volumes:
       - /opt/vicion/qdrant:/qdrant/storage
     stop_grace_period: 20s
+  falkordb:
+    image: falkordb/falkordb-server:latest
+    restart: unless-stopped
+    network_mode: host  # REDIS_ARGS debe fijar --bind 127.0.0.1 --port 6380
+    env_file: [/run/vicionpower/falkordb.env]
+    volumes:
+      - /opt/vicion/falkordb:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p 6380 -a \"$${FALKORDB_PASSWORD}\" ping | grep PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 20s
   vp-support:
-    image: ${REGISTRY}/vp/vp-support:kb-v2
+    image: ${REGISTRY}/vp/vp-support:${IMAGE_TAG}
     restart: unless-stopped
     network_mode: host  # bind 0.0.0.0:9096; el SG mantiene el puerto cerrado al público
     env_file: [/run/vicionpower/vp-support.env]
-    depends_on: [qdrant]
+    depends_on: [qdrant, falkordb]
     stop_grace_period: 20s
   vp-kb-indexer:
-    image: ${REGISTRY}/vp/vp-kb-indexer:kb-v2
+    image: ${REGISTRY}/vp/vp-kb-indexer:${IMAGE_TAG}
     restart: unless-stopped
     network_mode: host
     env_file: [/run/vicionpower/vp-kb-indexer.env]
-    depends_on: [qdrant]
+    depends_on: [qdrant, falkordb]
     stop_grace_period: 20s

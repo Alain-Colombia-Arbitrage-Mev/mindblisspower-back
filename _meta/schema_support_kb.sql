@@ -4,6 +4,7 @@
 -- Decisión 2026-07-09:
 --   - Postgres = FUENTE DE VERDAD de los documentos; Qdrant = índice vectorial
 --     DERIVADO y reconstruible (vp-kb-indexer --rebuild).
+--   - FalkorDB = grafo DERIVADO para relaciones documento/chunk/categoría.
 --   - Embeddings: intfloat/multilingual-e5-large vía OpenRouter.
 --     Reglas duras del modelo: prefijos "passage: "/"query: ", límite 512
 --     tokens ⇒ chunks ≤ ~400 tokens, 1024 dims, distancia Cosine.
@@ -59,6 +60,7 @@ CREATE TABLE support.kb_chunks (
   metadata     jsonb       NOT NULL DEFAULT '{}'::jsonb,
   updated_at   timestamptz NOT NULL DEFAULT now(),
   embedded_at  timestamptz,                       -- NULL ⇒ pendiente de embeber
+  graph_synced_at timestamptz,                     -- NULL ⇒ pendiente de sincronizar a FalkorDB
   embed_model  text,                              -- modelo con el que se embebió
   UNIQUE (doc_id, ord)
 );
@@ -68,6 +70,9 @@ CREATE INDEX kb_chunks_pending_idx ON support.kb_chunks (updated_at)
   WHERE embedded_at IS NULL;
 
 CREATE INDEX kb_chunks_doc_idx ON support.kb_chunks (doc_id);
+
+CREATE INDEX kb_chunks_graph_pending_idx ON support.kb_chunks (updated_at)
+  WHERE graph_synced_at IS NULL;
 
 -- =============================================================================
 -- 3. updated_at automático (mismo patrón que el resto del schema)

@@ -49,7 +49,9 @@ func run() error {
 	logger := log.New("vp-kb-indexer", cfg.LogLevel)
 	logger.Info().Str("version", version).Str("commit", commit).
 		Str("model", supportkb.EmbedModel).Int("dims", supportkb.EmbedDims).
-		Str("collection", cfg.Collection).Msg("vp-kb-indexer starting")
+		Str("collection", cfg.Collection).
+		Str("falkor_graph", cfg.FalkorGraphName).
+		Msg("vp-kb-indexer starting")
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -79,9 +81,27 @@ func run() error {
 	}
 
 	ix := supportkb.NewIndexer(pool, emb, qd, cfg.BatchSize, logger)
+	graphReady := false
+	graph, err := supportkb.NewFalkorDB(cfg.FalkorDBURL, cfg.FalkorGraphName, cfg.FalkorTimeout)
+	if err != nil {
+		logger.Warn().Err(err).Msg("FalkorDB config inválida; GraphRAG sync deshabilitado")
+	} else if graph != nil {
+		defer graph.Close()
+		if err := graph.Ping(rootCtx); err != nil {
+			logger.Warn().Err(err).Msg("FalkorDB no disponible; se reintentará en próximos reinicios")
+		} else {
+			ix.SetGraph(graph)
+			graphReady = true
+			logger.Info().Str("graph", cfg.FalkorGraphName).Msg("FalkorDB sync enabled")
+		}
+	}
 
 	if *query != "" {
-		hits, qerr := supportkb.NewSearcher(emb, qd).Search(rootCtx, *query, supportkb.SearchOpts{
+		sr := supportkb.NewSearcher(emb, qd)
+		if graphReady {
+			sr.SetGraph(graph, cfg.FalkorExpand)
+		}
+		hits, qerr := sr.Search(rootCtx, *query, supportkb.SearchOpts{
 			Visibility: supportkb.VisibilityFor("member"),
 			Lang:       "es",
 			TopK:       5,
