@@ -50,6 +50,7 @@ DECLARE
 BEGIN
   FOREACH role_name IN ARRAY ARRAY['vp_engine','engine_write','app_write','app_admin'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('GRANT USAGE ON SCHEMA support TO %I', role_name);
       EXECUTE format('GRANT SELECT, INSERT, UPDATE ON support.call_session TO %I', role_name);
       EXECUTE format('GRANT SELECT, INSERT, UPDATE ON support.ticket TO %I', role_name);
     END IF;
@@ -57,6 +58,7 @@ BEGIN
 
   FOREACH role_name IN ARRAY ARRAY['engine_read','app_read'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('GRANT USAGE ON SCHEMA support TO %I', role_name);
       EXECUTE format('GRANT SELECT ON support.call_session TO %I', role_name);
       EXECUTE format('GRANT SELECT ON support.ticket TO %I', role_name);
     END IF;
