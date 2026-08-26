@@ -26,8 +26,7 @@ services:
     volumes:
       - /etc/vp-engine/tls:/etc/vp-engine/tls:ro
     stop_grace_period: 20s
-  # --- Soporte RAG (KB) — imágenes con tag propio (kb-v*), NO siguen IMAGE_TAG:
-  # se despliegan aparte y los deploys de api/vp-engine no deben tocarlas.
+  # --- Soporte RAG (KB): qdrant/falkordb mantienen imagen fija; los servicios Go siguen IMAGE_TAG.
   qdrant:
     image: qdrant/qdrant:v1.15.1
     restart: unless-stopped
@@ -44,7 +43,7 @@ services:
     volumes:
       - /opt/vicion/falkordb:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -p 6380 -a \"$${FALKORDB_PASSWORD}\" ping | grep PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${FALKORDB_PASSWORD}\" redis-cli -p 6380 ping | grep PONG"]
       interval: 30s
       timeout: 10s
       retries: 5
