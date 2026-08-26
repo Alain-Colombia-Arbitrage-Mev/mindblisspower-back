@@ -52,6 +52,7 @@ jobs:
           - { repo: vp/vp-withdrawals, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-withdrawals }
           - { repo: vp/vp-support, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-support }
           - { repo: vp/vp-kb-indexer, context: vp-engine, dockerfile: vp-engine/deployments/Dockerfile, cmd: vp-kb-indexer }
+          - { repo: vp/vp-voice-agent, context: vp-voice-agent, dockerfile: vp-voice-agent/Dockerfile, cmd: "" }
     steps:
       - uses: actions/checkout@v7
       - uses: aws-actions/configure-aws-credentials@v6
@@ -59,6 +60,8 @@ jobs:
           role-to-assume: arn:aws:iam::522814703714:role/vp-gha-deploy
           aws-region: ${{ env.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2.1.7
+      - uses: docker/setup-qemu-action@v4
+        with: { platforms: arm64 }
       - uses: docker/setup-buildx-action@v4
       - name: env tag
         id: t

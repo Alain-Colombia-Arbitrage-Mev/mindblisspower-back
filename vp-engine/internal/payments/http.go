@@ -79,6 +79,9 @@ type Handler struct {
 	voiceSayLanguage      string
 	voiceGatherLanguage   string
 	voiceGatherTimeoutSec int
+	voiceAgentMode        string
+	pipecatStreamURL      string
+	pipecatStreamSecret   string
 }
 
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
@@ -210,6 +213,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/support/voice/twilio/process", h.handleTwilioVoiceProcess)
 	mux.HandleFunc("/api/support/voice/twilio/status", h.handleTwilioVoiceStatus)
 	mux.HandleFunc("/api/support/whatsapp/twilio", h.handleTwilioWhatsApp)
+	mux.HandleFunc("/internal/support/voice/turn", h.handleInternalVoiceTurn)
 	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
 	mux.HandleFunc("/api/support/tickets", h.handleMemberTickets)
 	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)

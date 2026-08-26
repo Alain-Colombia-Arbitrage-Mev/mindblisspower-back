@@ -23,7 +23,14 @@ app.mindblisspower.com {
         reverse_proxy 127.0.0.1:9095
     }
 
-    # 3) Todo lo demás → app Next (incluye el BFF /api/payments/checkout y /me)
+    # 3) Pipecat Media Streams. Twilio llega a
+    # /api/support/voice/pipecat/ws y el runner escucha /ws.
+    handle /api/support/voice/pipecat/* {
+        uri strip_prefix /api/support/voice/pipecat
+        reverse_proxy 127.0.0.1:7860
+    }
+
+    # 4) Todo lo demás → app Next (incluye el BFF /api/payments/checkout y /me)
     handle {
         reverse_proxy 127.0.0.1:3000
     }

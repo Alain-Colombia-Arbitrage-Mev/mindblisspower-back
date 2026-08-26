@@ -40,6 +40,81 @@ func TestTwilioVoiceInitialReturnsGatherWithoutDB(t *testing.T) {
 	}
 }
 
+func TestTwilioVoiceInitialReturnsPipecatStreamWhenEnabled(t *testing.T) {
+	h := &Handler{store: &Store{}, log: zerolog.Nop()}
+	h.SetTwilioSupportChannels("", "", false, 3, "es-MX", "es-CO", 5)
+	h.SetPipecatVoiceAgent("pipecat", "wss://app.mindblisspower.com/api/support/voice/pipecat/ws", "stream-secret")
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	form := url.Values{
+		"CallSid": {"CA123"},
+		"From":    {"+573046572009"},
+		"To":      {"+15551234567"},
+	}
+	resp, err := http.Post(srv.URL+"/api/support/voice/twilio", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("voice webhook: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	text := string(body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, text)
+	}
+	if !strings.Contains(text, "<Connect><Stream") ||
+		!strings.Contains(text, `url="wss://app.mindblisspower.com/api/support/voice/pipecat/ws"`) ||
+		!strings.Contains(text, `name="mb_call_sid" value="CA123"`) ||
+		!strings.Contains(text, `name="mb_sig" value="`) {
+		t.Fatalf("body = %s, want signed Pipecat stream", text)
+	}
+	if strings.Contains(text, "<Gather") {
+		t.Fatalf("body = %s, did not want Gather when Pipecat is enabled", text)
+	}
+}
+
+func TestTwilioVoicePipecatFallsBackWithoutSecureURLAndSecret(t *testing.T) {
+	h := &Handler{store: &Store{}, log: zerolog.Nop()}
+	h.SetTwilioSupportChannels("", "", false, 3, "es-MX", "es-CO", 5)
+	h.SetPipecatVoiceAgent("pipecat", "http://app.mindblisspower.com/ws", "")
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	form := url.Values{"CallSid": {"CA123"}}
+	resp, err := http.Post(srv.URL+"/api/support/voice/twilio", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("voice webhook: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "<Gather") {
+		t.Fatalf("body = %s, want Gather fallback", string(body))
+	}
+}
+
+func TestSignPipecatStreamContract(t *testing.T) {
+	got := signPipecatStream("s", "CA123", "123", "voice")
+	want := "fff01464eb3b4c396900ab4994b2c40cd8738050479e396b0856d01a57eed881"
+	if got != want {
+		t.Fatalf("signature = %s, want %s", got, want)
+	}
+}
+
+func TestInternalVoiceTurnRequiresServiceToken(t *testing.T) {
+	h := &Handler{store: &Store{}, serviceToken: "svc", log: zerolog.Nop()}
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/internal/support/voice/turn", "application/json", strings.NewReader(`{"call_sid":"CA123","user_message":"no veo mi arbol"}`))
+	if err != nil {
+		t.Fatalf("voice turn: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
 func TestTwilioWhatsAppIgnoresNonSupportWithoutDB(t *testing.T) {
 	h := &Handler{store: &Store{}, log: zerolog.Nop()}
 	h.SetTwilioSupportChannels("", "", false, 3, "es-MX", "es-CO", 5)
