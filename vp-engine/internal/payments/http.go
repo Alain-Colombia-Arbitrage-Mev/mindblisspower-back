@@ -62,6 +62,13 @@ type Handler struct {
 	// resume usa serviceToken como clave.
 	resumeBaseURL string
 	successURL    string
+
+	// Motor de soporte IA (vp-support + Qdrant/OpenRouter). Auto-draft no envia
+	// correo; auto-reply queda opt-in por env para evitar respuestas no auditadas.
+	supportAIURL       string
+	supportAIToken     string
+	supportAIAutoDraft bool
+	supportAIAutoReply bool
 }
 
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
@@ -184,9 +191,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/otp-check", h.handleAdminOtpCheck)
 	mux.HandleFunc("/api/admin/tickets", h.handleAdminTickets)
 	mux.HandleFunc("/api/admin/tickets/action", h.handleAdminTicketAction)
+	mux.HandleFunc("/api/admin/tickets/agents", h.handleAdminTicketAgents)
 	mux.HandleFunc("/api/admin/email", h.handleAdminEmail)
 	mux.HandleFunc("/api/admin/news", h.handleAdminNews)
 	mux.HandleFunc("/api/support/access-help", h.handleAccessHelp)
+	mux.HandleFunc("/api/support/email/ingest", h.handleSupportEmailIngest)
 	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
 	mux.HandleFunc("/api/support/tickets", h.handleMemberTickets)
 	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)
