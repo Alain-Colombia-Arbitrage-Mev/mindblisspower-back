@@ -4,6 +4,7 @@
 # - Keep every port bound to 127.0.0.1. Do not open 6333/6334/6380/9096 in SGs.
 # - Qdrant is the derived vector index. Postgres support.kb_* stays canonical.
 # - FalkorDB is the graph memory layer for relationships/categories/entities.
+# - FalkorDB Browser is exposed only on 127.0.0.1:33000 for SSH-tunneled admin use.
 # - OpenRouter keys live only in the env file or Secrets Manager.
 #
 # Run:
@@ -49,6 +50,22 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+
+  falkordb-browser:
+    image: falkordb/falkordb-browser:latest
+    container_name: mindbrain-falkordb-browser
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FALKORDB_BROWSER_PORT:-33000}:3000"
+    environment:
+      FALKORDB_URL: redis://mindbrain-falkordb:6379
+      FALKORDB_PASSWORD: ${FALKORDB_PASSWORD:?missing FALKORDB_PASSWORD}
+      ENCRYPTION_KEY: ${FALKORDB_BROWSER_ENCRYPTION_KEY:?missing FALKORDB_BROWSER_ENCRYPTION_KEY}
+      NEXTAUTH_URL: ${FALKORDB_BROWSER_NEXTAUTH_URL:-http://127.0.0.1:33000}
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    mem_limit: 512m
 
   vp-support:
     image: ${REGISTRY:?missing REGISTRY}/vp/vp-support:${SUPPORT_IMAGE_TAG:-kb-v2}

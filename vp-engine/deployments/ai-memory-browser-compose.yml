@@ -1,0 +1,22 @@
+# Optional private FalkorDB Browser overlay for support memory operations.
+#
+# Use with the ai-memory stack:
+#   docker compose -f docker-compose.yml -f ai-memory-browser-compose.yml up -d falkordb-browser
+#
+# The browser is intentionally bound to 127.0.0.1 and should be reached through SSH tunneling.
+services:
+  falkordb-browser:
+    image: falkordb/falkordb-browser:latest
+    container_name: mindbrain-falkordb-browser
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FALKORDB_BROWSER_PORT:-33000}:3000"
+    environment:
+      FALKORDB_URL: redis://mindbrain-falkordb:6379
+      FALKORDB_PASSWORD: ${FALKORDB_PASSWORD:?missing FALKORDB_PASSWORD}
+      ENCRYPTION_KEY: ${FALKORDB_BROWSER_ENCRYPTION_KEY:?missing FALKORDB_BROWSER_ENCRYPTION_KEY}
+      NEXTAUTH_URL: ${FALKORDB_BROWSER_NEXTAUTH_URL:-http://127.0.0.1:33000}
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    mem_limit: 512m
