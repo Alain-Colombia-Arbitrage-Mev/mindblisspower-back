@@ -656,7 +656,10 @@ func (h *Handler) handleAuthUserExists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"exists":            access.Exists,
 		"checked":           true,
+		"enabled":           access.Exists && access.Enabled,
+		"status":            access.Status,
 		"confirmed":         access.Exists && access.Status == "CONFIRMED",
+		"email_verified":    access.EmailVerified,
 		"phone_linked":      access.PhoneLinked,
 		"phone_verified":    access.PhoneVerified,
 		"phone_destination": maskPhoneNumber(access.PhoneNumber),

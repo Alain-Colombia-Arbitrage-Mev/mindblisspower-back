@@ -113,6 +113,8 @@ func (h *Handler) handleAdminOtpCheck(w http.ResponseWriter, r *http.Request) {
 		diagnosis = "sin_confirmar" // registró pero no confirmó → OTP de login no se envía
 	case !access.Enabled:
 		diagnosis = "deshabilitado"
+	case !access.EmailVerified:
+		diagnosis = "email_sin_validar"
 	case !access.PhoneLinked:
 		diagnosis = "telefono_no_vinculado"
 	case !access.PhoneVerified:
@@ -125,6 +127,7 @@ func (h *Handler) handleAdminOtpCheck(w http.ResponseWriter, r *http.Request) {
 		"cognito_confirmed": access.Exists && access.Status == "CONFIRMED",
 		"cognito_enabled":   access.Enabled,
 		"cognito_status":    access.Status,
+		"email_verified":    access.EmailVerified,
 		"phone_linked":      access.PhoneLinked,
 		"phone_verified":    access.PhoneVerified,
 		"phone_destination": maskPhoneNumber(access.PhoneNumber),

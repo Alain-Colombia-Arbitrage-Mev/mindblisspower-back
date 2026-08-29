@@ -28,6 +28,7 @@ type CognitoUserAccessStatus struct {
 	Exists        bool
 	Enabled       bool
 	Status        string
+	EmailVerified bool
 	PhoneNumber   string
 	PhoneLinked   bool
 	PhoneVerified bool
@@ -104,6 +105,8 @@ func (c *CognitoAdmin) GetUserAccessStatus(ctx context.Context, email string) (C
 			value = strings.TrimSpace(*attr.Value)
 		}
 		switch name {
+		case "email_verified":
+			status.EmailVerified = strings.EqualFold(value, "true")
 		case "phone_number":
 			status.PhoneNumber = value
 			status.PhoneLinked = value != ""
