@@ -160,6 +160,7 @@ type PurchaseIntent struct {
 	PersonID            int64
 	AffiliateID         *int64
 	SponsorAffiliateID  *int64
+	ReferralCode        string
 	PackageID           int
 	PV                  int
 	AmountUSD           decimal.Decimal
@@ -238,16 +239,24 @@ func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (st
 	var id string
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO payments.purchase_intent (
-			user_id, person_id, affiliate_id, sponsor_affiliate_id,
+			user_id, person_id, affiliate_id, sponsor_affiliate_id, referral_code,
 			package_id, pv, amount_usd, fee_usd, total_cents, currency, status
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'created')
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'created')
 		RETURNING id::text
 	`, in.UserID, in.PersonID, in.AffiliateID, in.SponsorAffiliateID,
-		in.PackageID, in.PV, in.AmountUSD.String(), in.FeeUSD.String(), in.TotalCents, in.Currency).Scan(&id)
+		emptyToNil(in.ReferralCode), in.PackageID, in.PV, in.AmountUSD.String(), in.FeeUSD.String(), in.TotalCents, in.Currency).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create purchase_intent: %w", err)
 	}
 	return id, nil
+}
+
+func emptyToNil(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // AttachSession guarda el id de la sesión de Checkout creada.
