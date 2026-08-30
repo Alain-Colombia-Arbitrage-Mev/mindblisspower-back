@@ -70,7 +70,9 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 		       COALESCE(a.left_count,0), COALESCE(a.right_count,0),
 		       (a.id IS NOT NULL) AS positioned,
 		       COALESCE((SELECT SUM(amount_usd+fee_usd) FROM payments.purchase_intent pi
-		                  WHERE lower(pi.user_id)=lower(p.email) AND pi.status IN ('paid','activated')),0)::text AS total_paid,
+		                  WHERE (pi.person_id = p.id OR (pi.person_id IS NULL AND lower(pi.user_id)=lower(p.email)))
+		                    AND pi.status IN ('paid','activated')
+		                    AND pi.stripe_present IS DISTINCT FROM false),0)::text AS total_paid,
 		       COALESCE((SELECT count(*) FROM mlm.affiliate_package ap
 		                  WHERE ap.affiliate_id=a.id AND ap.status='active'),0) AS active_packages
 		  FROM mlm.person p

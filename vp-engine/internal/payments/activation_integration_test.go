@@ -161,6 +161,87 @@ func TestActivatePaidPurchase_Integration(t *testing.T) {
 	}
 }
 
+func TestMemberSummaryFiltersPaymentsByAuthoritativePerson(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type)
+		VALUES (1001,'Pack 100',100,100,'enrollment');
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (1,'Target','User','target@t.local','0','active'),
+		  (2,'Other','User','other@t.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed people/package: %v", err)
+	}
+
+	var otherAff int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (2, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&otherAff); err != nil {
+		t.Fatalf("other affiliate: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO payments.purchase_intent
+		  (id, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv,
+		   amount_usd, fee_usd, total_cents, currency, status, stripe_session_id, stripe_present)
+		VALUES
+		  ('00000000-0000-0000-0000-000000000001','target@t.local',1,NULL,NULL,1001,100,100,1,10100,'usd','created','cs_target_pending',NULL),
+		  ('00000000-0000-0000-0000-000000000002','target@t.local',2,$1,NULL,1001,100,100,1,10100,'usd','created','cs_wrong_person',NULL),
+		  ('00000000-0000-0000-0000-000000000004','target@t.local',1,NULL,NULL,1001,100,100,1,10100,'usd','activated','cs_test_false',false),
+		  ('00000000-0000-0000-0000-000000000005','target@t.local',1,NULL,NULL,1001,100,10,1,1100,'usd','activated','cs_live_person',true),
+		  ('00000000-0000-0000-0000-000000000007','target@t.local',2,$1,NULL,1001,100,30,3,3300,'usd','activated','cs_live_wrong_person',true)
+	`, otherAff); err != nil {
+		t.Fatalf("seed intents: %v", err)
+	}
+
+	store := NewStore(pool)
+	sum, err := store.GetMemberSummary(ctx, "target@t.local")
+	if err != nil {
+		t.Fatalf("member summary: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, payment := range sum.Payments {
+		seen[payment.PurchaseID] = true
+	}
+	for _, want := range []string{
+		"00000000-0000-0000-0000-000000000001",
+		"00000000-0000-0000-0000-000000000005",
+	} {
+		if !seen[want] {
+			t.Fatalf("expected payment %s in member summary; got %#v", want, seen)
+		}
+	}
+	for _, blocked := range []string{
+		"00000000-0000-0000-0000-000000000002",
+		"00000000-0000-0000-0000-000000000004",
+		"00000000-0000-0000-0000-000000000007",
+	} {
+		if seen[blocked] {
+			t.Fatalf("payment %s should not be visible in member summary", blocked)
+		}
+	}
+
+	users, _, err := store.ListUsers(ctx, "target@t.local", 10, 0)
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("users = %d, want 1", len(users))
+	}
+	totalPaid, err := decimal.NewFromString(users[0].TotalPaidUSD)
+	if err != nil {
+		t.Fatalf("parse total paid %q: %v", users[0].TotalPaidUSD, err)
+	}
+	if !totalPaid.Equal(decimal.NewFromInt(11)) {
+		t.Fatalf("total paid = %s, want 11", totalPaid)
+	}
+}
+
 // Pago sin sponsor ni afiliado → queda 'needs_placement' (no crashea).
 func TestActivate_NeedsPlacement_Integration(t *testing.T) {
 	pool, cleanup := pgContainer(t)
