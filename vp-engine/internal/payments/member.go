@@ -183,13 +183,14 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 	out.AffiliateID = affiliateID
 	out.Positioned = affiliateID != nil
 
-	// Pagos del miembro (por email; user_id guarda el email).
+	// Pagos del miembro. person_id es la identidad autoritativa; user_id solo es
+	// fallback para intents legacy sin persona ligada.
 	rows, err := reader.Query(ctx, `
-		SELECT id::text, package_id, amount_usd::text, fee_usd::text,
-		       (amount_usd + fee_usd)::text, status,
-		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'),
-		       COALESCE(to_char(paid_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
-		       COALESCE(to_char(activated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
+		SELECT pi.id::text, pi.package_id, pi.amount_usd::text, pi.fee_usd::text,
+		       (pi.amount_usd + pi.fee_usd)::text, pi.status,
+		       to_char(pi.created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'),
+		       COALESCE(to_char(pi.paid_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
+		       COALESCE(to_char(pi.activated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
 		       pi.sponsor_affiliate_id,
 		       COALESCE(trim(sp.first_name||' '||sp.last_name), ''),
 		       COALESCE(sp.email, ''),
@@ -197,8 +198,8 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 		  FROM payments.purchase_intent pi
 		  LEFT JOIN mlm.affiliate sa ON sa.id = pi.sponsor_affiliate_id
 		  LEFT JOIN mlm.person sp ON sp.id = sa.person_id
-		 WHERE lower(pi.user_id) = lower($1)
-		    OR pi.person_id = $2
+		 WHERE (pi.person_id = $2 OR (pi.person_id IS NULL AND lower(pi.user_id) = lower($1)))
+		   AND pi.stripe_present IS DISTINCT FROM false
 		 ORDER BY pi.created_at DESC
 		 LIMIT 100
 	`, email, personID)
