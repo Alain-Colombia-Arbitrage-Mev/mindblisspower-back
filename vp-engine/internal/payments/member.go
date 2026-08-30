@@ -16,15 +16,19 @@ import (
 
 // MemberPayment es una compra hecha por el miembro (payments.purchase_intent).
 type MemberPayment struct {
-	PurchaseID  string `json:"purchase_id"`
-	PackageID   int    `json:"package_id"`
-	AmountUSD   string `json:"amount_usd"` // valor del pack
-	FeeUSD      string `json:"fee_usd"`    // 1% activación
-	TotalUSD    string `json:"total_usd"`  // cobrado
-	Status      string `json:"status"`     // created|paid|activated|needs_placement|...
-	CreatedAt   string `json:"created_at"`
-	PaidAt      string `json:"paid_at,omitempty"`
-	ActivatedAt string `json:"activated_at,omitempty"`
+	PurchaseID         string `json:"purchase_id"`
+	PackageID          int    `json:"package_id"`
+	AmountUSD          string `json:"amount_usd"` // valor del pack
+	FeeUSD             string `json:"fee_usd"`    // 1% activación
+	TotalUSD           string `json:"total_usd"`  // cobrado
+	Status             string `json:"status"`     // created|paid|activated|needs_placement|...
+	CreatedAt          string `json:"created_at"`
+	PaidAt             string `json:"paid_at,omitempty"`
+	ActivatedAt        string `json:"activated_at,omitempty"`
+	SponsorAffiliateID *int64 `json:"sponsor_affiliate_id,omitempty"`
+	SponsorName        string `json:"sponsor_name,omitempty"`
+	SponsorEmail       string `json:"sponsor_email,omitempty"`
+	ReferralCode       string `json:"referral_code,omitempty"`
 }
 
 // MemberWithdrawal es una solicitud de retiro del miembro.
@@ -185,12 +189,19 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 		       (amount_usd + fee_usd)::text, status,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'),
 		       COALESCE(to_char(paid_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
-		       COALESCE(to_char(activated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), '')
-		  FROM payments.purchase_intent
-		 WHERE lower(user_id) = lower($1)
-		 ORDER BY created_at DESC
+		       COALESCE(to_char(activated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), ''),
+		       pi.sponsor_affiliate_id,
+		       COALESCE(trim(sp.first_name||' '||sp.last_name), ''),
+		       COALESCE(sp.email, ''),
+		       COALESCE(pi.referral_code, '')
+		  FROM payments.purchase_intent pi
+		  LEFT JOIN mlm.affiliate sa ON sa.id = pi.sponsor_affiliate_id
+		  LEFT JOIN mlm.person sp ON sp.id = sa.person_id
+		 WHERE lower(pi.user_id) = lower($1)
+		    OR pi.person_id = $2
+		 ORDER BY pi.created_at DESC
 		 LIMIT 100
-	`, email)
+	`, email, personID)
 	if err != nil {
 		return MemberSummary{}, fmt.Errorf("list payments: %w", err)
 	}
@@ -198,7 +209,8 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 	for rows.Next() {
 		var p MemberPayment
 		if err := rows.Scan(&p.PurchaseID, &p.PackageID, &p.AmountUSD, &p.FeeUSD, &p.TotalUSD,
-			&p.Status, &p.CreatedAt, &p.PaidAt, &p.ActivatedAt); err != nil {
+			&p.Status, &p.CreatedAt, &p.PaidAt, &p.ActivatedAt, &p.SponsorAffiliateID,
+			&p.SponsorName, &p.SponsorEmail, &p.ReferralCode); err != nil {
 			return MemberSummary{}, fmt.Errorf("scan payment: %w", err)
 		}
 		out.Payments = append(out.Payments, p)
