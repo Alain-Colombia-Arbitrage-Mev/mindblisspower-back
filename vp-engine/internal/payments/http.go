@@ -1053,13 +1053,25 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sponsor: el del afiliado existente; si es comprador nuevo (sin sponsor) y
-	// vino con ?ref=CODE, resolvemos el código de referido → afiliado referidor.
+	// Sponsor: el del afiliado existente es autoritativo. Un ?ref=CODE sólo se
+	// usa para compradores aún no colocados; aplicar refs nuevos sobre afiliados
+	// existentes mezcla sesiones/navegadores y puede atribuir sponsors falsos.
 	sponsor := buyer.SponsorAffiliateID
-	if sponsor == nil && req.Ref != "" {
-		if s, rerr := h.store.ResolveSponsorByCode(ctx, req.Ref); rerr == nil && s != nil {
-			sponsor = s
+	referralCode := strings.TrimSpace(req.Ref)
+	referralCodeForIntent := ""
+	if buyer.AffiliateID == nil && sponsor == nil && referralCode != "" {
+		resolvedSponsor, rerr := h.store.ResolveSponsorByCode(ctx, referralCode)
+		if rerr != nil {
+			h.log.Error().Err(rerr).Str("email", req.Email).Msg("resolve referral code")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
 		}
+		if resolvedSponsor == nil {
+			writeErr(w, http.StatusBadRequest, "invalid_referral_code")
+			return
+		}
+		sponsor = resolvedSponsor
+		referralCodeForIntent = referralCode
 	}
 	// Sin sponsor (sin ?ref ni afiliado previo) → root de empresa (la activación
 	// derrama bajo él). Así nadie queda huérfano y el pago nunca se bloquea.
@@ -1073,6 +1085,7 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		PersonID:           buyer.PersonID,
 		AffiliateID:        buyer.AffiliateID,
 		SponsorAffiliateID: sponsor,
+		ReferralCode:       referralCodeForIntent,
 		PackageID:          pack.ID,
 		PV:                 pack.PV,
 		AmountUSD:          pack.AmountUSD,

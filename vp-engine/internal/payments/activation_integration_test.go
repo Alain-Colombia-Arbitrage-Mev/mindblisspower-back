@@ -187,3 +187,46 @@ func TestActivate_NeedsPlacement_Integration(t *testing.T) {
 		t.Fatalf("status = %q, want needs_placement", res.Status)
 	}
 }
+
+func TestCreatePurchaseIntentStoresReferralCode_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type)
+		VALUES (1001,'Pack 1.000',1000,500,'enrollment');
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (11,'Ref','Buyer','ref-buyer@t.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	id, err := NewStore(pool).CreatePurchaseIntent(ctx, PurchaseIntent{
+		UserID:             "ref-buyer@t.local",
+		PersonID:           11,
+		SponsorAffiliateID: ptrInt64(79295),
+		ReferralCode:       "martinezl14",
+		PackageID:          1001,
+		PV:                 500,
+		AmountUSD:          decimal.NewFromInt(1000),
+		FeeUSD:             decimal.NewFromInt(10),
+		TotalCents:         101000,
+		Currency:           "usd",
+	})
+	if err != nil {
+		t.Fatalf("create purchase intent: %v", err)
+	}
+
+	var referralCode string
+	if err := pool.QueryRow(ctx, `SELECT referral_code FROM payments.purchase_intent WHERE id=$1::uuid`, id).Scan(&referralCode); err != nil {
+		t.Fatalf("read referral code: %v", err)
+	}
+	if referralCode != "martinezl14" {
+		t.Fatalf("referral_code = %q, want martinezl14", referralCode)
+	}
+}
+
+func ptrInt64(v int64) *int64 {
+	return &v
+}
