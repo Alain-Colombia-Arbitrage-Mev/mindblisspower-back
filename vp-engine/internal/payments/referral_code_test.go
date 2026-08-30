@@ -1,6 +1,11 @@
 package payments
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
 
 // El código canónico MP{affiliateID} debe parsearse para el fallback de
 // ResolveSponsorByCode; los formatos legacy (@handle) o inválidos no.
@@ -24,5 +29,17 @@ func TestMPCodeRegex(t *testing.T) {
 		if got != want {
 			t.Errorf("mpCodeRe(%q) captured %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestIsUndefinedColumn(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "42703"})
+	if !isUndefinedColumn(err) {
+		t.Fatal("isUndefinedColumn returned false for SQLSTATE 42703")
+	}
+
+	other := fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505"})
+	if isUndefinedColumn(other) {
+		t.Fatal("isUndefinedColumn returned true for non-undefined-column error")
 	}
 }

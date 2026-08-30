@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
@@ -236,7 +237,30 @@ func (s *Store) MarkIntentRiskStatus(ctx context.Context, paymentIntentID, newSt
 }
 
 func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (string, error) {
+	id, err := s.createPurchaseIntent(ctx, in, true)
+	if isUndefinedColumn(err) {
+		return s.createPurchaseIntent(ctx, in, false)
+	}
+	return id, err
+}
+
+func (s *Store) createPurchaseIntent(ctx context.Context, in PurchaseIntent, includeReferralCode bool) (string, error) {
 	var id string
+	if !includeReferralCode {
+		err := s.db.QueryRow(ctx, `
+			INSERT INTO payments.purchase_intent (
+				user_id, person_id, affiliate_id, sponsor_affiliate_id,
+				package_id, pv, amount_usd, fee_usd, total_cents, currency, status
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'created')
+			RETURNING id::text
+		`, in.UserID, in.PersonID, in.AffiliateID, in.SponsorAffiliateID,
+			in.PackageID, in.PV, in.AmountUSD.String(), in.FeeUSD.String(), in.TotalCents, in.Currency).Scan(&id)
+		if err != nil {
+			return "", fmt.Errorf("create purchase_intent: %w", err)
+		}
+		return id, nil
+	}
+
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO payments.purchase_intent (
 			user_id, person_id, affiliate_id, sponsor_affiliate_id, referral_code,
@@ -249,6 +273,11 @@ func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (st
 		return "", fmt.Errorf("create purchase_intent: %w", err)
 	}
 	return id, nil
+}
+
+func isUndefinedColumn(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
 }
 
 func emptyToNil(value string) any {
