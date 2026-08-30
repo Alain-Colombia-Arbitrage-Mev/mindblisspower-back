@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -239,6 +240,52 @@ func TestMemberSummaryFiltersPaymentsByAuthoritativePerson(t *testing.T) {
 	}
 	if !totalPaid.Equal(decimal.NewFromInt(11)) {
 		t.Fatalf("total paid = %s, want 11", totalPaid)
+	}
+}
+
+func TestCartResumeAndReminderUseAuthoritativePersonEmail(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type)
+		VALUES (1001,'Pack 100',100,100,'enrollment');
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (1,'Real','Buyer','real-buyer@t.local','0','active');
+		INSERT INTO payments.purchase_intent
+		  (id, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv,
+		   amount_usd, fee_usd, total_cents, currency, status, stripe_session_id, created_at)
+		VALUES
+		  ('00000000-0000-0000-0000-000000000011','wrong-login@t.local',1,NULL,NULL,1001,100,100,1,10100,'usd','created','cs_resume_wrong_email',now() - interval '2 hours')
+	`); err != nil {
+		t.Fatalf("seed cart: %v", err)
+	}
+
+	store := NewStore(pool)
+	ri, err := store.CartResumeInfo(ctx, "00000000-0000-0000-0000-000000000011")
+	if err != nil {
+		t.Fatalf("cart resume info: %v", err)
+	}
+	if ri.Email != "real-buyer@t.local" {
+		t.Fatalf("resume email = %q, want authoritative person email", ri.Email)
+	}
+
+	cart, status, err := store.LoadCartForReminder(ctx, "00000000-0000-0000-0000-000000000011")
+	if err != nil {
+		t.Fatalf("load cart for reminder: %v", err)
+	}
+	if status != "created" || cart.Email != "real-buyer@t.local" {
+		t.Fatalf("manual reminder = status %q email %q, want created/real-buyer@t.local", status, cart.Email)
+	}
+
+	carts, err := store.AbandonedCartsForReminder(ctx, time.Now().Add(-24*time.Hour), 3, 10)
+	if err != nil {
+		t.Fatalf("abandoned carts: %v", err)
+	}
+	if len(carts) != 1 || carts[0].Email != "real-buyer@t.local" {
+		t.Fatalf("abandoned carts = %#v, want one with authoritative person email", carts)
 	}
 }
 

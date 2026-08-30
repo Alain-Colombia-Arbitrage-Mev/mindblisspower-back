@@ -64,9 +64,10 @@ type resumeInfo struct {
 func (s *Store) CartResumeInfo(ctx context.Context, intentID string) (resumeInfo, error) {
 	var ri resumeInfo
 	err := s.db.QueryRow(ctx, `
-		SELECT package_id, user_id, person_id, status
-		  FROM payments.purchase_intent
-		 WHERE id = $1::uuid
+		SELECT pi.package_id, COALESCE(p.email::text, pi.user_id), pi.person_id, pi.status
+		  FROM payments.purchase_intent pi
+		  LEFT JOIN mlm.person p ON p.id = pi.person_id
+		 WHERE pi.id = $1::uuid
 	`, intentID).Scan(&ri.PackageID, &ri.Email, &ri.PersonID, &ri.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return resumeInfo{}, ErrIntentNotFound
@@ -166,11 +167,12 @@ type abandonedCart struct {
 // último recordatorio hace >24h, y comprador NO suspendido/baneado.
 func (s *Store) AbandonedCartsForReminder(ctx context.Context, cutoff time.Time, maxCount, limit int) ([]abandonedCart, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT pi.id::text, pi.user_id,
-		       COALESCE((SELECT trim(p.first_name||' '||p.last_name) FROM mlm.person p WHERE p.id = pi.person_id), ''),
+		SELECT pi.id::text, COALESCE(p.email::text, pi.user_id),
+		       COALESCE(trim(p.first_name||' '||p.last_name), ''),
 		       pk.name, pi.amount_usd::text
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
+		  LEFT JOIN mlm.person p ON p.id = pi.person_id
 		 WHERE pi.status = 'created'
 		   AND pi.created_at >= $1
 		   AND pi.created_at <= now() - interval '1 hour'
@@ -178,14 +180,14 @@ func (s *Store) AbandonedCartsForReminder(ctx context.Context, cutoff time.Time,
 		   AND pi.reminder_count < $2
 		   AND (pi.reminder_sent_at IS NULL OR pi.reminder_sent_at <= now() - interval '24 hours')
 		   AND NOT EXISTS (
-		         SELECT 1 FROM mlm.person p
-		          WHERE p.id = pi.person_id
-		            AND (p.blacklisted OR p.status IN ('suspended','banned','deleted'))
+		         SELECT 1 FROM mlm.person blocked
+		          WHERE blocked.id = pi.person_id
+		            AND (blocked.blacklisted OR blocked.status IN ('suspended','banned','deleted'))
 		       )
 		   AND NOT EXISTS (
 		         SELECT 1 FROM mlm.blacklist b
 		          WHERE b.email_norm IS NOT NULL
-		            AND b.email_norm = mlm.norm_email(pi.user_id)
+		            AND b.email_norm = mlm.norm_email(COALESCE(p.email::text, pi.user_id))
 		       )
 		 ORDER BY pi.created_at
 		 LIMIT $3
@@ -218,11 +220,12 @@ func (s *Store) LoadCartForReminder(ctx context.Context, intentID string) (aband
 	var c abandonedCart
 	var status string
 	err := s.db.QueryRow(ctx, `
-		SELECT pi.id::text, pi.user_id,
-		       COALESCE((SELECT trim(p.first_name||' '||p.last_name) FROM mlm.person p WHERE p.id = pi.person_id), ''),
+		SELECT pi.id::text, COALESCE(p.email::text, pi.user_id),
+		       COALESCE(trim(p.first_name||' '||p.last_name), ''),
 		       pk.name, pi.amount_usd::text, pi.status
 		  FROM payments.purchase_intent pi
 		  JOIN mlm.package pk ON pk.id = pi.package_id
+		  LEFT JOIN mlm.person p ON p.id = pi.person_id
 		 WHERE pi.id = $1::uuid
 	`, intentID).Scan(&c.IntentID, &c.Email, &c.Name, &c.Plan, &c.Amount, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
