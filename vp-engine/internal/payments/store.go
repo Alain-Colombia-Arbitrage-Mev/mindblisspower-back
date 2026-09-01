@@ -106,6 +106,30 @@ func (s *Store) ResolveBuyer(ctx context.Context, email string) (Buyer, error) {
 	return b, nil
 }
 
+// SponsorIsBinaryAncestor valida que el patrocinador directo también sea
+// ancestro estructural del afiliado en el árbol binario.
+func (s *Store) SponsorIsBinaryAncestor(ctx context.Context, affiliateID, sponsorID int64) (bool, error) {
+	if affiliateID <= 0 || sponsorID <= 0 {
+		return false, nil
+	}
+	if affiliateID == sponsorID {
+		return true, nil
+	}
+	var ok bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM mlm.affiliate_closure
+			 WHERE ancestor_id = $1
+			   AND descendant_id = $2
+			   AND distance > 0
+		)`, sponsorID, affiliateID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("sponsor binary ancestor check: %w", err)
+	}
+	return ok, nil
+}
+
 // EnsurePerson garantiza que exista mlm.person para el email (auto-provisión de
 // usuarios nuevos de Cognito que aún no tienen fila en RDS). Idempotente por
 // email. Devuelve el person_id. La colocación en el árbol (affiliate) la hace la

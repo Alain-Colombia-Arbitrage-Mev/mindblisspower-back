@@ -1065,6 +1065,23 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if buyer.AffiliateID != nil && sponsor != nil {
+		aligned, err := h.store.SponsorIsBinaryAncestor(ctx, *buyer.AffiliateID, *sponsor)
+		if err != nil {
+			h.log.Error().Err(err).Str("email", req.Email).Msg("checkout sponsor/tree alignment")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		if !aligned {
+			h.log.Warn().
+				Str("email", req.Email).
+				Int64("affiliate_id", *buyer.AffiliateID).
+				Int64("sponsor_affiliate_id", *sponsor).
+				Msg("checkout blocked: sponsor is not a binary ancestor")
+			writeErr(w, http.StatusConflict, "tree_relocation_required")
+			return
+		}
+	}
 
 	intentID, err := h.store.CreatePurchaseIntent(ctx, PurchaseIntent{
 		UserID:             req.Email, // traceability: identificador externo del comprador
