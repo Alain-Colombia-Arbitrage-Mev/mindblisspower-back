@@ -901,12 +901,21 @@ func (h *Handler) handleRegistrationEvent(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
+		Email        string `json:"email"`
+		Name         string `json:"name"`
+		ReferralCode string `json:"referral_code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Email) == "" {
 		writeErr(w, http.StatusBadRequest, "email_required")
 		return
+	}
+	if code := strings.TrimSpace(req.ReferralCode); code != "" {
+		if _, err := h.store.RecordRegistrationReferral(r.Context(), req.Email, code); err != nil {
+			h.log.Warn().
+				Err(err).
+				Str("email", strings.ToLower(strings.TrimSpace(req.Email))).
+				Msg("registration event referral attribution skipped")
+		}
 	}
 	h.store.cache.PublishEvent(r.Context(), "member.registered", map[string]any{
 		"email": strings.ToLower(strings.TrimSpace(req.Email)),
