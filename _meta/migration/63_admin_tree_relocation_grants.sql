@@ -12,8 +12,5 @@ BEGIN
     GRANT SELECT, INSERT ON audit.activity_log TO vp_engine;
     GRANT SELECT, UPDATE ON payments.purchase_intent TO vp_engine;
     GRANT SELECT, INSERT, UPDATE ON payments.registration_referral TO vp_engine;
-
-    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA mlm TO vp_engine;
-    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA audit TO vp_engine;
   END IF;
 END $$;
