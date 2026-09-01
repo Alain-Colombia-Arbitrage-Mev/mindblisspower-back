@@ -3,7 +3,9 @@ package payments
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -140,10 +142,11 @@ func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		Email     string `json:"email"`
-		Phone     string `json:"phone"`
-		Name      string `json:"name"`
-		BirthDate string `json:"birth_date"`
+		Email        string `json:"email"`
+		Phone        string `json:"phone"`
+		Name         string `json:"name"`
+		BirthDate    string `json:"birth_date"`
+		ReferralCode string `json:"referral_code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
@@ -162,6 +165,81 @@ func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Requ
 			Str("email", strings.ToLower(strings.TrimSpace(req.Email))).
 			Str("reason", decision.Reason).
 			Msg("registro bloqueado: motor de baneo")
+		writeJSON(w, http.StatusOK, map[string]any{"blacklisted": true, "reason": decision.Reason})
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"blacklisted": decision.Blocked, "reason": decision.Reason})
+
+	resp := map[string]any{"blacklisted": false, "reason": ""}
+	if code := strings.TrimSpace(req.ReferralCode); code != "" {
+		sponsor, err := h.store.ResolveSponsorByCode(r.Context(), code)
+		if err != nil {
+			h.log.Error().Err(err).Str("email", strings.ToLower(strings.TrimSpace(req.Email))).Msg("registration referral")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"blacklisted": false,
+				"error":       "referral_precheck_unavailable",
+			})
+			return
+		}
+		if sponsor == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"blacklisted": false,
+				"error":       "invalid_referral_code",
+			})
+			return
+		}
+		resp["referral_valid"] = true
+		resp["referral_code"] = code
+		resp["sponsor_affiliate_id"] = *sponsor
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleRegistrationReferralAttribution persiste el referido capturado durante
+// el registro una vez que el BFF ya creó el usuario Cognito. Esto evita depender
+// exclusivamente de localStorage cuando el checkout ocurre en otra sesión.
+func (h *Handler) handleRegistrationReferralAttribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !h.svcAuth(w, r) {
+		return
+	}
+	var req struct {
+		Email        string `json:"email"`
+		ReferralCode string `json:"referral_code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if strings.TrimSpace(req.Email) == "" || strings.TrimSpace(req.ReferralCode) == "" {
+		writeErr(w, http.StatusBadRequest, "email_and_referral_required")
+		return
+	}
+	decision, err := h.store.BanDecisionFor(r.Context(), BanCandidate{Email: req.Email})
+	if err != nil {
+		h.log.Error().Err(err).Msg("registration referral ban decision")
+		writeErr(w, http.StatusServiceUnavailable, "precheck_unavailable")
+		return
+	}
+	if decision.Blocked {
+		writeErr(w, http.StatusForbidden, "blacklisted")
+		return
+	}
+	referral, err := h.store.RecordRegistrationReferral(r.Context(), req.Email, req.ReferralCode)
+	if errors.Is(err, ErrInvalidReferralCode) {
+		writeErr(w, http.StatusBadRequest, "invalid_referral_code")
+		return
+	}
+	if err != nil {
+		h.log.Error().Err(err).Str("email", strings.ToLower(strings.TrimSpace(req.Email))).Msg("record registration referral")
+		writeErr(w, http.StatusServiceUnavailable, "referral_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":               "ok",
+		"referral_code":        referral.Code,
+		"sponsor_affiliate_id": referral.SponsorAffiliateID,
+	})
 }

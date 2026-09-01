@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -352,6 +353,86 @@ func TestCreatePurchaseIntentStoresReferralCode_Integration(t *testing.T) {
 	}
 	if referralCode != "martinezl14" {
 		t.Fatalf("referral_code = %q, want martinezl14", referralCode)
+	}
+}
+
+func TestRegistrationReferralAttribution_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (21,'Tiburcio','Hernandez','tibhern@t.local','0','active'),
+		  (22,'Reynaldo','Sanchez','reynaldo@t.local','0','active');
+		INSERT INTO mlm.affiliate (id, person_id, parent_id, position, sponsor_id, status, path, depth, invitation_link)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (210,21,NULL,NULL,NULL,'active',''::ltree,0,'tiburcio65');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := NewStore(pool)
+	recorded, err := store.RecordRegistrationReferral(ctx, "REYNALDO@t.local", "tiburcio65")
+	if err != nil {
+		t.Fatalf("record registration referral: %v", err)
+	}
+	if recorded == nil || recorded.SponsorAffiliateID != 210 {
+		t.Fatalf("recorded sponsor = %#v, want affiliate 210", recorded)
+	}
+
+	found, err := store.LookupRegistrationReferral(ctx, "reynaldo@t.local")
+	if err != nil {
+		t.Fatalf("lookup registration referral: %v", err)
+	}
+	if found == nil || found.Code != "tiburcio65" || found.SponsorAffiliateID != 210 {
+		t.Fatalf("lookup = %#v, want tiburcio65/210", found)
+	}
+}
+
+func TestResolveCheckoutSponsorUsesStoredRegistrationReferral_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (31,'Tiburcio','Hernandez','tibhern@t.local','0','active'),
+		  (32,'Reynaldo','Sanchez','reynaldo@t.local','0','active');
+		INSERT INTO mlm.affiliate (id, person_id, parent_id, position, sponsor_id, status, path, depth, invitation_link)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (310,31,NULL,NULL,NULL,'active',''::ltree,0,'tiburcio65');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := NewStore(pool)
+	if _, err := store.RecordRegistrationReferral(ctx, "reynaldo@t.local", "tiburcio65"); err != nil {
+		t.Fatalf("record registration referral: %v", err)
+	}
+	handler := &Handler{store: store, companyRoot: 999}
+	sponsor, code, err := handler.resolveCheckoutSponsor(ctx, "reynaldo@t.local", Buyer{PersonID: 32}, "")
+	if err != nil {
+		t.Fatalf("resolve checkout sponsor: %v", err)
+	}
+	if sponsor == nil || *sponsor != 310 {
+		t.Fatalf("sponsor = %v, want 310", sponsor)
+	}
+	if code != "tiburcio65" {
+		t.Fatalf("referral code = %q, want tiburcio65", code)
+	}
+}
+
+func TestRecordRegistrationReferralRejectsInvalidCode_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := NewStore(pool).RecordRegistrationReferral(ctx, "buyer@t.local", "missing-code")
+	if !errors.Is(err, ErrInvalidReferralCode) {
+		t.Fatalf("err = %v, want ErrInvalidReferralCode", err)
 	}
 }
 

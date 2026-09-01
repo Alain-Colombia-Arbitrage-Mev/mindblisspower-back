@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	ErrPackNotFound   = errors.New("package not found or inactive")
-	ErrBuyerNotFound  = errors.New("buyer (person) not found for user_id")
-	ErrIntentNotFound = errors.New("purchase_intent not found for session")
+	ErrPackNotFound        = errors.New("package not found or inactive")
+	ErrBuyerNotFound       = errors.New("buyer (person) not found for user_id")
+	ErrIntentNotFound      = errors.New("purchase_intent not found for session")
+	ErrInvalidReferralCode = errors.New("invalid referral code")
 )
 
 // Store encapsula el acceso a Postgres del servicio de pagos.
@@ -278,6 +279,11 @@ func (s *Store) createPurchaseIntent(ctx context.Context, in PurchaseIntent, inc
 func isUndefinedColumn(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "42703"
+}
+
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
 func emptyToNil(value string) any {
