@@ -160,6 +160,31 @@ SELECT rr.email_norm,
  LIMIT 100;
 
 \echo == 3. Recent nonlegacy payment placements outside sponsor subtree ==
+WITH new_payment_affiliate AS (
+  SELECT pi.id AS intent_id, pi.user_id, pi.person_id, pi.affiliate_id, pi.sponsor_affiliate_id, pi.referral_code,
+         pi.created_at, pi.paid_at, pi.activated_at, pi.status,
+         a.created_at AS affiliate_created_at, a.sponsor_id AS actual_sponsor_id, a.legacy_id_vicionario,
+         EXISTS (
+           SELECT 1
+             FROM mlm.affiliate_closure c
+            WHERE c.ancestor_id = pi.sponsor_affiliate_id
+              AND c.descendant_id = pi.affiliate_id
+         ) AS intent_sponsor_is_ancestor
+    FROM payments.purchase_intent pi
+    JOIN mlm.affiliate a ON a.id = pi.affiliate_id
+   WHERE pi.status = 'activated'
+     AND pi.affiliate_id IS NOT NULL
+     AND (
+       a.created_at BETWEEN pi.created_at - interval '10 minutes'
+                        AND COALESCE(pi.activated_at, pi.paid_at, pi.updated_at, pi.created_at) + interval '10 minutes'
+       OR EXISTS (
+         SELECT 1
+           FROM mlm.tree_event te
+          WHERE te.external_ref = 'enroll:' || pi.affiliate_id::text
+            AND te.kind::text = 'enrollment'
+       )
+     )
+)
 SELECT n.intent_id,
        n.created_at,
        n.activated_at,
