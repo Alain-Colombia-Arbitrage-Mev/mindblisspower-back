@@ -176,6 +176,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/users/export", h.handleAdminUsersExport)
 	mux.HandleFunc("/api/admin/user", h.handleAdminUser)
 	mux.HandleFunc("/api/admin/user/branch-tree", h.handleAdminUserBranchTree)
+	mux.HandleFunc("/api/admin/user/tree-relocation", h.handleAdminUserTreeRelocation)
 	mux.HandleFunc("/api/admin/summary", h.handleAdminSummary)
 	mux.HandleFunc("/api/admin/block", h.handleAdminBlock)
 	mux.HandleFunc("/api/admin/blacklist", h.handleAdminBlacklist)

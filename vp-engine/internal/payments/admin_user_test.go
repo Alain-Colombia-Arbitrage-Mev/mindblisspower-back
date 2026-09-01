@@ -48,6 +48,7 @@ func TestAdminUserRoutes_Mounted(t *testing.T) {
 		{http.MethodPut, "/api/admin/user"},
 		{http.MethodDelete, "/api/admin/user"},
 		{http.MethodGet, "/api/admin/user/branch-tree?affiliate_id=1&email=admin@example.com"},
+		{http.MethodPost, "/api/admin/user/tree-relocation"},
 	}
 	for _, c := range cases {
 		req, _ := http.NewRequest(c.method, srv.URL+c.path, strings.NewReader("{}"))
@@ -58,6 +59,40 @@ func TestAdminUserRoutes_Mounted(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("%s %s: expected 401 without service token, got %d", c.method, c.path, resp.StatusCode)
+		}
+	}
+}
+
+// POST tree-relocation: exige super_admin, preview/confirmacion y parametros
+// completos antes de tocar la DB.
+func TestAdminUserTreeRelocation_Validation(t *testing.T) {
+	h := newInspectorTestHandler()
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	cases := []struct {
+		name    string
+		body    string
+		status  int
+		errCode string
+	}{
+		{"admin normal no puede", `{"email":"admin@example.com","person_id":5,"new_sponsor":"sponsor@example.com","reason":"corregir sponsor directo","dry_run":true}`, http.StatusForbidden, "not_super_admin"},
+		{"person_id faltante", `{"email":"root@example.com","new_sponsor":"sponsor@example.com","reason":"corregir sponsor directo","dry_run":true}`, http.StatusBadRequest, "missing_person_id"},
+		{"sponsor faltante", `{"email":"root@example.com","person_id":5,"reason":"corregir sponsor directo","dry_run":true}`, http.StatusBadRequest, "missing_sponsor"},
+		{"reason corto", `{"email":"root@example.com","person_id":5,"new_sponsor":"sponsor@example.com","reason":"fix","dry_run":true}`, http.StatusBadRequest, "reason_required"},
+		{"apply sin confirm", `{"email":"root@example.com","person_id":5,"new_sponsor":"sponsor@example.com","reason":"corregir sponsor directo","dry_run":false}`, http.StatusBadRequest, "confirm_required"},
+		{"position sin parent", `{"email":"root@example.com","person_id":5,"new_sponsor":"sponsor@example.com","target_position":"L","reason":"corregir sponsor directo","dry_run":true}`, http.StatusBadRequest, "target_parent_required"},
+		{"parent sin position", `{"email":"root@example.com","person_id":5,"new_sponsor":"sponsor@example.com","target_parent_affiliate_id":7,"reason":"corregir sponsor directo","dry_run":true}`, http.StatusBadRequest, "target_position_required"},
+		{"position invalida", `{"email":"root@example.com","person_id":5,"new_sponsor":"sponsor@example.com","target_parent_affiliate_id":7,"target_position":"X","reason":"corregir sponsor directo","dry_run":true}`, http.StatusBadRequest, "invalid_position"},
+		{"json inválido", `{`, http.StatusBadRequest, "invalid_json"},
+	}
+	for _, c := range cases {
+		resp, out := doInspectorReq(t, srv, http.MethodPost, "/api/admin/user/tree-relocation", c.body)
+		if resp.StatusCode != c.status {
+			t.Fatalf("%s: expected %d, got %d (%v)", c.name, c.status, resp.StatusCode, out)
+		}
+		if got, _ := out["error"].(string); got != c.errCode {
+			t.Fatalf("%s: expected error %q, got %q", c.name, c.errCode, got)
 		}
 	}
 }
