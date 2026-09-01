@@ -425,6 +425,25 @@ func TestResolveCheckoutSponsorUsesStoredRegistrationReferral_Integration(t *tes
 	}
 }
 
+func TestResolveCheckoutSponsorFallsBackToCompanyRootWithoutReferral_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	store := NewStore(pool)
+	handler := &Handler{store: store, companyRoot: 999}
+	sponsor, code, err := handler.resolveCheckoutSponsor(ctx, "organic@t.local", Buyer{PersonID: 42}, "")
+	if err != nil {
+		t.Fatalf("resolve checkout sponsor: %v", err)
+	}
+	if sponsor == nil || *sponsor != 999 {
+		t.Fatalf("sponsor = %v, want company root 999", sponsor)
+	}
+	if code != "" {
+		t.Fatalf("referral code = %q, want empty", code)
+	}
+}
+
 func TestRecordRegistrationReferralRejectsInvalidCode_Integration(t *testing.T) {
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
