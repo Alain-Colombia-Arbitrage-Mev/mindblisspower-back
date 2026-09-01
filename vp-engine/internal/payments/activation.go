@@ -143,6 +143,21 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 			s.afterPaymentConfirmed(ctx, intentID, "payment.paid", nil)
 			return ActivationResult{Status: "needs_placement"}, nil
 		}
+		eligible, err := sponsorCanReceivePlacement(ctx, tx, *sponsorID)
+		if err != nil {
+			return ActivationResult{}, err
+		}
+		if !eligible {
+			if _, uerr := tx.Exec(ctx, `UPDATE payments.purchase_intent SET status='needs_placement', updated_at=now() WHERE id=$1`, intentID); uerr != nil {
+				return ActivationResult{}, uerr
+			}
+			if cerr := tx.Commit(ctx); cerr != nil {
+				return ActivationResult{}, cerr
+			}
+			s.invalidateMemberCaches(ctx, userID)
+			s.afterPaymentConfirmed(ctx, intentID, "payment.paid", nil)
+			return ActivationResult{Status: "needs_placement"}, nil
+		}
 		affID, err = autoPlaceAffiliate(ctx, tx, personID, *sponsorID)
 		if err != nil {
 			return ActivationResult{}, fmt.Errorf("auto-place: %w", err)

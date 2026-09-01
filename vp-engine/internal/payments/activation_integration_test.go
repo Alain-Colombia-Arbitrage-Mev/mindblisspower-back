@@ -455,6 +455,135 @@ func TestRecordRegistrationReferralRejectsInvalidCode_Integration(t *testing.T) 
 	}
 }
 
+func TestReferralSponsorEligibility_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status, blacklisted)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (41,'Active','Sponsor','active-sponsor@t.local','0','active',false),
+		  (42,'Banned','Sponsor','banned-sponsor@t.local','0','active',true),
+		  (43,'Suspended','Sponsor','suspended-sponsor@t.local','0','suspended',false),
+		  (44,'Affiliate','Banned','affiliate-banned@t.local','0','active',false),
+		  (45,'Pending','Buyer','pending-buyer@t.local','0','active',false);
+		INSERT INTO mlm.affiliate (id, person_id, parent_id, position, sponsor_id, status, path, depth, invitation_link)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (410,41,NULL,NULL,NULL,'active',''::ltree,0,'active-code'),
+		  (420,42,NULL,NULL,NULL,'active',''::ltree,0,'banned-code'),
+		  (430,43,NULL,NULL,NULL,'active',''::ltree,0,'suspended-code'),
+		  (440,44,NULL,NULL,NULL,'banned',''::ltree,0,'affiliate-banned-code');
+		INSERT INTO payments.registration_referral(email_norm, referral_code, sponsor_affiliate_id, source)
+		  VALUES ('pending-buyer@t.local', 'banned-code', 420, 'register');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := NewStore(pool)
+	active, err := store.ResolveSponsorByCode(ctx, "active-code")
+	if err != nil {
+		t.Fatalf("resolve active sponsor: %v", err)
+	}
+	if active == nil || *active != 410 {
+		t.Fatalf("active sponsor = %v, want 410", active)
+	}
+	for _, code := range []string{"banned-code", "suspended-code", "affiliate-banned-code", "MP420", "MP430", "MP440"} {
+		got, err := store.ResolveSponsorByCode(ctx, code)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", code, err)
+		}
+		if got != nil {
+			t.Fatalf("resolve %s = %d, want nil", code, *got)
+		}
+	}
+
+	registered, err := store.LookupRegistrationReferral(ctx, "pending-buyer@t.local")
+	if err != nil {
+		t.Fatalf("lookup registration referral: %v", err)
+	}
+	if registered != nil {
+		t.Fatalf("registered referral = %#v, want nil for banned sponsor", registered)
+	}
+
+	handler := &Handler{store: store, companyRoot: 999}
+	sponsor, code, err := handler.resolveCheckoutSponsor(ctx, "pending-buyer@t.local", Buyer{PersonID: 45}, "")
+	if err != nil {
+		t.Fatalf("resolve checkout sponsor: %v", err)
+	}
+	if sponsor == nil || *sponsor != 999 {
+		t.Fatalf("sponsor = %v, want company root 999", sponsor)
+	}
+	if code != "" {
+		t.Fatalf("referral code = %q, want empty", code)
+	}
+}
+
+func TestActivatePaidPurchaseDefersPlacementWhenSponsorBecomesIneligible_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type) VALUES (1201,'Pack 100',100,50,'enrollment');
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status, blacklisted)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (51,'Late','Sponsor','late-sponsor@t.local','0','active',false),
+		  (52,'Late','Buyer','late-buyer@t.local','0','active',false);
+		INSERT INTO mlm.affiliate (id, person_id, parent_id, position, sponsor_id, status, path, depth)
+		  OVERRIDING SYSTEM VALUE VALUES
+		  (510,51,NULL,NULL,NULL,'active',''::ltree,0);
+		INSERT INTO payments.purchase_intent
+		  (id, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv,
+		   amount_usd, fee_usd, total_cents, currency, status, stripe_session_id)
+		VALUES ('00000000-0000-0000-0000-000000001201','late-buyer@t.local',52,NULL,510,1201,50,
+		        100,1,10100,'usd','created','cs_late_sponsor');
+		UPDATE mlm.person SET blacklisted = true WHERE id = 51;
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	res, err := NewStore(pool).ActivatePaidPurchase(ctx, "cs_late_sponsor", "pi_late_sponsor")
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if res.Status != "needs_placement" {
+		t.Fatalf("status = %q, want needs_placement", res.Status)
+	}
+
+	var affiliates, packages int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mlm.affiliate WHERE person_id = 52`).Scan(&affiliates); err != nil {
+		t.Fatalf("buyer affiliate count: %v", err)
+	}
+	if affiliates != 0 {
+		t.Fatalf("buyer affiliate count = %d, want 0", affiliates)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM mlm.affiliate_package ap
+		  JOIN mlm.affiliate a ON a.id = ap.affiliate_id
+		 WHERE a.person_id = 52
+	`).Scan(&packages); err != nil {
+		t.Fatalf("buyer package count: %v", err)
+	}
+	if packages != 0 {
+		t.Fatalf("buyer package count = %d, want 0", packages)
+	}
+
+	var status string
+	var paid bool
+	if err := pool.QueryRow(ctx, `
+		SELECT status::text, paid_at IS NOT NULL
+		  FROM payments.purchase_intent
+		 WHERE stripe_session_id = 'cs_late_sponsor'
+	`).Scan(&status, &paid); err != nil {
+		t.Fatalf("intent status: %v", err)
+	}
+	if status != "needs_placement" || !paid {
+		t.Fatalf("intent = %s paid=%v, want needs_placement paid=true", status, paid)
+	}
+}
+
 func ptrInt64(v int64) *int64 {
 	return &v
 }

@@ -93,6 +93,32 @@ func TestBanDecision_NameOnlyUsesStoredIdentity(t *testing.T) {
 	}
 }
 
+func TestBanDecision_BlockedAffiliateStatus(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status, blacklisted)
+		  OVERRIDING SYSTEM VALUE
+		VALUES (11, 'Blocked', 'Affiliate', 'blocked-affiliate@test.local', '+573009998877', 'active', false);
+
+		INSERT INTO mlm.affiliate (id, person_id, parent_id, position, sponsor_id, status, path, depth)
+		  OVERRIDING SYSTEM VALUE
+		VALUES (110, 11, NULL, NULL, NULL, 'banned', ''::ltree, 0);
+	`); err != nil {
+		t.Fatalf("seed affiliate block: %v", err)
+	}
+
+	decision, err := NewStore(pool).BanDecisionFor(ctx, BanCandidate{Email: "blocked-affiliate@test.local"})
+	if err != nil {
+		t.Fatalf("ban decision: %v", err)
+	}
+	if !decision.Blocked || decision.Reason != "account_suspended" {
+		t.Fatalf("decision = %+v, want account_suspended block", decision)
+	}
+}
+
 func TestActivatePaidPurchase_BannedBuyerSecurityBlocked(t *testing.T) {
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
