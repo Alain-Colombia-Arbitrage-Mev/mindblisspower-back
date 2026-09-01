@@ -71,7 +71,13 @@ func banDecisionFor(ctx context.Context, q banQuerier, c BanCandidate) (BanDecis
 		         mlm.norm_name(p.first_name || ' ' || p.last_name) AS name_norm,
 		         p.birthday AS birthdate,
 		         (COALESCE(p.blacklisted,false)
-		           OR p.status::text IN ('suspended','banned','deleted')) AS suspended
+		           OR p.status::text IN ('suspended','banned','deleted')
+		           OR EXISTS (
+		              SELECT 1
+		                FROM mlm.affiliate a
+		               WHERE a.person_id = p.id
+		                 AND a.status::text IN ('suspended','banned','deleted')
+		           )) AS suspended
 		    FROM mlm.person p
 		    JOIN input i ON i.email_norm IS NOT NULL AND mlm.norm_email(p.email) = i.email_norm
 		   LIMIT 1

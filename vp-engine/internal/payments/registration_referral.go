@@ -57,11 +57,16 @@ func (s *Store) LookupRegistrationReferral(ctx context.Context, email string) (*
 
 	var out RegistrationReferral
 	err := s.db.QueryRow(ctx, `
-		SELECT referral_code, sponsor_affiliate_id
-		  FROM payments.registration_referral
-		 WHERE email_norm = $1
-		   AND consumed_at IS NULL
-		   AND updated_at >= now() - interval '30 days'
+		SELECT rr.referral_code, rr.sponsor_affiliate_id
+		  FROM payments.registration_referral rr
+		  JOIN mlm.affiliate a ON a.id = rr.sponsor_affiliate_id
+		  JOIN mlm.person p ON p.id = a.person_id
+		 WHERE rr.email_norm = $1
+		   AND rr.consumed_at IS NULL
+		   AND rr.updated_at >= now() - interval '30 days'
+		   AND a.status::text = 'active'
+		   AND p.status::text = 'active'
+		   AND NOT COALESCE(p.blacklisted,false)
 		 LIMIT 1
 	`, emailNorm).Scan(&out.Code, &out.SponsorAffiliateID)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -130,6 +130,35 @@ func (s *Store) SponsorIsBinaryAncestor(ctx context.Context, affiliateID, sponso
 	return ok, nil
 }
 
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (s *Store) SponsorCanReceivePlacement(ctx context.Context, sponsorID int64) (bool, error) {
+	return sponsorCanReceivePlacement(ctx, s.db, sponsorID)
+}
+
+func sponsorCanReceivePlacement(ctx context.Context, q rowQuerier, sponsorID int64) (bool, error) {
+	if sponsorID <= 0 {
+		return false, nil
+	}
+	var ok bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM mlm.affiliate a
+			  JOIN mlm.person p ON p.id = a.person_id
+			 WHERE a.id = $1
+			   AND a.status::text = 'active'
+			   AND p.status::text = 'active'
+			   AND NOT COALESCE(p.blacklisted,false)
+		)`, sponsorID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("sponsor placement eligibility: %w", err)
+	}
+	return ok, nil
+}
+
 // EnsurePerson garantiza que exista mlm.person para el email (auto-provisión de
 // usuarios nuevos de Cognito que aún no tienen fila en RDS). Idempotente por
 // email. Devuelve el person_id. La colocación en el árbol (affiliate) la hace la
