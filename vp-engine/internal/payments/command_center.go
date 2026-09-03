@@ -70,7 +70,7 @@ func (h *Handler) handleCommandCenterSummary(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	m, _, err := h.store.BuildNetworkMetrics(ctx)
+	m, _, err := h.store.BuildNetworkMetrics(ctx, h.companyRoot)
 	if err != nil {
 		h.log.Error().Err(err).Msg("cc summary: network metrics")
 		writeErr(w, http.StatusInternalServerError, "internal")

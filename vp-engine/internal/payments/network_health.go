@@ -6,12 +6,10 @@ package payments
 // existing finance/solvency queries, and computes a RankExposure summary.
 //
 // Company-root identification:
-//   The binary tree may have a single company-root affiliate (parent_id IS NULL,
-//   position IS NULL) or, rarely, a small forest if ops ever created two detached
-//   roots.  We SUM left_count/right_count/left_pv_lifetime/right_pv_lifetime over
-//   ALL root affiliates (WHERE parent_id IS NULL).  In the normal single-root case
-//   this is identical to querying by companyRoot id; it stays correct for a forest
-//   without requiring the Handler's companyRoot int64 to be threaded into Store.
+//   Prefer the configured company root when the caller has it. If historical
+//   data does not have a formal parent_id IS NULL root, fall back to detached
+//   or top visible nodes so the dashboard does not report empty legs while the
+//   tree has placed affiliates.
 //
 // Field mapping from AdminFinance / Solvency:
 //   CompanyFund       ← AdminFinance.TreasuryUSD          (string, parse to float64)
@@ -41,8 +39,12 @@ type RankExposure struct {
 // It reuses GetAdminFinance and GetSolvency (cache-aside, no extra queries)
 // and adds two targeted SQL reads: one for network member/volume counts from
 // the tree root(s), and one for unpaid rank-bonus installments.
-func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMetrics, RankExposure, error) {
+func (s *Store) BuildNetworkMetrics(ctx context.Context, companyRootOpt ...int64) (networkintel.NetworkMetrics, RankExposure, error) {
 	var m networkintel.NetworkMetrics
+	var companyRoot int64
+	if len(companyRootOpt) > 0 {
+		companyRoot = companyRootOpt[0]
+	}
 
 	// ── 1. Network counts and binary-leg volumes ────────────────────────────
 	//
@@ -53,20 +55,77 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context) (networkintel.NetworkMe
 	//   and represent the full network split, not per-affiliate subtotals.
 	// LeftVolume/RightVolume: analogous for lifetime PV.
 	//
-	// We aggregate over WHERE parent_id IS NULL (all roots) so the query is
-	// correct for both single-root and multi-root (forest) deployments.
+	// Root selection mirrors the admin tree explorer: configured root first,
+	// detached roots second, then orphan/top visible nodes as a legacy fallback.
 	var leftVolStr, rightVolStr string
 	err := s.db.QueryRow(ctx, `
+		WITH visible_affiliates AS (
+		  SELECT a.id, a.parent_id, COALESCE(a.depth, 0) AS depth
+		    FROM mlm.affiliate a
+		    JOIN mlm.person p ON p.id = a.person_id
+		   WHERE a.status::text <> 'deleted'
+		     AND p.status::text <> 'deleted'
+		),
+		configured_root AS (
+		  SELECT id, 0 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE id = $1
+		     AND $1 > 0
+		),
+		detached_roots AS (
+		  SELECT id, 1 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE parent_id IS NULL
+		     AND NOT EXISTS (SELECT 1 FROM configured_root)
+		),
+		orphan_roots AS (
+		  SELECT a.id, 2 AS priority, a.depth
+		    FROM visible_affiliates a
+		    LEFT JOIN visible_affiliates parent ON parent.id = a.parent_id
+		   WHERE parent.id IS NULL
+		     AND NOT EXISTS (SELECT 1 FROM configured_root)
+		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
+		   ORDER BY a.depth, a.id
+		   LIMIT 25
+		),
+		depth_roots AS (
+		  SELECT id, 3 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE NOT EXISTS (SELECT 1 FROM configured_root)
+		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
+		     AND NOT EXISTS (SELECT 1 FROM orphan_roots)
+		   ORDER BY depth, id
+		   LIMIT 25
+		),
+		root_ids AS (
+		  SELECT DISTINCT ON (id) id, priority, depth
+		    FROM (
+		      SELECT * FROM configured_root
+		      UNION ALL
+		      SELECT * FROM detached_roots
+		      UNION ALL
+		      SELECT * FROM orphan_roots
+		      UNION ALL
+		      SELECT * FROM depth_roots
+		    ) candidates
+		   ORDER BY id, priority, depth
+		),
+		selected_roots AS (
+		  SELECT id
+		    FROM root_ids
+		   ORDER BY priority, depth, id
+		   LIMIT 25
+		)
 		SELECT
 		  (SELECT count(*) FROM mlm.affiliate)                     AS total_members,
 		  (SELECT count(*) FROM mlm.person WHERE status = 'active') AS active_members,
-		  COALESCE(SUM(left_count),  0)                            AS left_members,
-		  COALESCE(SUM(right_count), 0)                            AS right_members,
-		  COALESCE(SUM(left_pv_lifetime),  0)::text                AS left_volume,
-		  COALESCE(SUM(right_pv_lifetime), 0)::text                AS right_volume
-		  FROM mlm.affiliate
-		 WHERE parent_id IS NULL
-	`).Scan(
+		  COALESCE(SUM(a.left_count),  0)                          AS left_members,
+		  COALESCE(SUM(a.right_count), 0)                          AS right_members,
+		  COALESCE(SUM(a.left_pv_lifetime),  0)::text              AS left_volume,
+		  COALESCE(SUM(a.right_pv_lifetime), 0)::text              AS right_volume
+		  FROM mlm.affiliate a
+		  JOIN selected_roots sr ON sr.id = a.id
+	`, companyRoot).Scan(
 		&m.TotalMembers,
 		&m.ActiveMembers,
 		&m.LeftMembers,

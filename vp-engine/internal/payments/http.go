@@ -511,7 +511,7 @@ func (h *Handler) handleNetworkHealth(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdmin(w, r); !ok {
 		return
 	}
-	m, rx, err := h.store.BuildNetworkMetrics(r.Context())
+	m, rx, err := h.store.BuildNetworkMetrics(r.Context(), h.companyRoot)
 	if err != nil {
 		h.log.Error().Err(err).Msg("build network metrics")
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -537,7 +537,7 @@ func (h *Handler) handleNetworkSustainability(w http.ResponseWriter, r *http.Req
 	ctx := r.Context()
 
 	// ── Live (cheap — siempre fresco) ────────────────────────────────────────
-	m, rx, err := h.store.BuildNetworkMetrics(ctx)
+	m, rx, err := h.store.BuildNetworkMetrics(ctx, h.companyRoot)
 	if err != nil {
 		h.log.Error().Err(err).Msg("sustainability: build network metrics")
 		writeErr(w, http.StatusInternalServerError, "internal")
