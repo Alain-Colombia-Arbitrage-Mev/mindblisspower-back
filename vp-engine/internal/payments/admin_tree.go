@@ -1,0 +1,565 @@
+package payments
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// AdminTreeRankRef es la referencia compacta al rango visible en el explorador.
+type AdminTreeRankRef struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+// AdminTreeAffiliateRef es una referencia compacta a sponsor/padre.
+type AdminTreeAffiliateRef struct {
+	ID     string `json:"id"`
+	Handle string `json:"handle"`
+	Name   string `json:"name"`
+	Email  string `json:"email,omitempty"`
+}
+
+// AdminTreeNode es la unidad de navegación del árbol binario del panel admin.
+// Es read-only y apta para carga perezosa: roots -> children -> children...
+type AdminTreeNode struct {
+	ID            string                 `json:"id"`
+	ParentID      *string                `json:"parentId"`
+	Side          *string                `json:"side"`
+	Handle        string                 `json:"handle"`
+	Name          string                 `json:"name"`
+	Email         string                 `json:"email"`
+	Status        string                 `json:"status"`
+	Banned        bool                   `json:"banned"`
+	Rank          *AdminTreeRankRef      `json:"rank"`
+	Sponsor       *AdminTreeAffiliateRef `json:"sponsor,omitempty"`
+	HasChildren   bool                   `json:"hasChildren"`
+	DownlineTotal int64                  `json:"downlineTotal"`
+	LeftCount     int64                  `json:"leftCount"`
+	RightCount    int64                  `json:"rightCount"`
+	PVLeft        string                 `json:"pvLeft"`
+	PVRight       string                 `json:"pvRight"`
+	ActivePackage bool                   `json:"activePackage"`
+}
+
+// AdminTreeSearchResult devuelve la ruta raíz->nodo para auto-expandir la UI.
+type AdminTreeSearchResult struct {
+	AdminTreeNode
+	Path       []string `json:"path"`
+	Revealable bool     `json:"revealable"`
+}
+
+func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
+	if companyRoot <= 0 {
+		companyRoot = 1
+	}
+	rows, err := s.reader().Query(ctx, `
+		SELECT a.id,
+		       a.parent_id,
+		       a.position::text,
+		       COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id),
+		       trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),
+		       p.email::text,
+		       p.status::text,
+		       COALESCE(p.blacklisted,false),
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.blacklist b
+		          WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		             OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		             OR (b.name_norm IS NOT NULL
+		                 AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		                 AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		       ),
+		       a.status::text,
+		       r.code,
+		       r.name_es,
+		       sp.id,
+		       COALESCE(NULLIF(sp.invitation_link,''), 'MP'||sp.id),
+		       trim(coalesce(spp.first_name,'')||' '||coalesce(spp.last_name,'')),
+		       spp.email::text,
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.affiliate c
+		           JOIN mlm.person cp ON cp.id = c.person_id
+		          WHERE c.parent_id = a.id
+		            AND c.status::text = 'active'
+		            AND cp.status::text = 'active'
+		            AND NOT COALESCE(cp.blacklisted,false)
+		            AND NOT EXISTS (
+		              SELECT 1
+		                FROM mlm.blacklist b
+		               WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(cp.email))
+		                  OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(cp.phone_number))
+		                  OR (b.name_norm IS NOT NULL
+		                      AND b.name_norm = mlm.norm_name(cp.first_name || ' ' || cp.last_name)
+		                      AND (b.birthdate IS NULL OR (cp.birthday IS NOT NULL AND b.birthdate = cp.birthday)))
+		            )
+		       ),
+		       COALESCE(a.left_count,0),
+		       COALESCE(a.right_count,0),
+		       COALESCE(a.left_pv_lifetime,0)::text,
+		       COALESCE(a.right_pv_lifetime,0)::text,
+		       EXISTS (
+		         SELECT 1 FROM mlm.affiliate_package ap
+		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
+		       )
+		  FROM mlm.affiliate a
+		  JOIN mlm.person p ON p.id = a.person_id
+		  LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
+		  LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
+		  LEFT JOIN mlm.person spp ON spp.id = sp.person_id
+		 WHERE a.parent_id IS NULL
+		   AND a.status::text = 'active'
+		   AND p.status::text = 'active'
+		   AND NOT COALESCE(p.blacklisted,false)
+		   AND NOT EXISTS (
+		     SELECT 1
+		       FROM mlm.blacklist b
+		      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		         OR (b.name_norm IS NOT NULL
+		             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		   )
+		 ORDER BY (a.id = $1) DESC, a.id
+	`, companyRoot)
+	if err != nil {
+		return nil, fmt.Errorf("admin tree roots: %w", err)
+	}
+	defer rows.Close()
+	return scanAdminTreeNodes(rows)
+}
+
+func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]AdminTreeNode, error) {
+	rows, err := s.reader().Query(ctx, `
+		SELECT a.id,
+		       a.parent_id,
+		       a.position::text,
+		       COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id),
+		       trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),
+		       p.email::text,
+		       p.status::text,
+		       COALESCE(p.blacklisted,false),
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.blacklist b
+		          WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		             OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		             OR (b.name_norm IS NOT NULL
+		                 AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		                 AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		       ),
+		       a.status::text,
+		       r.code,
+		       r.name_es,
+		       sp.id,
+		       COALESCE(NULLIF(sp.invitation_link,''), 'MP'||sp.id),
+		       trim(coalesce(spp.first_name,'')||' '||coalesce(spp.last_name,'')),
+		       spp.email::text,
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.affiliate c
+		           JOIN mlm.person cp ON cp.id = c.person_id
+		          WHERE c.parent_id = a.id
+		            AND c.status::text = 'active'
+		            AND cp.status::text = 'active'
+		            AND NOT COALESCE(cp.blacklisted,false)
+		            AND NOT EXISTS (
+		              SELECT 1
+		                FROM mlm.blacklist b
+		               WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(cp.email))
+		                  OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(cp.phone_number))
+		                  OR (b.name_norm IS NOT NULL
+		                      AND b.name_norm = mlm.norm_name(cp.first_name || ' ' || cp.last_name)
+		                      AND (b.birthdate IS NULL OR (cp.birthday IS NOT NULL AND b.birthdate = cp.birthday)))
+		            )
+		       ),
+		       COALESCE(a.left_count,0),
+		       COALESCE(a.right_count,0),
+		       COALESCE(a.left_pv_lifetime,0)::text,
+		       COALESCE(a.right_pv_lifetime,0)::text,
+		       EXISTS (
+		         SELECT 1 FROM mlm.affiliate_package ap
+		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
+		       )
+		  FROM mlm.affiliate a
+		  JOIN mlm.person p ON p.id = a.person_id
+		  LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
+		  LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
+		  LEFT JOIN mlm.person spp ON spp.id = sp.person_id
+		 WHERE a.parent_id = $1
+		   AND a.status::text = 'active'
+		   AND p.status::text = 'active'
+		   AND NOT COALESCE(p.blacklisted,false)
+		   AND NOT EXISTS (
+		     SELECT 1
+		       FROM mlm.blacklist b
+		      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		         OR (b.name_norm IS NOT NULL
+		             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		   )
+		 ORDER BY CASE a.position::text WHEN 'L' THEN 1 WHEN 'R' THEN 2 ELSE 3 END, a.id
+	`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("admin tree children: %w", err)
+	}
+	defer rows.Close()
+	return scanAdminTreeNodes(rows)
+}
+
+func (s *Store) SearchAdminTree(ctx context.Context, q string, limit int) ([]AdminTreeSearchResult, error) {
+	q = strings.TrimSpace(q)
+	if limit <= 0 || limit > 25 {
+		limit = 20
+	}
+	like := "%" + q + "%"
+	rows, err := s.reader().Query(ctx, `
+		SELECT a.id,
+		       a.parent_id,
+		       a.position::text,
+		       COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id),
+		       trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),
+		       p.email::text,
+		       p.status::text,
+		       COALESCE(p.blacklisted,false),
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.blacklist b
+		          WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		             OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		             OR (b.name_norm IS NOT NULL
+		                 AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		                 AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		       ),
+		       a.status::text,
+		       r.code,
+		       r.name_es,
+		       sp.id,
+		       COALESCE(NULLIF(sp.invitation_link,''), 'MP'||sp.id),
+		       trim(coalesce(spp.first_name,'')||' '||coalesce(spp.last_name,'')),
+		       spp.email::text,
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.affiliate c
+		           JOIN mlm.person cp ON cp.id = c.person_id
+		          WHERE c.parent_id = a.id
+		            AND c.status::text = 'active'
+		            AND cp.status::text = 'active'
+		            AND NOT COALESCE(cp.blacklisted,false)
+		            AND NOT EXISTS (
+		              SELECT 1
+		                FROM mlm.blacklist b
+		               WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(cp.email))
+		                  OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(cp.phone_number))
+		                  OR (b.name_norm IS NOT NULL
+		                      AND b.name_norm = mlm.norm_name(cp.first_name || ' ' || cp.last_name)
+		                      AND (b.birthdate IS NULL OR (cp.birthday IS NOT NULL AND b.birthdate = cp.birthday)))
+		            )
+		       ),
+		       COALESCE(a.left_count,0),
+		       COALESCE(a.right_count,0),
+		       COALESCE(a.left_pv_lifetime,0)::text,
+		       COALESCE(a.right_pv_lifetime,0)::text,
+		       EXISTS (
+		         SELECT 1 FROM mlm.affiliate_package ap
+		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
+		       )
+		  FROM mlm.affiliate a
+		  JOIN mlm.person p ON p.id = a.person_id
+		  LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
+		  LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
+		  LEFT JOIN mlm.person spp ON spp.id = sp.person_id
+		 WHERE a.id::text = $1
+		    OR lower(COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id)) = lower($1)
+		    OR COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id) ILIKE $2
+		    OR p.email::text ILIKE $2
+		    OR trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')) ILIKE $2
+		 ORDER BY (lower(p.email::text) = lower($1)) DESC,
+		          (lower(COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id)) = lower($1)) DESC,
+		          (p.email::text ILIKE ($1 || '%')) DESC,
+		          a.id
+		 LIMIT $3
+	`, q, like, limit)
+	if err != nil {
+		return nil, fmt.Errorf("admin tree search: %w", err)
+	}
+	defer rows.Close()
+
+	nodes, err := scanAdminTreeNodes(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		return []AdminTreeSearchResult{}, nil
+	}
+
+	ids := make([]int64, 0, len(nodes))
+	for _, n := range nodes {
+		id, err := strconv.ParseInt(n.ID, 10, 64)
+		if err == nil {
+			ids = append(ids, id)
+		}
+	}
+	pathByID, revealableByID, err := s.adminTreePaths(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]AdminTreeSearchResult, 0, len(nodes))
+	for _, n := range nodes {
+		path := pathByID[n.ID]
+		if len(path) == 0 {
+			path = []string{n.ID}
+		}
+		out = append(out, AdminTreeSearchResult{
+			AdminTreeNode: n,
+			Path:          path,
+			Revealable:    revealableByID[n.ID] && !n.Banned,
+		})
+	}
+	return out, nil
+}
+
+func (s *Store) adminTreePaths(ctx context.Context, ids []int64) (map[string][]string, map[string]bool, error) {
+	pathByID := map[string][]string{}
+	revealableByID := map[string]bool{}
+	if len(ids) == 0 {
+		return pathByID, revealableByID, nil
+	}
+	rows, err := s.reader().Query(ctx, `
+		WITH RECURSIVE up AS (
+		  SELECT id, parent_id, id AS match_id, 0 AS d
+		    FROM mlm.affiliate
+		   WHERE id = ANY($1)
+		  UNION ALL
+		  SELECT a.id, a.parent_id, up.match_id, up.d + 1
+		    FROM mlm.affiliate a
+		    JOIN up ON a.id = up.parent_id
+		   WHERE up.d < 256
+		)
+		SELECT up.match_id,
+		       array_agg(up.id ORDER BY up.d DESC) AS path,
+		       bool_and(
+		         a.status::text = 'active'
+		         AND p.status::text = 'active'
+		         AND NOT COALESCE(p.blacklisted,false)
+		         AND NOT EXISTS (
+		           SELECT 1
+		             FROM mlm.blacklist b
+		            WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		               OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		               OR (b.name_norm IS NOT NULL
+		                   AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		                   AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		         )
+		       ) AS revealable
+		  FROM up
+		  JOIN mlm.affiliate a ON a.id = up.id
+		  JOIN mlm.person p ON p.id = a.person_id
+		 GROUP BY up.match_id
+	`, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("admin tree paths: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var matchID int64
+		var rawPath []int64
+		var revealable bool
+		if err := rows.Scan(&matchID, &rawPath, &revealable); err != nil {
+			return nil, nil, fmt.Errorf("scan admin tree path: %w", err)
+		}
+		key := strconv.FormatInt(matchID, 10)
+		path := make([]string, 0, len(rawPath))
+		for _, id := range rawPath {
+			path = append(path, strconv.FormatInt(id, 10))
+		}
+		pathByID[key] = path
+		revealableByID[key] = revealable
+	}
+	return pathByID, revealableByID, rows.Err()
+}
+
+func scanAdminTreeNodes(rows pgx.Rows) ([]AdminTreeNode, error) {
+	out := []AdminTreeNode{}
+	for rows.Next() {
+		node, err := scanAdminTreeNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, node)
+	}
+	return out, rows.Err()
+}
+
+func scanAdminTreeNode(rows pgx.Rows) (AdminTreeNode, error) {
+	var id int64
+	var parentID *int64
+	var side *string
+	var handle, name, email, personStatus, affiliateStatus string
+	var blacklisted, listedByBlacklist, hasChildren, activePackage bool
+	var rankCode, rankName *string
+	var sponsorID *int64
+	var sponsorHandle, sponsorName, sponsorEmail *string
+	var leftCount, rightCount int64
+	var pvLeft, pvRight string
+
+	if err := rows.Scan(
+		&id,
+		&parentID,
+		&side,
+		&handle,
+		&name,
+		&email,
+		&personStatus,
+		&blacklisted,
+		&listedByBlacklist,
+		&affiliateStatus,
+		&rankCode,
+		&rankName,
+		&sponsorID,
+		&sponsorHandle,
+		&sponsorName,
+		&sponsorEmail,
+		&hasChildren,
+		&leftCount,
+		&rightCount,
+		&pvLeft,
+		&pvRight,
+		&activePackage,
+	); err != nil {
+		return AdminTreeNode{}, fmt.Errorf("scan admin tree node: %w", err)
+	}
+
+	status := personStatus
+	if status == "" {
+		status = affiliateStatus
+	}
+	banned := blacklisted || listedByBlacklist || inactiveTreeStatus(personStatus) || inactiveTreeStatus(affiliateStatus)
+	node := AdminTreeNode{
+		ID:            strconv.FormatInt(id, 10),
+		ParentID:      int64PtrToString(parentID),
+		Side:          side,
+		Handle:        handle,
+		Name:          strings.TrimSpace(name),
+		Email:         email,
+		Status:        status,
+		Banned:        banned,
+		HasChildren:   hasChildren,
+		DownlineTotal: leftCount + rightCount,
+		LeftCount:     leftCount,
+		RightCount:    rightCount,
+		PVLeft:        pvLeft,
+		PVRight:       pvRight,
+		ActivePackage: activePackage,
+	}
+	if node.Name == "" {
+		node.Name = "—"
+	}
+	if rankCode != nil {
+		node.Rank = &AdminTreeRankRef{Code: *rankCode, Name: derefStr(rankName)}
+	}
+	if sponsorID != nil {
+		node.Sponsor = &AdminTreeAffiliateRef{
+			ID:     strconv.FormatInt(*sponsorID, 10),
+			Handle: derefStr(sponsorHandle),
+			Name:   strings.TrimSpace(derefStr(sponsorName)),
+			Email:  derefStr(sponsorEmail),
+		}
+	}
+	return node, nil
+}
+
+func inactiveTreeStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "suspended", "banned", "deleted":
+		return true
+	default:
+		return false
+	}
+}
+
+func int64PtrToString(v *int64) *string {
+	if v == nil {
+		return nil
+	}
+	s := strconv.FormatInt(*v, 10)
+	return &s
+}
+
+func (h *Handler) handleAdminTreeRoots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	nodes, err := h.store.ListAdminTreeRoots(r.Context(), h.companyRoot)
+	if err != nil {
+		h.log.Error().Err(err).Msg("admin tree roots")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"roots": nodes})
+}
+
+func (h *Handler) handleAdminTreeChildren(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	parentID, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("parent_id")), 10, 64)
+	if err != nil || parentID <= 0 {
+		writeErr(w, http.StatusBadRequest, "bad_parent_id")
+		return
+	}
+	children, err := h.store.ListAdminTreeChildren(r.Context(), parentID)
+	if err != nil {
+		h.log.Error().Err(err).Int64("parent_id", parentID).Msg("admin tree children")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"parentId": strconv.FormatInt(parentID, 10),
+		"children": children,
+	})
+}
+
+func (h *Handler) handleAdminTreeSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		writeJSON(w, http.StatusOK, map[string]any{"results": []AdminTreeSearchResult{}})
+		return
+	}
+	limit := atoiDefault(r.URL.Query().Get("limit"), 20)
+	results, err := h.store.SearchAdminTree(r.Context(), q, limit)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusOK, map[string]any{"results": []AdminTreeSearchResult{}})
+			return
+		}
+		h.log.Error().Err(err).Str("q", q).Msg("admin tree search")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}

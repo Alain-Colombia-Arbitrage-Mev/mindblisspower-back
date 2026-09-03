@@ -49,6 +49,9 @@ func TestAdminUserRoutes_Mounted(t *testing.T) {
 		{http.MethodDelete, "/api/admin/user"},
 		{http.MethodGet, "/api/admin/user/branch-tree?affiliate_id=1&email=admin@example.com"},
 		{http.MethodPost, "/api/admin/user/tree-relocation"},
+		{http.MethodGet, "/api/admin/tree/roots?email=admin@example.com"},
+		{http.MethodGet, "/api/admin/tree/children?parent_id=1&email=admin@example.com"},
+		{http.MethodGet, "/api/admin/tree/search?q=user@example.com&email=admin@example.com"},
 	}
 	for _, c := range cases {
 		req, _ := http.NewRequest(c.method, srv.URL+c.path, strings.NewReader("{}"))
@@ -167,6 +170,14 @@ func TestAdminUserGet_Params(t *testing.T) {
 	resp, out = doInspectorReq(t, srv, http.MethodGet, "/api/admin/user/branch-tree?email=admin@example.com", "")
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("branch-tree sin affiliate_id: expected 400, got %d (%v)", resp.StatusCode, out)
+	}
+	resp, out = doInspectorReq(t, srv, http.MethodGet, "/api/admin/tree/children?email=admin@example.com", "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("admin tree children sin parent_id: expected 400, got %d (%v)", resp.StatusCode, out)
+	}
+	resp, out = doInspectorReq(t, srv, http.MethodGet, "/api/admin/tree/search?q=a&email=admin@example.com", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin tree search corta: expected 200, got %d (%v)", resp.StatusCode, out)
 	}
 	// Método no soportado en la ruta del inspector.
 	resp, _ = doInspectorReq(t, srv, http.MethodPost, "/api/admin/user", `{}`)
