@@ -178,6 +178,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/user/branch-tree", h.handleAdminUserBranchTree)
 	mux.HandleFunc("/api/admin/user/tree-relocation", h.handleAdminUserTreeRelocation)
 	mux.HandleFunc("/api/admin/tree/roots", h.handleAdminTreeRoots)
+	mux.HandleFunc("/api/admin/tree/full", h.handleAdminTreeFull)
 	mux.HandleFunc("/api/admin/tree/children", h.handleAdminTreeChildren)
 	mux.HandleFunc("/api/admin/tree/search", h.handleAdminTreeSearch)
 	mux.HandleFunc("/api/admin/summary", h.handleAdminSummary)

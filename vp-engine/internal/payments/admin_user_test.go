@@ -50,6 +50,7 @@ func TestAdminUserRoutes_Mounted(t *testing.T) {
 		{http.MethodGet, "/api/admin/user/branch-tree?affiliate_id=1&email=admin@example.com"},
 		{http.MethodPost, "/api/admin/user/tree-relocation"},
 		{http.MethodGet, "/api/admin/tree/roots?email=admin@example.com"},
+		{http.MethodGet, "/api/admin/tree/full?email=admin@example.com"},
 		{http.MethodGet, "/api/admin/tree/children?parent_id=1&email=admin@example.com"},
 		{http.MethodGet, "/api/admin/tree/search?q=user@example.com&email=admin@example.com"},
 	}

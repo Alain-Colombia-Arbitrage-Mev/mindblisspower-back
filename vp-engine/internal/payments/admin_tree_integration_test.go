@@ -94,3 +94,59 @@ func TestListAdminTreeRoots_ShowsConfiguredRootAndNonActiveChildren(t *testing.T
 		t.Fatalf("metrics volumes = %.0f/%.0f, want 100/80", metrics.LeftVolume, metrics.RightVolume)
 	}
 }
+
+func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs DB (Docker); skipped under -short")
+	}
+
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	store := NewStore(pool)
+
+	root := seedAdminTreeAffiliate(t, ctx, pool, "Root", "Full", "root-full@t.local", nil, "", nil, "root-full")
+	left := seedAdminTreeAffiliate(t, ctx, pool, "Left", "Full", "left-full@t.local", &root.affID, "L", &root.affID, "left-full")
+	right := seedAdminTreeAffiliate(t, ctx, pool, "Right", "Full", "right-full@t.local", &root.affID, "R", &root.affID, "right-full")
+	grandchild := seedAdminTreeAffiliate(t, ctx, pool, "Grand", "Full", "grand-full@t.local", &left.affID, "L", &left.affID, "grand-full")
+	deletedChild := seedAdminTreeAffiliate(t, ctx, pool, "Deleted", "Full", "deleted-full@t.local", &right.affID, "L", &right.affID, "deleted-full")
+
+	if _, err := pool.Exec(ctx, `UPDATE mlm.person SET status = 'pending' WHERE id = $1`, grandchild.personID); err != nil {
+		t.Fatalf("pend grandchild person: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE mlm.affiliate SET status = 'pending' WHERE id = $1`, grandchild.affID); err != nil {
+		t.Fatalf("pend grandchild affiliate: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE mlm.affiliate SET status = 'deleted' WHERE id = $1`, deletedChild.affID); err != nil {
+		t.Fatalf("delete child affiliate: %v", err)
+	}
+
+	nodes, err := store.ListAdminTreeFull(ctx, root.affID)
+	if err != nil {
+		t.Fatalf("ListAdminTreeFull: %v", err)
+	}
+	wantOrder := []string{
+		strconv.FormatInt(root.affID, 10),
+		strconv.FormatInt(left.affID, 10),
+		strconv.FormatInt(grandchild.affID, 10),
+		strconv.FormatInt(right.affID, 10),
+	}
+	if len(nodes) != len(wantOrder) {
+		t.Fatalf("nodes len = %d, want %d (%v)", len(nodes), len(wantOrder), nodes)
+	}
+	for i, wantID := range wantOrder {
+		if nodes[i].ID != wantID {
+			t.Fatalf("nodes[%d].ID = %s, want %s (%v)", i, nodes[i].ID, wantID, nodes)
+		}
+	}
+	if !nodes[0].HasChildren || !nodes[1].HasChildren {
+		t.Fatalf("root and left child should report visible descendants (%v)", nodes)
+	}
+	if nodes[2].Status != "pending" {
+		t.Fatalf("grandchild status = %s, want pending", nodes[2].Status)
+	}
+	if nodes[3].HasChildren {
+		t.Fatalf("right child should not report children")
+	}
+}

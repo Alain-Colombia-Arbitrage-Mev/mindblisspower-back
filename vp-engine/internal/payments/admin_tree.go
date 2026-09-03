@@ -229,6 +229,147 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 	return scanAdminTreeNodes(rows)
 }
 
+func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
+	rows, err := s.reader().Query(ctx, `
+		WITH RECURSIVE visible_affiliates AS (
+		  SELECT a.id, a.parent_id, a.position::text AS position, COALESCE(a.depth, 0) AS depth
+		    FROM mlm.affiliate a
+		    JOIN mlm.person p ON p.id = a.person_id
+		   WHERE a.status::text <> 'deleted'
+		     AND p.status::text <> 'deleted'
+		),
+		configured_root AS (
+		  SELECT id, 0 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE id = $1
+		     AND $1 > 0
+		),
+		detached_roots AS (
+		  SELECT id, 1 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE parent_id IS NULL
+		     AND NOT EXISTS (SELECT 1 FROM configured_root)
+		),
+		orphan_roots AS (
+		  SELECT a.id, 2 AS priority, a.depth
+		    FROM visible_affiliates a
+		    LEFT JOIN visible_affiliates parent ON parent.id = a.parent_id
+		   WHERE parent.id IS NULL
+		     AND NOT EXISTS (SELECT 1 FROM configured_root)
+		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
+		),
+		depth_roots AS (
+		  SELECT id, 3 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE NOT EXISTS (SELECT 1 FROM configured_root)
+		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
+		     AND NOT EXISTS (SELECT 1 FROM orphan_roots)
+		   ORDER BY depth, id
+		   LIMIT 25
+		),
+		root_ids AS (
+		  SELECT DISTINCT ON (id) id, priority, depth
+		    FROM (
+		      SELECT * FROM configured_root
+		      UNION ALL
+		      SELECT * FROM detached_roots
+		      UNION ALL
+		      SELECT * FROM orphan_roots
+		      UNION ALL
+		      SELECT * FROM depth_roots
+		    ) candidates
+		   ORDER BY id, priority, depth
+		),
+		selected_roots AS (
+		  SELECT id, priority, depth
+		    FROM root_ids
+		   ORDER BY priority, depth, id
+		),
+		tree AS (
+		  SELECT va.id,
+		         va.parent_id,
+		         sr.priority,
+		         ARRAY[va.id]::bigint[] AS path_ids,
+		         lpad(sr.priority::text, 2, '0') || ':' ||
+		         lpad(va.depth::text, 8, '0') || ':' ||
+		         lpad(va.id::text, 20, '0') AS sort_path
+		    FROM selected_roots sr
+		    JOIN visible_affiliates va ON va.id = sr.id
+		  UNION ALL
+		  SELECT child.id,
+		         child.parent_id,
+		         tree.priority,
+		         tree.path_ids || child.id,
+		         tree.sort_path || '.' ||
+		         CASE child.position WHEN 'L' THEN '1' WHEN 'R' THEN '2' ELSE '3' END ||
+		         ':' || lpad(child.id::text, 20, '0') AS sort_path
+		    FROM visible_affiliates child
+		    JOIN tree ON child.parent_id = tree.id
+		   WHERE cardinality(tree.path_ids) < 512
+		     AND NOT child.id = ANY(tree.path_ids)
+		),
+		dedup_tree AS (
+		  SELECT DISTINCT ON (id) id, priority, sort_path, cardinality(path_ids) AS tree_depth
+		    FROM tree
+		   ORDER BY id, cardinality(path_ids), priority, sort_path
+		)
+		SELECT a.id,
+		       a.parent_id,
+		       a.position::text,
+		       COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id),
+		       trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),
+		       p.email::text,
+		       p.status::text,
+		       COALESCE(p.blacklisted,false),
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.blacklist b
+		          WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		             OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		             OR (b.name_norm IS NOT NULL
+		                 AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		                 AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		       ),
+		       a.status::text,
+		       r.code,
+		       r.name_es,
+		       sp.id,
+		       COALESCE(NULLIF(sp.invitation_link,''), 'MP'||sp.id),
+		       trim(coalesce(spp.first_name,'')||' '||coalesce(spp.last_name,'')),
+		       spp.email::text,
+		       EXISTS (
+		         SELECT 1
+		           FROM mlm.affiliate c
+		           JOIN mlm.person cp ON cp.id = c.person_id
+		          WHERE c.parent_id = a.id
+		            AND c.status::text <> 'deleted'
+		            AND cp.status::text <> 'deleted'
+		       ),
+		       COALESCE(a.left_count,0),
+		       COALESCE(a.right_count,0),
+		       COALESCE(a.left_pv_lifetime,0)::text,
+		       COALESCE(a.right_pv_lifetime,0)::text,
+		       EXISTS (
+		         SELECT 1 FROM mlm.affiliate_package ap
+		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
+		       )
+		  FROM dedup_tree t
+		  JOIN mlm.affiliate a ON a.id = t.id
+		  JOIN mlm.person p ON p.id = a.person_id
+		  LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
+		  LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
+		  LEFT JOIN mlm.person spp ON spp.id = sp.person_id
+		 WHERE a.status::text <> 'deleted'
+		   AND p.status::text <> 'deleted'
+		 ORDER BY t.sort_path
+	`, companyRoot)
+	if err != nil {
+		return nil, fmt.Errorf("admin tree full: %w", err)
+	}
+	defer rows.Close()
+	return scanAdminTreeNodes(rows)
+}
+
 func (s *Store) SearchAdminTree(ctx context.Context, q string, limit int) ([]AdminTreeSearchResult, error) {
 	q = strings.TrimSpace(q)
 	if limit <= 0 || limit > 25 {
@@ -520,6 +661,23 @@ func (h *Handler) handleAdminTreeRoots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"roots": nodes})
+}
+
+func (h *Handler) handleAdminTreeFull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	nodes, err := h.store.ListAdminTreeFull(r.Context(), h.companyRoot)
+	if err != nil {
+		h.log.Error().Err(err).Msg("admin tree full")
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
 }
 
 func (h *Handler) handleAdminTreeChildren(w http.ResponseWriter, r *http.Request) {
