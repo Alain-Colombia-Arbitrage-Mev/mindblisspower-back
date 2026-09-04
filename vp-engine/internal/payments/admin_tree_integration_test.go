@@ -111,6 +111,8 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 	right := seedAdminTreeAffiliate(t, ctx, pool, "Right", "Full", "right-full@t.local", &root.affID, "R", &root.affID, "right-full")
 	grandchild := seedAdminTreeAffiliate(t, ctx, pool, "Grand", "Full", "grand-full@t.local", &left.affID, "L", &left.affID, "grand-full")
 	deletedChild := seedAdminTreeAffiliate(t, ctx, pool, "Deleted", "Full", "deleted-full@t.local", &right.affID, "L", &right.affID, "deleted-full")
+	detachedRoot := seedAdminTreeAffiliate(t, ctx, pool, "Detached", "Root", "detached-full@t.local", nil, "", nil, "detached-full")
+	detachedChild := seedAdminTreeAffiliate(t, ctx, pool, "Detached", "Child", "detached-child-full@t.local", &detachedRoot.affID, "R", &detachedRoot.affID, "detached-child-full")
 
 	if _, err := pool.Exec(ctx, `UPDATE mlm.person SET status = 'pending' WHERE id = $1`, grandchild.personID); err != nil {
 		t.Fatalf("pend grandchild person: %v", err)
@@ -131,6 +133,8 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 		strconv.FormatInt(left.affID, 10),
 		strconv.FormatInt(grandchild.affID, 10),
 		strconv.FormatInt(right.affID, 10),
+		strconv.FormatInt(detachedRoot.affID, 10),
+		strconv.FormatInt(detachedChild.affID, 10),
 	}
 	if len(nodes) != len(wantOrder) {
 		t.Fatalf("nodes len = %d, want %d (%v)", len(nodes), len(wantOrder), nodes)

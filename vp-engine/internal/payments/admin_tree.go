@@ -248,15 +248,13 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		  SELECT id, 1 AS priority, depth
 		    FROM visible_affiliates
 		   WHERE parent_id IS NULL
-		     AND NOT EXISTS (SELECT 1 FROM configured_root)
 		),
 		orphan_roots AS (
 		  SELECT a.id, 2 AS priority, a.depth
 		    FROM visible_affiliates a
 		    LEFT JOIN visible_affiliates parent ON parent.id = a.parent_id
-		   WHERE parent.id IS NULL
-		     AND NOT EXISTS (SELECT 1 FROM configured_root)
-		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
+		   WHERE a.parent_id IS NOT NULL
+		     AND parent.id IS NULL
 		),
 		depth_roots AS (
 		  SELECT id, 3 AS priority, depth
