@@ -781,7 +781,20 @@ func (s *Store) GetBranchMini(ctx context.Context, affiliateID int64) (*AdminBra
 		       a.position::text, a.status::text,
 		       a.left_count + a.right_count, a.left_count, a.right_count
 		  FROM mlm.affiliate a
+		  JOIN mlm.person p ON p.id = a.person_id
 		 WHERE a.id = $1
+		   AND a.status::text NOT IN ('deleted','suspended','banned')
+		   AND p.status::text NOT IN ('deleted','suspended','banned')
+		   AND NOT COALESCE(p.blacklisted,false)
+		   AND NOT EXISTS (
+		     SELECT 1
+		       FROM mlm.blacklist b
+		      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		         OR (b.name_norm IS NOT NULL
+		             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		   )
 	`, affiliateID).Scan(&root.ID, &root.Handle, &root.Side, &root.Status,
 		&root.DownlineTotal, &root.DownlineLeft, &root.DownlineRight)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -795,7 +808,20 @@ func (s *Store) GetBranchMini(ctx context.Context, affiliateID int64) (*AdminBra
 		SELECT a.id, COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id),
 		       a.position::text, a.status::text, a.left_count + a.right_count
 		  FROM mlm.affiliate a
+		  JOIN mlm.person p ON p.id = a.person_id
 		 WHERE a.parent_id = $1
+		   AND a.status::text NOT IN ('deleted','suspended','banned')
+		   AND p.status::text NOT IN ('deleted','suspended','banned')
+		   AND NOT COALESCE(p.blacklisted,false)
+		   AND NOT EXISTS (
+		     SELECT 1
+		       FROM mlm.blacklist b
+		      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		         OR (b.name_norm IS NOT NULL
+		             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		   )
 		 ORDER BY a.position
 	`, affiliateID)
 	if err != nil {
