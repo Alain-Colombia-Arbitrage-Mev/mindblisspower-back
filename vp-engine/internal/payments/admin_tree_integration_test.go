@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestListAdminTreeChildren_HidesBannedAndBlacklistedNodes(t *testing.T) {
+func TestListAdminTreeChildren_ReturnsMaskedUnavailableNodes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("needs DB (Docker); skipped under -short")
 	}
@@ -92,16 +92,21 @@ func TestListAdminTreeChildren_HidesBannedAndBlacklistedNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAdminTreeChildren active child: %v", err)
 	}
-	if len(activeChildren) != 0 {
-		t.Fatalf("suspended/blacklisted children should be hidden, got %v", activeChildren)
+	if len(activeChildren) != 2 {
+		t.Fatalf("unavailable children len = %d, want 2 (%v)", len(activeChildren), activeChildren)
+	}
+	for _, child := range activeChildren {
+		if !child.Banned || child.Name != "Not Available" || child.Handle != "Not Available" || child.Email != "" || child.Rank != nil || child.Sponsor != nil {
+			t.Fatalf("unavailable child must be structurally present and identity-masked: %+v", child)
+		}
 	}
 
 	pendingChildren, err := store.ListAdminTreeChildren(ctx, pendingChild.affID)
 	if err != nil {
 		t.Fatalf("ListAdminTreeChildren pending child: %v", err)
 	}
-	if len(pendingChildren) != 0 {
-		t.Fatalf("listed blacklist child should be hidden, got %v", pendingChildren)
+	if len(pendingChildren) != 1 || !pendingChildren[0].Banned || pendingChildren[0].Name != "Not Available" {
+		t.Fatalf("blacklist-listed child should be masked, got %v", pendingChildren)
 	}
 
 	branchRoot, branchChildren, err := store.GetBranchMini(ctx, root.affID)
@@ -173,12 +178,16 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 		t.Fatalf("ListAdminTreeFull: %v", err)
 	}
 	wantIDs := map[string]bool{
-		strconv.FormatInt(root.affID, 10):          false,
-		strconv.FormatInt(left.affID, 10):          false,
-		strconv.FormatInt(right.affID, 10):         false,
-		strconv.FormatInt(grandchild.affID, 10):    false,
-		strconv.FormatInt(detachedRoot.affID, 10):  false,
-		strconv.FormatInt(detachedChild.affID, 10): false,
+		strconv.FormatInt(root.affID, 10):             false,
+		strconv.FormatInt(left.affID, 10):             false,
+		strconv.FormatInt(right.affID, 10):            false,
+		strconv.FormatInt(grandchild.affID, 10):       false,
+		strconv.FormatInt(deletedChild.affID, 10):     false,
+		strconv.FormatInt(suspendedChild.affID, 10):   false,
+		strconv.FormatInt(blacklistedChild.affID, 10): false,
+		strconv.FormatInt(detachedRoot.affID, 10):     false,
+		strconv.FormatInt(detachedChild.affID, 10):    false,
+		strconv.FormatInt(listedChild.affID, 10):      false,
 	}
 	nodesByID := map[string]AdminTreeNode{}
 	for _, node := range nodes {
@@ -195,17 +204,11 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 			t.Fatalf("missing node id %s in %v", id, nodes)
 		}
 	}
-	if _, ok := nodesByID[strconv.FormatInt(deletedChild.affID, 10)]; ok {
-		t.Fatalf("deleted child should not be returned")
-	}
-	if _, ok := nodesByID[strconv.FormatInt(suspendedChild.affID, 10)]; ok {
-		t.Fatalf("suspended child should not be returned")
-	}
-	if _, ok := nodesByID[strconv.FormatInt(blacklistedChild.affID, 10)]; ok {
-		t.Fatalf("blacklisted child should not be returned")
-	}
-	if _, ok := nodesByID[strconv.FormatInt(listedChild.affID, 10)]; ok {
-		t.Fatalf("blacklist-listed child should not be returned")
+	for _, id := range []int64{deletedChild.affID, suspendedChild.affID, blacklistedChild.affID, listedChild.affID} {
+		node := nodesByID[strconv.FormatInt(id, 10)]
+		if !node.Banned || node.Name != "Not Available" || node.Email != "" {
+			t.Fatalf("unavailable full-tree node must be masked: %+v", node)
+		}
 	}
 	if !nodesByID[strconv.FormatInt(root.affID, 10)].HasChildren || !nodesByID[strconv.FormatInt(left.affID, 10)].HasChildren {
 		t.Fatalf("root and left child should report visible descendants (%v)", nodes)
@@ -213,8 +216,8 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 	if nodesByID[strconv.FormatInt(grandchild.affID, 10)].Status != "pending" {
 		t.Fatalf("grandchild status = %s, want pending", nodesByID[strconv.FormatInt(grandchild.affID, 10)].Status)
 	}
-	if nodesByID[strconv.FormatInt(right.affID, 10)].HasChildren {
-		t.Fatalf("right child should not report children")
+	if !nodesByID[strconv.FormatInt(right.affID, 10)].HasChildren {
+		t.Fatalf("right child should report its unavailable children")
 	}
 }
 

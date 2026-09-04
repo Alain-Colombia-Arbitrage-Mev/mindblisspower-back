@@ -56,52 +56,30 @@ type AdminTreeSearchResult struct {
 
 func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
-		WITH visible_affiliates AS (
-		  SELECT a.id, a.parent_id, COALESCE(a.depth, 0) AS depth
+		WITH configured_root AS (
+		  SELECT a.id, 0 AS priority, COALESCE(a.depth, 0) AS depth
 		    FROM mlm.affiliate a
-		    JOIN mlm.person p ON p.id = a.person_id
-		   WHERE a.status::text NOT IN ('deleted','suspended','banned')
-		     AND p.status::text NOT IN ('deleted','suspended','banned')
-		     AND NOT COALESCE(p.blacklisted,false)
-		     AND NOT EXISTS (
-		       SELECT 1
-		         FROM mlm.blacklist b
-		        WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
-		           OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
-		           OR (b.name_norm IS NOT NULL
-		               AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
-		               AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
-		     )
-		),
-		configured_root AS (
-		  SELECT id, 0 AS priority, depth
-		    FROM visible_affiliates
-		   WHERE id = $1
-		     AND $1 > 0
+		   WHERE a.legacy_id_vicionario = 1
+		  UNION ALL
+		  SELECT a.id, 1 AS priority, COALESCE(a.depth, 0) AS depth
+		    FROM mlm.affiliate a
+		   WHERE a.id = $1 AND $1 > 0
+		     AND NOT EXISTS (SELECT 1 FROM mlm.affiliate WHERE legacy_id_vicionario = 1)
 		),
 		detached_roots AS (
-		  SELECT id, 1 AS priority, depth
-		    FROM visible_affiliates
-		   WHERE parent_id IS NULL
+		  SELECT a.id, 2 AS priority, COALESCE(a.depth, 0) AS depth
+		    FROM mlm.affiliate a
+		   WHERE a.parent_id IS NULL
 		     AND NOT EXISTS (SELECT 1 FROM configured_root)
-		),
-		orphan_roots AS (
-		  SELECT a.id, 2 AS priority, a.depth
-		    FROM visible_affiliates a
-		    LEFT JOIN visible_affiliates parent ON parent.id = a.parent_id
-		   WHERE parent.id IS NULL
-		     AND NOT EXISTS (SELECT 1 FROM configured_root)
-		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
-		   ORDER BY a.depth, a.id
+		   ORDER BY COALESCE(a.depth, 0), a.id
 		   LIMIT 25
 		),
 		depth_roots AS (
-		  SELECT id, 3 AS priority, depth
-		    FROM visible_affiliates
+		  SELECT a.id, 3 AS priority, COALESCE(a.depth, 0) AS depth
+		    FROM mlm.affiliate a
 		   WHERE NOT EXISTS (SELECT 1 FROM configured_root)
 		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
-		     AND NOT EXISTS (SELECT 1 FROM orphan_roots)
-		   ORDER BY depth, id
+		   ORDER BY COALESCE(a.depth, 0), a.id
 		   LIMIT 25
 		),
 		root_ids AS (
@@ -110,8 +88,6 @@ func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]Ad
 		      SELECT * FROM configured_root
 		      UNION ALL
 		      SELECT * FROM detached_roots
-		      UNION ALL
-		      SELECT * FROM orphan_roots
 		      UNION ALL
 		      SELECT * FROM depth_roots
 		    ) candidates
@@ -150,20 +126,7 @@ func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]Ad
 		       EXISTS (
 		         SELECT 1
 		           FROM mlm.affiliate c
-		           JOIN mlm.person cp ON cp.id = c.person_id
 		          WHERE c.parent_id = a.id
-		            AND c.status::text NOT IN ('deleted','suspended','banned')
-		            AND cp.status::text NOT IN ('deleted','suspended','banned')
-		            AND NOT COALESCE(cp.blacklisted,false)
-		            AND NOT EXISTS (
-		              SELECT 1
-		                FROM mlm.blacklist b
-		               WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(cp.email))
-		                  OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(cp.phone_number))
-		                  OR (b.name_norm IS NOT NULL
-		                      AND b.name_norm = mlm.norm_name(cp.first_name || ' ' || cp.last_name)
-		                      AND (b.birthdate IS NULL OR (cp.birthday IS NOT NULL AND b.birthdate = cp.birthday)))
-		            )
 		       ),
 		       COALESCE(a.left_count,0),
 		       COALESCE(a.right_count,0),
@@ -229,20 +192,7 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 		       EXISTS (
 		         SELECT 1
 		           FROM mlm.affiliate c
-		           JOIN mlm.person cp ON cp.id = c.person_id
 		          WHERE c.parent_id = a.id
-		            AND c.status::text NOT IN ('deleted','suspended','banned')
-		            AND cp.status::text NOT IN ('deleted','suspended','banned')
-		            AND NOT COALESCE(cp.blacklisted,false)
-		            AND NOT EXISTS (
-		              SELECT 1
-		                FROM mlm.blacklist b
-		               WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(cp.email))
-		                  OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(cp.phone_number))
-		                  OR (b.name_norm IS NOT NULL
-		                      AND b.name_norm = mlm.norm_name(cp.first_name || ' ' || cp.last_name)
-		                      AND (b.birthdate IS NULL OR (cp.birthday IS NOT NULL AND b.birthdate = cp.birthday)))
-		            )
 		       ),
 		       COALESCE(a.left_count,0),
 		       COALESCE(a.right_count,0),
@@ -258,18 +208,6 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 		 LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
 		 LEFT JOIN mlm.person spp ON spp.id = sp.person_id
 		 WHERE a.parent_id = $1
-		   AND a.status::text NOT IN ('deleted','suspended','banned')
-		   AND p.status::text NOT IN ('deleted','suspended','banned')
-		   AND NOT COALESCE(p.blacklisted,false)
-		   AND NOT EXISTS (
-		     SELECT 1
-		       FROM mlm.blacklist b
-		      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
-		         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
-		         OR (b.name_norm IS NOT NULL
-		             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
-		             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
-		   )
 		 ORDER BY CASE a.position::text WHEN 'L' THEN 1 WHEN 'R' THEN 2 ELSE 3 END, a.id
 	`, parentID)
 	if err != nil {
@@ -281,8 +219,9 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 
 func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
-		WITH visible_affiliates AS (
+		WITH all_affiliates AS (
 		  SELECT a.id,
+		         a.legacy_id_vicionario,
 		         a.parent_id,
 		         a.position::text AS position,
 		         COALESCE(a.depth, 0) AS depth,
@@ -291,6 +230,15 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		         p.email::text AS email,
 		         p.status::text AS person_status,
 		         COALESCE(p.blacklisted,false) AS blacklisted,
+		         EXISTS (
+		           SELECT 1
+		             FROM mlm.blacklist b
+		            WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+		               OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+		               OR (b.name_norm IS NOT NULL
+		                   AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+		                   AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+		         ) AS listed_by_blacklist,
 		         a.status::text AS affiliate_status,
 		         r.code AS rank_code,
 		         r.name_es AS rank_name,
@@ -302,22 +250,10 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		    FROM mlm.affiliate a
 		    JOIN mlm.person p ON p.id = a.person_id
 		    LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
-		   WHERE a.status::text NOT IN ('deleted','suspended','banned')
-		     AND p.status::text NOT IN ('deleted','suspended','banned')
-		     AND NOT COALESCE(p.blacklisted,false)
-		     AND NOT EXISTS (
-		       SELECT 1
-		         FROM mlm.blacklist b
-		        WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
-		           OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
-		           OR (b.name_norm IS NOT NULL
-		               AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
-		               AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
-		     )
 		),
 		child_flags AS (
 		  SELECT parent_id, true AS has_children
-		    FROM visible_affiliates
+		    FROM all_affiliates
 		   WHERE parent_id IS NOT NULL
 		   GROUP BY parent_id
 		),
@@ -334,7 +270,7 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		       va.email,
 		       va.person_status,
 		       va.blacklisted,
-		       false,
+		       va.listed_by_blacklist,
 		       va.affiliate_status,
 		       va.rank_code,
 		       va.rank_name,
@@ -348,12 +284,13 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		       va.pv_left,
 		       va.pv_right,
 		       active_packages.affiliate_id IS NOT NULL
-		  FROM visible_affiliates va
-		  LEFT JOIN visible_affiliates sponsor ON sponsor.id = va.sponsor_id
+		  FROM all_affiliates va
+		  LEFT JOIN all_affiliates sponsor ON sponsor.id = va.sponsor_id
 		  LEFT JOIN child_flags ON child_flags.parent_id = va.id
 		  LEFT JOIN active_packages ON active_packages.affiliate_id = va.id
 		 ORDER BY CASE
-		            WHEN va.id = $1 AND $1 > 0 THEN 0
+		            WHEN va.legacy_id_vicionario = 1 THEN 0
+		            WHEN va.id = $1 AND $1 > 0 THEN 1
 		            WHEN va.parent_id IS NULL THEN 1
 		            ELSE 2
 		          END,
@@ -510,27 +447,12 @@ func (s *Store) adminTreePaths(ctx context.Context, ids []int64) (map[string][]s
 		  SELECT a.id, a.parent_id, up.match_id, up.d + 1
 		    FROM mlm.affiliate a
 		    JOIN up ON a.id = up.parent_id
-		   WHERE up.d < 256
+		   WHERE up.d < 512
 		)
 		SELECT up.match_id,
 		       array_agg(up.id ORDER BY up.d DESC) AS path,
-		       bool_and(
-		         a.status::text NOT IN ('deleted','suspended','banned')
-		         AND p.status::text NOT IN ('deleted','suspended','banned')
-		         AND NOT COALESCE(p.blacklisted,false)
-		         AND NOT EXISTS (
-		           SELECT 1
-		             FROM mlm.blacklist b
-		            WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
-		               OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
-		               OR (b.name_norm IS NOT NULL
-		                   AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
-		                   AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
-		         )
-		       ) AS revealable
+		       true AS revealable
 		  FROM up
-		  JOIN mlm.affiliate a ON a.id = up.id
-		  JOIN mlm.person p ON p.id = a.person_id
 		 GROUP BY up.match_id
 	`, ids)
 	if err != nil {
@@ -638,6 +560,20 @@ func scanAdminTreeNode(rows pgx.Rows) (AdminTreeNode, error) {
 			Name:   strings.TrimSpace(derefStr(sponsorName)),
 			Email:  derefStr(sponsorEmail),
 		}
+	}
+	if banned {
+		// La topología se conserva para poder navegar por debajo del nodo, pero
+		// ninguna identidad, rango, sponsor, paquete o volumen de una cuenta
+		// bloqueada debe salir en la respuesta.
+		node.Handle = "Not Available"
+		node.Name = "Not Available"
+		node.Email = ""
+		node.Status = "unavailable"
+		node.Rank = nil
+		node.Sponsor = nil
+		node.PVLeft = "0"
+		node.PVRight = "0"
+		node.ActivePackage = false
 	}
 	return node, nil
 }
