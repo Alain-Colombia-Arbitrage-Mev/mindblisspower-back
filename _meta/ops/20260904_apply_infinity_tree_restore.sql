@@ -263,6 +263,18 @@ UPDATE mlm.affiliate a
  WHERE a.id=np.id;
 
 -- Reconciliación diferencial: evita borrar y recrear 7+ millones de filas.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM mlm.affiliate_closure c
+      JOIN _new_closure n USING(ancestor_id,descendant_id)
+     WHERE c.distance<>n.distance
+  ) THEN
+    RAISE EXCEPTION 'Closure distance updates required; aborting before reconciliation';
+  END IF;
+END $$;
+
 DELETE FROM mlm.affiliate_closure c
  WHERE NOT EXISTS (
    SELECT 1 FROM _new_closure n
@@ -272,16 +284,9 @@ DELETE FROM mlm.affiliate_closure c
 INSERT INTO mlm.affiliate_closure(ancestor_id,descendant_id,distance)
 SELECT n.ancestor_id,n.descendant_id,n.distance
   FROM _new_closure n
-  LEFT JOIN mlm.affiliate_closure c
+ LEFT JOIN mlm.affiliate_closure c
     ON c.ancestor_id=n.ancestor_id AND c.descendant_id=n.descendant_id
  WHERE c.ancestor_id IS NULL;
-
-UPDATE mlm.affiliate_closure c
-   SET distance=n.distance
-  FROM _new_closure n
- WHERE c.ancestor_id=n.ancestor_id
-   AND c.descendant_id=n.descendant_id
-   AND c.distance<>n.distance;
 
 DO $$
 DECLARE v bigint;
