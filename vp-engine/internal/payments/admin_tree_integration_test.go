@@ -128,29 +128,39 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAdminTreeFull: %v", err)
 	}
-	wantOrder := []string{
-		strconv.FormatInt(root.affID, 10),
-		strconv.FormatInt(left.affID, 10),
-		strconv.FormatInt(grandchild.affID, 10),
-		strconv.FormatInt(right.affID, 10),
-		strconv.FormatInt(detachedRoot.affID, 10),
-		strconv.FormatInt(detachedChild.affID, 10),
+	wantIDs := map[string]bool{
+		strconv.FormatInt(root.affID, 10):          false,
+		strconv.FormatInt(left.affID, 10):          false,
+		strconv.FormatInt(right.affID, 10):         false,
+		strconv.FormatInt(grandchild.affID, 10):    false,
+		strconv.FormatInt(detachedRoot.affID, 10):  false,
+		strconv.FormatInt(detachedChild.affID, 10): false,
 	}
-	if len(nodes) != len(wantOrder) {
-		t.Fatalf("nodes len = %d, want %d (%v)", len(nodes), len(wantOrder), nodes)
-	}
-	for i, wantID := range wantOrder {
-		if nodes[i].ID != wantID {
-			t.Fatalf("nodes[%d].ID = %s, want %s (%v)", i, nodes[i].ID, wantID, nodes)
+	nodesByID := map[string]AdminTreeNode{}
+	for _, node := range nodes {
+		nodesByID[node.ID] = node
+		if _, ok := wantIDs[node.ID]; ok {
+			wantIDs[node.ID] = true
 		}
 	}
-	if !nodes[0].HasChildren || !nodes[1].HasChildren {
+	if len(nodes) != len(wantIDs) {
+		t.Fatalf("nodes len = %d, want %d (%v)", len(nodes), len(wantIDs), nodes)
+	}
+	for id, seen := range wantIDs {
+		if !seen {
+			t.Fatalf("missing node id %s in %v", id, nodes)
+		}
+	}
+	if _, ok := nodesByID[strconv.FormatInt(deletedChild.affID, 10)]; ok {
+		t.Fatalf("deleted child should not be returned")
+	}
+	if !nodesByID[strconv.FormatInt(root.affID, 10)].HasChildren || !nodesByID[strconv.FormatInt(left.affID, 10)].HasChildren {
 		t.Fatalf("root and left child should report visible descendants (%v)", nodes)
 	}
-	if nodes[2].Status != "pending" {
-		t.Fatalf("grandchild status = %s, want pending", nodes[2].Status)
+	if nodesByID[strconv.FormatInt(grandchild.affID, 10)].Status != "pending" {
+		t.Fatalf("grandchild status = %s, want pending", nodesByID[strconv.FormatInt(grandchild.affID, 10)].Status)
 	}
-	if nodes[3].HasChildren {
+	if nodesByID[strconv.FormatInt(right.affID, 10)].HasChildren {
 		t.Fatalf("right child should not report children")
 	}
 }

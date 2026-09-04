@@ -231,7 +231,7 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 
 func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
-		WITH RECURSIVE visible_affiliates AS (
+		WITH visible_affiliates AS (
 		  SELECT a.id,
 		         a.parent_id,
 		         a.position::text AS position,
@@ -265,79 +265,6 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		  SELECT DISTINCT affiliate_id
 		    FROM mlm.affiliate_package
 		   WHERE status::text = 'active'
-		),
-		configured_root AS (
-		  SELECT id, 0 AS priority, depth
-		    FROM visible_affiliates
-		   WHERE id = $1
-		     AND $1 > 0
-		),
-		detached_roots AS (
-		  SELECT id, 1 AS priority, depth
-		    FROM visible_affiliates
-		   WHERE parent_id IS NULL
-		),
-		orphan_roots AS (
-		  SELECT a.id, 2 AS priority, a.depth
-		    FROM visible_affiliates a
-		    LEFT JOIN visible_affiliates parent ON parent.id = a.parent_id
-		   WHERE a.parent_id IS NOT NULL
-		     AND parent.id IS NULL
-		),
-		depth_roots AS (
-		  SELECT id, 3 AS priority, depth
-		    FROM visible_affiliates
-		   WHERE NOT EXISTS (SELECT 1 FROM configured_root)
-		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
-		     AND NOT EXISTS (SELECT 1 FROM orphan_roots)
-		   ORDER BY depth, id
-		   LIMIT 25
-		),
-		root_ids AS (
-		  SELECT DISTINCT ON (id) id, priority, depth
-		    FROM (
-		      SELECT * FROM configured_root
-		      UNION ALL
-		      SELECT * FROM detached_roots
-		      UNION ALL
-		      SELECT * FROM orphan_roots
-		      UNION ALL
-		      SELECT * FROM depth_roots
-		    ) candidates
-		   ORDER BY id, priority, depth
-		),
-		selected_roots AS (
-		  SELECT id, priority, depth
-		    FROM root_ids
-		   ORDER BY priority, depth, id
-		),
-		tree AS (
-		  SELECT va.id,
-		         va.parent_id,
-		         sr.priority,
-		         ARRAY[va.id]::bigint[] AS path_ids,
-		         lpad(sr.priority::text, 2, '0') || ':' ||
-		         lpad(va.depth::text, 8, '0') || ':' ||
-		         lpad(va.id::text, 20, '0') AS sort_path
-		    FROM selected_roots sr
-		    JOIN visible_affiliates va ON va.id = sr.id
-		  UNION ALL
-		  SELECT child.id,
-		         child.parent_id,
-		         tree.priority,
-		         tree.path_ids || child.id,
-		         tree.sort_path || '.' ||
-		         CASE child.position WHEN 'L' THEN '1' WHEN 'R' THEN '2' ELSE '3' END ||
-		         ':' || lpad(child.id::text, 20, '0') AS sort_path
-		    FROM visible_affiliates child
-		    JOIN tree ON child.parent_id = tree.id
-		   WHERE cardinality(tree.path_ids) < 512
-		     AND NOT child.id = ANY(tree.path_ids)
-		),
-		dedup_tree AS (
-		  SELECT DISTINCT ON (id) id, priority, sort_path, cardinality(path_ids) AS tree_depth
-		    FROM tree
-		   ORDER BY id, cardinality(path_ids), priority, sort_path
 		)
 		SELECT va.id,
 		       va.parent_id,
@@ -361,12 +288,18 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		       va.pv_left,
 		       va.pv_right,
 		       active_packages.affiliate_id IS NOT NULL
-		  FROM dedup_tree t
-		  JOIN visible_affiliates va ON va.id = t.id
+		  FROM visible_affiliates va
 		  LEFT JOIN visible_affiliates sponsor ON sponsor.id = va.sponsor_id
 		  LEFT JOIN child_flags ON child_flags.parent_id = va.id
 		  LEFT JOIN active_packages ON active_packages.affiliate_id = va.id
-		 ORDER BY t.sort_path
+		 ORDER BY CASE
+		            WHEN va.id = $1 AND $1 > 0 THEN 0
+		            WHEN va.parent_id IS NULL THEN 1
+		            ELSE 2
+		          END,
+		          va.depth,
+		          CASE va.position WHEN 'L' THEN 1 WHEN 'R' THEN 2 ELSE 3 END,
+		          va.id
 	`, companyRoot)
 	if err != nil {
 		return nil, fmt.Errorf("admin tree full: %w", err)
