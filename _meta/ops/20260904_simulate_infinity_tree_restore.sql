@@ -131,7 +131,7 @@ WITH RECURSIVE tree AS (
    WHERE e.parent_id IS NULL
   UNION ALL
   SELECT c.id,
-         p.path || text2ltree(c.position::text || '_' || c.id::text),
+         p.path || text2ltree(c.position::text),
          p.depth+1
     FROM tree p
     JOIN _final_edge c ON c.parent_id=p.id
@@ -141,6 +141,11 @@ SELECT * FROM tree;
 
 CREATE UNIQUE INDEX ON _new_path(id);
 ANALYZE _new_path;
+
+CREATE TEMP TABLE _path_index_probe(path ltree NOT NULL) ON COMMIT DROP;
+INSERT INTO _path_index_probe(path) SELECT path FROM _new_path;
+CREATE INDEX _path_index_probe_btree ON _path_index_probe(path);
+DROP TABLE _path_index_probe;
 
 DO $$
 DECLARE

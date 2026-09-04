@@ -157,7 +157,10 @@ WITH RECURSIVE tree AS (
   SELECT e.id,text2ltree(e.id::text) AS path,0 AS depth
     FROM _final_edge e WHERE e.parent_id IS NULL
   UNION ALL
-  SELECT c.id,p.path || text2ltree(c.position::text || '_' || c.id::text),p.depth+1
+  -- Una sola raíz + la restricción UNIQUE(parent_id, position) hacen que la
+  -- secuencia L/R identifique unívocamente cada nodo. La codificación compacta
+  -- evita superar el límite de clave del índice B-tree en profundidades >300.
+  SELECT c.id,p.path || text2ltree(c.position::text),p.depth+1
     FROM tree p JOIN _final_edge c ON c.parent_id=p.id
    WHERE p.depth<1024
 )
@@ -165,6 +168,13 @@ SELECT * FROM tree;
 
 CREATE UNIQUE INDEX ON _new_path(id);
 ANALYZE _new_path;
+
+-- Prueba exactamente la misma clase de índice que existe en producción antes
+-- de escribir una sola ruta real. Cualquier ruta demasiado grande aborta aquí.
+CREATE TEMP TABLE _path_index_probe(path ltree NOT NULL) ON COMMIT DROP;
+INSERT INTO _path_index_probe(path) SELECT path FROM _new_path;
+CREATE INDEX _path_index_probe_btree ON _path_index_probe(path);
+DROP TABLE _path_index_probe;
 
 DO $$
 BEGIN
