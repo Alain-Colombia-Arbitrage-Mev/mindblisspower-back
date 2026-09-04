@@ -45,6 +45,39 @@ func TestListAdminTreeChildren_ReturnsMaskedUnavailableNodes(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE mlm.affiliate SET status = 'pending' WHERE id = $1`, pendingChild.affID); err != nil {
 		t.Fatalf("pend child affiliate: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET current_rank_id = 1,
+		       left_pv_current = 120,
+		       right_pv_current = 80,
+		       left_pv_lifetime = 5120,
+		       right_pv_lifetime = 5080
+		 WHERE id = $1
+	`, root.affID); err != nil {
+		t.Fatalf("seed root rank and volume: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET current_rank_id = 2,
+		       left_pv_current = 45,
+		       right_pv_current = 30,
+		       left_pv_lifetime = 9045,
+		       right_pv_lifetime = 9030
+		 WHERE id = $1
+	`, activeChild.affID); err != nil {
+		t.Fatalf("seed active child rank and volume: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET current_rank_id = 3,
+		       left_pv_current = 25,
+		       right_pv_current = 15,
+		       left_pv_lifetime = 8025,
+		       right_pv_lifetime = 8015
+		 WHERE id = ANY($1::bigint[])
+	`, []int64{suspendedChild.affID, blacklistedChild.affID}); err != nil {
+		t.Fatalf("seed unavailable children rank and volume: %v", err)
+	}
 
 	roots, err := store.ListAdminTreeRoots(ctx, root.affID)
 	if err != nil {
@@ -61,6 +94,9 @@ func TestListAdminTreeChildren_ReturnsMaskedUnavailableNodes(t *testing.T) {
 	}
 	if !roots[0].HasChildren {
 		t.Fatalf("configured root should report visible children")
+	}
+	if roots[0].Rank == nil || roots[0].Rank.Name != "Bronce" || roots[0].PVLeft != "120.00" || roots[0].PVRight != "80.00" {
+		t.Fatalf("root must return rank and current volume, got %+v", roots[0])
 	}
 
 	children, err := store.ListAdminTreeChildren(ctx, root.affID)
@@ -84,8 +120,10 @@ func TestListAdminTreeChildren_ReturnsMaskedUnavailableNodes(t *testing.T) {
 			t.Fatalf("missing child id %s in %v", id, children)
 		}
 	}
-	if len(children) != len(wantIDs) {
-		t.Fatalf("children len = %d, want %d (%v)", len(children), len(wantIDs), children)
+	for _, child := range children {
+		if child.ID == strconv.FormatInt(activeChild.affID, 10) && (child.Rank == nil || child.Rank.Name != "Plata" || child.PVLeft != "45.00" || child.PVRight != "30.00") {
+			t.Fatalf("active child must return rank and current volume, got %+v", child)
+		}
 	}
 
 	activeChildren, err := store.ListAdminTreeChildren(ctx, activeChild.affID)
@@ -96,8 +134,11 @@ func TestListAdminTreeChildren_ReturnsMaskedUnavailableNodes(t *testing.T) {
 		t.Fatalf("unavailable children len = %d, want 2 (%v)", len(activeChildren), activeChildren)
 	}
 	for _, child := range activeChildren {
-		if !child.Banned || child.Name != "Not Available" || child.Handle != "Not Available" || child.Email != "" || child.Rank != nil || child.Sponsor != nil {
+		if !child.Banned || child.Name != "Not Available" || child.Handle != "Not Available" || child.Email != "" || child.Sponsor != nil {
 			t.Fatalf("unavailable child must be structurally present and identity-masked: %+v", child)
+		}
+		if child.Rank == nil || child.Rank.Name != "Oro" || child.PVLeft != "25.00" || child.PVRight != "15.00" {
+			t.Fatalf("unavailable child must retain admin rank and current volume: %+v", child)
 		}
 	}
 
@@ -172,6 +213,17 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed blacklist row: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET current_rank_id = 4,
+		       left_pv_current = 70,
+		       right_pv_current = 60,
+		       left_pv_lifetime = 7070,
+		       right_pv_lifetime = 7060
+		 WHERE id = $1
+	`, grandchild.affID); err != nil {
+		t.Fatalf("seed full-tree rank and volume: %v", err)
+	}
 
 	nodes, err := store.ListAdminTreeFull(ctx, root.affID)
 	if err != nil {
@@ -216,6 +268,10 @@ func TestListAdminTreeFull_ReturnsWholeConfiguredTree(t *testing.T) {
 	if nodesByID[strconv.FormatInt(grandchild.affID, 10)].Status != "pending" {
 		t.Fatalf("grandchild status = %s, want pending", nodesByID[strconv.FormatInt(grandchild.affID, 10)].Status)
 	}
+	grandchildNode := nodesByID[strconv.FormatInt(grandchild.affID, 10)]
+	if grandchildNode.Rank == nil || grandchildNode.Rank.Name != "Platino" || grandchildNode.PVLeft != "70.00" || grandchildNode.PVRight != "60.00" {
+		t.Fatalf("full tree must return rank and current volume, got %+v", grandchildNode)
+	}
 	if !nodesByID[strconv.FormatInt(right.affID, 10)].HasChildren {
 		t.Fatalf("right child should report its unavailable children")
 	}
@@ -243,6 +299,17 @@ func TestSearchAdminTree_HidesBannedAndBlacklistedNodes(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE mlm.person SET blacklisted = true WHERE id = $1`, blacklisted.personID); err != nil {
 		t.Fatalf("blacklist person: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.affiliate
+		   SET current_rank_id = 5,
+		       left_pv_current = 90,
+		       right_pv_current = 75,
+		       left_pv_lifetime = 9090,
+		       right_pv_lifetime = 9075
+		 WHERE id = $1
+	`, visible.affID); err != nil {
+		t.Fatalf("seed searchable rank and volume: %v", err)
+	}
 
 	results, err := store.SearchAdminTree(ctx, "needle", 20)
 	if err != nil {
@@ -253,5 +320,8 @@ func TestSearchAdminTree_HidesBannedAndBlacklistedNodes(t *testing.T) {
 	}
 	if results[0].ID != strconv.FormatInt(visible.affID, 10) {
 		t.Fatalf("result id = %s, want %d", results[0].ID, visible.affID)
+	}
+	if results[0].Rank == nil || results[0].Rank.Name != "Zafiro" || results[0].PVLeft != "90.00" || results[0].PVRight != "75.00" {
+		t.Fatalf("search result must return rank and current volume, got %+v", results[0])
 	}
 }

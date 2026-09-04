@@ -130,8 +130,8 @@ func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]Ad
 		       ),
 		       COALESCE(a.left_count,0),
 		       COALESCE(a.right_count,0),
-		       COALESCE(a.left_pv_lifetime,0)::text,
-		       COALESCE(a.right_pv_lifetime,0)::text,
+		       COALESCE(a.left_pv_current,0)::text,
+		       COALESCE(a.right_pv_current,0)::text,
 		       EXISTS (
 		         SELECT 1 FROM mlm.affiliate_package ap
 		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
@@ -196,8 +196,8 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 		       ),
 		       COALESCE(a.left_count,0),
 		       COALESCE(a.right_count,0),
-		       COALESCE(a.left_pv_lifetime,0)::text,
-		       COALESCE(a.right_pv_lifetime,0)::text,
+		       COALESCE(a.left_pv_current,0)::text,
+		       COALESCE(a.right_pv_current,0)::text,
 		       EXISTS (
 		         SELECT 1 FROM mlm.affiliate_package ap
 		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
@@ -245,8 +245,8 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		         a.sponsor_id,
 		         COALESCE(a.left_count,0) AS left_count,
 		         COALESCE(a.right_count,0) AS right_count,
-		         COALESCE(a.left_pv_lifetime,0)::text AS pv_left,
-		         COALESCE(a.right_pv_lifetime,0)::text AS pv_right
+		         COALESCE(a.left_pv_current,0)::text AS pv_left,
+		         COALESCE(a.right_pv_current,0)::text AS pv_right
 		    FROM mlm.affiliate a
 		    JOIN mlm.person p ON p.id = a.person_id
 		    LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
@@ -356,8 +356,8 @@ func (s *Store) SearchAdminTree(ctx context.Context, q string, limit int) ([]Adm
 		       ),
 		       COALESCE(a.left_count,0),
 		       COALESCE(a.right_count,0),
-		       COALESCE(a.left_pv_lifetime,0)::text,
-		       COALESCE(a.right_pv_lifetime,0)::text,
+		       COALESCE(a.left_pv_current,0)::text,
+		       COALESCE(a.right_pv_current,0)::text,
 		       EXISTS (
 		         SELECT 1 FROM mlm.affiliate_package ap
 		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
@@ -563,16 +563,14 @@ func scanAdminTreeNode(rows pgx.Rows) (AdminTreeNode, error) {
 	}
 	if banned {
 		// La topología se conserva para poder navegar por debajo del nodo, pero
-		// ninguna identidad, rango, sponsor, paquete o volumen de una cuenta
-		// bloqueada debe salir en la respuesta.
+		// la identidad y el sponsor de la cuenta bloqueada permanecen ocultos.
+		// El rango y el volumen operativo actual sí son visibles en este endpoint
+		// exclusivo para administradores, porque son necesarios para auditar la red.
 		node.Handle = "Not Available"
 		node.Name = "Not Available"
 		node.Email = ""
 		node.Status = "unavailable"
-		node.Rank = nil
 		node.Sponsor = nil
-		node.PVLeft = "0"
-		node.PVRight = "0"
 		node.ActivePackage = false
 	}
 	return node, nil
