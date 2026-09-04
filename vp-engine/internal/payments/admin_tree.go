@@ -232,11 +232,39 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
 		WITH RECURSIVE visible_affiliates AS (
-		  SELECT a.id, a.parent_id, a.position::text AS position, COALESCE(a.depth, 0) AS depth
+		  SELECT a.id,
+		         a.parent_id,
+		         a.position::text AS position,
+		         COALESCE(a.depth, 0) AS depth,
+		         COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id) AS handle,
+		         trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')) AS name,
+		         p.email::text AS email,
+		         p.status::text AS person_status,
+		         COALESCE(p.blacklisted,false) AS blacklisted,
+		         a.status::text AS affiliate_status,
+		         r.code AS rank_code,
+		         r.name_es AS rank_name,
+		         a.sponsor_id,
+		         COALESCE(a.left_count,0) AS left_count,
+		         COALESCE(a.right_count,0) AS right_count,
+		         COALESCE(a.left_pv_lifetime,0)::text AS pv_left,
+		         COALESCE(a.right_pv_lifetime,0)::text AS pv_right
 		    FROM mlm.affiliate a
 		    JOIN mlm.person p ON p.id = a.person_id
+		    LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
 		   WHERE a.status::text <> 'deleted'
 		     AND p.status::text <> 'deleted'
+		),
+		child_flags AS (
+		  SELECT parent_id, true AS has_children
+		    FROM visible_affiliates
+		   WHERE parent_id IS NOT NULL
+		   GROUP BY parent_id
+		),
+		active_packages AS (
+		  SELECT DISTINCT affiliate_id
+		    FROM mlm.affiliate_package
+		   WHERE status::text = 'active'
 		),
 		configured_root AS (
 		  SELECT id, 0 AS priority, depth
@@ -311,54 +339,33 @@ func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]Adm
 		    FROM tree
 		   ORDER BY id, cardinality(path_ids), priority, sort_path
 		)
-		SELECT a.id,
-		       a.parent_id,
-		       a.position::text,
-		       COALESCE(NULLIF(a.invitation_link,''), 'MP'||a.id),
-		       trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),
-		       p.email::text,
-		       p.status::text,
-		       COALESCE(p.blacklisted,false),
-		       EXISTS (
-		         SELECT 1
-		           FROM mlm.blacklist b
-		          WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
-		             OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
-		             OR (b.name_norm IS NOT NULL
-		                 AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
-		                 AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
-		       ),
-		       a.status::text,
-		       r.code,
-		       r.name_es,
-		       sp.id,
-		       COALESCE(NULLIF(sp.invitation_link,''), 'MP'||sp.id),
-		       trim(coalesce(spp.first_name,'')||' '||coalesce(spp.last_name,'')),
-		       spp.email::text,
-		       EXISTS (
-		         SELECT 1
-		           FROM mlm.affiliate c
-		           JOIN mlm.person cp ON cp.id = c.person_id
-		          WHERE c.parent_id = a.id
-		            AND c.status::text <> 'deleted'
-		            AND cp.status::text <> 'deleted'
-		       ),
-		       COALESCE(a.left_count,0),
-		       COALESCE(a.right_count,0),
-		       COALESCE(a.left_pv_lifetime,0)::text,
-		       COALESCE(a.right_pv_lifetime,0)::text,
-		       EXISTS (
-		         SELECT 1 FROM mlm.affiliate_package ap
-		          WHERE ap.affiliate_id = a.id AND ap.status::text = 'active'
-		       )
+		SELECT va.id,
+		       va.parent_id,
+		       va.position,
+		       va.handle,
+		       va.name,
+		       va.email,
+		       va.person_status,
+		       va.blacklisted,
+		       false,
+		       va.affiliate_status,
+		       va.rank_code,
+		       va.rank_name,
+		       sponsor.id,
+		       sponsor.handle,
+		       sponsor.name,
+		       sponsor.email,
+		       COALESCE(child_flags.has_children, false),
+		       va.left_count,
+		       va.right_count,
+		       va.pv_left,
+		       va.pv_right,
+		       active_packages.affiliate_id IS NOT NULL
 		  FROM dedup_tree t
-		  JOIN mlm.affiliate a ON a.id = t.id
-		  JOIN mlm.person p ON p.id = a.person_id
-		  LEFT JOIN mlm.rank r ON r.id = a.current_rank_id
-		  LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
-		  LEFT JOIN mlm.person spp ON spp.id = sp.person_id
-		 WHERE a.status::text <> 'deleted'
-		   AND p.status::text <> 'deleted'
+		  JOIN visible_affiliates va ON va.id = t.id
+		  LEFT JOIN visible_affiliates sponsor ON sponsor.id = va.sponsor_id
+		  LEFT JOIN child_flags ON child_flags.parent_id = va.id
+		  LEFT JOIN active_packages ON active_packages.affiliate_id = va.id
 		 ORDER BY t.sort_path
 	`, companyRoot)
 	if err != nil {
