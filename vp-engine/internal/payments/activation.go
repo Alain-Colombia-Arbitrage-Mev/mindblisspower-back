@@ -42,31 +42,34 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 	defer tx.Rollback(ctx) //nolint:errcheck // safe tras Commit
 
 	var (
-		intentID    string
-		userID      string
-		personID    int64
-		affiliateID *int64
-		sponsorID   *int64
-		packageID   int
-		pv          int
-		status      string
+		intentID      string
+		userID        string
+		personID      int64
+		affiliateID   *int64
+		sponsorID     *int64
+		packageID     int
+		pv            int
+		status        string
+		preferredSide string
 	)
 	const lockIntentBySession = `
-		SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status
+		SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status,
+		       COALESCE(preferred_side, '')
 		  FROM payments.purchase_intent
 		 WHERE stripe_session_id = $1
 		 FOR UPDATE
 	`
 	err = tx.QueryRow(ctx, lockIntentBySession, sessionID).Scan(
-		&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status,
+		&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide,
 	)
 	if errors.Is(err, pgx.ErrNoRows) && strings.TrimSpace(purchaseIntentID) != "" {
 		err = tx.QueryRow(ctx, `
-			SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status
+			SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status,
+			       COALESCE(preferred_side, '')
 			  FROM payments.purchase_intent
 			 WHERE id = $1::uuid
 			 FOR UPDATE
-		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status)
+		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActivationResult{}, ErrIntentNotFound
@@ -158,7 +161,7 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 			s.afterPaymentConfirmed(ctx, intentID, "payment.paid", nil)
 			return ActivationResult{Status: "needs_placement"}, nil
 		}
-		affID, err = autoPlaceAffiliate(ctx, tx, personID, *sponsorID)
+		affID, err = autoPlaceAffiliate(ctx, tx, personID, *sponsorID, preferredSide)
 		if err != nil {
 			return ActivationResult{}, fmt.Errorf("auto-place: %w", err)
 		}
@@ -360,22 +363,23 @@ Este es un mensaje automático; por favor no respondas a este correo.`,
 	s.log.Info().Str("intent", intentID).Str("to", email).Msg("comprobante de compra enviado")
 }
 
-// autoPlaceAffiliate coloca al comprador bajo su sponsor siguiendo la regla
-// weak-leg (pierna con menor PV; desempate por conteo, luego 'L'). Race-safe vía
+// autoPlaceAffiliate coloca al comprador bajo su sponsor. Si el registro llegó
+// por un enlace L/R, desciende siempre por ese lado hasta el primer hueco; sin
+// preferencia conserva la regla legacy weak-leg. Race-safe vía
 // pg_advisory_xact_lock(sponsor) + FOR UPDATE al descender. Port fiel de
 // backend/app/src/server/affiliate.ts::autoPlaceAffiliate.
-func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64) (int64, error) {
+func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, requestedSide string) (int64, error) {
 	// Clase 2 = colocación (el cierre binario usa clase 1; evita colisión de
 	// keyspace con el period id — el afiliado 1 = la empresa chocaba el lunes).
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2, $1::int)`, sponsorID); err != nil {
 		return 0, fmt.Errorf("advisory lock: %w", err)
 	}
 
-	const preferred = "L"
+	preferred := normalizePreferredSide(requestedSide)
 
-	// Descenso weak-leg SET-BASED: un solo CTE recursivo baja desde el sponsor
-	// eligiendo en cada nodo la pierna débil (menor PV; desempate por conteo,
-	// luego 'L') y siguiendo el hijo de esa pierna, hasta el primer hueco (el
+	// Descenso SET-BASED: un solo CTE recursivo baja desde el sponsor. Con L/R
+	// explícito sigue esa misma pierna en cada nodo; sin preferencia elige la
+	// pierna débil (menor PV; desempate por conteo, luego L), hasta el primer hueco (el
 	// nodo más profundo cuya pierna elegida no tiene hijo). Reemplaza el loop de
 	// O(prof) round-trips (~382 a prof 191) por 1 query, encogiendo la ventana del
 	// advisory_lock(sponsor) → mucha más throughput de colocación concurrente.
@@ -392,21 +396,23 @@ func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int6
 		err := tx.QueryRow(ctx, `
 			WITH RECURSIVE walk AS (
 			  SELECT a.id AS node_id,
-			         CASE WHEN a.left_pv_current < a.right_pv_current THEN 'L'
+			         CASE WHEN $2 IN ('L','R') THEN $2
+			              WHEN a.left_pv_current < a.right_pv_current THEN 'L'
 			              WHEN a.right_pv_current < a.left_pv_current THEN 'R'
 			              WHEN a.left_count < a.right_count THEN 'L'
 			              WHEN a.right_count < a.left_count THEN 'R'
-			              ELSE $2 END AS side,
+			              ELSE 'L' END AS side,
 			         0 AS lvl
 			    FROM mlm.affiliate a
 			   WHERE a.id = $1
 			  UNION ALL
 			  SELECT c.id,
-			         CASE WHEN c.left_pv_current < c.right_pv_current THEN 'L'
+			         CASE WHEN $2 IN ('L','R') THEN $2
+			              WHEN c.left_pv_current < c.right_pv_current THEN 'L'
 			              WHEN c.right_pv_current < c.left_pv_current THEN 'R'
 			              WHEN c.left_count < c.right_count THEN 'L'
 			              WHEN c.right_count < c.left_count THEN 'R'
-			              ELSE $2 END,
+			              ELSE 'L' END,
 			         w.lvl + 1
 			    FROM walk w
 			    JOIN mlm.affiliate c

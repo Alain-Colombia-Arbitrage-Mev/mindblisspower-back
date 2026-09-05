@@ -216,6 +216,7 @@ type PurchaseIntent struct {
 	AffiliateID         *int64
 	SponsorAffiliateID  *int64
 	ReferralCode        string
+	PreferredSide       string
 	PackageID           int
 	PV                  int
 	AmountUSD           decimal.Decimal
@@ -317,12 +318,12 @@ func (s *Store) createPurchaseIntent(ctx context.Context, in PurchaseIntent, inc
 
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO payments.purchase_intent (
-			user_id, person_id, affiliate_id, sponsor_affiliate_id, referral_code,
+			user_id, person_id, affiliate_id, sponsor_affiliate_id, referral_code, preferred_side,
 			package_id, pv, amount_usd, fee_usd, total_cents, currency, status
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'created')
+		) VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11,$12,'created')
 		RETURNING id::text
 	`, in.UserID, in.PersonID, in.AffiliateID, in.SponsorAffiliateID,
-		emptyToNil(in.ReferralCode), in.PackageID, in.PV, in.AmountUSD.String(), in.FeeUSD.String(), in.TotalCents, in.Currency).Scan(&id)
+		emptyToNil(in.ReferralCode), normalizePreferredSide(in.PreferredSide), in.PackageID, in.PV, in.AmountUSD.String(), in.FeeUSD.String(), in.TotalCents, in.Currency).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create purchase_intent: %w", err)
 	}

@@ -972,11 +972,12 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 // ── Checkout ────────────────────────────────────────────────────────────────
 
 type checkoutRequest struct {
-	Email     string `json:"email"`
-	PackageID int    `json:"package_id"`
-	Ref       string `json:"ref"`   // código de referido (?ref=CODE) → sponsor para colocar
-	Name      string `json:"name"`  // nombre del token (para auto-provisión de mlm.person)
-	Phone     string `json:"phone"` // teléfono del token (E.164)
+	Email         string `json:"email"`
+	PackageID     int    `json:"package_id"`
+	Ref           string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
+	PreferredSide string `json:"preferred_side"` // L/R del enlace; se persiste hasta el webhook de pago
+	Name          string `json:"name"`           // nombre del token (para auto-provisión de mlm.person)
+	Phone         string `json:"phone"`          // teléfono del token (E.164)
 }
 
 type checkoutResponse struct {
@@ -1059,7 +1060,11 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sponsor, referralCodeForIntent, err := h.resolveCheckoutSponsor(ctx, req.Email, buyer, req.Ref)
+	if strings.TrimSpace(req.PreferredSide) != "" && normalizePreferredSide(req.PreferredSide) == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_preferred_side")
+		return
+	}
+	sponsor, referralCodeForIntent, preferredSideForIntent, err := h.resolveCheckoutPlacement(ctx, req.Email, buyer, req.Ref, req.PreferredSide)
 	if errors.Is(err, ErrInvalidReferralCode) {
 		writeErr(w, http.StatusBadRequest, "invalid_referral_code")
 		return
@@ -1093,6 +1098,7 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		AffiliateID:        buyer.AffiliateID,
 		SponsorAffiliateID: sponsor,
 		ReferralCode:       referralCodeForIntent,
+		PreferredSide:      preferredSideForIntent,
 		PackageID:          pack.ID,
 		PV:                 pack.PV,
 		AmountUSD:          pack.AmountUSD,
@@ -1113,6 +1119,9 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		"package_id":         strconv.Itoa(pack.ID),
 		"pv":                 strconv.Itoa(pack.PV),
 	}
+	if preferredSideForIntent != "" {
+		meta["preferred_side"] = preferredSideForIntent
+	}
 	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, meta)
 	if err != nil {
 		h.log.Error().Err(err).Str("intent", intentID).Msg("stripe checkout create")
@@ -1132,33 +1141,51 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) resolveCheckoutSponsor(ctx context.Context, email string, buyer Buyer, ref string) (*int64, string, error) {
+	sponsor, referralCode, _, err := h.resolveCheckoutPlacement(ctx, email, buyer, ref, "")
+	return sponsor, referralCode, err
+}
+
+func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, buyer Buyer, ref, requestedSide string) (*int64, string, string, error) {
 	// Sponsor: el del afiliado existente es autoritativo. Un ?ref=CODE sólo se
 	// usa para compradores aún no colocados; aplicar refs nuevos sobre afiliados
 	// existentes mezcla sesiones/navegadores y puede atribuir sponsors falsos.
 	sponsor := buyer.SponsorAffiliateID
 	referralCode := strings.TrimSpace(ref)
 	referralCodeForIntent := ""
+	preferredSideForIntent := ""
 
 	if buyer.AffiliateID == nil && sponsor == nil {
 		if referralCode != "" {
 			resolvedSponsor, err := h.store.ResolveSponsorByCode(ctx, referralCode)
 			if err != nil {
-				return nil, "", err
+				return nil, "", "", err
 			}
 			if resolvedSponsor == nil {
-				return nil, "", ErrInvalidReferralCode
+				return nil, "", "", ErrInvalidReferralCode
 			}
 			sponsor = resolvedSponsor
 			referralCodeForIntent = referralCode
+			preferredSideForIntent = normalizePreferredSide(requestedSide)
+
+			// El registro persistido es autoritativo cuando corresponde al mismo
+			// código. Evita que un almacenamiento local viejo cambie L/R al pagar.
+			registeredReferral, lookupErr := h.store.LookupRegistrationReferral(ctx, email)
+			if lookupErr != nil {
+				return nil, "", "", lookupErr
+			}
+			if registeredReferral != nil && strings.EqualFold(registeredReferral.Code, referralCode) {
+				preferredSideForIntent = registeredReferral.PreferredSide
+			}
 		} else {
 			registeredReferral, err := h.store.LookupRegistrationReferral(ctx, email)
 			if err != nil {
-				return nil, "", err
+				return nil, "", "", err
 			}
 			if registeredReferral != nil {
 				sid := registeredReferral.SponsorAffiliateID
 				sponsor = &sid
 				referralCodeForIntent = registeredReferral.Code
+				preferredSideForIntent = registeredReferral.PreferredSide
 			}
 		}
 	}
@@ -1169,7 +1196,7 @@ func (h *Handler) resolveCheckoutSponsor(ctx context.Context, email string, buye
 		cr := h.companyRoot
 		sponsor = &cr
 	}
-	return sponsor, referralCodeForIntent, nil
+	return sponsor, referralCodeForIntent, preferredSideForIntent, nil
 }
 
 // ── Webhook ──────────────────────────────────────────────────────────────────

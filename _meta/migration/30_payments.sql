@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS payments.purchase_intent (
   affiliate_id          bigint,             -- null si aún no está colocado en el árbol
   sponsor_affiliate_id  bigint,             -- usado por walletbridge para auto-colocar
   referral_code         text,               -- código crudo recibido del BFF para auditoría
+  preferred_side        char(1) CHECK (preferred_side IS NULL OR preferred_side IN ('L','R')),
 
   -- Paquete + precio (snapshot al momento de crear el intent).
   package_id            integer     NOT NULL,

@@ -374,11 +374,11 @@ func TestRegistrationReferralAttribution_Integration(t *testing.T) {
 	}
 
 	store := NewStore(pool)
-	recorded, err := store.RecordRegistrationReferral(ctx, "REYNALDO@t.local", "tiburcio65")
+	recorded, err := store.RecordRegistrationReferral(ctx, "REYNALDO@t.local", "tiburcio65", "R")
 	if err != nil {
 		t.Fatalf("record registration referral: %v", err)
 	}
-	if recorded == nil || recorded.SponsorAffiliateID != 210 {
+	if recorded == nil || recorded.SponsorAffiliateID != 210 || recorded.PreferredSide != "R" {
 		t.Fatalf("recorded sponsor = %#v, want affiliate 210", recorded)
 	}
 
@@ -386,7 +386,7 @@ func TestRegistrationReferralAttribution_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup registration referral: %v", err)
 	}
-	if found == nil || found.Code != "tiburcio65" || found.SponsorAffiliateID != 210 {
+	if found == nil || found.Code != "tiburcio65" || found.SponsorAffiliateID != 210 || found.PreferredSide != "R" {
 		t.Fatalf("lookup = %#v, want tiburcio65/210", found)
 	}
 }
@@ -409,7 +409,7 @@ func TestResolveCheckoutSponsorUsesStoredRegistrationReferral_Integration(t *tes
 	}
 
 	store := NewStore(pool)
-	if _, err := store.RecordRegistrationReferral(ctx, "reynaldo@t.local", "tiburcio65"); err != nil {
+	if _, err := store.RecordRegistrationReferral(ctx, "reynaldo@t.local", "tiburcio65", "L"); err != nil {
 		t.Fatalf("record registration referral: %v", err)
 	}
 	handler := &Handler{store: store, companyRoot: 999}
@@ -422,6 +422,10 @@ func TestResolveCheckoutSponsorUsesStoredRegistrationReferral_Integration(t *tes
 	}
 	if code != "tiburcio65" {
 		t.Fatalf("referral code = %q, want tiburcio65", code)
+	}
+	sponsorWithSide, codeWithSide, side, err := handler.resolveCheckoutPlacement(ctx, "reynaldo@t.local", Buyer{PersonID: 32}, "", "")
+	if err != nil || sponsorWithSide == nil || *sponsorWithSide != 310 || codeWithSide != "tiburcio65" || side != "L" {
+		t.Fatalf("placement = sponsor %v code %q side %q err %v", sponsorWithSide, codeWithSide, side, err)
 	}
 }
 

@@ -148,11 +148,12 @@ func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		Email        string `json:"email"`
-		Phone        string `json:"phone"`
-		Name         string `json:"name"`
-		BirthDate    string `json:"birth_date"`
-		ReferralCode string `json:"referral_code"`
+		Email         string `json:"email"`
+		Phone         string `json:"phone"`
+		Name          string `json:"name"`
+		BirthDate     string `json:"birth_date"`
+		ReferralCode  string `json:"referral_code"`
+		PreferredSide string `json:"preferred_side"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
@@ -176,6 +177,10 @@ func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Requ
 	}
 
 	resp := map[string]any{"blacklisted": false, "reason": ""}
+	if strings.TrimSpace(req.PreferredSide) != "" && normalizePreferredSide(req.PreferredSide) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"blacklisted": false, "error": "invalid_preferred_side"})
+		return
+	}
 	if code := strings.TrimSpace(req.ReferralCode); code != "" {
 		sponsor, err := h.store.ResolveSponsorByCode(r.Context(), code)
 		if err != nil {
@@ -196,6 +201,7 @@ func (h *Handler) handleRegistrationPrecheck(w http.ResponseWriter, r *http.Requ
 		resp["referral_valid"] = true
 		resp["referral_code"] = code
 		resp["sponsor_affiliate_id"] = *sponsor
+		resp["preferred_side"] = normalizePreferredSide(req.PreferredSide)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -212,8 +218,9 @@ func (h *Handler) handleRegistrationReferralAttribution(w http.ResponseWriter, r
 		return
 	}
 	var req struct {
-		Email        string `json:"email"`
-		ReferralCode string `json:"referral_code"`
+		Email         string `json:"email"`
+		ReferralCode  string `json:"referral_code"`
+		PreferredSide string `json:"preferred_side"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
@@ -233,7 +240,11 @@ func (h *Handler) handleRegistrationReferralAttribution(w http.ResponseWriter, r
 		writeErr(w, http.StatusForbidden, "blacklisted")
 		return
 	}
-	referral, err := h.store.RecordRegistrationReferral(r.Context(), req.Email, req.ReferralCode)
+	if strings.TrimSpace(req.PreferredSide) != "" && normalizePreferredSide(req.PreferredSide) == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_preferred_side")
+		return
+	}
+	referral, err := h.store.RecordRegistrationReferral(r.Context(), req.Email, req.ReferralCode, req.PreferredSide)
 	if errors.Is(err, ErrInvalidReferralCode) {
 		writeErr(w, http.StatusBadRequest, "invalid_referral_code")
 		return
@@ -247,5 +258,6 @@ func (h *Handler) handleRegistrationReferralAttribution(w http.ResponseWriter, r
 		"status":               "ok",
 		"referral_code":        referral.Code,
 		"sponsor_affiliate_id": referral.SponsorAffiliateID,
+		"preferred_side":       referral.PreferredSide,
 	})
 }
