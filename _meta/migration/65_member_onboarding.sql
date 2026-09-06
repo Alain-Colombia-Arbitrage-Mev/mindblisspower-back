@@ -31,6 +31,9 @@ REVOKE ALL ON mlm.member_onboarding FROM PUBLIC;
 
 DO $$
 BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_read') THEN
+    REVOKE ALL ON mlm.member_onboarding FROM app_read;
+  END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vp_engine') THEN
     GRANT SELECT, INSERT, UPDATE ON mlm.member_onboarding TO vp_engine;
   END IF;
