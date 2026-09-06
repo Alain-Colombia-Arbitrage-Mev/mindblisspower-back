@@ -166,6 +166,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/payments/me", h.handleMe)
 	mux.HandleFunc("/api/member/referral", h.handleMemberReferral)
 	mux.HandleFunc("/api/member/profile", h.handleMemberProfile)
+	mux.HandleFunc("/api/member/onboarding", h.handleMemberOnboarding)
 	mux.HandleFunc("/api/member/kyc/upload-url", h.handleKYCUploadURL)
 	mux.HandleFunc("/api/member/kyc/confirm", h.handleKYCConfirm)
 	mux.HandleFunc("/api/member/kyc/documents", h.handleKYCDocuments)
