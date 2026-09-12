@@ -174,7 +174,7 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		cache := map[int64]int64{}
 		retCache := map[int64]int64{}
 		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
-			d("100.00"), "testret:agresivo:1", "test agresivo", postedAt, 65, cache, retCache); err != nil {
+			d("100.00"), "testret:agresivo:1", "test agresivo", postedAt, 65, cache, retCache, 0, nil); err != nil {
 			t.Fatalf("postStreamPayment: %v", err)
 		}
 
@@ -238,7 +238,7 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		cache := map[int64]int64{}
 		retCache := map[int64]int64{}
 		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
-			d("100.00"), "testret:moderado:1", "test moderado", postedAt, 65, cache, retCache); err != nil {
+			d("100.00"), "testret:moderado:1", "test moderado", postedAt, 65, cache, retCache, 0, nil); err != nil {
 			t.Fatalf("postStreamPayment: %v", err)
 		}
 
@@ -285,7 +285,7 @@ func TestPostStreamPayment_RetirementRouting(t *testing.T) {
 		cache := map[int64]int64{}
 		retCache := map[int64]int64{}
 		if _, err := postStreamPayment(ctx, tx, conceptBinaryID, "binary_bonus", affID,
-			d("100.00"), "testret:parcial:1", "test parcial", postedAt, 65, cache, retCache); err != nil {
+			d("100.00"), "testret:parcial:1", "test parcial", postedAt, 65, cache, retCache, 0, nil); err != nil {
 			t.Fatalf("postStreamPayment: %v", err)
 		}
 

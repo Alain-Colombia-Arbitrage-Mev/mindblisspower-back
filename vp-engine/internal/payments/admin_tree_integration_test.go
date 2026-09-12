@@ -324,4 +324,7 @@ func TestSearchAdminTree_HidesBannedAndBlacklistedNodes(t *testing.T) {
 	if results[0].Rank == nil || results[0].Rank.Name != "Zafiro" || results[0].PVLeft != "90.00" || results[0].PVRight != "75.00" {
 		t.Fatalf("search result must return rank and current volume, got %+v", results[0])
 	}
+	if !results[0].HasChildren {
+		t.Fatalf("search result must report structural children even when the child is masked: %+v", results[0])
+	}
 }

@@ -48,10 +48,11 @@ type Config struct {
 	LogLevel     string
 
 	// Bonus engine schedules
-	BonusEngineTimezone           string
-	BonusEngineBinaryCron         string
-	BonusEngineROICron            string
-	BonusEngineBinaryCycleEnabled bool
+	BonusEngineTimezone               string
+	BonusEngineBinaryCron             string
+	BonusEngineROICron                string
+	BonusEngineBinaryCycleEnabled     bool
+	BonusEngineCompanyRootAffiliateID int64
 }
 
 // Load reads env vars and validates required fields.
@@ -84,6 +85,10 @@ func Load() (*Config, error) {
 		BonusEngineBinaryCron:         env("BONUS_ENGINE_BINARY_CRON", "0 2 * * 1"),
 		BonusEngineROICron:            env("BONUS_ENGINE_ROI_CRON", "0 1 * * *"),
 		BonusEngineBinaryCycleEnabled: envBool("BONUS_ENGINE_BINARY_CYCLE_ENABLED", true),
+		BonusEngineCompanyRootAffiliateID: int64(envInt(
+			"BONUS_ENGINE_COMPANY_ROOT_AFFILIATE_ID",
+			envInt("PAYMENTS_COMPANY_ROOT_AFFILIATE_ID", 0),
+		)),
 	}
 
 	if c.DatabaseURL == "" {

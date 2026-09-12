@@ -55,9 +55,12 @@ type AdminFinance struct {
 	RefundedSales             int64  `json:"refunded_sales"`
 
 	// Distribuido a la red (ledger).
-	CommissionsDistributedUSD string `json:"commissions_distributed_usd"` // Σ créditos a miembros (todos los bonos)
-	PendingPayoutUSD          string `json:"pending_payout_usd"`          // balance vivo en wallets (lo que se debe, no retirado)
-	MaturingUSD               string `json:"maturing_usd"`                // créditos aún no madurados (no retirables)
+	CommissionsDistributedUSD      string `json:"commissions_distributed_usd"`        // Σ créditos a miembros (todos los bonos)
+	PendingPayoutUSD               string `json:"pending_payout_usd"`                 // alias operativo del neto pendiente por pagar
+	PendingPayoutGrossUSD          string `json:"pending_payout_gross_usd"`           // balance vivo bruto en wallets antes de cargos por seguridad
+	PendingPayoutNetUSD            string `json:"pending_payout_net_usd"`             // bruto - cargos de seguridad aplicables, mínimo 0
+	SecurityPendingPayoutOffsetUSD string `json:"security_pending_payout_offset_usd"` // porción de cargos de seguridad descontada del bruto pendiente
+	MaturingUSD                    string `json:"maturing_usd"`                       // créditos aún no madurados (no retirables)
 
 	// Rangos.
 	RanksAchieved int64  `json:"ranks_achieved"`  // # de hitos de rango alcanzados
@@ -129,11 +132,14 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	f.RefundedSales = securityCharges.RefundedSales
 
 	// Distribuido / pendiente (ledger). SOLO bonos/ROI a miembros: se EXCLUYEN
-	// inflows y fees (package_purchase/platform_fee/inter_platform).
+	// inflows y fees (package_purchase/platform_fee/inter_platform). El balance
+	// vivo bruto en wallets NO es el neto a pagar si existen cargos de seguridad
+	// pendientes por recuperar; esos cargos se aplican abajo sin tocar el PV ni
+	// la posición estructural del árbol.
 	if err := s.reader().QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (WHERE wm.amount > 0),0)::text,                                   -- distribuido (créditos)
-		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen),0)::text,                                -- balance vivo (neto)
+		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen),0)::text,                                -- balance vivo bruto
 		  COALESCE(SUM(wm.amount) FILTER (WHERE NOT wm.is_frozen AND wm.amount > 0 AND wm.available_at > current_date),0)::text -- madurando
 		  FROM mlm.wallet_movement wm
 		  JOIN mlm.concept c ON c.id = wm.concept_id
@@ -141,6 +147,10 @@ func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
 	`).Scan(&f.CommissionsDistributedUSD, &f.PendingPayoutUSD, &f.MaturingUSD); err != nil {
 		return f, fmt.Errorf("ledger totals: %w", err)
 	}
+	f.PendingPayoutGrossUSD = f.PendingPayoutUSD
+	f.SecurityPendingPayoutOffsetUSD = moneyMin(f.PendingPayoutGrossUSD, f.SecurityPendingChargesUSD)
+	f.PendingPayoutNetUSD = moneySubFloorZero(f.PendingPayoutGrossUSD, f.SecurityPendingChargesUSD)
+	f.PendingPayoutUSD = f.PendingPayoutNetUSD
 
 	// Rangos alcanzados + dinero pagado por rangos.
 	if err := s.reader().QueryRow(ctx, `

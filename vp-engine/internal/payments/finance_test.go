@@ -2,8 +2,85 @@ package payments
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 )
+
+func TestGetAdminFinance_PendingPayoutSubtractsSecurityCharges(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.country (id, iso2, name_es, name_en) VALUES (1,'CO','Colombia','Colombia');
+		INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals) VALUES (1,'USD','US Dollar',true,2);
+		INSERT INTO mlm.concept (id, kind, name_es, name_en, factor, requires_pair, active)
+		  VALUES (11,'binary_bonus','Bono binario','Binary bonus',1,false,true);
+		INSERT INTO mlm.package (id, name, amount_usd, pv, type) VALUES (1001,'Pack 1.000',1000,500,'enrollment');
+		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
+		  OVERRIDING SYSTEM VALUE VALUES (1,'Aff','Iliate','aff-payout@t.local','0','active');
+	`); err != nil {
+		t.Fatalf("seed catálogos: %v", err)
+	}
+
+	var affID, walletID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.affiliate (person_id, parent_id, position, status, path, depth)
+		VALUES (1, NULL, NULL, 'active', ''::ltree, 0) RETURNING id`).Scan(&affID); err != nil {
+		t.Fatalf("seed affiliate: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		VALUES ($1,1,'usd-payout-'||$1::bigint::text,0) RETURNING id`, affID).Scan(&walletID); err != nil {
+		t.Fatalf("seed wallet: %v", err)
+	}
+
+	var txnID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
+		VALUES ('finance:pending-payout', 'bonus pendiente', 'posted', $1) RETURNING id`,
+		time.Now().UTC()).Scan(&txnID); err != nil {
+		t.Fatalf("seed transaction: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet_movement
+		  (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at)
+		VALUES ($1, $2, $3, 11, 1000.00, now())`,
+		txnID, walletID, affID); err != nil {
+		t.Fatalf("seed wallet movement: %v", err)
+	}
+
+	for i, status := range []string{"failed", "security_blocked", "chargeback"} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO payments.purchase_intent
+			  (user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv,
+			   amount_usd, fee_usd, total_cents, currency, status, stripe_session_id, stripe_present)
+			VALUES ('aff-payout@t.local', 1, $1, NULL, 1001, 500, 1000.00, 10.00, 101000, 'usd', $2, $3, true)
+		`, affID, status, fmt.Sprintf("cs_fin_risk_%d", i)); err != nil {
+			t.Fatalf("seed purchase_intent(%s): %v", status, err)
+		}
+	}
+
+	store := NewStore(pool)
+	f, err := store.GetAdminFinance(ctx)
+	if err != nil {
+		t.Fatalf("GetAdminFinance: %v", err)
+	}
+
+	if f.PendingPayoutGrossUSD != "1000.00" {
+		t.Fatalf("PendingPayoutGrossUSD = %q, want %q", f.PendingPayoutGrossUSD, "1000.00")
+	}
+	if f.SecurityPendingPayoutOffsetUSD != "210.00" {
+		t.Fatalf("SecurityPendingPayoutOffsetUSD = %q, want %q", f.SecurityPendingPayoutOffsetUSD, "210.00")
+	}
+	if f.PendingPayoutNetUSD != "790.00" {
+		t.Fatalf("PendingPayoutNetUSD = %q, want %q", f.PendingPayoutNetUSD, "790.00")
+	}
+	if f.PendingPayoutUSD != f.PendingPayoutNetUSD {
+		t.Fatalf("PendingPayoutUSD = %q, want net alias %q", f.PendingPayoutUSD, f.PendingPayoutNetUSD)
+	}
+}
 
 // TestGetAdminFinance_TreasurySubtractsNetWithdrawals verifica el bug de
 // tesorería reportado: el afiliado solicita el BRUTO (amount_usd) y se le

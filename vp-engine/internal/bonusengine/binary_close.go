@@ -141,6 +141,7 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 	postedAt := pEnd                 // todos los pagos del período al instante de cierre lógico
 	walletCache := map[int64]int64{} // caché wallet USD por afiliado
 	retWallets := map[int64]int64{}  // caché wallet USD-RET por afiliado (separado del USD)
+	payoutRoutes := map[int64]payoutRoute{}
 
 	for _, c := range candidates {
 		net := c.GrossAmount.Mul(theta).RoundDown(2)
@@ -181,27 +182,33 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 		}
 
 		// 2. wallet_movement — ruteo 401k: toRet va al plan, toWd al billetera.
-		pct, err := pctToPlanFor(ctx, tx, c.AffiliateID, "binary_bonus")
+		// Si el beneficiario o su rama esta bloqueada, se conserva el consumo del
+		// nodo original pero el dinero se acredita al afiliado raiz de empresa.
+		route, err := effectivePayoutAffiliateID(ctx, tx, c.AffiliateID, e.companyRootAffiliateID, payoutRoutes)
+		if err != nil {
+			return fmt.Errorf("payout route (%s): %w", extRef, err)
+		}
+		pct, err := pctToPlanFor(ctx, tx, route.affiliateID, "binary_bonus")
 		if err != nil {
 			return fmt.Errorf("pctToPlanFor (%s): %w", extRef, err)
 		}
 		toRet, toWd := routeSplit(net, pct)
-		if err := postRetirementContribution(ctx, tx, c.AffiliateID, toRet, extRef, postedAt, plan.RetirementAge, retWallets); err != nil {
+		if err := postRetirementContribution(ctx, tx, route.affiliateID, toRet, extRef, postedAt, plan.RetirementAge, retWallets); err != nil {
 			return fmt.Errorf("retirement contribution (%s): %w", extRef, err)
 		}
 		if toWd.Sign() > 0 {
 			// Wallet USD get-or-create (defensa: un afiliado sin wallet no
 			// tumba el cierre entero con ErrNoRows).
-			walletID, err := ensureUSDWallet(ctx, tx, c.AffiliateID, walletCache)
+			walletID, err := ensureUSDWallet(ctx, tx, route.affiliateID, walletCache)
 			if err != nil {
-				return fmt.Errorf("wallet for affiliate %d: %w", c.AffiliateID, err)
+				return fmt.Errorf("wallet for affiliate %d: %w", route.affiliateID, err)
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO mlm.wallet_movement
 				  (transaction_id, wallet_id, affiliate_id, concept_id,
 				   vicionario_package_id, amount, posted_at, available_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, mlm.fn_bonus_available_at($7))`,
-				txnID, walletID, c.AffiliateID, binaryConceptID,
+				txnID, walletID, route.affiliateID, binaryConceptID,
 				c.AffiliatePackageID, toWd, postedAt); err != nil {
 				return fmt.Errorf("insert wallet_movement: %w", err)
 			}
@@ -265,7 +272,7 @@ func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
 	// Pagar streams v2 (yield, conversión de puntos, rangos, referido,
 	// regalía) con el MISMO θ del período. PayV2Streams paga sobre el
 	// snapshot de puntos previo a este período y resetea points_accrued=0.
-	v2Paid, err := PayV2Streams(ctx, tx, plan, periodID, v2, theta, postedAt)
+	v2Paid, err := PayV2Streams(ctx, tx, plan, periodID, v2, theta, postedAt, e.companyRootAffiliateID)
 	if err != nil {
 		return fmt.Errorf("pay v2 streams: %w", err)
 	}

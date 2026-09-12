@@ -527,6 +527,43 @@ func moneyAdd(a, b string) string {
 	return da.Add(db).StringFixed(2)
 }
 
+func moneyMin(a, b string) string {
+	da, err := decimal.NewFromString(strings.TrimSpace(a))
+	if err != nil {
+		da = decimal.Zero
+	}
+	if da.IsNegative() {
+		da = decimal.Zero
+	}
+	db, err := decimal.NewFromString(strings.TrimSpace(b))
+	if err != nil {
+		db = decimal.Zero
+	}
+	if db.IsNegative() {
+		db = decimal.Zero
+	}
+	if da.LessThan(db) {
+		return da.StringFixed(2)
+	}
+	return db.StringFixed(2)
+}
+
+func moneySubFloorZero(a, b string) string {
+	da, err := decimal.NewFromString(strings.TrimSpace(a))
+	if err != nil {
+		da = decimal.Zero
+	}
+	db, err := decimal.NewFromString(strings.TrimSpace(b))
+	if err != nil {
+		db = decimal.Zero
+	}
+	out := da.Sub(db)
+	if out.IsNegative() {
+		return "0.00"
+	}
+	return out.StringFixed(2)
+}
+
 func isOperationalChargeTableUnavailable(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501")

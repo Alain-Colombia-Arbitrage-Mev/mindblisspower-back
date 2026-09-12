@@ -105,6 +105,7 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 	}
 
 	wallets := map[int64]int64{}
+	payoutRoutes := map[int64]payoutRoute{}
 	for _, c := range cds {
 		res.CDsProcessed++
 
@@ -152,12 +153,16 @@ func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
 			}
 
 			if gross.Sign() > 0 {
-				walletID, werr := ensureUSDWallet(ctx, tx, c.affID, wallets)
+				route, rerr := effectivePayoutAffiliateID(ctx, tx, c.affID, e.companyRootAffiliateID, payoutRoutes)
+				if rerr != nil {
+					return res, rerr
+				}
+				walletID, werr := ensureUSDWallet(ctx, tx, route.affiliateID, wallets)
 				if werr != nil {
 					return res, werr
 				}
 				extRef := fmt.Sprintf("cdroi:%d:%s", c.id, cutoff.Format("2006-01-02"))
-				posted, perr := e.postCDROI(ctx, tx, walletID, c.affID, gross, c.maturesDate, extRef)
+				posted, perr := e.postCDROI(ctx, tx, walletID, route.affiliateID, gross, c.maturesDate, extRef)
 				if perr != nil {
 					return res, perr
 				}

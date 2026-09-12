@@ -47,12 +47,24 @@ func WithTimezone(tz string) Option {
 	}
 }
 
+// WithCompanyRootAffiliateID fija el afiliado de empresa que recibe comisiones
+// retenidas por usuarios baneados, suspendidos, blacklisted o ubicados bajo una
+// rama baneada. Cero mantiene el comportamiento histórico.
+func WithCompanyRootAffiliateID(id int64) Option {
+	return func(e *Engine) {
+		if id > 0 {
+			e.companyRootAffiliateID = id
+		}
+	}
+}
+
 // Engine ejecuta los runs de bonos. Una sola instancia compartida.
 type Engine struct {
-	db   *pgxpool.Pool
-	nats *nats.Conn
-	log  zerolog.Logger
-	tz   string // zona de negocio para fechas de calendario
+	db                     *pgxpool.Pool
+	nats                   *nats.Conn
+	log                    zerolog.Logger
+	tz                     string // zona de negocio para fechas de calendario
+	companyRootAffiliateID int64
 
 	// Métricas (ADR 0011)
 	closeRunDuration  prometheus.Histogram
