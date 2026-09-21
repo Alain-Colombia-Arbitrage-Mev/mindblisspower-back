@@ -208,8 +208,10 @@ func (h *Handler) handleTwilioVoiceProcess(w http.ResponseWriter, r *http.Reques
 			if res.Escalate {
 				status = "escalate"
 			}
-			if _, serr := h.store.SaveTicketAIDraft(ctx, t.ID, status, res.Answer, "", res.Sources); serr != nil {
+			if saved, serr := h.store.SaveTicketAIDraft(ctx, t.ID, status, res.Answer, "", res.Sources); serr != nil {
 				h.log.Warn().Err(serr).Int64("ticket", t.ID).Msg("save voice ai draft")
+			} else if status == "escalate" {
+				t = h.notifyEscalatedTicket(ctx, saved)
 			}
 		}
 	}
@@ -292,9 +294,7 @@ func (h *Handler) handleTwilioWhatsApp(w http.ResponseWriter, r *http.Request) {
 		writeTwiML(w, messagingResponse("No pude abrir tu ticket en este momento. Intenta nuevamente en unos minutos."))
 		return
 	}
-	if _, aerr := h.store.AutoAssignTicket(r.Context(), t.ID); aerr != nil && !errors.Is(aerr, ErrNoSupportAgent) {
-		h.log.Warn().Err(aerr).Int64("ticket", t.ID).Msg("auto assign whatsapp ticket")
-	}
+	t = h.assignAndNotifyTicket(r.Context(), t)
 
 	reply := fmt.Sprintf("Recibimos tu solicitud de soporte. Ticket #%d.", t.ID)
 	if h.supportAIURL != "" && h.supportAIToken != "" {
@@ -384,8 +384,10 @@ func (h *Handler) handleInternalVoiceTurn(w http.ResponseWriter, r *http.Request
 			if containsAnyKeyword(normalizeSupportText(aiAnswer), []string{"agente", "soporte humano", "revision manual", "escalar"}) {
 				status = "escalate"
 			}
-			if _, serr := h.store.SaveTicketAIDraft(ctx, t.ID, status, aiAnswer, "", nil); serr != nil {
+			if saved, serr := h.store.SaveTicketAIDraft(ctx, t.ID, status, aiAnswer, "", nil); serr != nil {
 				h.log.Warn().Err(serr).Int64("ticket", t.ID).Msg("save pipecat ai draft")
+			} else if status == "escalate" {
+				t = h.notifyEscalatedTicket(ctx, saved)
 			}
 		}
 	} else {
@@ -426,9 +428,7 @@ func (h *Handler) ensureCallTicket(ctx context.Context, session CallSession, cal
 	if err != nil {
 		return Ticket{}, err
 	}
-	if _, aerr := h.store.AutoAssignTicket(ctx, t.ID); aerr != nil && !errors.Is(aerr, ErrNoSupportAgent) {
-		h.log.Warn().Err(aerr).Int64("ticket", t.ID).Msg("auto assign voice ticket")
-	}
+	t = h.assignAndNotifyTicket(ctx, t)
 	if _, err := h.store.UpsertCallSession(ctx, callSID, from, to, channel, t.ID); err != nil {
 		return Ticket{}, err
 	}

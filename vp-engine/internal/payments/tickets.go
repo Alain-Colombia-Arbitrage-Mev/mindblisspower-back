@@ -234,6 +234,7 @@ func (h *Handler) handleAccessHelp(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	t = h.assignAndNotifyTicket(r.Context(), t)
 	h.maybeDraftTicketAsync(t.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "status": "open", "priority": t.Priority, "category": t.Category})
 }
@@ -481,6 +482,38 @@ func (s *Store) ListSupportAgents(ctx context.Context) ([]SupportAgent, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) SupportAgentEmailsForCategory(ctx context.Context, category string) ([]string, error) {
+	category = strings.ToLower(strings.TrimSpace(category))
+	if !validTicketCategories[category] || category == "non_support" {
+		category = "general"
+	}
+	rows, err := s.reader().Query(ctx, `
+		SELECT email
+		  FROM support.agent
+		 WHERE active
+		   AND (
+		     specialties = ARRAY['general']::text[]
+		     OR specialties @> ARRAY[$1::text]
+		     OR specialties @> ARRAY['general']::text[]
+		   )
+		 ORDER BY CASE WHEN specialties @> ARRAY[$1::text] THEN 0 ELSE 1 END,
+		          sort_order ASC, email ASC
+		 LIMIT 50`, category)
+	if err != nil {
+		return nil, fmt.Errorf("list support agent emails: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, fmt.Errorf("scan support agent email: %w", err)
+		}
+		out = append(out, email)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpsertSupportAgent(ctx context.Context, a SupportAgent) (SupportAgent, error) {
 	a.Email = normalizeTicketEmail(a.Email)
 	a.Name = cleanTicketField(a.Name, 120)
@@ -664,6 +697,7 @@ func (h *Handler) handleAdminTicketAction(w http.ResponseWriter, r *http.Request
 			h.writeTicketActionError(w, err)
 			return
 		}
+		h.notifyTicketAssignment(t, "assigned")
 		writeJSON(w, http.StatusOK, t)
 	case "auto_assign":
 		t, err := h.store.AutoAssignTicket(r.Context(), req.ID)
@@ -671,6 +705,7 @@ func (h *Handler) handleAdminTicketAction(w http.ResponseWriter, r *http.Request
 			h.writeTicketActionError(w, err)
 			return
 		}
+		h.notifyTicketAssignment(t, "auto_assigned")
 		writeJSON(w, http.StatusOK, t)
 	case "draft_ai":
 		t, err := h.DraftTicketAI(r.Context(), req.ID)
@@ -726,6 +761,153 @@ func (h *Handler) notifyTicketReply(t Ticket) {
 	}(t)
 }
 
+func (h *Handler) assignAndNotifyTicket(ctx context.Context, t Ticket) Ticket {
+	if strings.TrimSpace(t.AssignedTo) == "" {
+		assigned, err := h.store.AutoAssignTicket(ctx, t.ID)
+		if err != nil {
+			if errors.Is(err, ErrNoSupportAgent) {
+				h.notifyTicketPool(t, "opened_unassigned")
+			} else {
+				h.log.Warn().Err(err).Int64("ticket", t.ID).Msg("ticket auto assignment failed")
+			}
+			return t
+		}
+		t = assigned
+	}
+	h.notifyTicketAssignment(t, "opened")
+	return t
+}
+
+func (h *Handler) notifyTicketAssignment(t Ticket, reason string) {
+	if strings.TrimSpace(t.AssignedTo) == "" {
+		return
+	}
+	h.notifyTicketAgents(t, []string{t.AssignedTo}, reason)
+}
+
+func (h *Handler) notifyEscalatedTicket(ctx context.Context, t Ticket) Ticket {
+	if strings.TrimSpace(t.AssignedTo) == "" {
+		assigned, err := h.store.AutoAssignTicket(ctx, t.ID)
+		if err != nil {
+			if errors.Is(err, ErrNoSupportAgent) {
+				h.notifyTicketPool(t, "ai_escalated_unassigned")
+			} else {
+				h.log.Warn().Err(err).Int64("ticket", t.ID).Msg("ticket escalation assignment failed")
+			}
+			return t
+		}
+		t = assigned
+	}
+	h.notifyTicketAssignment(t, "ai_escalated")
+	return t
+}
+
+func (h *Handler) notifyTicketPool(t Ticket, reason string) {
+	go func(t Ticket) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		recipients, err := h.store.SupportAgentEmailsForCategory(ctx, t.Category)
+		if err != nil {
+			h.log.Warn().Err(err).Int64("ticket", t.ID).Msg("ticket support pool lookup failed")
+			recipients = h.adminEmails
+		}
+		if len(recipients) == 0 {
+			recipients = h.adminEmails
+		}
+		if len(recipients) == 0 {
+			h.log.Warn().Int64("ticket", t.ID).Msg("ticket notification skipped: no support recipients")
+			return
+		}
+		if err := h.store.SendEmail(ctx, recipients, ticketAgentSubject(t, reason), ticketAgentBody(t, reason)); err != nil {
+			h.log.Warn().Err(err).Int64("ticket", t.ID).Msg("ticket pool email failed (non-fatal)")
+		}
+	}(t)
+}
+
+func (h *Handler) notifyTicketAgents(t Ticket, recipients []string, reason string) {
+	go func(t Ticket, recipients []string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := h.store.SendEmail(ctx, recipients, ticketAgentSubject(t, reason), ticketAgentBody(t, reason)); err != nil {
+			h.log.Warn().Err(err).Int64("ticket", t.ID).Msg("ticket agent email failed (non-fatal)")
+		}
+	}(t, recipients)
+}
+
+func ticketAgentSubject(t Ticket, reason string) string {
+	action := "Nuevo ticket"
+	switch reason {
+	case "assigned":
+		action = "Ticket asignado"
+	case "auto_assigned":
+		action = "Ticket autoasignado"
+	case "opened_unassigned":
+		action = "Ticket sin asignacion"
+	case "ai_escalated":
+		action = "Ticket escalado por IA"
+	case "ai_escalated_unassigned":
+		action = "Escalamiento IA sin asignacion"
+	}
+	return fmt.Sprintf("[BMP Soporte] %s #%d - %s", action, t.ID, cleanTicketField(t.Subject, 90))
+}
+
+func ticketAgentBody(t Ticket, reason string) string {
+	action := map[string]string{
+		"assigned":          "Fue asignado manualmente.",
+		"auto_assigned":     "Fue asignado automaticamente.",
+		"opened":            "Fue creado y asignado automaticamente.",
+		"opened_unassigned": "Fue creado, pero no habia capacidad de asignacion automatica.",
+		"ai_escalated":      "La IA marco este ticket para escalamiento humano.",
+		"ai_escalated_unassigned": "La IA marco este ticket para escalamiento humano, " +
+			"pero no habia capacidad de asignacion automatica.",
+	}[reason]
+	if action == "" {
+		action = "Requiere revision de soporte."
+	}
+	assigned := strings.TrimSpace(t.AssignedTo)
+	if assigned == "" {
+		assigned = "Sin asignar"
+	}
+	return fmt.Sprintf(`%s
+
+Ticket #%d
+Cliente: %s
+Prioridad: %s
+Categoria: %s
+Origen: %s
+Asignado a: %s
+
+Resumen:
+%s
+
+Asunto:
+%s
+
+Descripcion:
+%s
+
+Abrir en admin:
+%s
+
+- Sistema de soporte BMP`,
+		action, t.ID, t.Email, t.Priority, t.Category, t.Source, assigned,
+		emptyDash(t.ProblemSummary), t.Subject, t.Body, supportTicketAdminURL())
+}
+
+func supportTicketAdminURL() string {
+	if v := strings.TrimSpace(firstEnv("PAYMENTS_SUPPORT_ADMIN_URL", "ADMIN_DASHBOARD_URL")); v != "" {
+		return v
+	}
+	return "https://admin.mindblisspower.com/dashboard/tickets"
+}
+
+func emptyDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
 // handleMemberTicket: POST /api/support/ticket — el BFF del growth-hub abre un
 // ticket a nombre del miembro autenticado.
 func (h *Handler) handleMemberTicket(w http.ResponseWriter, r *http.Request) {
@@ -762,6 +944,7 @@ func (h *Handler) handleMemberTicket(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	t = h.assignAndNotifyTicket(r.Context(), t)
 	h.maybeDraftTicketAsync(t.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "status": "open", "priority": t.Priority, "category": t.Category})
 }
@@ -838,6 +1021,7 @@ func (h *Handler) handleSupportEmailIngest(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	t = h.assignAndNotifyTicket(r.Context(), t)
 	if h.supportAIAutoDraft && h.supportAIURL != "" && h.supportAIToken != "" {
 		if drafted, derr := h.DraftTicketAI(r.Context(), t.ID); derr != nil {
 			h.log.Warn().Err(derr).Int64("ticket", t.ID).Msg("support email ai draft failed")
@@ -915,7 +1099,14 @@ func (h *Handler) DraftTicketAI(ctx context.Context, id int64) (Ticket, error) {
 	if res.Escalate {
 		status = "escalate"
 	}
-	return h.store.SaveTicketAIDraft(ctx, id, status, answer, "", res.Sources)
+	t, err = h.store.SaveTicketAIDraft(ctx, id, status, answer, "", res.Sources)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if status == "escalate" {
+		t = h.notifyEscalatedTicket(ctx, t)
+	}
+	return t, nil
 }
 
 func (h *Handler) SendTicketAIDraft(ctx context.Context, id int64, adminEmail string, notify bool) (Ticket, error) {
@@ -1043,13 +1234,14 @@ var ticketCategoryKeywords = map[string][]string{
 	"tree":        {"arbol", "binario", "posicion", "derrame", "referido", "referidos", "sponsor", "estructura", "red"},
 	"payments":    {"pago", "checkout", "stripe", "tarjeta", "rechazada", "fallido", "recibo", "cobro", "cobrado", "reembolso", "refund", "chargeback", "contracargo"},
 	"kyc":         {"kyc", "documento", "pasaporte", "identidad", "verificacion de identidad"},
-	"withdrawals": {"retiro", "withdrawal", "wallet", "bmp", "cuenta bancaria", "saldo"},
+	"bmp":         {"bmp", "bridge", "billetera bmp", "cuenta bmp", "mindpower", "paycrypto", "virtual account"},
+	"withdrawals": {"retiro", "withdrawal", "wallet", "cuenta bancaria", "saldo"},
 	"commissions": {"comision", "comisiones", "bono", "bonificacion", "rango", "nivel", "pv"},
 	"technical":   {"error", "404", "no carga", "no abre", "bug", "fallo", "pantalla", "dashboard"},
 }
 
 func detectTicketCategory(text string) string {
-	for _, category := range []string{"access", "tree", "payments", "kyc", "withdrawals", "commissions", "technical"} {
+	for _, category := range []string{"bmp", "access", "tree", "payments", "kyc", "withdrawals", "commissions", "technical"} {
 		if containsAnyKeyword(text, ticketCategoryKeywords[category]) {
 			return category
 		}
@@ -1067,7 +1259,7 @@ func detectTicketPriority(text, category string) string {
 	if category == "access" && containsAnyKeyword(text, []string{"no llega", "no recibo", "otp", "codigo", "sms", "no puedo entrar", "correo falla"}) {
 		return "high"
 	}
-	if category == "payments" || category == "tree" || category == "withdrawals" {
+	if category == "payments" || category == "tree" || category == "bmp" || category == "withdrawals" {
 		return "high"
 	}
 	if category == "technical" && containsAnyKeyword(text, []string{"404", "no carga", "no abre"}) {
@@ -1093,6 +1285,7 @@ func summarizeTicketProblem(subject, body, category string) string {
 		"payments":    "Pagos: ",
 		"kyc":         "KYC: ",
 		"tree":        "Arbol binario: ",
+		"bmp":         "BMP: ",
 		"commissions": "Comisiones: ",
 		"withdrawals": "Retiros: ",
 		"technical":   "Tecnico: ",
@@ -1163,7 +1356,7 @@ func normalizeTicketSource(source string) string {
 
 var validTicketCategories = map[string]bool{
 	"access": true, "payments": true, "kyc": true, "tree": true, "commissions": true,
-	"withdrawals": true, "technical": true, "general": true, "non_support": true,
+	"bmp": true, "withdrawals": true, "technical": true, "general": true, "non_support": true,
 }
 
 func cleanSupportSpecialties(in []string) []string {

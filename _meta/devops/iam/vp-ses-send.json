@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SendTransactionalMailAsMindbliss",
+      "Effect": "Allow",
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Resource": [
+        "arn:aws:ses:us-east-1:522814703714:identity/mindblisspower.com",
+        "arn:aws:ses:us-east-1:522814703714:configuration-set/*"
+      ],
+      "Condition": {
+        "StringLike": { "ses:FromAddress": "*@mindblisspower.com" }
+      }
+    }
+  ]
+}

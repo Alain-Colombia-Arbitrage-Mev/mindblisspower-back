@@ -36,6 +36,14 @@ func TestClassifySupportTicket(t *testing.T) {
 			minPriority: "high",
 		},
 		{
+			name:        "bmp support issue",
+			subject:     "Problema con BMP",
+			body:        "No puedo validar mi cuenta BMP ni ver mi billetera BMP.",
+			support:     true,
+			category:    "bmp",
+			minPriority: "high",
+		},
+		{
 			name:     "commercial proposal",
 			subject:  "Propuesta comercial SEO",
 			body:     "Ofrecemos guest post, backlinks y publicidad para su negocio.",
