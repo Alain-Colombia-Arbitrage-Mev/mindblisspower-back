@@ -160,19 +160,30 @@ func (s *Store) SetCampaignStatus(ctx context.Context, id int64, from []string, 
 // EnqueueAudience resuelve el segmento e inserta los destinatarios en 'queued'.
 // Idempotente: ON CONFLICT DO NOTHING. Devuelve el total encolado.
 func (s *Store) EnqueueAudience(ctx context.Context, id int64, seg comms.Segment, maxAudience int) (int, error) {
-	sql, args := comms.AudienceQuery(seg)
-	var n int
-	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM (`+sql+`) q`, args...).Scan(&n); err != nil {
-		return 0, err
-	}
-	if maxAudience > 0 && n > maxAudience {
-		return n, ErrAudienceTooLarge
-	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	total, err := s.enqueueAudienceTx(ctx, tx, id, seg, maxAudience)
+	if err != nil {
+		return total, err
+	}
+	return total, tx.Commit(ctx)
+}
+
+// enqueueAudienceTx hace el trabajo de EnqueueAudience dentro de una tx dada
+// por el caller (p.ej. DecideCampaign), para que el encolado y el cambio de
+// estado de la campaña sean atómicos.
+func (s *Store) enqueueAudienceTx(ctx context.Context, tx pgx.Tx, id int64, seg comms.Segment, maxAudience int) (int, error) {
+	sql, args := comms.AudienceQuery(seg)
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (`+sql+`) q`, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	if maxAudience > 0 && n > maxAudience {
+		return n, ErrAudienceTooLarge
+	}
 	insArgs := append([]any{id}, args...)
 	// los $ del subquery se desplazan +1 porque $1 es campaign_id
 	shifted := shiftParams(sql, 1)
@@ -187,7 +198,7 @@ func (s *Store) EnqueueAudience(ctx context.Context, id int64, seg comms.Segment
 	if _, err := tx.Exec(ctx, `UPDATE comms.campaign SET audience_count=$2 WHERE id=$1`, id, total); err != nil {
 		return 0, err
 	}
-	return total, tx.Commit(ctx)
+	return total, nil
 }
 
 // shiftParams renumera $1..$n → $(1+by)..$(n+by). Los placeholders del

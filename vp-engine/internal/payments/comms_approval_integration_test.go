@@ -55,4 +55,52 @@ func TestCommsApproval_FourEyes_Integration(t *testing.T) {
 	if err != nil || c2.Status != "rejected" {
 		t.Fatalf("reject = %+v, %v", c2, err)
 	}
+	var st2 string
+	if err := pool.QueryRow(ctx, `SELECT status::text FROM mlm.approval_request WHERE id=$1`, *c2.ApprovalRequestID).Scan(&st2); err != nil || st2 != "rejected" {
+		t.Fatalf("approval_request status (reject) = %q, %v", st2, err)
+	}
+
+	// re-decidir una campaña ya aprobada debe fallar y no duplicar el encolado.
+	if _, err := store.DecideCampaign(ctx, c.ID, "super@x.com", "approve", "again", 150000, 3); !errors.Is(err, ErrCampaignState) {
+		t.Fatalf("re-decide already-approved campaign should be ErrCampaignState, got %v", err)
+	}
+	var recipientCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM comms.campaign_recipient WHERE campaign_id=$1`, c.ID).Scan(&recipientCount); err != nil || recipientCount != 1 {
+		t.Fatalf("recipient count after re-decide = %d, %v (want 1, no duplicate enqueue)", recipientCount, err)
+	}
+
+	// carrera de submit: draft → submit (ok) → draft (forzado) → submit de nuevo (ok, nueva approval_request)
+	// → estado no-draft (forzado) → submit debe fallar sin dejar approval_request huérfana.
+	c3, err := store.CreateCampaign(ctx, "admin@x.com", "Tercer asunto", "Tercer cuerpo largo", seg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c3, err = store.SubmitCampaign(ctx, c3.ID, "admin@x.com", "primer envio a revision")
+	if err != nil || c3.Status != "pending_approval" {
+		t.Fatalf("submit c3 #1 = %+v, %v", c3, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE comms.campaign SET status='draft' WHERE id=$1`, c3.ID); err != nil {
+		t.Fatal(err)
+	}
+	c3, err = store.SubmitCampaign(ctx, c3.ID, "admin@x.com", "segundo envio a revision")
+	if err != nil || c3.Status != "pending_approval" || c3.ApprovalRequestID == nil {
+		t.Fatalf("submit c3 #2 = %+v, %v", c3, err)
+	}
+	var arCountBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mlm.approval_request WHERE operation_type='comms_campaign'`).Scan(&arCountBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE comms.campaign SET status='cancelled' WHERE id=$1`, c3.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SubmitCampaign(ctx, c3.ID, "admin@x.com", "tercer envio a revision"); !errors.Is(err, ErrCampaignState) {
+		t.Fatalf("submit c3 #3 (cancelled) should be ErrCampaignState, got %v", err)
+	}
+	var arCountAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mlm.approval_request WHERE operation_type='comms_campaign'`).Scan(&arCountAfter); err != nil {
+		t.Fatal(err)
+	}
+	if arCountAfter != arCountBefore {
+		t.Fatalf("orphan approval_request created: before=%d after=%d", arCountBefore, arCountAfter)
+	}
 }

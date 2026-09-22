@@ -64,9 +64,13 @@ func (s *Store) SubmitCampaign(ctx context.Context, id int64, adminEmail, reason
 		VALUES ('comms_campaign', $1, 1, $2, $3) RETURNING id`, payload, initiator, reason).Scan(&arID); err != nil {
 		return Campaign{}, fmt.Errorf("approval_request: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE comms.campaign SET status='pending_approval', approval_request_id=$2, audience_count=$3
-		WHERE id=$1 AND status='draft'`, id, arID, prev.Eligible); err != nil {
+	tag, err := tx.Exec(ctx, `UPDATE comms.campaign SET status='pending_approval', approval_request_id=$2, audience_count=$3
+		WHERE id=$1 AND status='draft'`, id, arID, prev.Eligible)
+	if err != nil {
 		return Campaign{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return Campaign{}, ErrCampaignState
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Campaign{}, err
@@ -95,6 +99,17 @@ func (s *Store) DecideCampaign(ctx context.Context, id int64, superEmail, decisi
 	if err != nil {
 		return Campaign{}, err
 	}
+	arStatus, cStatus := "approved", "approved"
+	if decision == "reject" {
+		arStatus, cStatus = "rejected", "rejected"
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return Campaign{}, err
+	}
+	defer tx.Rollback(ctx)
+
 	if decision == "approve" {
 		if maxPerDay > 0 {
 			n, err := s.CountCampaignsApprovedToday(ctx)
@@ -109,29 +124,31 @@ func (s *Store) DecideCampaign(ctx context.Context, id int64, superEmail, decisi
 		if err != nil {
 			return Campaign{}, err
 		}
-		if _, err := s.EnqueueAudience(ctx, id, seg, maxAudience); err != nil {
+		if _, err := s.enqueueAudienceTx(ctx, tx, id, seg, maxAudience); err != nil {
 			return Campaign{}, err
 		}
 	}
-	arStatus, cStatus := "approved", "approved"
-	if decision == "reject" {
-		arStatus, cStatus = "rejected", "rejected"
+
+	tag, err := tx.Exec(ctx, `UPDATE mlm.approval_request
+		SET approver_1_person_id=$2, approver_1_decision=$3, approver_1_reason=$4, approver_1_at=now(), status=$5::mlm.approval_status
+		WHERE id=$1 AND status='pending'`, *c.ApprovalRequestID, approver, decision, reason, arStatus)
+	if err != nil {
+		return Campaign{}, fmt.Errorf("approval decide: %w", err)
 	}
-	tx, err := s.db.Begin(ctx)
+	if tag.RowsAffected() == 0 {
+		return Campaign{}, ErrCampaignState
+	}
+
+	tag2, err := tx.Exec(ctx, `UPDATE comms.campaign SET status=$2::comms.campaign_status, approved_by=$3,
+		finished_at = CASE WHEN $2='rejected' THEN now() ELSE NULL END
+		WHERE id=$1 AND status='pending_approval'`, id, cStatus, strings.ToLower(superEmail))
 	if err != nil {
 		return Campaign{}, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `UPDATE mlm.approval_request
-		SET approver_1_person_id=$2, approver_1_decision=$3, approver_1_reason=$4, approver_1_at=now(), status=$5::mlm.approval_status
-		WHERE id=$1 AND status='pending'`, *c.ApprovalRequestID, approver, decision, reason, arStatus); err != nil {
-		return Campaign{}, fmt.Errorf("approval decide: %w", err)
+	if tag2.RowsAffected() == 0 {
+		return Campaign{}, ErrCampaignState
 	}
-	if _, err := tx.Exec(ctx, `UPDATE comms.campaign SET status=$2::comms.campaign_status, approved_by=$3,
-		finished_at = CASE WHEN $2='rejected' THEN now() ELSE NULL END
-		WHERE id=$1 AND status='pending_approval'`, id, cStatus, strings.ToLower(superEmail)); err != nil {
-		return Campaign{}, err
-	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return Campaign{}, err
 	}
