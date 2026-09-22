@@ -5,11 +5,17 @@ go 1.25.0
 require (
 	connectrpc.com/connect v1.17.0
 	github.com/MicahParks/keyfunc/v3 v3.8.0
+	github.com/aws/aws-sdk-go-v2 v1.42.1
+	github.com/aws/aws-sdk-go-v2/config v1.32.29
+	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.64.1
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0
+	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.63.0
 	github.com/go-co-op/gocron/v2 v2.13.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/leanovate/gopter v0.2.11
+	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/nats-io/nats.go v1.37.0
 	github.com/prometheus/client_golang v1.20.5
 	github.com/redis/go-redis/v9 v9.20.1
@@ -17,6 +23,7 @@ require (
 	github.com/shopspring/decimal v1.4.0
 	github.com/stripe/stripe-go/v85 v85.2.0
 	github.com/testcontainers/testcontainers-go v0.42.0
+	github.com/yuin/goldmark v1.8.6
 	go.opentelemetry.io/otel v1.41.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.31.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.31.0
@@ -31,26 +38,22 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/MicahParks/jwkset v0.11.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/aws/aws-sdk-go-v2 v1.42.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.32.29 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.28 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.31 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.64.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.30 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.31 // indirect
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.63.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.4.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.32.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.37.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.44.0 // indirect
 	github.com/aws/smithy-go v1.27.3 // indirect
+	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -68,6 +71,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/gorilla/css v1.0.1 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
