@@ -29,21 +29,22 @@ import (
 const maxEmailRecipients = 50
 
 var (
-	sesOnce   sync.Once
+	sesMu     sync.Mutex
 	sesClient *sesv2.Client
-	sesErr    error
 )
 
 func getSES(ctx context.Context) (*sesv2.Client, error) {
-	sesOnce.Do(func() {
-		cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("us-east-1"))
-		if err != nil {
-			sesErr = fmt.Errorf("aws config: %w", err)
-			return
-		}
-		sesClient = sesv2.NewFromConfig(cfg)
-	})
-	return sesClient, sesErr
+	sesMu.Lock()
+	defer sesMu.Unlock()
+	if sesClient != nil {
+		return sesClient, nil
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("us-east-1"))
+	if err != nil {
+		return nil, fmt.Errorf("aws config: %w", err)
+	}
+	sesClient = sesv2.NewFromConfig(cfg)
+	return sesClient, nil
 }
 
 func emailFrom() string {
@@ -99,6 +100,70 @@ func (s *Store) SendEmail(ctx context.Context, to []string, subject, body string
 		return fmt.Errorf("ses send: %w", err)
 	}
 	return nil
+}
+
+// HTMLEmail: correo individual con HTML + texto, usado por comunicados masivos.
+type HTMLEmail struct {
+	To             string
+	Subject        string
+	HTML           string
+	Text           string
+	ReplyTo        string
+	ConfigSet      string
+	UnsubscribeURL string
+}
+
+// EmailSender abstrae SES para poder testear el sender sin red.
+type EmailSender interface {
+	SendHTMLEmail(ctx context.Context, m HTMLEmail) (string, error)
+}
+
+func buildSESHTMLInput(from string, m HTMLEmail) *sesv2.SendEmailInput {
+	msg := &sestypes.Message{
+		Subject: &sestypes.Content{Data: aws.String(smtpHeaderValue(m.Subject)), Charset: aws.String("UTF-8")},
+		Body: &sestypes.Body{
+			Html: &sestypes.Content{Data: aws.String(m.HTML), Charset: aws.String("UTF-8")},
+			Text: &sestypes.Content{Data: aws.String(m.Text), Charset: aws.String("UTF-8")},
+		},
+	}
+	if m.UnsubscribeURL != "" {
+		msg.Headers = []sestypes.MessageHeader{
+			{Name: aws.String("List-Unsubscribe"), Value: aws.String("<" + m.UnsubscribeURL + ">")},
+			{Name: aws.String("List-Unsubscribe-Post"), Value: aws.String("List-Unsubscribe=One-Click")},
+		}
+	}
+	in := &sesv2.SendEmailInput{
+		FromEmailAddress: aws.String(from),
+		Destination:      &sestypes.Destination{ToAddresses: []string{strings.ToLower(strings.TrimSpace(m.To))}},
+		Content:          &sestypes.EmailContent{Simple: msg},
+	}
+	if m.ReplyTo != "" {
+		in.ReplyToAddresses = []string{m.ReplyTo}
+	}
+	if m.ConfigSet != "" {
+		in.ConfigurationSetName = aws.String(m.ConfigSet)
+	}
+	return in
+}
+
+// SendHTMLEmail envía por SES y devuelve el MessageId (para cruzar eventos).
+// No usa el fallback SMTP: los comunicados necesitan MessageId y cabeceras.
+func (s *Store) SendHTMLEmail(ctx context.Context, m HTMLEmail) (string, error) {
+	if !strings.Contains(m.To, "@") || strings.TrimSpace(m.Subject) == "" || strings.TrimSpace(m.HTML) == "" {
+		return "", fmt.Errorf("html email: to/subject/html requeridos")
+	}
+	client, err := getSES(ctx)
+	if err != nil {
+		return "", err
+	}
+	out, err := client.SendEmail(ctx, buildSESHTMLInput(emailFrom(), m))
+	if err != nil {
+		return "", fmt.Errorf("ses send: %w", err)
+	}
+	if out.MessageId == nil {
+		return "", fmt.Errorf("ses send: sin MessageId")
+	}
+	return *out.MessageId, nil
 }
 
 type smtpEmailConfig struct {
