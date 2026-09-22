@@ -209,4 +209,15 @@ func TestCommsSender_SendTest_Integration(t *testing.T) {
 	if len(f.sent) != 1 || f.sent[0].Subject != "[PRUEBA] Asunto largo" || f.sent[0].To != "admin@x.com" {
 		t.Fatalf("test mail = %+v", f.sent)
 	}
+	// SendTest no debe firmar un token de baja real ni redeemable: sin cabecera
+	// List-Unsubscribe, y el pie visible usa un marcador no canjeable (?test=1, no ?t=).
+	if f.sent[0].UnsubscribeURL != "" {
+		t.Fatalf("test mail should not carry a List-Unsubscribe header, got %q", f.sent[0].UnsubscribeURL)
+	}
+	if !strings.Contains(f.sent[0].HTML, "?test=1") {
+		t.Fatalf("test mail footer should contain ?test=1, got %q", f.sent[0].HTML)
+	}
+	if strings.Contains(f.sent[0].HTML, "?t=") {
+		t.Fatalf("test mail footer should not contain a redeemable ?t= token, got %q", f.sent[0].HTML)
+	}
 }

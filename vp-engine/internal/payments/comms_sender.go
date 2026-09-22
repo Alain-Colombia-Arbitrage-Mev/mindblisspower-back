@@ -13,13 +13,14 @@ import (
 )
 
 type CommsSenderConfig struct {
-	RatePerSec        int
-	BatchSize         int
-	SESConfigSet      string
-	UnsubscribeSecret []byte
-	UnsubscribeBase   string
-	ReplyTo           string
-	UnsubscribeTTL    time.Duration
+	RatePerSec              int
+	BatchSize               int
+	SESConfigSet            string
+	UnsubscribeSecret       []byte
+	UnsubscribeBase         string
+	UnsubscribeOneClickBase string // endpoint API para List-Unsubscribe (One-Click); derivado de UnsubscribeBase si vacío
+	ReplyTo                 string
+	UnsubscribeTTL          time.Duration
 }
 
 type CommsSender struct {
@@ -38,6 +39,12 @@ func NewCommsSender(store *Store, email EmailSender, cfg CommsSenderConfig, log 
 	}
 	if cfg.UnsubscribeTTL <= 0 {
 		cfg.UnsubscribeTTL = 180 * 24 * time.Hour
+	}
+	if cfg.UnsubscribeOneClickBase == "" {
+		cfg.UnsubscribeOneClickBase = strings.Replace(cfg.UnsubscribeBase, "/baja", "/api/comms/unsubscribe", 1)
+		if cfg.UnsubscribeOneClickBase == cfg.UnsubscribeBase {
+			log.Warn().Str("base", cfg.UnsubscribeBase).Msg("comms: UnsubscribeOneClickBase no configurado y no se pudo derivar; List-Unsubscribe apuntará a la página visible")
+		}
 	}
 	return &CommsSender{store: store, email: email, cfg: cfg, log: log}
 }
@@ -119,14 +126,18 @@ func (cs *CommsSender) RunOnce(ctx context.Context) (int, error) {
 		}
 		tag, err := cs.store.db.Exec(ctx, `UPDATE comms.campaign_recipient SET status='sending', attempts=attempts+1
 			WHERE campaign_id=$1 AND person_id=$2 AND status='queued'`, id, r.pid)
-		if err != nil || tag.RowsAffected() == 0 {
-			continue
+		if err != nil {
+			cs.log.Warn().Err(err).Int64("campaign", id).Int64("person", r.pid).Msg("comms: claim failed")
+			return sent, fmt.Errorf("claim recipient: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			continue // perdió la carrera con otro proceso, normal
 		}
 		tok := comms.SignUnsubscribe(cs.cfg.UnsubscribeSecret, r.pid, time.Now().Add(cs.cfg.UnsubscribeTTL))
 		// El pie visible del correo usa la página de baja; la cabecera List-Unsubscribe
 		// (One-Click, RFC 8058) usa el endpoint API separado.
 		footerURL := comms.UnsubscribeURL(cs.cfg.UnsubscribeBase, tok)
-		headerURL := comms.UnsubscribeURL(strings.Replace(cs.cfg.UnsubscribeBase, "/baja", "/api/comms/unsubscribe", 1), tok)
+		headerURL := comms.UnsubscribeURL(cs.cfg.UnsubscribeOneClickBase, tok)
 		rendered, err := comms.Render(comms.RenderInput{Subject: c.Subject, BodyMarkdown: c.BodyMarkdown, FirstName: r.name,
 			UnsubscribeURL: footerURL})
 		if err != nil {
@@ -192,10 +203,12 @@ func (cs *CommsSender) maybeFinish(ctx context.Context, id int64) error {
 }
 
 // SendTest envía la campaña renderizada al email del admin, sin tocar recipients.
+// No firma un token de baja real (no hay persona destinataria válida que dar de baja):
+// el pie del correo de prueba usa un marcador no canjeable y no lleva cabecera
+// List-Unsubscribe.
 func (cs *CommsSender) SendTest(ctx context.Context, c Campaign, toEmail string) error {
-	tok := comms.SignUnsubscribe(cs.cfg.UnsubscribeSecret, 0+1, time.Now().Add(time.Hour)) // person 1 = placeholder; la baja de prueba no aplica
-	url := comms.UnsubscribeURL(cs.cfg.UnsubscribeBase, tok)
-	rendered, err := comms.Render(comms.RenderInput{Subject: c.Subject, BodyMarkdown: c.BodyMarkdown, FirstName: "", UnsubscribeURL: url})
+	footerURL := cs.cfg.UnsubscribeBase + "?test=1"
+	rendered, err := comms.Render(comms.RenderInput{Subject: c.Subject, BodyMarkdown: c.BodyMarkdown, FirstName: "", UnsubscribeURL: footerURL})
 	if err != nil {
 		return err
 	}
