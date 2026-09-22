@@ -82,6 +82,16 @@ type Handler struct {
 	voiceAgentMode        string
 	pipecatStreamURL      string
 	pipecatStreamSecret   string
+
+	// comms: comunicados masivos (campañas de email). sender nil ⇒ endpoints
+	// /api/admin/comms/* y /api/comms/unsubscribe responden 503 comms_disabled.
+	comms struct {
+		sender       *CommsSender
+		maxAudience  int
+		maxPerDay    int
+		maxTestSends int
+		unsubSecret  []byte
+	}
 }
 
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
@@ -212,6 +222,15 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/tickets/action", h.handleAdminTicketAction)
 	mux.HandleFunc("/api/admin/tickets/agents", h.handleAdminTicketAgents)
 	mux.HandleFunc("/api/admin/email", h.handleAdminEmail)
+	mux.HandleFunc("/api/admin/comms/campaigns", h.handleCommsCampaigns)
+	mux.HandleFunc("/api/admin/comms/campaign", h.handleCommsCampaign)
+	mux.HandleFunc("/api/admin/comms/campaign/preview", h.handleCommsPreview)
+	mux.HandleFunc("/api/admin/comms/campaign/test", h.handleCommsTest)
+	mux.HandleFunc("/api/admin/comms/campaign/submit", h.handleCommsSubmit)
+	mux.HandleFunc("/api/admin/comms/campaign/decide", h.handleCommsDecide)
+	mux.HandleFunc("/api/admin/comms/campaign/control", h.handleCommsControl)
+	mux.HandleFunc("/api/admin/comms/campaign/recipients", h.handleCommsRecipients)
+	mux.HandleFunc("/api/comms/unsubscribe", h.handleCommsUnsubscribe)
 	mux.HandleFunc("/api/admin/news", h.handleAdminNews)
 	mux.HandleFunc("/api/support/access-help", h.handleAccessHelp)
 	mux.HandleFunc("/api/support/email/ingest", h.handleSupportEmailIngest)
