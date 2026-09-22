@@ -98,6 +98,60 @@ func TestCommsHTTP_FullFlow_Integration(t *testing.T) {
 	if code != 200 || out["total"].(float64) != 1 {
 		t.Fatalf("list = %d %v", code, out)
 	}
+
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaign/control", "super@x.com", map[string]any{"id": id, "action": "resume"})
+	if code != 200 || out["status"] != "approved" {
+		t.Fatalf("resume = %d %v", code, out)
+	}
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaign/control", "super@x.com", map[string]any{"id": id, "action": "cancel"})
+	if code != 200 || out["status"] != "cancelled" {
+		t.Fatalf("cancel = %d %v", code, out)
+	}
+	var skipped int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM comms.campaign_recipient WHERE campaign_id=$1 AND status='skipped' AND skip_reason='cancelled'`, id).Scan(&skipped); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped recipients = %d, want 1", skipped)
+	}
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaign/control", "super@x.com", map[string]any{"id": id, "action": "cancel"})
+	if code != 409 || out["error"] != "campaign_invalid_state" {
+		t.Fatalf("cancel again = %d %v, want 409 campaign_invalid_state", code, out)
+	}
+}
+
+func TestCommsHTTP_TestSendFailureRefundsQuota_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	store := NewStore(pool)
+	seedAdmin(t, ctx, store.db, "admin@x.com")
+	seedAdmin(t, ctx, store.db, "super@x.com")
+	h := NewHandler(store, nil, "svc-token", []string{"admin@x.com", "super@x.com"}, 0, zerolog.Nop())
+	h.superAdminEmails = []string{"super@x.com"}
+	f := &fakeEmailSender{fails: map[string]error{"admin@x.com": fakeAPIErr{"InternalFailure", 500}}}
+	h.SetComms(newTestSender(store, f), 150000, 3, 1, []byte("unsub-secret"))
+	routes := h.Routes()
+
+	code, out := doJSON(t, routes, "POST", "/api/admin/comms/campaigns", "admin@x.com",
+		map[string]any{"subject": "Asunto largo", "body_markdown": "Cuerpo de prueba largo", "segment": map[string]any{}})
+	if code != 201 {
+		t.Fatalf("create = %d %v", code, out)
+	}
+	id := int64(out["id"].(float64))
+
+	code, _ = doJSON(t, routes, "POST", "/api/admin/comms/campaign/test", "admin@x.com", map[string]any{"id": id})
+	if code != 502 {
+		t.Fatalf("test send (fails) = %d, want 502", code)
+	}
+	code, _ = doJSON(t, routes, "POST", "/api/admin/comms/campaign/test", "admin@x.com", map[string]any{"id": id})
+	if code != 200 {
+		t.Fatalf("test send (refunded slot) = %d, want 200", code)
+	}
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaign/test", "admin@x.com", map[string]any{"id": id})
+	if code != 429 || out["error"] != "test_send_limit" {
+		t.Fatalf("test send (limit) = %d %v, want 429 test_send_limit", code, out)
+	}
 }
 
 func TestCommsHTTP_Unsubscribe_Integration(t *testing.T) {
@@ -130,6 +184,15 @@ func TestCommsHTTP_Unsubscribe_Integration(t *testing.T) {
 	routes.ServeHTTP(rr, req)
 	if rr.Code != 400 {
 		t.Fatalf("bad token = %d", rr.Code)
+	}
+
+	expired := comms.SignUnsubscribe([]byte("unsub-secret"), pid, time.Now().Add(-time.Minute))
+	req = httptest.NewRequest("POST", "/api/comms/unsubscribe", bytes.NewBufferString(`{"token":"`+expired+`"}`))
+	req.Header.Set("X-VP-Service-Token", "svc-token")
+	rr = httptest.NewRecorder()
+	routes.ServeHTTP(rr, req)
+	if rr.Code != 410 {
+		t.Fatalf("expired token = %d, want 410", rr.Code)
 	}
 }
 

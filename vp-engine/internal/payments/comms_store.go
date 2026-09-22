@@ -235,6 +235,39 @@ func (s *Store) IncrementTestSends(ctx context.Context, id int64, max int) error
 	return nil
 }
 
+// DecrementTestSends revierte el cupo consumido por IncrementTestSends cuando
+// el envío de prueba falla (no debe contar contra maxTestSends).
+func (s *Store) DecrementTestSends(ctx context.Context, id int64) error {
+	_, err := s.db.Exec(ctx, `UPDATE comms.campaign SET test_sends = GREATEST(test_sends-1, 0) WHERE id=$1`, id)
+	return err
+}
+
+// CancelCampaign: en una sola transacción pasa la campaña a 'cancelled' (solo
+// desde `from`) y marca los destinatarios aún en cola como skipped('cancelled').
+func (s *Store) CancelCampaign(ctx context.Context, id int64, from []string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE comms.campaign SET status='cancelled', finished_at=now()
+		WHERE id=$1 AND status::text = ANY($2::text[])`, id, from)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		if _, gerr := s.GetCampaign(ctx, id); gerr != nil {
+			return gerr
+		}
+		return ErrCampaignState
+	}
+	if _, err := tx.Exec(ctx, `UPDATE comms.campaign_recipient SET status='skipped', skip_reason='cancelled'
+		WHERE campaign_id=$1 AND status='queued'`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) ListCampaignRecipients(ctx context.Context, id int64, status string, limit, offset int) ([]CampaignRecipient, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50

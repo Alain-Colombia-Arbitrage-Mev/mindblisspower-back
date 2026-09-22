@@ -226,6 +226,7 @@ func (h *Handler) handleCommsTest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.comms.sender.SendTest(r.Context(), c, adminEmail); err != nil {
 		h.log.Error().Err(err).Int64("campaign", c.ID).Msg("comms test send")
+		_ = h.store.DecrementTestSends(r.Context(), c.ID)
 		writeErr(w, http.StatusBadGateway, "email_send_failed")
 		return
 	}
@@ -303,10 +304,7 @@ func (h *Handler) handleCommsControl(w http.ResponseWriter, r *http.Request) {
 	case "resume":
 		err = h.store.SetCampaignStatus(r.Context(), b.ID, []string{"paused"}, "approved", "")
 	case "cancel":
-		if err = h.store.SetCampaignStatus(r.Context(), b.ID, []string{"pending_approval", "approved", "sending", "paused"}, "cancelled", ""); err == nil {
-			_, err = h.store.db.Exec(r.Context(), `UPDATE comms.campaign_recipient SET status='skipped', skip_reason='cancelled'
-				WHERE campaign_id=$1 AND status='queued'`, b.ID)
-		}
+		err = h.store.CancelCampaign(r.Context(), b.ID, []string{"pending_approval", "approved", "sending", "paused"})
 	default:
 		writeErr(w, http.StatusBadRequest, "action_invalid")
 		return
