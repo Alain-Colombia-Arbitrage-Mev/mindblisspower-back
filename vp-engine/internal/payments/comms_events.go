@@ -79,15 +79,23 @@ func (ec *CommsEventConsumer) Loop(ctx context.Context) {
 	}
 }
 
-// RunOnce: long-poll (20 s) de hasta 10 mensajes; cada mensaje se borra siempre
-// (los no relacionados con campañas o corruptos se descartan sin reintento).
+// RunOnce: long-poll (20 s) de hasta 10 mensajes. Un mensaje se borra cuando
+// ProcessBody lo aplicó sin error, o cuando no es de campaña / está corrupto
+// (unmatched: no se reintenta). Si es de campaña pero falla al aplicarlo en DB
+// (matched=true, err!=nil), NO se borra: SQS lo redelivera tras el visibility
+// timeout y, agotados los intentos, cae a la DLQ (maxReceiveCount=5).
 func (ec *CommsEventConsumer) RunOnce(ctx context.Context) (int, error) {
 	msgs, err := ec.q.Receive(ctx, 10, 20)
 	if err != nil {
 		return 0, fmt.Errorf("sqs receive: %w", err)
 	}
 	for _, m := range msgs {
-		if _, perr := ec.ProcessBody(ctx, []byte(m.Body)); perr != nil {
+		matched, perr := ec.ProcessBody(ctx, []byte(m.Body))
+		if matched && perr != nil {
+			ec.log.Warn().Err(perr).Str("msg", m.ID).Msg("comms event: DB update failed, message kept for retry")
+			continue
+		}
+		if perr != nil {
 			ec.log.Warn().Err(perr).Str("msg", m.ID).Msg("comms event skipped")
 		}
 		if derr := ec.q.Delete(ctx, m.ReceiptHandle); derr != nil {
@@ -115,7 +123,10 @@ func (ec *CommsEventConsumer) ProcessBody(ctx context.Context, body []byte) (boo
 				err = ec.store.AddSuppressed(ctx, email, "bounce_permanent")
 			}
 		} else {
-			err = ec.store.MarkRecipient(ctx, cid, pid, "sent", "bounce_transient: "+ev.Diagnostic)
+			// No usar MarkRecipient: pisaría sent_at (se fija a now() cuando status='sent'),
+			// perdiendo la hora real del envío original. Solo anotamos el diagnóstico.
+			_, err = ec.store.db.Exec(ctx, `UPDATE comms.campaign_recipient SET last_error=$3 WHERE campaign_id=$1 AND person_id=$2`,
+				cid, pid, "bounce_transient: "+ev.Diagnostic)
 		}
 	case "Complaint":
 		if err = ec.store.MarkRecipient(ctx, cid, pid, "complained", ev.Diagnostic); err == nil {
