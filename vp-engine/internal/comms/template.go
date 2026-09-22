@@ -76,7 +76,7 @@ func Render(in RenderInput) (Rendered, error) {
 	if n := strings.TrimSpace(in.FirstName); n != "" {
 		greeting = "Hola " + n + ","
 	}
-	text := greeting + "\n\n" + strings.TrimSpace(in.BodyMarkdown) + "\n\n--\n" +
+	text := greeting + "\n\n" + strings.TrimSpace(src) + "\n\n--\n" +
 		"Recibes este correo porque eres miembro de Mindbliss Power. Revisa tu carpeta de spam si no lo ves en tu bandeja principal.\n" +
 		"Darse de baja: " + in.UnsubscribeURL + "\n"
 	return Rendered{Subject: in.Subject, HTML: out.String(), Text: text}, nil

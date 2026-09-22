@@ -41,6 +41,9 @@ func TestRenderRejectsHTTPLinksAndRequiresUnsubscribe(t *testing.T) {
 	if strings.Contains(out.HTML, "http://evil.test") || strings.Contains(out.HTML, "javascript:") {
 		t.Fatalf("insecure links kept: %s", out.HTML)
 	}
+	if strings.Contains(out.Text, "http://evil.test") || strings.Contains(out.Text, "javascript:") {
+		t.Fatalf("insecure links kept in text: %s", out.Text)
+	}
 	if _, err := Render(RenderInput{Subject: "x", BodyMarkdown: "hola"}); err == nil {
 		t.Fatal("expected error without UnsubscribeURL")
 	}
