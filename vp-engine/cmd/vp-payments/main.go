@@ -293,6 +293,29 @@ func run() error {
 		}()
 	}
 
+	// Comunicados masivos: sender (solo donde COMMS_ENABLED=true, i.e. APP) y
+	// consumer de eventos SES por SQS. Non-fatal.
+	if cfg.CommsEnabled {
+		sender := payments.NewCommsSender(store, store, payments.CommsSenderConfig{
+			RatePerSec: cfg.CommsSendRatePerSec, BatchSize: cfg.CommsBatchSize, SESConfigSet: cfg.CommsSESConfigSet,
+			UnsubscribeSecret: []byte(cfg.CommsUnsubscribeSecret), UnsubscribeBase: cfg.CommsUnsubscribeBaseURL,
+			UnsubscribeOneClickBase: cfg.CommsUnsubscribeOneClickURL,
+			ReplyTo:                 cfg.CommsReplyTo,
+		}, logger.With().Str("component", "comms-sender").Logger())
+		handler.SetComms(sender, cfg.CommsMaxAudience, cfg.CommsMaxPerDay, cfg.CommsMaxTestSends, []byte(cfg.CommsUnsubscribeSecret))
+		go sender.Loop(rootCtx)
+		if cfg.CommsSQSQueueURL != "" {
+			if q, err := payments.NewSQSQueueClient(rootCtx, cfg.CommsSQSQueueURL); err != nil {
+				logger.Error().Err(err).Msg("comms: SQS client init failed; sin seguimiento de entregas")
+			} else {
+				go payments.NewCommsEventConsumer(store, q, logger.With().Str("component", "comms-events").Logger()).Loop(rootCtx)
+			}
+		}
+	} else if cfg.CommsUnsubscribeSecret != "" {
+		// Sin sender pero con secreto: el endpoint de baja sigue funcionando (WORKER/staging)
+		handler.SetComms(nil, 0, 0, 0, []byte(cfg.CommsUnsubscribeSecret))
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info().Str("addr", srv.Addr).Strs("payment_methods", cfg.PaymentMethods).Msg("http server listening")

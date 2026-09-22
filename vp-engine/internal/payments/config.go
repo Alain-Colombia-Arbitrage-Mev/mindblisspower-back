@@ -133,6 +133,20 @@ type Config struct {
 	VoiceAgentMode         string
 	PipecatStreamURL       string
 	PipecatStreamSecret    string
+
+	// ── Comunicados masivos (comms) ────────────────────────────────────────────
+	CommsEnabled                bool
+	CommsSendRatePerSec         int
+	CommsBatchSize              int
+	CommsSESConfigSet           string
+	CommsUnsubscribeSecret      string
+	CommsUnsubscribeBaseURL     string
+	CommsUnsubscribeOneClickURL string
+	CommsReplyTo                string
+	CommsSQSQueueURL            string
+	CommsMaxAudience            int
+	CommsMaxPerDay              int
+	CommsMaxTestSends           int
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -211,6 +225,19 @@ func LoadConfig() (*Config, error) {
 		VoiceAgentMode:          env("PAYMENTS_VOICE_AGENT_MODE", "gather"),
 		PipecatStreamURL:        env("PAYMENTS_PIPECAT_WS_URL", ""),
 		PipecatStreamSecret:     env("PAYMENTS_PIPECAT_STREAM_SECRET", ""),
+
+		CommsEnabled:                envBool("COMMS_ENABLED", false),
+		CommsSendRatePerSec:         envInt("COMMS_SEND_RATE_PER_SEC", 10),
+		CommsBatchSize:              envInt("COMMS_BATCH_SIZE", 100),
+		CommsSESConfigSet:           firstEnvDefault("COMMS_SES_CONFIG_SET", "entregas"),
+		CommsUnsubscribeSecret:      os.Getenv("COMMS_UNSUBSCRIBE_SECRET"),
+		CommsUnsubscribeBaseURL:     firstEnvDefault("COMMS_UNSUBSCRIBE_BASE_URL", "https://app.mindblisspower.com/baja"),
+		CommsUnsubscribeOneClickURL: os.Getenv("COMMS_UNSUBSCRIBE_ONECLICK_URL"),
+		CommsReplyTo:                firstEnvDefault("COMMS_REPLY_TO", "soporte@mindblisspower.com"),
+		CommsSQSQueueURL:            os.Getenv("COMMS_SQS_QUEUE_URL"),
+		CommsMaxAudience:            envInt("COMMS_MAX_AUDIENCE", 150000),
+		CommsMaxPerDay:              envInt("COMMS_MAX_CAMPAIGNS_PER_DAY", 3),
+		CommsMaxTestSends:           envInt("COMMS_MAX_TEST_SENDS", 5),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"
@@ -227,6 +254,9 @@ func LoadConfig() (*Config, error) {
 	}
 	if c.ServiceToken == "" {
 		return nil, fmt.Errorf("PAYMENTS_SERVICE_TOKEN is required")
+	}
+	if c.CommsEnabled && strings.TrimSpace(c.CommsUnsubscribeSecret) == "" {
+		return nil, fmt.Errorf("COMMS_ENABLED=true requiere COMMS_UNSUBSCRIBE_SECRET")
 	}
 	if len(c.PaymentMethods) == 0 {
 		c.PaymentMethods = []string{"card"}
@@ -302,6 +332,14 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// firstEnvDefault devuelve el env var si no está vacío, o el fallback dado.
+func firstEnvDefault(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func envInt(key string, fallback int) int {
