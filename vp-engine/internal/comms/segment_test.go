@@ -43,7 +43,9 @@ func TestParseSegmentNormalizesEmails(t *testing.T) {
 
 func TestAudienceQueryAlwaysExcludesBlacklistUnsubscribeAndAdmins(t *testing.T) {
 	sql, args := AudienceQuery(Segment{Status: []string{"active"}, Membership: "any"})
-	for _, must := range []string{"NOT p.blacklisted", "p.is_admin = false", "comms.unsubscribe", "comms.suppressed_email", "ORDER BY p.id"} {
+	// I12: el filtro debe comparar contra el enum nativo (índice utilizable), no
+	// castear la columna a text en cada fila.
+	for _, must := range []string{"p.status = ANY($1::text[]::mlm.person_status[])", "NOT p.blacklisted", "p.is_admin = false", "comms.unsubscribe", "comms.suppressed_email", "ORDER BY p.id"} {
 		if !strings.Contains(sql, must) {
 			t.Fatalf("sql missing %q:\n%s", must, sql)
 		}
@@ -62,4 +64,24 @@ func TestAudienceQueryEmailsListIgnoresFilters(t *testing.T) {
 	if args[1] != nil || args[2] != nil || args[3] != "any" {
 		t.Fatalf("filters not neutralized: %v", args)
 	}
+	// ...y el status se abre a los 3 válidos: la lista explícita manda, no el
+	// default "active" (si no, un email de una persona 'pending' se caería en silencio).
+	st, ok := args[0].([]string)
+	if !ok || len(st) != 3 {
+		t.Fatalf("status not widened for email list: %#v", args[0])
+	}
+	for _, want := range []string{"pending", "active", "suspended"} {
+		if !contains(st, want) {
+			t.Fatalf("status = %v, want pending/active/suspended", st)
+		}
+	}
+}
+
+func contains(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }

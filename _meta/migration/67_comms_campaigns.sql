@@ -1,3 +1,4 @@
+-- Aplicar con: psql -v ON_ERROR_STOP=1 -f 67_comms_campaigns.sql (NUNCA --single-transaction: el ALTER TYPE final debe correr fuera de la transacción)
 -- 67_comms_campaigns.sql — comunicados masivos por correo (campañas por segmento,
 -- aprobación four-eyes, cola de destinatarios, bajas y supresión por rebote).
 SET search_path = mlm, public;
@@ -90,6 +91,15 @@ CREATE TRIGGER campaign_recipient_touch BEFORE UPDATE ON comms.campaign_recipien
 GRANT USAGE ON SCHEMA comms TO vp_engine;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA comms TO vp_engine;
 ALTER DEFAULT PRIVILEGES IN SCHEMA comms GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO vp_engine;
+-- app_read (rol de solo lectura para paneles/reportes): solo la cabecera de las
+-- campañas, nunca comms.campaign_recipient (contiene el email de cada miembro).
+-- Guardado por si el rol no existe todavía en el entorno donde se aplica.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app_read') THEN
+    GRANT USAGE ON SCHEMA comms TO app_read;
+    GRANT SELECT ON comms.campaign TO app_read;
+  END IF;
+END $$;
 
 COMMIT;
 

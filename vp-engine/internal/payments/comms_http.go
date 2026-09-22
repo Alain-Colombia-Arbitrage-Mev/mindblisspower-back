@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vicionpower/vp-engine/internal/comms"
 )
@@ -76,8 +77,12 @@ func readCampaignBody(w http.ResponseWriter, r *http.Request) (campaignBody, boo
 	return b, true
 }
 
+// validCampaignText cuenta RUNAS, no bytes: los CHECK de comms.campaign usan
+// length() de Postgres (caracteres), así que medir en bytes rechazaba asuntos
+// legítimos con acentos/emoji que la DB sí acepta (y al revés en el mínimo).
 func validCampaignText(subject, body string) bool {
-	return len(subject) >= 3 && len(subject) <= 150 && len(body) >= 10 && len(body) <= 20000
+	s, b := utf8.RuneCountInString(subject), utf8.RuneCountInString(body)
+	return s >= 3 && s <= 150 && b >= 10 && b <= 20000
 }
 
 // GET (lista) / POST (crear) /api/admin/comms/campaigns
@@ -192,7 +197,8 @@ func (h *Handler) handleCommsPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rendered, err := comms.Render(comms.RenderInput{Subject: subject, BodyMarkdown: body, FirstName: "Nombre",
-		UnsubscribeURL: comms.UnsubscribeURL(h.comms.sender.cfg.UnsubscribeBase, "preview")})
+		UnsubscribeURL: comms.UnsubscribeURL(h.comms.sender.cfg.UnsubscribeBase, "preview"),
+		LegalName:      h.comms.sender.cfg.LegalName, PostalAddress: h.comms.sender.cfg.PostalAddress})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "render_failed")
 		return
@@ -298,6 +304,7 @@ func (h *Handler) handleCommsControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
+	requeued := 0
 	switch b.Action {
 	case "pause":
 		err = h.store.SetCampaignStatus(r.Context(), b.ID, []string{"approved", "sending"}, "paused", "manual: "+superEmail)
@@ -305,6 +312,19 @@ func (h *Handler) handleCommsControl(w http.ResponseWriter, r *http.Request) {
 		err = h.store.SetCampaignStatus(r.Context(), b.ID, []string{"paused"}, "approved", "")
 	case "cancel":
 		err = h.store.CancelCampaign(r.Context(), b.ID, []string{"pending_approval", "approved", "sending", "paused"})
+	case "requeue_failed":
+		// Reencola las filas que el barrido dejó en failed('stale'). Solo tiene
+		// sentido en campañas que aún pueden enviar (o que cerraron con fallos).
+		var cur Campaign
+		cur, err = h.store.GetCampaign(r.Context(), b.ID)
+		if err == nil {
+			switch cur.Status {
+			case "paused", "sending", "approved", "done":
+				requeued, err = h.store.RequeueStaleFailed(r.Context(), b.ID)
+			default:
+				err = ErrCampaignState
+			}
+		}
 	default:
 		writeErr(w, http.StatusBadRequest, "action_invalid")
 		return
@@ -318,7 +338,11 @@ func (h *Handler) handleCommsControl(w http.ResponseWriter, r *http.Request) {
 		writeCommsErr(w, err)
 		return
 	}
-	h.log.Info().Int64("campaign", c.ID).Str("by", superEmail).Str("action", b.Action).Msg("comms campaign control")
+	h.log.Info().Int64("campaign", c.ID).Str("by", superEmail).Str("action", b.Action).Int("requeued", requeued).Msg("comms campaign control")
+	if b.Action == "requeue_failed" {
+		writeJSON(w, http.StatusOK, map[string]any{"campaign": c, "requeued": requeued})
+		return
+	}
 	writeJSON(w, http.StatusOK, c)
 }
 

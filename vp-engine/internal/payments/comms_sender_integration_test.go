@@ -69,6 +69,7 @@ func newTestSender(store *Store, f *fakeEmailSender) *CommsSender {
 		RatePerSec: 1000, BatchSize: 2, SESConfigSet: "entregas",
 		UnsubscribeSecret: []byte("s"), UnsubscribeBase: "https://app.test/baja",
 		ReplyTo: "soporte@x.com", UnsubscribeTTL: time.Hour,
+		LegalName: "Mindbliss Power SAS", PostalAddress: "Calle 1 # 2-3, Bogotá",
 	}, zerolog.Nop())
 }
 
@@ -191,6 +192,72 @@ func TestCommsSender_StaleSendingIsFailedNotResent_Integration(t *testing.T) {
 	recs, _, _ := store.ListCampaignRecipients(ctx, c.ID, "failed", 10, 0)
 	if len(recs) != 1 || recs[0].LastError != "stale" {
 		t.Fatalf("recs = %+v", recs)
+	}
+	// I14: la fila atascada quedó en failed('stale') a propósito (at-most-once),
+	// pero el operador puede reencolarla explícitamente. Tras requeue, el sender
+	// la vuelve a tomar.
+	n, err := store.RequeueStaleFailed(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("RequeueStaleFailed: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("requeued = %d, want 1", n)
+	}
+	if _, err := cs.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.sent) != 1 {
+		t.Fatalf("requeued row should be sent once, sent = %d", len(f.sent))
+	}
+}
+
+// TestCommsSender_SkipsUnsubscribedAfterEnqueue_Integration (C1): la audiencia se
+// congela al aprobar, así que una baja o una supresión posterior al encolado no la
+// filtraría. RunOnce debe re-chequear antes de cada lote y saltar esas filas.
+func TestCommsSender_SkipsUnsubscribedAfterEnqueue_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	store := NewStore(pool)
+	c := approvedCampaign(t, ctx, store, []string{"a@x.com", "b@x.com"})
+	// La baja y la supresión llegan DESPUÉS de encolar.
+	if err := store.AddUnsubscribe(ctx, "a@x.com", nil, "link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddSuppressed(ctx, "b@x.com", "bounce_permanent"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeEmailSender{}
+	cs := newTestSender(store, f)
+	for i := 0; i < 5; i++ {
+		n, err := cs.RunOnce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("no debe enviarse nada, sent = %+v", f.sent)
+	}
+	got, _ := store.GetCampaign(ctx, c.ID)
+	if got.Status != "done" {
+		t.Fatalf("campaign status = %q, want done", got.Status)
+	}
+	recs, _, _ := store.ListCampaignRecipients(ctx, c.ID, "", 10, 0)
+	byEmail := map[string]CampaignRecipient{}
+	for _, r := range recs {
+		byEmail[r.Email] = r
+	}
+	if len(recs) != 2 {
+		t.Fatalf("recipients = %+v", recs)
+	}
+	if byEmail["a@x.com"].Status != "skipped" || byEmail["a@x.com"].SkipReason != "unsubscribed" {
+		t.Fatalf("a@x.com = %+v, want skipped/unsubscribed", byEmail["a@x.com"])
+	}
+	if byEmail["b@x.com"].Status != "skipped" || byEmail["b@x.com"].SkipReason != "suppressed" {
+		t.Fatalf("b@x.com = %+v, want skipped/suppressed", byEmail["b@x.com"])
 	}
 }
 

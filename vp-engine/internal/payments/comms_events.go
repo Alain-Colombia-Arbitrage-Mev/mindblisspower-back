@@ -153,7 +153,9 @@ func (ec *CommsEventConsumer) maybePauseForBounceRate(ctx context.Context, cid i
 	}
 	// +1 por el rebote que acabamos de aplicar (los contadores aún no se refrescan)
 	bounced := c.BouncedCount + 1
-	if c.Status == "sending" && c.SentCount >= 1000 && bounced*100 > c.SentCount*5 {
+	// Arma a partir de 100 envíos: con 1000 una campaña chica (o el primer lote de
+	// una grande) podía quemar la reputación del dominio sin que el freno actuara.
+	if c.Status == "sending" && c.SentCount >= 100 && bounced*100 > c.SentCount*5 {
 		if err := ec.store.SetCampaignStatus(ctx, cid, []string{"sending"}, "paused", "bounce_rate"); err != nil {
 			return err
 		}

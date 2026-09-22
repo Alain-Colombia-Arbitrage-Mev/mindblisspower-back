@@ -1,5 +1,3 @@
-//go:build integration || !short
-
 package payments
 
 import (

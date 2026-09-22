@@ -118,6 +118,34 @@ func TestCommsHTTP_FullFlow_Integration(t *testing.T) {
 	if code != 409 || out["error"] != "campaign_invalid_state" {
 		t.Fatalf("cancel again = %d %v, want 409 campaign_invalid_state", code, out)
 	}
+
+	// I13: cancelar desde pending_approval debe cerrar también la approval_request,
+	// si no queda pendiendo para siempre en la cola de aprobaciones del panel.
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaigns", "admin@x.com",
+		map[string]any{"subject": "Segundo asunto", "body_markdown": "Otro cuerpo de prueba largo", "segment": map[string]any{"status": []string{"active"}}})
+	if code != 201 {
+		t.Fatalf("create 2 = %d %v", code, out)
+	}
+	id2 := int64(out["id"].(float64))
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaign/submit", "admin@x.com", map[string]any{"id": id2, "reason": "segundo comunicado de prueba"})
+	if code != 200 || out["status"] != "pending_approval" {
+		t.Fatalf("submit 2 = %d %v", code, out)
+	}
+	var arID int64
+	if err := pool.QueryRow(ctx, `SELECT approval_request_id FROM comms.campaign WHERE id=$1`, id2).Scan(&arID); err != nil {
+		t.Fatal(err)
+	}
+	code, out = doJSON(t, routes, "POST", "/api/admin/comms/campaign/control", "super@x.com", map[string]any{"id": id2, "action": "cancel"})
+	if code != 200 || out["status"] != "cancelled" {
+		t.Fatalf("cancel 2 = %d %v", code, out)
+	}
+	var arStatus string
+	if err := pool.QueryRow(ctx, `SELECT status::text FROM mlm.approval_request WHERE id=$1`, arID).Scan(&arStatus); err != nil {
+		t.Fatal(err)
+	}
+	if arStatus == "pending" {
+		t.Fatalf("approval_request %d sigue en pending tras cancelar la campaña", arID)
+	}
 }
 
 func TestCommsHTTP_TestSendFailureRefundsQuota_Integration(t *testing.T) {

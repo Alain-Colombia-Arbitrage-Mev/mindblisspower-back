@@ -147,6 +147,11 @@ type Config struct {
 	CommsMaxAudience            int
 	CommsMaxPerDay              int
 	CommsMaxTestSends           int
+	// CommsLegalName / CommsPostalAddress: identidad legal que va en el pie de
+	// todo comunicado (CAN-SPAM §7704(a)(5)). El render falla si el nombre está
+	// vacío; la dirección postal es opcional pero debería configurarse en prod.
+	CommsLegalName     string
+	CommsPostalAddress string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -229,15 +234,17 @@ func LoadConfig() (*Config, error) {
 		CommsEnabled:                envBool("COMMS_ENABLED", false),
 		CommsSendRatePerSec:         envInt("COMMS_SEND_RATE_PER_SEC", 10),
 		CommsBatchSize:              envInt("COMMS_BATCH_SIZE", 100),
-		CommsSESConfigSet:           firstEnvDefault("COMMS_SES_CONFIG_SET", "entregas"),
+		CommsSESConfigSet:           strings.TrimSpace(env("COMMS_SES_CONFIG_SET", "entregas")),
 		CommsUnsubscribeSecret:      os.Getenv("COMMS_UNSUBSCRIBE_SECRET"),
-		CommsUnsubscribeBaseURL:     firstEnvDefault("COMMS_UNSUBSCRIBE_BASE_URL", "https://app.mindblisspower.com/baja"),
+		CommsUnsubscribeBaseURL:     strings.TrimSpace(env("COMMS_UNSUBSCRIBE_BASE_URL", "https://app.mindblisspower.com/baja")),
 		CommsUnsubscribeOneClickURL: os.Getenv("COMMS_UNSUBSCRIBE_ONECLICK_URL"),
-		CommsReplyTo:                firstEnvDefault("COMMS_REPLY_TO", "soporte@mindblisspower.com"),
+		CommsReplyTo:                strings.TrimSpace(env("COMMS_REPLY_TO", "soporte@mindblisspower.com")),
 		CommsSQSQueueURL:            os.Getenv("COMMS_SQS_QUEUE_URL"),
 		CommsMaxAudience:            envInt("COMMS_MAX_AUDIENCE", 150000),
 		CommsMaxPerDay:              envInt("COMMS_MAX_CAMPAIGNS_PER_DAY", 3),
 		CommsMaxTestSends:           envInt("COMMS_MAX_TEST_SENDS", 5),
+		CommsLegalName:              strings.TrimSpace(env("COMMS_LEGAL_NAME", "Mindbliss Power")),
+		CommsPostalAddress:          strings.TrimSpace(env("COMMS_POSTAL_ADDRESS", "")),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"
@@ -332,14 +339,6 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
-}
-
-// firstEnvDefault devuelve el env var si no está vacío, o el fallback dado.
-func firstEnvDefault(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return fallback
 }
 
 func envInt(key string, fallback int) int {

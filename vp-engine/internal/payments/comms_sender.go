@@ -21,6 +21,10 @@ type CommsSenderConfig struct {
 	UnsubscribeOneClickBase string // endpoint API para List-Unsubscribe (One-Click); derivado de UnsubscribeBase si vacío
 	ReplyTo                 string
 	UnsubscribeTTL          time.Duration
+	// LegalName / PostalAddress: identidad legal del remitente para el pie del
+	// correo (CAN-SPAM). LegalName vacío hace fallar el render de cada mensaje.
+	LegalName     string
+	PostalAddress string
 }
 
 type CommsSender struct {
@@ -73,6 +77,12 @@ func (cs *CommsSender) Loop(ctx context.Context) {
 // activa (sending, o approved más antigua); 3) envía un lote respetando el ritmo;
 // 4) cierra la campaña si no queda trabajo.
 func (cs *CommsSender) RunOnce(ctx context.Context) (int, error) {
+	// Barrido de filas 'sending' atascadas (proceso muerto entre el claim y la
+	// respuesta de SES). Se marcan failed('stale') y NO se reencolan solas: el
+	// envío es at-most-once a propósito — SES pudo haber aceptado el mensaje y
+	// reencolar automáticamente duplicaría el correo al miembro. Si el operador
+	// confirma que el reinicio ocurrió antes de enviar, puede reencolarlas a mano
+	// con la acción `requeue_failed` (Store.RequeueStaleFailed, solo super_admin).
 	if _, err := cs.store.db.Exec(ctx, `UPDATE comms.campaign_recipient SET status='failed', last_error='stale'
 		WHERE status='sending' AND updated_at < now() - interval '10 minutes'`); err != nil {
 		return 0, fmt.Errorf("stale sweep: %w", err)
@@ -87,6 +97,18 @@ func (cs *CommsSender) RunOnce(ctx context.Context) (int, error) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("claim campaign: %w", err)
+	}
+	// Re-chequeo de bajas/supresión ANTES de cada lote: la audiencia se congela al
+	// aprobar la campaña, así que una baja (o un rebote permanente de otra campaña)
+	// posterior al encolado no se vería. Sin esto, un envío largo seguiría escribiendo
+	// a direcciones ya dadas de baja.
+	if _, err := cs.store.db.Exec(ctx, `UPDATE comms.campaign_recipient r SET status='skipped',
+	       skip_reason = CASE WHEN EXISTS (SELECT 1 FROM comms.suppressed_email s WHERE s.email=r.email)
+	                          THEN 'suppressed' ELSE 'unsubscribed' END
+	 WHERE r.campaign_id=$1 AND r.status='queued'
+	   AND (EXISTS (SELECT 1 FROM comms.unsubscribe u WHERE u.email=r.email)
+	     OR EXISTS (SELECT 1 FROM comms.suppressed_email s WHERE s.email=r.email))`, id); err != nil {
+		return 0, fmt.Errorf("recheck unsubscribe/suppression: %w", err)
 	}
 	c, err := cs.store.GetCampaign(ctx, id)
 	if err != nil {
@@ -139,7 +161,7 @@ func (cs *CommsSender) RunOnce(ctx context.Context) (int, error) {
 		footerURL := comms.UnsubscribeURL(cs.cfg.UnsubscribeBase, tok)
 		headerURL := comms.UnsubscribeURL(cs.cfg.UnsubscribeOneClickBase, tok)
 		rendered, err := comms.Render(comms.RenderInput{Subject: c.Subject, BodyMarkdown: c.BodyMarkdown, FirstName: r.name,
-			UnsubscribeURL: footerURL})
+			UnsubscribeURL: footerURL, LegalName: cs.cfg.LegalName, PostalAddress: cs.cfg.PostalAddress})
 		if err != nil {
 			_ = cs.store.MarkRecipient(ctx, id, r.pid, "failed", "render: "+err.Error())
 			continue
@@ -207,8 +229,9 @@ func (cs *CommsSender) maybeFinish(ctx context.Context, id int64) error {
 // el pie del correo de prueba usa un marcador no canjeable y no lleva cabecera
 // List-Unsubscribe.
 func (cs *CommsSender) SendTest(ctx context.Context, c Campaign, toEmail string) error {
-	footerURL := cs.cfg.UnsubscribeBase + "?test=1"
-	rendered, err := comms.Render(comms.RenderInput{Subject: c.Subject, BodyMarkdown: c.BodyMarkdown, FirstName: "", UnsubscribeURL: footerURL})
+	footerURL := withQuery(cs.cfg.UnsubscribeBase, "test=1")
+	rendered, err := comms.Render(comms.RenderInput{Subject: c.Subject, BodyMarkdown: c.BodyMarkdown, FirstName: "",
+		UnsubscribeURL: footerURL, LegalName: cs.cfg.LegalName, PostalAddress: cs.cfg.PostalAddress})
 	if err != nil {
 		return err
 	}
@@ -217,15 +240,32 @@ func (cs *CommsSender) SendTest(ctx context.Context, c Campaign, toEmail string)
 	return err
 }
 
+// withQuery añade `kv` a la query string de base usando el separador correcto.
+// No se usa comms.UnsubscribeURL porque ese helper siempre agrega `t=<token>`, y
+// el correo de prueba debe llevar un marcador NO canjeable.
+func withQuery(base, kv string) string {
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + kv
+}
+
 func isAccessDenied(err error) bool {
 	var c interface{ ErrorCode() string }
 	return errors.As(err, &c) && c.ErrorCode() == "AccessDeniedException"
 }
 
+// truncErr recorta el mensaje a 300 RUNAS (no bytes): cortar por bytes puede
+// partir un carácter multibyte y dejar UTF-8 inválido, que Postgres rechaza al
+// escribirlo en last_error.
 func truncErr(err error) string {
 	s := err.Error()
-	if len(s) > 300 {
-		return s[:300]
+	if len(s) <= 300 {
+		return s
+	}
+	if r := []rune(s); len(r) > 300 {
+		return string(r[:300])
 	}
 	return s
 }

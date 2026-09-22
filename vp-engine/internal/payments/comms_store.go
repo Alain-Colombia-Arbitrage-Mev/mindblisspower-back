@@ -36,10 +36,14 @@ type Campaign struct {
 	ComplainedCount   int             `json:"complained_count"`
 	FailedCount       int             `json:"failed_count"`
 	PauseReason       string          `json:"pause_reason,omitempty"`
-	StartedAt         *time.Time      `json:"started_at,omitempty"`
-	FinishedAt        *time.Time      `json:"finished_at,omitempty"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
+	// InitiatorReason: justificación que escribió el iniciador al enviar a
+	// aprobación (mlm.approval_request.initiator_reason). Solo se puebla en
+	// GetCampaign — el listado no la necesita.
+	InitiatorReason string     `json:"initiator_reason,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type AudiencePreview struct {
@@ -98,7 +102,23 @@ func (s *Store) UpdateCampaignDraft(ctx context.Context, id int64, subject, body
 }
 
 func (s *Store) GetCampaign(ctx context.Context, id int64) (Campaign, error) {
-	return scanCampaign(s.db.QueryRow(ctx, `SELECT `+campaignCols+` FROM comms.campaign WHERE id=$1`, id))
+	c, err := scanCampaign(s.db.QueryRow(ctx, `SELECT `+campaignCols+` FROM comms.campaign WHERE id=$1`, id))
+	if err != nil {
+		return c, err
+	}
+	// Segunda consulta (en vez de tocar campaignCols, que comparte el scan con
+	// el listado): el panel necesita la justificación del iniciador para poder
+	// decidir la aprobación con contexto. Best-effort: si falla, el detalle de
+	// la campaña sigue sirviendo sin ella.
+	if c.ApprovalRequestID != nil {
+		var reason string
+		if qerr := s.db.QueryRow(ctx, `SELECT COALESCE(ar.initiator_reason,'') FROM comms.campaign c
+			LEFT JOIN mlm.approval_request ar ON ar.id = c.approval_request_id
+			WHERE c.id=$1`, id).Scan(&reason); qerr == nil {
+			c.InitiatorReason = reason
+		}
+	}
+	return c, nil
 }
 
 func (s *Store) ListCampaigns(ctx context.Context, status string, limit, offset int) ([]Campaign, int, error) {
@@ -265,7 +285,47 @@ func (s *Store) CancelCampaign(ctx context.Context, id int64, from []string) err
 		WHERE campaign_id=$1 AND status='queued'`, id); err != nil {
 		return err
 	}
+	// Cancelar desde pending_approval debe cerrar también la solicitud de
+	// aprobación: si no, queda 'pending' para siempre en la cola four-eyes del
+	// panel y un super_admin podría aprobar una campaña ya cancelada.
+	// mlm.approval_status NO tiene valor 'cancelled' (pending/approved/rejected/
+	// expired/executed) ⇒ se usa 'expired', el único terminal que no afirma una
+	// decisión humana.
+	if _, err := tx.Exec(ctx, `UPDATE mlm.approval_request ar SET status='expired'
+		FROM comms.campaign c
+		WHERE c.id=$1 AND ar.id=c.approval_request_id AND ar.status='pending'`, id); err != nil {
+		return fmt.Errorf("cancel approval_request: %w", err)
+	}
 	return tx.Commit(ctx)
+}
+
+// RequeueStaleFailed devuelve a 'queued' las filas que el barrido de RunOnce
+// marcó failed('stale') (proceso muerto a mitad del envío). Solo esas: un fallo
+// real de SES no se reintenta por aquí. Si la campaña ya cerró como 'done', la
+// devuelve a 'approved' en la MISMA transacción para que el sender la retome.
+func (s *Store) RequeueStaleFailed(ctx context.Context, id int64) (int, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE comms.campaign_recipient
+		SET status='queued', last_error=NULL, attempts=0, next_attempt_at=NULL
+		WHERE campaign_id=$1 AND status='failed' AND last_error='stale'`, id)
+	if err != nil {
+		return 0, err
+	}
+	n := int(tag.RowsAffected())
+	if n > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE comms.campaign SET status='approved', finished_at=NULL
+			WHERE id=$1 AND status='done'`, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *Store) ListCampaignRecipients(ctx context.Context, id int64, status string, limit, offset int) ([]CampaignRecipient, int, error) {

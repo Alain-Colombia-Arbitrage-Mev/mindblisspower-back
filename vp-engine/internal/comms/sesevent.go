@@ -14,7 +14,12 @@ type SESEvent struct {
 
 type rawSESEvent struct {
 	EventType string `json:"eventType"`
-	Mail      struct {
+	// NotificationType: las notificaciones "legacy" de SES (publicadas por el
+	// propio identity notification topic, no por un event destination del
+	// configuration set) traen el tipo bajo esta clave. Aceptar ambas evita
+	// perder rebotes/quejas en silencio.
+	NotificationType string `json:"notificationType"`
+	Mail             struct {
 		MessageID string `json:"messageId"`
 	} `json:"mail"`
 	Bounce struct {
@@ -33,11 +38,15 @@ func ParseSESEvent(raw []byte) (SESEvent, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return SESEvent{}, err
 	}
-	if r.Mail.MessageID == "" || r.EventType == "" {
-		return SESEvent{}, errors.New("ses event: falta eventType o messageId")
+	evType := r.EventType
+	if evType == "" {
+		evType = r.NotificationType
 	}
-	ev := SESEvent{Type: r.EventType, MessageID: r.Mail.MessageID}
-	switch r.EventType {
+	if r.Mail.MessageID == "" || evType == "" {
+		return SESEvent{}, errors.New("ses event: falta eventType/notificationType o messageId")
+	}
+	ev := SESEvent{Type: evType, MessageID: r.Mail.MessageID}
+	switch evType {
 	case "Bounce":
 		ev.Permanent = r.Bounce.BounceType == "Permanent"
 		if len(r.Bounce.BouncedRecipients) > 0 {
@@ -49,9 +58,16 @@ func ParseSESEvent(raw []byte) (SESEvent, error) {
 	return ev, nil
 }
 
+// truncate corta a n RUNAS, no a n bytes: cortar por bytes puede partir un
+// carácter multibyte y dejar UTF-8 inválido, que Postgres rechaza al guardarlo
+// (los diagnósticos de SES vienen con acentos y comillas tipográficas).
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }

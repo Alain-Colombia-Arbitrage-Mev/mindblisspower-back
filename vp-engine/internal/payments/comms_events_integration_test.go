@@ -100,7 +100,10 @@ func TestCommsEvents_AutoPauseOnBounceRate_Integration(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(pool)
 	c := approvedCampaign(t, ctx, store, []string{"z@x.com"})
-	if _, err := pool.Exec(ctx, `UPDATE comms.campaign SET status='sending', sent_count=1000, bounced_count=60 WHERE id=$1`, c.ID); err != nil {
+	// I2: el freno arma a partir de 100 envíos (antes 1000: con el tope de 3
+	// campañas/día una campaña chica podía quemar la reputación sin frenarse).
+	// 6/100 = 6% > 5% ⇒ pausa.
+	if _, err := pool.Exec(ctx, `UPDATE comms.campaign SET status='sending', sent_count=100, bounced_count=6 WHERE id=$1`, c.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE comms.campaign_recipient SET status='sent', ses_message_id='m-z' WHERE campaign_id=$1`, c.ID); err != nil {
@@ -116,6 +119,23 @@ func TestCommsEvents_AutoPauseOnBounceRate_Integration(t *testing.T) {
 	got, _ := store.GetCampaign(ctx, c.ID)
 	if got.Status != "paused" || got.PauseReason != "bounce_rate" {
 		t.Fatalf("expected paused by bounce_rate, got %+v", got)
+	}
+
+	// Caso negativo: 4+1 = 5 rebotes sobre 100 envíos = 5%, NO supera el umbral.
+	c2 := approvedCampaign(t, ctx, store, []string{"y@x.com"})
+	if _, err := pool.Exec(ctx, `UPDATE comms.campaign SET status='sending', sent_count=100, bounced_count=4 WHERE id=$1`, c2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE comms.campaign_recipient SET status='sent', ses_message_id='m-y' WHERE campaign_id=$1`, c2.ID); err != nil {
+		t.Fatal(err)
+	}
+	matched, err = ec.ProcessBody(ctx, []byte(`{"eventType":"Bounce","mail":{"messageId":"m-y"},"bounce":{"bounceType":"Permanent"}}`))
+	if err != nil || !matched {
+		t.Fatalf("matched=%v err=%v", matched, err)
+	}
+	got2, _ := store.GetCampaign(ctx, c2.ID)
+	if got2.Status != "sending" {
+		t.Fatalf("5%% de rebotes no debe pausar; status = %q", got2.Status)
 	}
 }
 

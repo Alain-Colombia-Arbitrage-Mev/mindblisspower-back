@@ -82,9 +82,14 @@ func AudienceQuery(s Segment) (string, []any) {
 	var ranks, countries any
 	membership := s.Membership
 	var emails any
+	status := s.Status
 	if len(s.Emails) > 0 {
 		emails = s.Emails
 		membership = "any"
+		// Con lista explícita de emails los filtros se anulan (ver doc arriba):
+		// también el de estado, que por defecto es solo 'active'. Si no, un email
+		// cargado a mano de una persona 'pending' o 'suspended' se caería sin aviso.
+		status = []string{"pending", "active", "suspended"}
 	} else {
 		if len(s.RankIDs) > 0 {
 			ranks = s.RankIDs
@@ -97,7 +102,7 @@ func AudienceQuery(s Segment) (string, []any) {
 SELECT p.id, p.email::text, p.first_name
   FROM mlm.person p
   LEFT JOIN mlm.affiliate a ON a.person_id = p.id
- WHERE p.status::text = ANY($1::text[])
+ WHERE p.status = ANY($1::text[]::mlm.person_status[])
    AND NOT p.blacklisted
    AND p.is_admin = false
    AND ($2::smallint[] IS NULL OR a.current_rank_id = ANY($2::smallint[]))
@@ -111,7 +116,7 @@ SELECT p.id, p.email::text, p.first_name
    AND NOT EXISTS (SELECT 1 FROM comms.unsubscribe u WHERE u.email = p.email)
    AND NOT EXISTS (SELECT 1 FROM comms.suppressed_email se WHERE se.email = p.email)
  ORDER BY p.id`
-	return sql, []any{s.Status, ranks, countries, membership, emails}
+	return sql, []any{status, ranks, countries, membership, emails}
 }
 
 // ExclusionCountsQuery: cuántos candidatos del segmento quedan fuera y por qué.
@@ -122,7 +127,7 @@ WITH base AS (
   SELECT p.id, p.email, p.blacklisted, p.is_admin
     FROM mlm.person p
     LEFT JOIN mlm.affiliate a ON a.person_id = p.id
-   WHERE p.status::text = ANY($1::text[])
+   WHERE p.status = ANY($1::text[]::mlm.person_status[])
      AND ($2::smallint[] IS NULL OR a.current_rank_id = ANY($2::smallint[]))
      AND ($3::smallint[] IS NULL OR p.phone_country_id = ANY($3::smallint[]))
      AND ($4::text = 'any'
