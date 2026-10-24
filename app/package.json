@@ -2,6 +2,7 @@
   "name": "vicionpower-app",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "bun@1.4.4",
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/server.ts",
@@ -11,7 +12,9 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "auth:migrate": "bunx @better-auth/cli migrate",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:toolchain": "bun scripts/check-dependency-toolchain.ts",
+    "audit": "bun audit"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.0",
@@ -25,8 +28,11 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/bun": "^1.1.0",
+    "@types/bun": "1.4.4",
     "drizzle-kit": "^0.31.11",
     "typescript": "^5.6.0"
+  },
+  "overrides": {
+    "esbuild": "0.28.2"
   }
 }
