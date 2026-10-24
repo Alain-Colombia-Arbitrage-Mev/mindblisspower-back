@@ -1,0 +1,53 @@
+name: alibaba-terraform-plan
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Protected GitHub environment (requires reviewers)
+        type: choice
+        required: true
+        options: [staging, production]
+permissions:
+  contents: read
+concurrency:
+  group: alibaba-terraform-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main' && vars.DEPLOYMENT_PROVIDER == 'alibaba'
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: deploy/alibaba/terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: {persist-credentials: false}
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with: {terraform_version: "1.17.0", terraform_wrapper: false}
+      - uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_PLAN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_OIDC_PROVIDER_ARN }}
+          audience: sts.aliyuncs.com
+      - name: Prepare isolated backend and variables (no credentials in files)
+        env:
+          BACKEND_JSON: ${{ vars.TF_BACKEND_JSON }}
+          VARIABLES_JSON: ${{ vars.TF_VARIABLES_JSON }}
+          TARGET_ENV: ${{ inputs.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          jq -e --arg env "$TARGET_ENV" '.environment == $env' <<< "$VARIABLES_JSON" >/dev/null
+          jq -e --arg env "$TARGET_ENV" '.encrypt == true and .acl == "private" and (.tablestore_table | length > 0) and (.tablestore_endpoint | startswith("https://")) and .prefix == ("mindbliss/" + $env)' <<< "$BACKEND_JSON" >/dev/null
+          printf '%s' "$BACKEND_JSON" > "$RUNNER_TEMP/backend.json"
+          printf '%s' "$VARIABLES_JSON" > "$RUNNER_TEMP/input.tfvars.json"
+      - run: terraform init -input=false -lockfile=readonly -backend-config="$RUNNER_TEMP/backend.json"
+      - run: terraform validate
+      - name: Read-only infrastructure plan (never applies or uploads a state/plan)
+        run: terraform plan -input=false -lock-timeout=120s -var-file="$RUNNER_TEMP/input.tfvars.json"

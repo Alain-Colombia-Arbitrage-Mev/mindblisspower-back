@@ -86,11 +86,18 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 		return ActivationResult{Status: "replay"}, nil
 	}
 
+	// Different checkout sessions can belong to the same buyer. Serialize them
+	// before resolving the affiliate, not only later by sponsor/empty slot.
+	var buyerEmail string
+	if err := tx.QueryRow(ctx, `SELECT email::text FROM mlm.person WHERE id = $1 FOR NO KEY UPDATE`, personID).Scan(&buyerEmail); err != nil {
+		return ActivationResult{}, fmt.Errorf("lock buyer: %w", err)
+	}
+
 	// Defensa en profundidad: checkout bloquea cuentas vetadas antes de crear
 	// Stripe, pero una sesión antigua puede pagarse después. En ese caso no se
 	// crea afiliado, paquete, wallet ni PV; se conserva el cargo para revisión o
 	// reembolso operativo.
-	decision, err := banDecisionFor(ctx, tx, BanCandidate{Email: userID})
+	decision, err := banDecisionFor(ctx, tx, BanCandidate{Email: buyerEmail})
 	if err != nil {
 		return ActivationResult{}, fmt.Errorf("ban decision: %w", err)
 	}
@@ -366,8 +373,7 @@ Este es un mensaje automático; por favor no respondas a este correo.`,
 // autoPlaceAffiliate coloca al comprador bajo su sponsor. Si el registro llegó
 // por un enlace L/R, desciende siempre por ese lado hasta el primer hueco; sin
 // preferencia conserva la regla legacy weak-leg. Race-safe vía
-// pg_advisory_xact_lock(sponsor) + FOR UPDATE al descender. Port fiel de
-// backend/app/src/server/affiliate.ts::autoPlaceAffiliate.
+// pg_advisory_xact_lock(sponsor) + unique(parent_id, position) y reintento.
 func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, requestedSide string) (int64, error) {
 	// Clase 2 = colocación (el cierre binario usa clase 1; evita colisión de
 	// keyspace con el period id — el afiliado 1 = la empresa chocaba el lunes).

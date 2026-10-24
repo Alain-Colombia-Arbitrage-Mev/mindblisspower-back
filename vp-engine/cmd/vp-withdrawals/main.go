@@ -77,13 +77,19 @@ func run() error {
 	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
 		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
 		if verr != nil {
+			if cfg.RequireVerifiedIdentity {
+				return verr
+			}
 			logger.Warn().Err(verr).
 				Msg("id-token verifier init failed; identidad SIN verificar: se confía en el email declarado por el llamador")
 		} else {
-			handler.SetIdentityVerifier(verifier, false)
+			handler.SetIdentityVerifier(verifier, cfg.RequireVerifiedIdentity)
 			logger.Info().Str("issuer", cfg.CognitoIssuer).Msg("id-token identity verification enabled")
 		}
 	} else {
+		if cfg.RequireVerifiedIdentity {
+			return errors.New("WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY=true but Cognito issuer is not configured")
+		}
 		// No es fail-closed: requireVerified queda en false, así que resolveIdentity
 		// acepta el email declarado (query/body) sin verificarlo. Cualquiera con el
 		// token de servicio puede hacerse pasar por admin. Paridad intencional con

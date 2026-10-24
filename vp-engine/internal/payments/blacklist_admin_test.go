@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 )
 
@@ -48,6 +49,43 @@ func TestCognitoUsername_Parity(t *testing.T) {
 	want := "mp_ccd4684a149d62260f26aafab09116ab860fc691"
 	if got != want {
 		t.Fatalf("cognitoUsername mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestBanDecision_UsesPrimaryWhenReadReplicaIsUnavailable(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.person (first_name, last_name, email, phone_number, status, blacklisted)
+		VALUES ('Blocked', 'Member', 'blocked-primary@test.local', '0', 'active', true)
+	`); err != nil {
+		t.Fatalf("seed blocked person: %v", err)
+	}
+	replica, err := pgxpool.New(ctx, "postgres://unused:unused@127.0.0.1:1/unavailable?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replica.Close()
+	store := NewStore(pool)
+	store.SetReadPool(replica)
+	decision, err := store.BanDecisionFor(ctx, BanCandidate{Email: "blocked-primary@test.local"})
+	if err != nil {
+		t.Fatalf("ban check must not depend on the reporting replica: %v", err)
+	}
+	if !decision.Blocked || decision.Reason != "account_suspended" {
+		t.Fatalf("decision = %+v, want primary account_suspended", decision)
+	}
+
+	availableReplica, err := pgxpool.NewWithConfig(ctx, pool.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer availableReplica.Close()
+	store.SetReadPool(availableReplica)
+	pool.Close()
+	if _, err := store.BanDecisionFor(ctx, BanCandidate{Email: "blocked-primary@test.local"}); err == nil {
+		t.Fatal("ban check must fail closed when the primary is unavailable")
 	}
 }
 

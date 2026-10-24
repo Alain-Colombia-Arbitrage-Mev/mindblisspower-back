@@ -3,7 +3,7 @@
 # Run:    docker run --env-file /etc/vp-engine/app.env -p 50051:50051 -p 9090:9090 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/vp-engine:dev
 
 # Stage 1: builder
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
 
 # Para CA certs y tzdata (timezones); copiamos al stage final.
 RUN apk add --no-cache ca-certificates tzdata git
@@ -20,7 +20,7 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG TARGETOS=linux
-ARG TARGETARCH=arm64
+ARG TARGETARCH
 ARG CMD=vp-engine
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build \
@@ -36,7 +36,7 @@ RUN apk add --no-cache file && \
     (echo "ERROR: binario no es estático" && exit 1)
 
 # Stage 2: runtime scratch
-FROM scratch
+FROM scratch AS runtime
 
 # Cosas mínimas para que el binario corra:
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

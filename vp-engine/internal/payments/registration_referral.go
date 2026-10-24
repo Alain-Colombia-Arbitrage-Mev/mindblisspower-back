@@ -70,9 +70,7 @@ func (s *Store) LookupRegistrationReferral(ctx context.Context, email string) (*
 		 WHERE rr.email_norm = $1
 		   AND rr.consumed_at IS NULL
 		   AND rr.updated_at >= now() - interval '30 days'
-		   AND a.status::text = 'active'
-		   AND p.status::text = 'active'
-		   AND NOT COALESCE(p.blacklisted,false)
+		   AND `+placementSponsorEligibilitySQL+`
 		 LIMIT 1
 	`, emailNorm).Scan(&out.Code, &out.SponsorAffiliateID, &out.PreferredSide)
 	if errors.Is(err, pgx.ErrNoRows) {

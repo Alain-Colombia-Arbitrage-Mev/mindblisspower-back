@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -291,6 +292,41 @@ func run() error {
 				}
 			}
 		}()
+	}
+
+	// Comunicados masivos: sender (solo donde COMMS_ENABLED=true, i.e. APP) y
+	// consumer de eventos SES por SQS. Non-fatal.
+	if cfg.CommsEnabled {
+		// Falla el arranque si la URL One-Click (RFC 8058) no se puede determinar:
+		// sin ella la cabecera List-Unsubscribe-Post apuntaría a la página visible,
+		// Gmail la trataría como un enlace normal y la baja en un clic dejaría de
+		// funcionar en silencio, con el costo de reputación que eso implica.
+		if cfg.CommsUnsubscribeOneClickURL == "" &&
+			strings.Replace(cfg.CommsUnsubscribeBaseURL, "/baja", "/api/comms/unsubscribe", 1) == cfg.CommsUnsubscribeBaseURL {
+			logger.Fatal().
+				Str("base", cfg.CommsUnsubscribeBaseURL).
+				Msg("COMMS_ENABLED=true pero no se puede derivar la URL One-Click: setear COMMS_UNSUBSCRIBE_ONECLICK_URL, o que COMMS_UNSUBSCRIBE_BASE_URL contenga /baja")
+		}
+		sender := payments.NewCommsSender(store, store, payments.CommsSenderConfig{
+			RatePerSec: cfg.CommsSendRatePerSec, BatchSize: cfg.CommsBatchSize, SESConfigSet: cfg.CommsSESConfigSet,
+			UnsubscribeSecret: []byte(cfg.CommsUnsubscribeSecret), UnsubscribeBase: cfg.CommsUnsubscribeBaseURL,
+			UnsubscribeOneClickBase: cfg.CommsUnsubscribeOneClickURL,
+			ReplyTo:                 cfg.CommsReplyTo,
+			LegalName:               cfg.CommsLegalName,
+			PostalAddress:           cfg.CommsPostalAddress,
+		}, logger.With().Str("component", "comms-sender").Logger())
+		handler.SetComms(sender, cfg.CommsMaxAudience, cfg.CommsMaxPerDay, cfg.CommsMaxTestSends, []byte(cfg.CommsUnsubscribeSecret))
+		go sender.Loop(rootCtx)
+		if cfg.CommsSQSQueueURL != "" {
+			if q, err := payments.NewSQSQueueClient(rootCtx, cfg.CommsSQSQueueURL); err != nil {
+				logger.Error().Err(err).Msg("comms: SQS client init failed; sin seguimiento de entregas")
+			} else {
+				go payments.NewCommsEventConsumer(store, q, logger.With().Str("component", "comms-events").Logger()).Loop(rootCtx)
+			}
+		}
+	} else if cfg.CommsUnsubscribeSecret != "" {
+		// Sin sender pero con secreto: el endpoint de baja sigue funcionando (WORKER/staging)
+		handler.SetComms(nil, 0, 0, 0, []byte(cfg.CommsUnsubscribeSecret))
 	}
 
 	errCh := make(chan error, 1)

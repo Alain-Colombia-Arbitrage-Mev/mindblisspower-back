@@ -1,0 +1,11 @@
+FROM golang:1.26.10-alpine
+RUN apk add --no-cache gcc musl-dev git ca-certificates
+WORKDIR /workspace/vp-engine
+COPY vp-engine/go.mod vp-engine/go.sum ./
+RUN go mod download && go mod verify
+COPY vp-engine/ ./
+COPY _meta/*.sql /workspace/_meta/
+COPY _meta/migration/*.sql /workspace/_meta/migration/
+COPY .gitignore /workspace/.gitignore
+ENV CGO_ENABLED=1
+CMD ["go", "test", "-race", "-p", "2", "-count=1", "-timeout=20m", "./..."]

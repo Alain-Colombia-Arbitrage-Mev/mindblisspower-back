@@ -21,13 +21,14 @@ func NewCache(addr, password string) *Cache {
 		return nil
 	}
 	return &Cache{rdb: redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     password,
-		DB:           0,
-		DialTimeout:  500 * time.Millisecond,
-		ReadTimeout:  300 * time.Millisecond,
-		WriteTimeout: 300 * time.Millisecond,
-		PoolSize:     10,
+		Addr:                  addr,
+		Password:              password,
+		DB:                    0,
+		DialTimeout:           500 * time.Millisecond,
+		ReadTimeout:           300 * time.Millisecond,
+		WriteTimeout:          300 * time.Millisecond,
+		ContextTimeoutEnabled: true,
+		PoolSize:              10,
 	})}
 }
 
@@ -147,21 +148,4 @@ func parseInt64(s string) int64 {
 		n = n*10 + int64(s[i]-'0')
 	}
 	return n
-}
-
-// allow implementa rate-limit por ventana fija: ≤ limit hits por window para la
-// clave dada. Devuelve true si se permite. Nil/fallo de Redis ⇒ permite (no
-// bloquea tráfico por una caída de caché).
-func (c *Cache) allow(ctx context.Context, key string, limit int64, window time.Duration) bool {
-	if c == nil {
-		return true
-	}
-	n, err := c.rdb.Incr(ctx, key).Result()
-	if err != nil {
-		return true
-	}
-	if n == 1 {
-		_ = c.rdb.Expire(ctx, key, window).Err()
-	}
-	return n <= limit
 }

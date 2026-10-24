@@ -257,9 +257,7 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 		   FROM mlm.affiliate a
 		   JOIN mlm.person p ON p.id = a.person_id
 		  WHERE a.invitation_link = $1
-		    AND a.status::text = 'active'
-		    AND p.status::text = 'active'
-		    AND NOT COALESCE(p.blacklisted,false)
+		    AND `+placementSponsorEligibilitySQL+`
 		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
@@ -274,9 +272,7 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 		   FROM mlm.affiliate a
 		   JOIN mlm.person p ON p.id = a.person_id
 		  WHERE lower(a.invitation_link) = lower($1)
-		    AND a.status::text = 'active'
-		    AND p.status::text = 'active'
-		    AND NOT COALESCE(p.blacklisted,false)
+		    AND `+placementSponsorEligibilitySQL+`
 		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
@@ -293,9 +289,7 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 				   FROM mlm.affiliate a
 				   JOIN mlm.person p ON p.id = a.person_id
 				  WHERE a.id = $1
-				    AND a.status::text = 'active'
-				    AND p.status::text = 'active'
-				    AND NOT COALESCE(p.blacklisted,false)
+				    AND `+placementSponsorEligibilitySQL+`
 				  LIMIT 1`, n).Scan(&id)
 			if err == nil {
 				return &id, nil

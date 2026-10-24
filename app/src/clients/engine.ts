@@ -9,9 +9,8 @@
 import { createClient, type Client } from '@connectrpc/connect';
 import { createGrpcTransport } from '@connectrpc/connect-node';
 import { LedgerService } from '@proto/ledger_pb.js';
+import { engineTransportOptions } from './engine-transport';
 
-const baseUrl = process.env.VP_ENGINE_GRPC_URL ?? 'http://localhost:50051';
-
-const transport = createGrpcTransport({ baseUrl });
+const transport = createGrpcTransport(engineTransportOptions(process.env));
 
 export const ledgerClient: Client<typeof LedgerService> = createClient(LedgerService, transport);

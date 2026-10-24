@@ -26,7 +26,7 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
-app.post('/api/affiliate/auto-place', async (c) => {
+app.post('/api/affiliate/auto-place', requireAdmin, async (c) => {
   const body = await c.req.json();
   const result = await autoPlaceAffiliate({
     personId:           BigInt(body.personId),
@@ -36,7 +36,7 @@ app.post('/api/affiliate/auto-place', async (c) => {
   return c.json(result);
 });
 
-app.post('/api/affiliate/place', async (c) => {
+app.post('/api/affiliate/place', requireAdmin, async (c) => {
   const body = await c.req.json();
   const result = await placeAffiliate({
     personId:           BigInt(body.personId),
@@ -47,7 +47,7 @@ app.post('/api/affiliate/place', async (c) => {
   return c.json(result);
 });
 
-app.post('/api/transaction/post', async (c) => {
+app.post('/api/transaction/post', requireAdmin, async (c) => {
   const body = await c.req.json();
   const session = c.get('session');
   const result = await postTransaction({
@@ -104,6 +104,7 @@ app.post('/api/admin/command-center/alerts/:id/ack', requireAdmin, async (c) => 
 app.get('/health', (c) => c.text('ok'));
 
 export default {
+  hostname: process.env.API_LISTEN_HOST ?? '0.0.0.0',
   port: Number(process.env.PORT ?? 3000),
   fetch: app.fetch,
 };

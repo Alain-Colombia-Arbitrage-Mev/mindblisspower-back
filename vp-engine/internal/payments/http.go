@@ -82,6 +82,16 @@ type Handler struct {
 	voiceAgentMode        string
 	pipecatStreamURL      string
 	pipecatStreamSecret   string
+
+	// comms: comunicados masivos (campañas de email). sender nil ⇒ endpoints
+	// /api/admin/comms/* y /api/comms/unsubscribe responden 503 comms_disabled.
+	comms struct {
+		sender       *CommsSender
+		maxAudience  int
+		maxPerDay    int
+		maxTestSends int
+		unsubSecret  []byte
+	}
 }
 
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
@@ -212,6 +222,15 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/tickets/action", h.handleAdminTicketAction)
 	mux.HandleFunc("/api/admin/tickets/agents", h.handleAdminTicketAgents)
 	mux.HandleFunc("/api/admin/email", h.handleAdminEmail)
+	mux.HandleFunc("/api/admin/comms/campaigns", h.handleCommsCampaigns)
+	mux.HandleFunc("/api/admin/comms/campaign", h.handleCommsCampaign)
+	mux.HandleFunc("/api/admin/comms/campaign/preview", h.handleCommsPreview)
+	mux.HandleFunc("/api/admin/comms/campaign/test", h.handleCommsTest)
+	mux.HandleFunc("/api/admin/comms/campaign/submit", h.handleCommsSubmit)
+	mux.HandleFunc("/api/admin/comms/campaign/decide", h.handleCommsDecide)
+	mux.HandleFunc("/api/admin/comms/campaign/control", h.handleCommsControl)
+	mux.HandleFunc("/api/admin/comms/campaign/recipients", h.handleCommsRecipients)
+	mux.HandleFunc("/api/comms/unsubscribe", h.handleCommsUnsubscribe)
 	mux.HandleFunc("/api/admin/news", h.handleAdminNews)
 	mux.HandleFunc("/api/support/access-help", h.handleAccessHelp)
 	mux.HandleFunc("/api/support/email/ingest", h.handleSupportEmailIngest)
@@ -250,49 +269,17 @@ func (h *Handler) handleAdminActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
-// rateLimit: dos capas (ventana fija 1 min). Antes el contador era GLOBAL por
-// path (3000/min compartido entre TODOS los usuarios): con carga alta los
-// usuarios legítimos se bloqueaban entre sí ("demasiados intentos").
-//   - por cliente+path (240/min): "cliente" = IP real (X-Forwarded-For del
-//     proxy) o, si el BFF no la reenvía, el email del query autenticado —
-//     un abusivo se limita solo a sí mismo.
-//   - global por path (12000/min): backstop que protege la DB ante estampidas.
-//
-// Nil cache o Redis caído ⇒ permite. Excluye webhook y health.
-func (h *Handler) rateLimit(next http.Handler) http.Handler {
-	const perClientPerMinute = 240
-	const perPathPerMinute = 12000
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/webhooks/stripe" || r.URL.Path == "/health" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		client := clientKey(r)
-		if !h.store.cache.allow(r.Context(), "rl:c:"+client+":"+r.Method+":"+r.URL.Path, perClientPerMinute, time.Minute) ||
-			!h.store.cache.allow(r.Context(), "rl:g:"+r.Method+":"+r.URL.Path, perPathPerMinute, time.Minute) {
-			writeErr(w, http.StatusTooManyRequests, "rate_limited")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// clientKey identifica al cliente para rate limiting: primera IP del
-// X-Forwarded-For (Caddy/BFF), o el email del query (llamadas BFF sin XFF),
-// o la IP directa como último recurso.
+// Only a trusted proxy's last forwarded hop is used as the network identity.
 func clientKey(r *http.Request) string {
 	// X-Forwarded-For solo se honra si la conexión viene del proxy local
 	// (Caddy en loopback / red privada). Un cliente directo podría inventar un
 	// XFF distinto por request y fabricar claves ilimitadas, anulando el límite
 	// por-cliente (quedaría solo el backstop global).
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" && fromTrustedProxy(r.RemoteAddr) {
-		if i := strings.IndexByte(xff, ','); i > 0 {
-			return strings.TrimSpace(xff[:i])
+		if i := strings.LastIndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[i+1:])
 		}
 		return strings.TrimSpace(xff)
-	}
-	if email := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("email"))); email != "" {
-		return email
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
@@ -334,15 +321,11 @@ func (h *Handler) handleAdminPlanSimulate(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
+	email, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = email
-	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	sim, err := h.store.SimulatePlanTheta(r.Context(), req.Changes)
 	if err != nil {
 		h.log.Error().Err(err).Msg("simulate plan")
@@ -402,15 +385,11 @@ func (h *Handler) handleAdminPlanPropose(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
+	email, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = email
-	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	id, err := h.store.ProposePlanChange(r.Context(), req.Email, req.Changes, req.Reason)
 	if err != nil {
 		if errors.Is(err, ErrPlanFieldNotEditable) || errors.Is(err, ErrPlanFieldOutOfBounds) {
@@ -445,15 +424,11 @@ func (h *Handler) handleAdminPlanDecide(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
+	email, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = email
-	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	if req.ID <= 0 {
 		writeErr(w, http.StatusBadRequest, "missing id")
 		return
@@ -688,6 +663,9 @@ func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
 // presente pero es inválido — el caller distingue ese caso con headerPresent).
 func (h *Handler) verifiedEmail(r *http.Request) (email string, ok bool) {
 	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
+	if identity, exists := r.Context().Value(budgetIdentityKey{}).(verifiedBudgetIdentity); exists && identity.token == raw {
+		return identity.email, true
+	}
 	if raw == "" || h.verifier == nil {
 		return "", false
 	}
@@ -779,10 +757,15 @@ func (h *Handler) effectiveIdentity(w http.ResponseWriter, r *http.Request, clai
 // requireAdmin valida token de servicio + identidad verificada (o fallback) +
 // que el email resultante sea admin.
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return h.requireAdminIdentity(w, r, r.URL.Query().Get("email"))
+}
+
+// Body-only legacy callers use the same role, ban and impersonation checks.
+func (h *Handler) requireAdminIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (string, bool) {
 	if !h.svcAuth(w, r) {
 		return "", false
 	}
-	_, eff, ok := h.effectiveIdentity(w, r, r.URL.Query().Get("email"))
+	_, eff, ok := h.effectiveIdentity(w, r, claimedEmail)
 	if !ok {
 		return "", false
 	}
@@ -869,16 +852,11 @@ func (h *Handler) handleAdminBlock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	identity, ok := h.resolveIdentity(w, r, req.Email)
+	identity, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = identity
-	admin, err := h.isAdminEmail(r.Context(), req.Email)
-	if err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	if req.PersonID <= 0 {
 		writeErr(w, http.StatusBadRequest, "missing person_id")
 		return

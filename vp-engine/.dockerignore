@@ -9,3 +9,10 @@ dist/
 .env*
 tests/
 *.log
+.claude-flow/
+**/.claude-flow/
+*.db
+**/*.db
+*.rvf*
+*.exe
+*.test

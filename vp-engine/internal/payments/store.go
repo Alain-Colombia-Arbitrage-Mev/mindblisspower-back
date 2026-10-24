@@ -138,6 +138,21 @@ func (s *Store) SponsorCanReceivePlacement(ctx context.Context, sponsorID int64)
 	return sponsorCanReceivePlacement(ctx, s.db, sponsorID)
 }
 
+// Static predicate shared by referral lookup and payment activation. Aliases
+// a/p are affiliate/person; blacklist-only bans must also prevent enrollment.
+const placementSponsorEligibilitySQL = `
+	   a.status::text = 'active'
+	   AND p.status::text = 'active'
+	   AND NOT COALESCE(p.blacklisted,false)
+	   AND NOT EXISTS (
+	     SELECT 1 FROM mlm.blacklist b
+	      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
+	         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
+	         OR (b.name_norm IS NOT NULL
+	             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
+	             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
+	   )`
+
 func sponsorCanReceivePlacement(ctx context.Context, q rowQuerier, sponsorID int64) (bool, error) {
 	if sponsorID <= 0 {
 		return false, nil
@@ -149,9 +164,7 @@ func sponsorCanReceivePlacement(ctx context.Context, q rowQuerier, sponsorID int
 			  FROM mlm.affiliate a
 			  JOIN mlm.person p ON p.id = a.person_id
 			 WHERE a.id = $1
-			   AND a.status::text = 'active'
-			   AND p.status::text = 'active'
-			   AND NOT COALESCE(p.blacklisted,false)
+			   AND `+placementSponsorEligibilitySQL+`
 		)`, sponsorID).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("sponsor placement eligibility: %w", err)

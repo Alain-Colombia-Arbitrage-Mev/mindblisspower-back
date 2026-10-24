@@ -1,0 +1,21 @@
+services:
+  postgres:
+    mem_limit: 4g
+    cpus: 2
+  engine:
+    environment: {ENV: production}
+    mem_limit: 768m
+    cpus: 1
+  payments:
+    environment: {ENV: production}
+    mem_limit: 768m
+    cpus: 1
+  withdrawals:
+    environment: {ENV: production}
+    mem_limit: 384m
+  api:
+    mem_limit: 512m
+  client:
+    mem_limit: 768m
+  admin:
+    mem_limit: 768m

@@ -52,7 +52,8 @@ func parseBanBirthDate(birth string) any {
 // Si el candidato trae solo email, se enriquecen teléfono/nombre/fecha desde
 // mlm.person para que un ban por nombre también bloquee sesiones existentes.
 func (s *Store) BanDecisionFor(ctx context.Context, c BanCandidate) (BanDecision, error) {
-	return banDecisionFor(ctx, s.reader(), c)
+	// Security decisions must see bans immediately, not a lagging reporting replica.
+	return banDecisionFor(ctx, s.db, c)
 }
 
 func banDecisionFor(ctx context.Context, q banQuerier, c BanCandidate) (BanDecision, error) {

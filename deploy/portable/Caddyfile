@@ -1,0 +1,20 @@
+{$CLIENT_HOST} {
+	reverse_proxy {$CLIENT_UPSTREAM:client:3000}
+}
+
+{$ADMIN_HOST} {
+	reverse_proxy {$ADMIN_UPSTREAM:admin:3000}
+}
+
+{$WEBHOOK_HOST} {
+	@stripe {
+		method POST
+		path /api/webhooks/stripe
+	}
+	handle @stripe {
+		reverse_proxy {$PAYMENTS_UPSTREAM:payments:9095}
+	}
+	handle {
+		respond 404
+	}
+}

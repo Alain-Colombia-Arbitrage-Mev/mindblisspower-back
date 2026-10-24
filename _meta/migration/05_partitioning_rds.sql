@@ -1,4 +1,7 @@
 -- =============================================================================
+-- HISTORICAL, EMPTY-DATABASE-ONLY alternative. Do not use for the Alibaba rollout.
+-- Current non-destructive PostgreSQL/RDS path: 05_postgresql.sql.
+-- This file drops/recreates tables; it does NOT convert a populated database.
 -- 05_partitioning_rds.sql — REEMPLAZO de 05_timescaledb.sql para AWS RDS
 --
 -- RDS PostgreSQL NO soporta TimescaleDB (licencia TSL). Este script cubre lo

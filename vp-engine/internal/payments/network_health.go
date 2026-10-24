@@ -60,40 +60,31 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context, companyRootOpt ...int64
 	var leftVolStr, rightVolStr string
 	err := s.db.QueryRow(ctx, `
 		WITH visible_affiliates AS (
-		  SELECT a.id, a.parent_id, COALESCE(a.depth, 0) AS depth
+		  SELECT a.id, a.parent_id, a.legacy_id_vicionario, COALESCE(a.depth, 0) AS depth
 		    FROM mlm.affiliate a
 		    JOIN mlm.person p ON p.id = a.person_id
-		   WHERE a.status::text <> 'deleted'
-		     AND p.status::text <> 'deleted'
 		),
 		configured_root AS (
 		  SELECT id, 0 AS priority, depth
 		    FROM visible_affiliates
-		   WHERE id = $1
-		     AND $1 > 0
+		   WHERE legacy_id_vicionario = 1
+		  UNION ALL
+		  SELECT id, 1 AS priority, depth
+		    FROM visible_affiliates
+		   WHERE id = $1 AND $1 > 0
+		     AND NOT EXISTS (SELECT 1 FROM visible_affiliates WHERE legacy_id_vicionario = 1)
 		),
 		detached_roots AS (
-		  SELECT id, 1 AS priority, depth
+		  SELECT id, 2 AS priority, depth
 		    FROM visible_affiliates
 		   WHERE parent_id IS NULL
 		     AND NOT EXISTS (SELECT 1 FROM configured_root)
-		),
-		orphan_roots AS (
-		  SELECT a.id, 2 AS priority, a.depth
-		    FROM visible_affiliates a
-		    LEFT JOIN visible_affiliates parent ON parent.id = a.parent_id
-		   WHERE parent.id IS NULL
-		     AND NOT EXISTS (SELECT 1 FROM configured_root)
-		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
-		   ORDER BY a.depth, a.id
-		   LIMIT 25
 		),
 		depth_roots AS (
 		  SELECT id, 3 AS priority, depth
 		    FROM visible_affiliates
 		   WHERE NOT EXISTS (SELECT 1 FROM configured_root)
 		     AND NOT EXISTS (SELECT 1 FROM detached_roots)
-		     AND NOT EXISTS (SELECT 1 FROM orphan_roots)
 		   ORDER BY depth, id
 		   LIMIT 25
 		),
@@ -103,8 +94,6 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context, companyRootOpt ...int64
 		      SELECT * FROM configured_root
 		      UNION ALL
 		      SELECT * FROM detached_roots
-		      UNION ALL
-		      SELECT * FROM orphan_roots
 		      UNION ALL
 		      SELECT * FROM depth_roots
 		    ) candidates
