@@ -188,17 +188,31 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, 
 	if !ok {
 		return "", false
 	}
+	return email, h.authorizeAdmin(w, r, email)
+}
+
+func (h *Handler) authorizeAdmin(w http.ResponseWriter, r *http.Request, email string) bool {
 	admin, err := h.isAdminEmail(r.Context(), email)
 	if err != nil {
 		h.log.Error().Err(err).Msg("is_admin")
 		writeErr(w, http.StatusInternalServerError, "internal")
-		return "", false
+		return false
 	}
 	if !admin {
 		writeErr(w, http.StatusForbidden, "not_admin")
-		return "", false
+		return false
 	}
-	return email, true
+	blocked, err := h.store.PersonSuspendedByEmail(r.Context(), email)
+	if err != nil {
+		h.log.Error().Err(err).Msg("admin ban check unavailable")
+		writeErr(w, http.StatusServiceUnavailable, "account_status_unavailable")
+		return false
+	}
+	if blocked {
+		writeErr(w, http.StatusForbidden, "account_suspended")
+		return false
+	}
+	return true
 }
 
 type withdrawReq struct {
@@ -475,14 +489,7 @@ func (h *Handler) handleAdminBMPLinkAction(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	admin, err := h.isAdminEmail(r.Context(), adminEmail)
-	if err != nil {
-		h.log.Error().Err(err).Msg("is_admin")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
+	if !h.authorizeAdmin(w, r, adminEmail) {
 		return
 	}
 	if (req.Action != "approve" && req.Action != "reject") || req.ID <= 0 {
@@ -581,14 +588,7 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	admin, err := h.isAdminEmail(r.Context(), adminEmail)
-	if err != nil {
-		h.log.Error().Err(err).Msg("is_admin")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
+	if !h.authorizeAdmin(w, r, adminEmail) {
 		return
 	}
 	status := actionToStatus[req.Action]

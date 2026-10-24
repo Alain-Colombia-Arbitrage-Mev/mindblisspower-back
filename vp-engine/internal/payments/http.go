@@ -321,15 +321,11 @@ func (h *Handler) handleAdminPlanSimulate(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
+	email, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = email
-	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	sim, err := h.store.SimulatePlanTheta(r.Context(), req.Changes)
 	if err != nil {
 		h.log.Error().Err(err).Msg("simulate plan")
@@ -389,15 +385,11 @@ func (h *Handler) handleAdminPlanPropose(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
+	email, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = email
-	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	id, err := h.store.ProposePlanChange(r.Context(), req.Email, req.Changes, req.Reason)
 	if err != nil {
 		if errors.Is(err, ErrPlanFieldNotEditable) || errors.Is(err, ErrPlanFieldOutOfBounds) {
@@ -432,15 +424,11 @@ func (h *Handler) handleAdminPlanDecide(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	email, ok := h.resolveIdentity(w, r, req.Email)
+	email, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = email
-	if admin, err := h.isAdminEmail(r.Context(), req.Email); err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	if req.ID <= 0 {
 		writeErr(w, http.StatusBadRequest, "missing id")
 		return
@@ -769,10 +757,15 @@ func (h *Handler) effectiveIdentity(w http.ResponseWriter, r *http.Request, clai
 // requireAdmin valida token de servicio + identidad verificada (o fallback) +
 // que el email resultante sea admin.
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return h.requireAdminIdentity(w, r, r.URL.Query().Get("email"))
+}
+
+// Body-only legacy callers use the same role, ban and impersonation checks.
+func (h *Handler) requireAdminIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (string, bool) {
 	if !h.svcAuth(w, r) {
 		return "", false
 	}
-	_, eff, ok := h.effectiveIdentity(w, r, r.URL.Query().Get("email"))
+	_, eff, ok := h.effectiveIdentity(w, r, claimedEmail)
 	if !ok {
 		return "", false
 	}
@@ -859,16 +852,11 @@ func (h *Handler) handleAdminBlock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	identity, ok := h.resolveIdentity(w, r, req.Email)
+	identity, ok := h.requireAdminIdentity(w, r, req.Email)
 	if !ok {
 		return
 	}
 	req.Email = identity
-	admin, err := h.isAdminEmail(r.Context(), req.Email)
-	if err != nil || !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return
-	}
 	if req.PersonID <= 0 {
 		writeErr(w, http.StatusBadRequest, "missing person_id")
 		return

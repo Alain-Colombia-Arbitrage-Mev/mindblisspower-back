@@ -47,7 +47,7 @@ app.post('/api/affiliate/place', requireAdmin, async (c) => {
   return c.json(result);
 });
 
-app.post('/api/transaction/post', async (c) => {
+app.post('/api/transaction/post', requireAdmin, async (c) => {
   const body = await c.req.json();
   const session = c.get('session');
   const result = await postTransaction({
