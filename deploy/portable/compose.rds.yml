@@ -1,0 +1,35 @@
+# Single-host staging/restore validation with an EXTERNAL RDS database.
+# Not a multi-host scheduler/worker topology. Do not start this on both app nodes.
+services:
+  postgres:
+    profiles: [local-db]
+  engine:
+    depends_on: !reset {}
+    volumes:
+      - ${RUNTIME_DIR}/db-ca:/run/db-ca:ro
+  api:
+    depends_on: !reset {}
+    environment:
+      DATABASE_CA_FILE: /run/db-ca/server-ca.pem
+      DATABASE_EXPECTED_HOST: ${RDS_HOSTNAME:?Set the exact private RDS endpoint}
+      DATABASE_EXPECTED_NAME: ${RDS_DATABASE:?Set the environment-specific database}
+    volumes:
+      - ${RUNTIME_DIR}/db-ca:/run/db-ca:ro
+  payments:
+    depends_on: !override
+      redis: {condition: service_healthy}
+    volumes:
+      - ${RUNTIME_DIR}/db-ca:/run/db-ca:ro
+  withdrawals:
+    depends_on: !reset {}
+    volumes:
+      - ${RUNTIME_DIR}/db-ca:/run/db-ca:ro
+  client:
+    environment:
+      MEMBER_DB_SSL: verify-full
+      MEMBER_DB_CA_FILE: /run/db-ca/server-ca.pem
+    volumes:
+      - ${RUNTIME_DIR}/db-ca:/run/db-ca:ro
+  backup:
+    volumes:
+      - ${RUNTIME_DIR}/db-ca:/run/db-ca:ro

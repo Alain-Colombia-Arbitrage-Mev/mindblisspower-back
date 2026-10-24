@@ -26,4 +26,10 @@ describe('portable engine transport', () => {
       throw new Error('missing certificate');
     })).toThrow('missing certificate');
   });
+  test('App Platform accepts a complete inline identity without weakening verification', () => {
+    const inline = { VP_ENGINE_TLS_CA_PEM: 'ca', VP_ENGINE_TLS_CERT_PEM: 'cert', VP_ENGINE_TLS_KEY_PEM: 'key', VP_ENGINE_GRPC_URL: 'https://engine:50051' };
+    expect(engineTransportOptions(inline).nodeOptions).toEqual({ ca: Buffer.from('ca'), cert: Buffer.from('cert'), key: Buffer.from('key'), rejectUnauthorized: true });
+    expect(() => engineTransportOptions({ ...inline, VP_ENGINE_TLS_CA: '/ca' })).toThrow('not both');
+    expect(() => engineTransportOptions({ ...inline, VP_ENGINE_TLS_KEY_PEM: '' })).toThrow('mTLS requires');
+  });
 });

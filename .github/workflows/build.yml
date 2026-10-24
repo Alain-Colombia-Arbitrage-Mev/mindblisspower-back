@@ -2,13 +2,15 @@ name: build
 on:
   push: { branches: [main, staging] }
   workflow_dispatch:
-permissions: { id-token: write, contents: read }
+permissions: { contents: read }
 env:
   AWS_REGION: us-east-1
   REGISTRY: 522814703714.dkr.ecr.us-east-1.amazonaws.com
 jobs:
   ecr-preflight:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
     steps:
       - uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -47,6 +49,7 @@ jobs:
           done
 
   test:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -92,8 +95,10 @@ jobs:
         run: go test -count=1 -timeout 15m ./...
         working-directory: vp-engine
   push:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     needs: [ecr-preflight, test]
     runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
     strategy:
       matrix:
         include:

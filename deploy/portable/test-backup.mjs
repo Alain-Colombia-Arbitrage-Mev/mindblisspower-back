@@ -10,7 +10,10 @@ const id = randomBytes(6).toString('hex');
 const network = `mindbliss-backup-drill-${id}`;
 const container = `${network}-db`;
 const output = path.join(directory, 'artifacts', network);
-const postgres = 'timescale/timescaledb@sha256:526d01720f91772948d1ddd90601bd3d96cfa7e6afa3f3af87d4f0638c6e4d1a';
+const vanilla = process.argv.includes('--vanilla-postgres');
+const postgres = vanilla
+  ? 'postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27'
+  : 'timescale/timescaledb@sha256:526d01720f91772948d1ddd90601bd3d96cfa7e6afa3f3af87d4f0638c6e4d1a';
 const image = 'mindbliss/backup:infra-20261023';
 const password = randomBytes(24).toString('hex');
 let createdNetwork = false;
@@ -47,11 +50,11 @@ try {
   }
   assert.ok(ready, 'synthetic Postgres did not start');
   query('postgres', 'CREATE DATABASE drill_source TEMPLATE template0');
-  query('drill_source', `CREATE EXTENSION timescaledb; CREATE SCHEMA mlm;
+  query('drill_source', `${vanilla ? '' : 'CREATE EXTENSION timescaledb;'} CREATE SCHEMA mlm;
     CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,parent_id bigint REFERENCES mlm.affiliate(id),side text,unavailable boolean NOT NULL);
     INSERT INTO mlm.affiliate VALUES(101,NULL,NULL,false),(102,101,'L',true),(103,101,'R',false),(104,102,'R',false);
     CREATE TABLE mlm.sales(time timestamptz NOT NULL,amount numeric NOT NULL);
-    SELECT create_hypertable('mlm.sales',by_range('time'));
+    ${vanilla ? '' : "SELECT create_hypertable('mlm.sales',by_range('time'));"}
     INSERT INTO mlm.sales VALUES('2026-10-23T10:00:00Z',99.50),('2026-10-23T11:00:00Z',50.25);`);
   // Only this newly created, synthetic directory is given to a helper container.
   docker(['run', '--rm', '--network', 'none', '--user', '0', '-v', `${output}:/backups`, '--entrypoint', 'sh', image, '-ec', 'chown 70:70 /backups']);
@@ -68,7 +71,7 @@ try {
   assert.ok(manifest);
   const record = JSON.parse(await readFile(path.join(output, manifest), 'utf8'));
   assert.ok(record.roles?.sha256);
-  assert.ok(record.extensions.some(e => e.name === 'timescaledb'));
+  assert.equal(record.extensions.some(e => e.name === 'timescaledb'), !vanilla);
   query('postgres', 'CREATE DATABASE drill_restore_ok TEMPLATE template0');
   const restore = { DATABASE_URL: source.replace('/drill_source?', '/drill_restore_ok?'), BACKUP_MANIFEST: `/backups/${manifest}`, AGE_IDENTITY_FILE: '/backups/drill.agekey', RESTORE_TARGET_NAME: 'drill_restore_ok', RESTORE_CONFIRM: 'drill_restore_ok' };
   backupRun({ ...restore, RESTORE_CONFIRM: 'wrong' }, 'restore', true);
@@ -76,7 +79,7 @@ try {
   const rows = "SELECT json_agg(a ORDER BY id) FROM mlm.affiliate a";
   assert.equal(query('drill_restore_ok', rows), query('drill_source', rows));
   assert.equal(query('drill_restore_ok', 'SELECT sum(amount) FROM mlm.sales'), '149.75');
-  assert.equal(query('drill_restore_ok', "SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='mlm'"), '1');
+  if (!vanilla) assert.equal(query('drill_restore_ok', "SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='mlm'"), '1');
   backupRun(restore, 'restore', true); // Never overwrite a populated target.
   backupRun({ ...restore, DATABASE_URL: source, RESTORE_TARGET_NAME: 'drill_source', RESTORE_CONFIRM: 'drill_source' }, 'restore', true);
   query('postgres', 'CREATE DATABASE drill_restore_corrupt TEMPLATE template0');
@@ -86,7 +89,7 @@ try {
   const result = backupRun({ ...restore, DATABASE_URL: source.replace('/drill_source?', '/drill_restore_corrupt?'), RESTORE_TARGET_NAME: 'drill_restore_corrupt', RESTORE_CONFIRM: 'drill_restore_corrupt' }, 'restore', true);
   assert.match(result.stderr, /Checksum mismatch/);
   assert.equal(query('drill_restore_corrupt', "SELECT count(*) FROM pg_namespace WHERE nspname='mlm'"), '0');
-  console.log('PASS: encrypted backup + roles archive + Timescale restore + preserved binary positions + refusal of missing encryption, wrong confirmation, populated/non-restore databases and corrupt ciphertext.');
+  console.log(`PASS: encrypted backup + roles archive + ${vanilla ? 'native PostgreSQL' : 'Timescale'} restore + preserved binary positions + refusal of missing encryption, wrong confirmation, populated/non-restore databases and corrupt ciphertext.`);
   console.log(`Synthetic evidence only: ${output} (ciphertext intentionally corrupted by final negative test).`);
 } finally {
   // Names are generated here, never read from user settings or existing stacks.

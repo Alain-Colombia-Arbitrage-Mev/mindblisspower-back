@@ -36,3 +36,14 @@ deploy/portable/artifacts/
 *.dump
 *.dump.age
 *.agekey
+
+# Terraform state, local plans and environment-specific configuration
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.backend.hcl
+deploy/digitalocean/artifacts/
+deploy/digitalocean/runtime/

@@ -1,4 +1,4 @@
-FROM timescale/timescaledb@sha256:526d01720f91772948d1ddd90601bd3d96cfa7e6afa3f3af87d4f0638c6e4d1a
+FROM postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27
 COPY _meta/*.sql /qa-schema/
 COPY _meta/migration/*.sql /qa-schema/migration/
 COPY deploy/docker-qa/init.sql /docker-entrypoint-initdb.d/001-qa.sql

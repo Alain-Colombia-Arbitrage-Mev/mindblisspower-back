@@ -25,11 +25,13 @@ function fixture(environment = 'staging') {
   for (const name of ['client', 'admin']) env(name).DEMO_LOGIN_ENABLED = '0';
   env('withdrawals').SERVICE_TOKEN = token;
   env('withdrawals').WITHDRAWALS_REQUIRE_BMP = 'true';
+  env('withdrawals').WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY = 'true';
   env('payments').REQUIRE_VERIFIED_IDENTITY = 'true';
   env('payments').STRIPE_SECRET_KEY = environment === 'staging' ? 'sk_test_fake' : 'sk_live_fake';
   env('payments').STRIPE_WEBHOOK_SECRET = 'whsec_fake';
   env('engine').GRPC_TLS_REQUIRE_CLIENT_CERT = 'true';
   env('engine').BONUS_ENGINE_BINARY_CYCLE_ENABLED = 'false';
+  env('engine').BONUS_ENGINE_SCHEDULER_ENABLED = 'false';
   env('api').ENGINE_MTLS_REQUIRED = 'true';
   env('api').BETTER_AUTH_SECRET = 'test-better-auth-secret-not-real-'.repeat(2);
   for (const name of ['api', 'engine', 'payments', 'withdrawals', 'client', 'backup']) {
@@ -98,4 +100,57 @@ test('actual Compose files resolve to different projects and volumes, with no pu
     assert.ok(validateConfig(config, environment).length > 0, 'unfilled templates must not pass preflight');
   }
   assert.notEqual(names[0], names[1]);
+});
+
+function rdsFixture() {
+  const config = fixture('production');
+  delete config.services.postgres;
+  const host = 'pgm-synthetic.pg.rds.aliyuncs.com';
+  Object.assign(config.services.api.environment, {
+    DATABASE_EXPECTED_HOST: host, DATABASE_EXPECTED_NAME: 'mindbliss_production',
+    DATABASE_CA_FILE: '/run/db-ca/server-ca.pem',
+  });
+  Object.assign(config.services.client.environment, {
+    MEMBER_DB_SSL: 'verify-full', MEMBER_DB_CA_FILE: '/run/db-ca/server-ca.pem',
+  });
+  for (const name of ['api', 'engine', 'payments', 'withdrawals', 'client', 'backup']) {
+    const key = name === 'client' ? 'MEMBER_DATABASE_URL' : 'DATABASE_URL';
+    config.services[name].environment[key] = `postgres://${name}:test-db-password-not-real@${host}:5432/mindbliss_production?sslmode=verify-full&sslrootcert=/run/db-ca/server-ca.pem`;
+    config.services[name].volumes = [{ type: 'bind', source: '/synthetic/db-ca', target: '/run/db-ca', read_only: true }];
+  }
+  return config;
+}
+
+test('RDS mode requires a single explicit endpoint and verified TLS', () => {
+  assert.deepEqual(validateConfig(rdsFixture(), 'production', 'rds'), []);
+  for (const mutate of [
+    c => { c.services.postgres = fixture().services.postgres; },
+    c => { c.services.api.environment.DATABASE_EXPECTED_HOST = 'untrusted.example.invalid'; },
+    c => { c.services.engine.environment.DATABASE_URL = c.services.engine.environment.DATABASE_URL.replace('verify-full', 'require'); },
+    c => { c.services.client.environment.MEMBER_DB_SSL = 'require'; },
+    c => { c.services.payments.volumes[0].read_only = false; },
+    c => { c.services.withdrawals.depends_on = { postgres: {} }; },
+    c => { c.services.backup.environment.DATABASE_URL = c.services.backup.environment.DATABASE_URL.replace('sslrootcert', 'ignored'); },
+  ]) {
+    const config = rdsFixture(); mutate(config);
+    assert.ok(validateConfig(config, 'production', 'rds').length > 0);
+  }
+});
+
+test('RDS overlay does not start or depend on a local database', async () => {
+  const target = await mkdtemp(path.join(tmpdir(), 'mindbliss-compose-rds-'));
+  await initialize('staging', target);
+  const project = path.join(target, 'project.env');
+  await writeFile(project, `${await readFile(project, 'utf8')}\nRDS_HOSTNAME=pgm-synthetic.pg.rds.aliyuncs.com\nRDS_DATABASE=mindbliss_staging\n`);
+  const result = spawnSync('docker', [...composeArgs('staging', project, undefined, 'rds'), '--profile', 'ops', 'config', '--format', 'json'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const config = JSON.parse(result.stdout);
+  assert.equal(config.services.postgres, undefined);
+  for (const name of ['api', 'engine', 'payments', 'withdrawals']) {
+    assert.equal(config.services[name].depends_on?.postgres, undefined);
+  }
+  assert.equal(config.services.api.environment.DATABASE_CA_FILE, '/run/db-ca/server-ca.pem');
+  assert.equal(config.services.client.environment.MEMBER_DB_SSL, 'verify-full');
+  assert.ok(config.services.api.volumes.some(v => v.target === '/run/tls'));
+  assert.ok(config.services.api.volumes.some(v => v.target === '/run/db-ca' && v.read_only));
 });

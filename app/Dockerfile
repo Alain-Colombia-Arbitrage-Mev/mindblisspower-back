@@ -3,7 +3,7 @@
 # Run:   docker run --env-file /etc/vicionpower/app.env -p 3000:3000 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/api:dev
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
-FROM oven/bun:1.4.4-debian AS builder
+FROM oven/bun:1.4.4-debian@sha256:93d5032fe06d163427822dc1598f420363759bb18155c9cc90eb1be05a64a19e AS builder
 WORKDIR /app
 
 # Copy lockfile + manifest first for cache-friendly layer
@@ -22,14 +22,14 @@ CMD ["sh", "-c", "bun test && bun run test:toolchain && bun scripts/pentest-http
 
 # Install into a clean stage: --production does not prune an existing node_modules.
 # Omit optional adapter peers so Better Auth cannot reinstall the Drizzle CLI.
-FROM oven/bun:1.4.4-debian AS production-deps
+FROM oven/bun:1.4.4-debian@sha256:93d5032fe06d163427822dc1598f420363759bb18155c9cc90eb1be05a64a19e AS production-deps
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production --omit=peer && \
     test ! -f node_modules/drizzle-kit/package.json && test ! -f node_modules/esbuild/package.json
 
 # ─── Runtime ──────────────────────────────────────────────────────────────────
-FROM oven/bun:1.4.4-distroless AS runtime
+FROM oven/bun:1.4.4-distroless@sha256:153a951ae40106e125898103e6e990ee0f38e6aee7f561029e26cf9fbed23470 AS runtime
 WORKDIR /app
 
 # Non-root for defense-in-depth (the distroless image already runs as nonroot,

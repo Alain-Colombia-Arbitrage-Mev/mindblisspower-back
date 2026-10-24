@@ -3,6 +3,11 @@
 Estado: preparado y probado localmente; NO desplegado en Railway ni produccion.
 Rama: `feature/portable-docker-infra-20261023`. Fecha: 2026-10-23.
 
+Actualizacion 2026-10-24: el destino elegido es DigitalOcean App Platform.
+Ver [pruebas locales y preparacion para App Platform](../digitalocean/README.md).
+Este Compose sigue disponible para un host Docker propio; NO es un archivo
+que App Platform pueda importar. Los perfiles nuevos usan PostgreSQL nativo.
+
 ## Alcance
 
 | Servicio | Artefacto | Datos persistentes |
@@ -13,7 +18,7 @@ Rama: `feature/portable-docker-infra-20261023`. Fecha: 2026-10-23.
 | Motor Go / ledger / binario | `engine` | PostgreSQL |
 | Cobros y webhooks Go | `payments` | PostgreSQL |
 | Retiros Go | `withdrawals` | PostgreSQL |
-| PostgreSQL 17 + Timescale | Imagen de DB fijada por digest | Volumen `postgres-data` |
+| PostgreSQL 17 nativo + ltree | Imagen de DB fijada por digest | Volumen `postgres-data` |
 | Redis | Imagen versionada | Cache/limites regenerables; NO fuente contable |
 | HTTPS en VPS | Caddy, perfil `edge` | Certificados ACME en volumen |
 | Backup y restauracion | `backup`, perfil `ops` | Copias cifradas locales + S3 externo |
@@ -36,9 +41,10 @@ KYC externos siguen requiriendo configuracion y un plan de exportacion propio.
   La QA anterior `deploy/docker-qa` sigue siendo sintetica y efimera.
 - Ninguna migracion, restauracion, movimiento del arbol o calculo financiero se
   ejecuta automaticamente al iniciar el stack.
-- El cierre binario automatico permanece apagado al inicio. El motor tambien
-  ejecuta invariantes y un job diario de ROI: tener SOLO UNA instancia y arrancar
-  sobre datos reales unicamente tras revisar esos jobs.
+- Todos los jobs del motor permanecen apagados con
+  `BONUS_ENGINE_SCHEDULER_ENABLED=false`, incluido ROI e invariantes periodicas.
+  El cierre binario tambien queda desactivado. Revisar y aprobar esos jobs antes
+  de habilitar un unico ejecutor sobre datos reales.
 - Reconciliacion Stripe, correos de carrito y comunicados masivos apagados en el
   rollout inicial; habilitarlos despues de validar entorno y responsables.
 - APIs Go, API Bun, DB y Redis son privados. Solo frontend/admin y la ruta de
@@ -103,6 +109,8 @@ local siga coincidiendo con el manifiesto. Verifica el digest contra el registro
 promover ese mismo archivo de staging a produccion, SIN reconstruir aplicaciones.
 Fijar tambien Postgres/Redis por digest en el archivo del proyecto. Nunca
 actualizar una major de Postgres/Timescale cambiando un tag sobre un volumen viejo.
+Tampoco montar PGDATA de Timescale en la nueva imagen PostgreSQL nativa: requiere
+una conversion/restauracion revisada en otra DB, no un cambio de imagen in situ.
 
 Mantener copias de los manifiestos y de las imagenes en un segundo registro o
 en un archivo `docker image save -o release.tar ...`; verificar hash y probar

@@ -1,0 +1,42 @@
+name: app-platform-local
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, staging]
+permissions: {contents: read}
+concurrency:
+  group: app-platform-local-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  backend:
+    name: backend-docker-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: {node-version: "24"}
+      - run: node --test deploy/digitalocean/app-spec.test.mjs deploy/digitalocean/release.test.mjs deploy/digitalocean/deploy.test.mjs
+      - name: Validate both App Platform schemas offline (no account or token)
+        run: |
+          set -euo pipefail
+          for environment in staging production; do
+            node deploy/digitalocean/app-spec.mjs "$environment" | docker run --rm -i --network none \
+              digitalocean/doctl:2.0.0@sha256:0d6cc5a02544c6d3f268137c79d91c5cd9fb3187459d5cfca22d11c94fdb0a14 \
+              apps spec validate --schema-only - >/dev/null
+          done
+      - run: docker build -t mindbliss/backup:infra-20261023 deploy/portable/backup
+      - run: docker build -f deploy/docker-qa/Dockerfile.postgres -t mindbliss/rds-postgres-test:20261024 .
+      - name: Build the actual runtime containers
+        run: |
+          set -euo pipefail
+          docker build --target runtime -t mindbliss/app-platform-api:test-20261024 app
+          for service in engine payments withdrawals; do
+            docker build --target runtime --build-arg "CMD=vp-$service" -f vp-engine/deployments/Dockerfile \
+              -t "mindbliss/app-platform-$service:test-20261024" vp-engine
+          done
+      - name: Isolated staging and production profiles (no cloud, no real payments)
+        run: node deploy/digitalocean/test-local.mjs --synthetic-docker

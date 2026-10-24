@@ -14,7 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// pgContainer arranca Postgres (Timescale pg17) y aplica el schema mlm + el de
+// pgContainer arranca PostgreSQL 17 sin Timescale y aplica el schema mlm + el de
 // payments. Requiere Docker (igual que los tests del motor). Sin Docker, estos
 // tests fallan al arrancar — correrlos en CI/staging.
 func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
@@ -23,7 +23,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	defer cancel()
 
 	req := testcontainers.ContainerRequest{
-		Image: "timescale/timescaledb:latest-pg17",
+		Image: "postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27",
 		Env: map[string]string{
 			"POSTGRES_PASSWORD": "test",
 			"POSTGRES_DB":       "vicionpower_test",
@@ -49,6 +49,10 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		t.Fatalf("connect: %v", err)
 	}
 
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION ltree VERSION '1.2'`); err != nil {
+		_ = c.Terminate(ctx)
+		t.Fatalf("create RDS-compatible ltree: %v", err)
+	}
 	for _, r := range []string{"engine_write", "engine_read", "vp_engine"} {
 		if _, err := pool.Exec(ctx,
 			fmt.Sprintf(`DO $$ BEGIN CREATE ROLE %s NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`, r)); err != nil {
@@ -61,7 +65,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	for _, f := range []string{
 		"_meta/schema_mlm.sql",
 		"_meta/schema_governance.sql",
-		"_meta/migration/05_timescaledb.sql",
+		"_meta/migration/05_postgresql.sql",
 		"_meta/schema_payouts.sql",
 		"_meta/schema_payouts_v1.1.sql",
 		"_meta/schema_payouts_v1.2.sql",
@@ -91,6 +95,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/migration/66_support_bmp_category.sql",
 		"_meta/migration/67_comms_campaigns.sql",
 		"_meta/migration/68_blacklist_normalization_schema.sql",
+		"_meta/migration/69_tree_pv_truth_safe_path.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {

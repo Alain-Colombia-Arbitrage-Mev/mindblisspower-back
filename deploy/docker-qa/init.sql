@@ -3,10 +3,12 @@
 CREATE ROLE engine_write NOLOGIN;
 CREATE ROLE engine_read NOLOGIN;
 CREATE ROLE vp_engine NOLOGIN;
+-- Alibaba RDS PG17 advertises ltree 1.2; test that SQL surface explicitly.
+CREATE EXTENSION ltree VERSION '1.2';
 \ir /qa-schema/schema_mlm.sql
 \ir /qa-schema/auth.sql
 \ir /qa-schema/schema_governance.sql
-\ir /qa-schema/migration/05_timescaledb.sql
+\ir /qa-schema/migration/05_postgresql.sql
 \ir /qa-schema/schema_payouts.sql
 \ir /qa-schema/schema_payouts_v1.1.sql
 \ir /qa-schema/schema_payouts_v1.2.sql
@@ -39,6 +41,7 @@ CREATE ROLE vp_engine NOLOGIN;
 \ir /qa-schema/migration/66_support_bmp_category.sql
 \ir /qa-schema/migration/67_comms_campaigns.sql
 \ir /qa-schema/migration/68_blacklist_normalization_schema.sql
+\ir /qa-schema/migration/69_tree_pv_truth_safe_path.sql
 \ir /qa-schema/member-read.sql
 
 INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals)

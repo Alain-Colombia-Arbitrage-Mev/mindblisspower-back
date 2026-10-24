@@ -42,6 +42,13 @@ function request(tlsOptions: SecureClientSessionOptions): Promise<string> {
 }
 try {
   assert.equal(await request(options.nodeOptions as SecureClientSessionOptions), 'verified');
+  const inlineOptions = engineTransportOptions({
+    VP_ENGINE_GRPC_URL: baseUrl, ENGINE_MTLS_REQUIRED: 'true',
+    VP_ENGINE_TLS_CA_PEM: read('client/ca.crt').toString(),
+    VP_ENGINE_TLS_CERT_PEM: read('client/client.crt').toString(),
+    VP_ENGINE_TLS_KEY_PEM: read('client/client.key').toString(),
+  });
+  assert.equal(await request(inlineOptions.nodeOptions as SecureClientSessionOptions), 'verified');
   await assert.rejects(request({ ca: read('client/ca.crt'), rejectUnauthorized: true }), 'Client certificate must be required');
   await assert.rejects(request({ ...(options.nodeOptions as SecureClientSessionOptions), servername: 'wrong-host.invalid' }), 'Server hostname must be verified');
   console.log('PASS: real HTTP/2 mTLS handshake, refusal of missing client identity and wrong server hostname.');

@@ -13,13 +13,15 @@ export const imageKeys = {
   client: 'CLIENT_IMAGE', admin: 'ADMIN_IMAGE', backup: 'BACKUP_IMAGE',
 };
 
-export function validateConfig(config, environment) {
+export function validateConfig(config, environment, databaseMode = 'local') {
   const errors = [];
   const add = (condition, message) => { if (!condition) errors.push(message); };
   add(environmentNames.has(environment), 'Unknown environment');
+  add(['local', 'rds'].includes(databaseMode), 'Unknown database mode');
   add(config.name === `mindbliss-${environment}`, 'Project name must isolate the selected environment');
   const services = config.services || {};
   for (const name of Object.keys(imageKeys)) {
+    if (name === 'postgres' && databaseMode === 'rds') continue;
     const service = services[name];
     if (!service) { errors.push(`Missing service: ${name}`); continue; }
     add(!service.privileged && service.network_mode !== 'host', `${name}: privileged/host networking is forbidden`);
@@ -40,29 +42,46 @@ export function validateConfig(config, environment) {
     }
   }
   const env = name => services[name]?.environment || {};
-  add(services.postgres?.volumes?.some(v => v.type === 'volume' && v.target === '/var/lib/postgresql/data'), 'Postgres needs a persistent named volume');
-  add(!services.postgres?.tmpfs?.length, 'Postgres data must not be ephemeral');
+  if (databaseMode === 'rds') add(!services.postgres, 'RDS mode must not start a local Postgres service');
+  else {
+    add(services.postgres?.volumes?.some(v => v.type === 'volume' && v.target === '/var/lib/postgresql/data'), 'Postgres needs a persistent named volume');
+    add(!services.postgres?.tmpfs?.length, 'Postgres data must not be ephemeral');
+  }
   add(env('client').DEMO_LOGIN_ENABLED === '0' && env('admin').DEMO_LOGIN_ENABLED === '0', 'Demo login must stay disabled');
   add(env('payments').REQUIRE_VERIFIED_IDENTITY === 'true', 'Verified payment identity must remain required');
   add(env('withdrawals').WITHDRAWALS_REQUIRE_BMP === 'true', 'BMP withdrawal protection must remain enabled');
   add(env('engine').GRPC_TLS_REQUIRE_CLIENT_CERT === 'true', 'Engine client certificates must remain required');
   add(env('api').ENGINE_MTLS_REQUIRED === 'true', 'API must use engine mTLS');
   add(env('engine').BONUS_ENGINE_BINARY_CYCLE_ENABLED === 'false', 'Initial rollout must not activate a second binary scheduler');
+  add(env('engine').BONUS_ENGINE_SCHEDULER_ENABLED === 'false', 'Initial rollout must keep ALL financial schedules disabled');
+  add(env('withdrawals').WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY === 'true', 'Withdrawals must require verified identity');
   const token = env('payments').PAYMENTS_SERVICE_TOKEN;
   add(typeof token === 'string' && token.length >= 32, 'Service token must contain at least 32 characters');
   for (const name of ['client', 'admin']) add(env(name).PAYMENTS_SERVICE_TOKEN === token, `${name}: service token mismatch`);
   add(env('withdrawals').SERVICE_TOKEN === token, 'Withdrawal service token mismatch');
   add(env('payments').REDIS_PASSWORD === env('redis').REDIS_PASSWORD, 'Redis credentials mismatch');
   add(String(env('redis').REDIS_PASSWORD || '').length >= 24, 'Redis password must contain at least 24 characters');
-  add(String(env('postgres').POSTGRES_PASSWORD || '').length >= 24, 'Postgres password must contain at least 24 characters');
+  if (databaseMode === 'local') add(String(env('postgres').POSTGRES_PASSWORD || '').length >= 24, 'Postgres password must contain at least 24 characters');
   add(String(env('api').BETTER_AUTH_SECRET || '').length >= 32, 'Auth secret must contain at least 32 characters');
-  const dbName = env('postgres').POSTGRES_DB;
+  const dbName = databaseMode === 'rds' ? env('api').DATABASE_EXPECTED_NAME : env('postgres').POSTGRES_DB;
+  const dbHost = databaseMode === 'rds' ? env('api').DATABASE_EXPECTED_HOST : 'postgres';
+  if (databaseMode === 'rds') {
+    add(/^[a-z0-9.-]+\.rds\.aliyuncs\.com$/.test(dbHost || ''), 'Set the exact Alibaba RDS private endpoint');
+    add(env('api').DATABASE_CA_FILE === '/run/db-ca/server-ca.pem', 'API needs the mounted RDS CA');
+    add(env('client').MEMBER_DB_SSL === 'verify-full' && env('client').MEMBER_DB_CA_FILE === '/run/db-ca/server-ca.pem', 'Client must verify RDS certificates');
+  }
   add(typeof dbName === 'string' && dbName.includes(environment), 'Database name must identify its environment');
   const users = new Set();
   for (const name of ['api', 'engine', 'payments', 'withdrawals', 'client', 'backup']) {
     try {
       const uri = new URL(env(name)[name === 'client' ? 'MEMBER_DATABASE_URL' : 'DATABASE_URL']);
-      add(['postgres:', 'postgresql:'].includes(uri.protocol) && uri.hostname === 'postgres', `${name}: Compose must use its isolated Postgres service`);
+      add(['postgres:', 'postgresql:'].includes(uri.protocol) && uri.hostname === dbHost, `${name}: database host mismatch`);
+      if (databaseMode === 'rds') {
+        add(uri.searchParams.get('sslmode') === 'verify-full', `${name}: RDS requires sslmode=verify-full`);
+        if (!['api', 'client'].includes(name)) add(uri.searchParams.get('sslrootcert') === '/run/db-ca/server-ca.pem', `${name}: configure RDS sslrootcert`);
+        add(services[name].volumes?.some(v => v.target === '/run/db-ca' && v.type === 'bind' && v.read_only), `${name}: CA must be mounted read-only`);
+        add(!services[name].depends_on?.postgres, `${name}: external RDS cannot depend on local Postgres`);
+      }
       add(decodeURIComponent(uri.pathname.slice(1)) === dbName, `${name}: database mismatch`);
       add(Boolean(uri.username) && decodeURIComponent(uri.password).length >= 24, `${name}: use a named role and strong password`);
       if (name !== 'backup') {
@@ -142,16 +161,19 @@ export async function validateCertificates(config) {
   return errors;
 }
 
-export function composeArgs(environment, envFile, imageFile) {
+export function composeArgs(environment, envFile, imageFile, databaseMode = 'local') {
   if (!environmentNames.has(environment)) throw new Error('Use staging or production');
+  if (!['local', 'rds'].includes(databaseMode)) throw new Error('Use local or rds database mode');
   return ['compose', '--env-file', path.resolve(envFile), ...(imageFile ? ['--env-file', path.resolve(imageFile)] : []),
-    '-f', path.join(directory, 'compose.yml'), '-f', path.join(directory, `compose.${environment}.yml`)];
+    '-f', path.join(directory, 'compose.yml'), '-f', path.join(directory, `compose.${environment}.yml`),
+    ...(databaseMode === 'rds' ? ['-f', path.join(directory, 'compose.rds.yml')] : [])];
 }
 
 async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     environment: { type: 'string' }, directory: { type: 'string' },
     'env-file': { type: 'string' }, 'images-file': { type: 'string' },
+    database: { type: 'string', default: 'local' },
   } });
   const environment = values.environment;
   if (positionals[0] === 'init' && values.directory) {
@@ -159,11 +181,18 @@ async function main() {
     return;
   }
   if (positionals[0] !== 'check' || !values['env-file']) throw new Error('Usage: manage.mjs init --environment staging|production --directory DIR; or check --environment ENV --env-file FILE [--images-file FILE]');
-  const args = [...composeArgs(environment, values['env-file'], values['images-file']), '--profile', 'edge', '--profile', 'ops', 'config', '--format', 'json'];
+  const args = [...composeArgs(environment, values['env-file'], values['images-file'], values.database), '--profile', 'edge', '--profile', 'ops', 'config', '--format', 'json'];
   const result = spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   if (result.status !== 0) throw new Error('Compose could not resolve the configuration. Check file paths and required variables; no secrets printed.');
   const config = JSON.parse(result.stdout);
-  const errors = [...validateConfig(config, environment), ...await validateCertificates(config)];
+  const errors = [...validateConfig(config, environment, values.database), ...await validateCertificates(config)];
+  if (values.database === 'rds') {
+    try {
+      const mount = config.services.api.volumes.find(v => v.target === '/run/db-ca');
+      const ca = new X509Certificate(await readFile(path.join(mount.source, 'server-ca.pem')));
+      if (!ca.ca || Date.parse(ca.validFrom) > Date.now() || Date.parse(ca.validTo) < Date.now() + 14 * 86400000) throw new Error();
+    } catch { errors.push('RDS CA missing, invalid or expires in less than 14 days'); }
+  }
   if (errors.length) throw new Error(errors.map(e => `- ${e}`).join('\n'));
   console.log(`Configuration checks passed for ${environment}. Still required: certificate, schema, role grants, webhook and restore drill verification.`);
 }

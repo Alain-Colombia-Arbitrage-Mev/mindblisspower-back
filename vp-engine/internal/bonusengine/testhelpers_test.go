@@ -15,7 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// pgContainer arranca Timescale + extensions y aplica los 3 schemas + el patch.
+// pgContainer arranca PostgreSQL 17 sin Timescale y aplica schemas y reporting.
 // Cada test recibe una base aislada que se elimina al finalizar.
 func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
@@ -23,7 +23,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	defer cancel()
 
 	req := testcontainers.ContainerRequest{
-		Image: "timescale/timescaledb:latest-pg17",
+		Image: "postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27",
 		Env: map[string]string{
 			"POSTGRES_PASSWORD": "test",
 			"POSTGRES_DB":       "vicionpower_test",
@@ -50,6 +50,12 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		t.Fatalf("connect: %v", err)
 	}
 
+	// Match the ltree SQL version currently advertised by Alibaba RDS PG17.
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION ltree VERSION '1.2'`); err != nil {
+		_ = c.Terminate(ctx)
+		t.Fatalf("create RDS-compatible ltree: %v", err)
+	}
+
 	// Roles cluster-level que los schemas asumen creados por el bootstrap
 	// (00-init.sql / deployment).
 	for _, r := range []string{"engine_write", "engine_read", "vp_engine"} {
@@ -65,7 +71,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	for _, f := range []string{
 		"_meta/schema_mlm.sql",
 		"_meta/schema_governance.sql",
-		"_meta/migration/05_timescaledb.sql",
+		"_meta/migration/05_postgresql.sql",
 		"_meta/schema_payouts.sql",
 		"_meta/schema_payouts_v1.1.sql",
 		"_meta/schema_payouts_v1.2.sql",
@@ -75,6 +81,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/migration/43_blacklist.sql",
 		"_meta/migration/56_ban_engine_name_match.sql",
 		"_meta/migration/68_blacklist_normalization_schema.sql",
+		"_meta/migration/69_tree_pv_truth_safe_path.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {
