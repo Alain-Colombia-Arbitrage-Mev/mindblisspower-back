@@ -41,6 +41,31 @@ node deploy/docker-qa/smoke.mjs
 Client: http://127.0.0.1:3300/login. Admin: http://127.0.0.1:3301/login.
 API health: ports 3302 (Bun), 3305 (payments), 3307 (withdrawals).
 
+## Member Tree Reads
+
+The customer tree/referral/rank BFF reads PostgreSQL directly, not through Go.
+The QA client now uses the dedicated `qa_member_read` role. It only reads the
+required mlm tables/views, defaults to read-only transactions and cannot read
+auth or write affiliates. Its password is deliberately synthetic, not a secret
+for any real environment. Cognito remains unconfigured and fail-closed.
+
+For an already-running QA database created before this role was added, prepare
+the role without recreating the database, then replace only the client:
+
+```powershell
+node deploy/docker-qa/prepare-member-read.mjs --qa-docker
+docker compose -f deploy/docker-qa/compose.yml --profile test build client client-tests
+docker compose -f deploy/docker-qa/compose.yml up -d --no-deps --no-build --wait client
+node deploy/docker-qa/diagnose-member.mjs --qa-docker
+```
+
+The diagnostic runs the actual `memberDb` module from the test image in the
+client's network namespace and reports only aggregates and permission flags.
+It also verifies that anonymous tree/referral/payment requests return 401.
+It does not authenticate a real customer. From the client repository, run
+`node scripts/test-member-tree-query.mjs --qa-docker` to test partial/full tree
+SQL with transactionally rolled-back synthetic rows and the read-only role.
+
 The Go suite runs with Linux's race detector, with two package workers. Each
 integration test applies schema/migrations to a newly created test container.
 The preview database bootstrap follows the payments/withdrawals test harnesses;

@@ -3,3 +3,4 @@ COPY _meta/*.sql /qa-schema/
 COPY _meta/migration/*.sql /qa-schema/migration/
 COPY deploy/docker-qa/init.sql /docker-entrypoint-initdb.d/001-qa.sql
 COPY deploy/docker-qa/auth.sql /qa-schema/auth.sql
+COPY deploy/docker-qa/member-read.sql /qa-schema/member-read.sql

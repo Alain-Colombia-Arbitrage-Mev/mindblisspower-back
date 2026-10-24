@@ -39,6 +39,7 @@ CREATE ROLE vp_engine NOLOGIN;
 \ir /qa-schema/migration/66_support_bmp_category.sql
 \ir /qa-schema/migration/67_comms_campaigns.sql
 \ir /qa-schema/migration/68_blacklist_normalization_schema.sql
+\ir /qa-schema/member-read.sql
 
 INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals)
 VALUES (1, 'USD', 'US Dollar', true, 2);

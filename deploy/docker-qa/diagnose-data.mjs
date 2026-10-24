@@ -37,7 +37,7 @@ for (const endpoint of apiPaths) {
 const sql = `BEGIN READ ONLY; SELECT json_build_object('database',current_database(),'persons',(SELECT count(*) FROM mlm.person),'affiliates',(SELECT count(*) FROM mlm.affiliate),'purchaseIntents',(SELECT count(*) FROM payments.purchase_intent)); COMMIT;`;
 const output = docker(['exec', 'mindbliss-qa-postgres-1', 'psql', '-X', '-q', '-U', 'postgres', '-d', 'mindbliss_qa', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql]);
 report.database = JSON.parse(output);
-report.notes = ['UI fixtures on ports 64421/64422/64423 never query PostgreSQL.', 'Unconfigured Cognito prevents authenticated browser/BFF verification. No auth bypass is introduced.', 'Empty QA collections are not the recovered historical customer database.'];
+report.notes = ['UI fixtures on ports 64421/64422/64423/64424 never query PostgreSQL.', 'Unconfigured Cognito prevents authenticated browser/BFF verification. No auth bypass is introduced.', 'Empty QA collections are not the recovered historical customer database.'];
 const destination = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..', 'reportes', 'data-diagnostics-20261024.json');
 await mkdir(path.dirname(destination), { recursive: true });
 await writeFile(destination, `${JSON.stringify(report, null, 2)}\n`);

@@ -163,6 +163,10 @@ services:
       VP_PAYMENTS_URL: http://payments:9095
       VP_WITHDRAWALS_URL: http://withdrawals:9097
       PAYMENTS_SERVICE_TOKEN: synthetic-qa-only-not-for-production
+      MEMBER_DATABASE_URL: postgres://qa_member_read:synthetic-qa-read-only@postgres:5432/mindbliss_qa
+      MEMBER_DB_SSL: disable
+    depends_on:
+      postgres: {condition: service_healthy}
     read_only: true
     tmpfs: [/tmp, /app/.next/cache]
     cap_drop: [ALL]
