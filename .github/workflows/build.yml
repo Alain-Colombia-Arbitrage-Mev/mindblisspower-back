@@ -50,11 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Pin a la misma línea de Bun que usa app/Dockerfile (oven/bun:1.2). Evita
+      # Pin a la misma linea de Bun que usa app/Dockerfile. Evita
       # depender de resolver "latest" contra la API de GitHub (que rompió el CI
       # durante una degradación de api.github.com) y da builds reproducibles.
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: "1.2" }
+        with: { bun-version: "1.3.8" }
       - run: bun install --frozen-lockfile
         working-directory: app
       - run: bun run typecheck
@@ -72,12 +72,8 @@ jobs:
       - name: go test (unit, bloqueante)
         run: go test -count=1 -timeout 180s -run 'Theta' ./internal/bonusengine/ && go test -count=1 -timeout 120s ./internal/shared/config/...
         working-directory: vp-engine
-      # Suite completa (incluye integración con testcontainers/Postgres — los
-      # runners de GitHub traen Docker). OBSERVACIONAL por ahora
-      # (continue-on-error): cuando acumule corridas verdes, quitar el
-      # continue-on-error para hacerla bloqueante.
-      - name: go test (full, observacional)
-        continue-on-error: true
+      # La integracion con Postgres tambien bloquea la publicacion de imagenes.
+      - name: go test (full, bloqueante)
         run: go test -count=1 -timeout 15m ./...
         working-directory: vp-engine
   push:

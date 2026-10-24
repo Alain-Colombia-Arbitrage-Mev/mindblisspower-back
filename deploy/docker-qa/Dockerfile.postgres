@@ -1,0 +1,5 @@
+FROM timescale/timescaledb@sha256:526d01720f91772948d1ddd90601bd3d96cfa7e6afa3f3af87d4f0638c6e4d1a
+COPY _meta/*.sql /qa-schema/
+COPY _meta/migration/*.sql /qa-schema/migration/
+COPY deploy/docker-qa/init.sql /docker-entrypoint-initdb.d/001-qa.sql
+COPY deploy/docker-qa/auth.sql /qa-schema/auth.sql

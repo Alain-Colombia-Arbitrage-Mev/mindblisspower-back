@@ -3,7 +3,7 @@
 # Run:    docker run --env-file /etc/vp-engine/app.env -p 50051:50051 -p 9090:9090 522814703714.dkr.ecr.us-east-1.amazonaws.com/vp/vp-engine:dev
 
 # Stage 1: builder
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 # Para CA certs y tzdata (timezones); copiamos al stage final.
 RUN apk add --no-cache ca-certificates tzdata git
@@ -20,7 +20,7 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG TARGETOS=linux
-ARG TARGETARCH=arm64
+ARG TARGETARCH
 ARG CMD=vp-engine
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build \

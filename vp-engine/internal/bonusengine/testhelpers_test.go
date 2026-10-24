@@ -16,7 +16,7 @@ import (
 )
 
 // pgContainer arranca Timescale + extensions y aplica los 3 schemas + el patch.
-// Se reusa entre tests del mismo paquete vía sync.Once para amortizar el costo.
+// Cada test recibe una base aislada que se elimina al finalizar.
 func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -25,9 +25,9 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 	req := testcontainers.ContainerRequest{
 		Image: "timescale/timescaledb:latest-pg17",
 		Env: map[string]string{
-			"POSTGRES_PASSWORD":  "test",
-			"POSTGRES_DB":        "vicionpower_test",
-			"POSTGRES_USER":      "postgres",
+			"POSTGRES_PASSWORD": "test",
+			"POSTGRES_DB":       "vicionpower_test",
+			"POSTGRES_USER":     "postgres",
 		},
 		ExposedPorts: []string{"5432/tcp"},
 		WaitingFor: wait.ForLog("database system is ready to accept connections").
@@ -52,7 +52,7 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 
 	// Roles cluster-level que los schemas asumen creados por el bootstrap
 	// (00-init.sql / deployment).
-	for _, r := range []string{"engine_write", "engine_read"} {
+	for _, r := range []string{"engine_write", "engine_read", "vp_engine"} {
 		if _, err := pool.Exec(ctx,
 			fmt.Sprintf(`DO $$ BEGIN CREATE ROLE %s NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`, r)); err != nil {
 			_ = c.Terminate(ctx)
@@ -72,6 +72,9 @@ func pgContainer(t *testing.T) (*pgxpool.Pool, func()) {
 		"_meta/schema_ranks.sql",
 		"_meta/schema_payouts_v1.3.sql",
 		"_meta/migration/51_h3_paquete_vigente.sql",
+		"_meta/migration/43_blacklist.sql",
+		"_meta/migration/56_ban_engine_name_match.sql",
+		"_meta/migration/68_blacklist_normalization_schema.sql",
 	} {
 		b, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {
