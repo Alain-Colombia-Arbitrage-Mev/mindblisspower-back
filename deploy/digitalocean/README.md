@@ -11,7 +11,12 @@ Fecha: 2026-10-24. Rama local: `feature/digitalocean-app-platform-20261024`
 en backend y cliente. El usuario confirmo los proyectos cloud `mindbliss`
 (staging) y `mindbliss-prod` (produccion); IDs y recursos no verificados por API.
 Desde esta tarea NO se provisionaron servicios, publicaron imagenes ni
-desplegaron cambios cloud. Los workflows todavia no se ejecutaron en GitHub.
+desplegaron cambios cloud. Los workflows de revision se ejecutan en las PRs
+borrador [backend #4](https://github.com/Alain-Colombia-Arbitrage-Mev/mindblisspower-back/pull/4),
+[cliente #1](https://github.com/Alain-Colombia-Arbitrage-Mev/mindblisspowerfront/pull/1)
+y [admin #2](https://github.com/Alain-Colombia-Arbitrage-Mev/mindblisspower-admin/pull/2).
+Consultar los checks de su revision exacta; ninguna PR se integro desde esta
+tarea. DEPLOYMENT_PROVIDER=digitalocean ya esta configurado en los tres repos.
 La propuesta Terraform Alibaba queda inactiva.
 
 ## Resultado local

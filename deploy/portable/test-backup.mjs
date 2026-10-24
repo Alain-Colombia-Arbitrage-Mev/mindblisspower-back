@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { directory } from './manage.mjs';
@@ -69,7 +69,9 @@ try {
   assert.ok(!files.some(name => name.endsWith('.dump') || name.endsWith('.sql')), 'plaintext backup escaped the container');
   const manifest = files.find(name => name.endsWith('.manifest.json'));
   assert.ok(manifest);
-  const record = JSON.parse(await readFile(path.join(output, manifest), 'utf8'));
+  // The Linux runner is not UID 70; keep the backup files private to their owner.
+  const record = JSON.parse(docker(['run', '--rm', '--network', 'none', '--read-only',
+    '-v', `${output}:/backups:ro`, '--entrypoint', 'cat', image, `/backups/${manifest}`]));
   assert.ok(record.roles?.sha256);
   assert.equal(record.extensions.some(e => e.name === 'timescaledb'), !vanilla);
   query('postgres', 'CREATE DATABASE drill_restore_ok TEMPLATE template0');
@@ -83,9 +85,9 @@ try {
   backupRun(restore, 'restore', true); // Never overwrite a populated target.
   backupRun({ ...restore, DATABASE_URL: source, RESTORE_TARGET_NAME: 'drill_source', RESTORE_CONFIRM: 'drill_source' }, 'restore', true);
   query('postgres', 'CREATE DATABASE drill_restore_corrupt TEMPLATE template0');
-  const bytes = await readFile(path.join(output, record.database.file));
-  bytes[bytes.length - 1] ^= 1;
-  await writeFile(path.join(output, record.database.file), bytes);
+  assert.match(record.database.file, /^drill-[a-zA-Z0-9._-]+\.dump\.age$/);
+  docker(['run', '--rm', '--network', 'none', '--read-only', '-v', `${output}:/backups`,
+    '--entrypoint', 'sh', image, '-ec', 'printf "%s" corrupt >> "$1"', '--', `/backups/${record.database.file}`]);
   const result = backupRun({ ...restore, DATABASE_URL: source.replace('/drill_source?', '/drill_restore_corrupt?'), RESTORE_TARGET_NAME: 'drill_restore_corrupt', RESTORE_CONFIRM: 'drill_restore_corrupt' }, 'restore', true);
   assert.match(result.stderr, /Checksum mismatch/);
   assert.equal(query('drill_restore_corrupt', "SELECT count(*) FROM pg_namespace WHERE nspname='mlm'"), '0');
