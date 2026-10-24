@@ -142,18 +142,6 @@ func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]Ad
 		  LEFT JOIN mlm.affiliate sp ON sp.id = a.sponsor_id
 		  LEFT JOIN mlm.person spp ON spp.id = sp.person_id
 		  JOIN selected_roots sr ON sr.id = a.id
-		 WHERE a.status::text NOT IN ('deleted','suspended','banned')
-		   AND p.status::text NOT IN ('deleted','suspended','banned')
-		   AND NOT COALESCE(p.blacklisted,false)
-		   AND NOT EXISTS (
-		     SELECT 1
-		       FROM mlm.blacklist b
-		      WHERE (b.email_norm IS NOT NULL AND b.email_norm = mlm.norm_email(p.email))
-		         OR (b.phone_last10 IS NOT NULL AND b.phone_last10 = mlm.norm_phone10(p.phone_number))
-		         OR (b.name_norm IS NOT NULL
-		             AND b.name_norm = mlm.norm_name(p.first_name || ' ' || p.last_name)
-		             AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate = p.birthday)))
-		   )
 		 ORDER BY sr.priority, sr.depth, a.id
 	`, companyRoot)
 	if err != nil {
@@ -427,18 +415,18 @@ func (s *Store) adminTreePaths(ctx context.Context, ids []int64) (map[string][]s
 	}
 	rows, err := s.reader().Query(ctx, `
 		WITH RECURSIVE up AS (
-		  SELECT id, parent_id, id AS match_id, 0 AS d
+		  SELECT id, parent_id, id AS match_id, 0 AS d, ARRAY[id] AS path_ids
 		    FROM mlm.affiliate
 		   WHERE id = ANY($1)
 		  UNION ALL
-		  SELECT a.id, a.parent_id, up.match_id, up.d + 1
+		  SELECT a.id, a.parent_id, up.match_id, up.d + 1, up.path_ids || a.id
 		    FROM mlm.affiliate a
 		    JOIN up ON a.id = up.parent_id
-		   WHERE up.d < 512
+		   WHERE up.d < 512 AND NOT a.id = ANY(up.path_ids)
 		)
 		SELECT up.match_id,
 		       array_agg(up.id ORDER BY up.d DESC) AS path,
-		       true AS revealable
+		       bool_or(up.parent_id IS NULL) AS revealable
 		  FROM up
 		 GROUP BY up.match_id
 	`, ids)

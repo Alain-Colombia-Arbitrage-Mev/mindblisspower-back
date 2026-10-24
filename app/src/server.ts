@@ -26,7 +26,7 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
-app.post('/api/affiliate/auto-place', async (c) => {
+app.post('/api/affiliate/auto-place', requireAdmin, async (c) => {
   const body = await c.req.json();
   const result = await autoPlaceAffiliate({
     personId:           BigInt(body.personId),
@@ -36,7 +36,7 @@ app.post('/api/affiliate/auto-place', async (c) => {
   return c.json(result);
 });
 
-app.post('/api/affiliate/place', async (c) => {
+app.post('/api/affiliate/place', requireAdmin, async (c) => {
   const body = await c.req.json();
   const result = await placeAffiliate({
     personId:           BigInt(body.personId),
