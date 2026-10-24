@@ -1,0 +1,52 @@
+name: portable-infra
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - deploy/portable/**
+      - app/src/clients/engine*
+      - app/src/server.ts
+      - app/scripts/test-engine-mtls.ts
+      - .github/workflows/portable-infra.yml
+permissions: {contents: read}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with: {node-version: "24"}
+      - name: Environment isolation and deployment policy
+        run: node --test deploy/portable/manage.test.mjs
+      - name: Build portable backup tools
+        run: docker build -t mindbliss/backup:infra-20261023 deploy/portable/backup
+      - name: Synthetic encrypted restore drill
+        run: node deploy/portable/test-backup.mjs --synthetic-docker
+      - name: Generate disposable mTLS identities (never upload these artifacts)
+        run: |
+          mkdir -p deploy/portable/artifacts/mtls/runtime deploy/portable/artifacts/mtls/offline
+          docker run --rm --network none --user 0 \
+            -v "$PWD/deploy/portable/artifacts/mtls/runtime:/runtime" \
+            -v "$PWD/deploy/portable/artifacts/mtls/offline:/offline" \
+            -v "$PWD/deploy/portable/certificates.py:/tools/certificates.py:ro" \
+            --entrypoint python3 mindbliss/backup:infra-20261023 /tools/certificates.py \
+            --runtime /runtime --offline-ca /offline --dns engine.railway.internal
+      - name: Build Bun test image (includes typecheck)
+        run: docker build --target test -t mindbliss-infra-api-test app
+      - name: Unit checks for mTLS transport
+        run: docker run --rm --network none mindbliss-infra-api-test bun test src/clients/engine-transport.test.ts
+      - name: Real HTTP2 mTLS handshake and rejection tests
+        run: |
+          docker run --rm --network none \
+            -v "$PWD/deploy/portable/artifacts/mtls/runtime/tls:/fixtures:ro" \
+            -e MTLS_FIXTURE_DIR=/fixtures mindbliss-infra-api-test bun scripts/test-engine-mtls.ts
+      - name: Build portable HTTPS edge
+        run: docker build -f deploy/portable/Dockerfile.edge -t mindbliss/edge:infra-20261023 deploy/portable
+      - name: Validate immutable edge configuration
+        run: |
+          docker run --rm --network none \
+            -e CLIENT_HOST=http://client.example.invalid \
+            -e ADMIN_HOST=http://admin.example.invalid \
+            -e WEBHOOK_HOST=http://webhook.example.invalid \
+            mindbliss/edge:infra-20261023 caddy validate --config /etc/caddy/Caddyfile

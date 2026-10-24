@@ -104,6 +104,7 @@ app.post('/api/admin/command-center/alerts/:id/ack', requireAdmin, async (c) => 
 app.get('/health', (c) => c.text('ok'));
 
 export default {
+  hostname: process.env.API_LISTEN_HOST ?? '0.0.0.0',
   port: Number(process.env.PORT ?? 3000),
   fetch: app.fetch,
 };

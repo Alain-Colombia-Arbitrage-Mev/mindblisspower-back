@@ -1,0 +1,11 @@
+services:
+  engine:
+    environment: {ENV: staging}
+  payments:
+    environment: {ENV: staging}
+  withdrawals:
+    environment: {ENV: staging}
+  client:
+    ports: ["127.0.0.1:${CLIENT_PORT:-3400}:3000"]
+  admin:
+    ports: ["127.0.0.1:${ADMIN_PORT:-3401}:3000"]

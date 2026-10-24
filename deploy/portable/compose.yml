@@ -1,0 +1,164 @@
+name: mindbliss-${DEPLOY_ENV:?Set DEPLOY_ENV to staging or production}
+
+x-app: &app
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  logging: &logging
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+  networks: [application, data]
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE}
+    env_file: ["${RUNTIME_DIR:?Set absolute RUNTIME_DIR}/postgres.env"]
+    restart: unless-stopped
+    command: [postgres, -c, shared_preload_libraries=timescaledb,pg_stat_statements, -c, max_connections=150]
+    shm_size: 256mb
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 60s
+    logging: *logging
+    networks: [data]
+  redis:
+    image: ${REDIS_IMAGE:?Set REDIS_IMAGE}
+    env_file: ["${RUNTIME_DIR}/redis.env"]
+    command: [sh, -ec, 'exec redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/data]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+    networks: [data]
+  engine:
+    <<: *app
+    image: ${ENGINE_IMAGE:?Set ENGINE_IMAGE}
+    env_file: ["${RUNTIME_DIR}/engine.env"]
+    environment:
+      ENV: ${DEPLOY_ENV}
+      HTTP_LISTEN_ADDR: "[::]:9090"
+      GRPC_LISTEN_ADDR: "[::]:50051"
+      GRPC_TLS_CERT: /run/tls/server.crt
+      GRPC_TLS_KEY: /run/tls/server.key
+      GRPC_TLS_CLIENT_CA: /run/tls/ca.crt
+      GRPC_TLS_REQUIRE_CLIENT_CERT: "true"
+      BONUS_ENGINE_BINARY_CYCLE_ENABLED: "false"
+      AWS_EC2_METADATA_DISABLED: "true"
+    volumes: ["${RUNTIME_DIR}/tls/server:/run/tls:ro"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    <<: *app
+    image: ${API_IMAGE:?Set API_IMAGE}
+    env_file: ["${RUNTIME_DIR}/api.env"]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      API_LISTEN_HOST: "::"
+      VP_ENGINE_GRPC_URL: https://engine:50051
+      VP_ENGINE_HTTP_URL: http://engine:9090
+      VP_ENGINE_TLS_CA: /run/tls/ca.crt
+      VP_ENGINE_TLS_CERT: /run/tls/client.crt
+      VP_ENGINE_TLS_KEY: /run/tls/client.key
+      ENGINE_MTLS_REQUIRED: "true"
+    volumes: ["${RUNTIME_DIR}/tls/client:/run/tls:ro"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  payments:
+    <<: *app
+    image: ${PAYMENTS_IMAGE:?Set PAYMENTS_IMAGE}
+    env_file: ["${RUNTIME_DIR}/payments.env"]
+    environment:
+      ENV: ${DEPLOY_ENV}
+      PAYMENTS_HTTP_ADDR: "[::]:9095"
+      VP_ENGINE_URL: http://engine:9090
+      REQUIRE_VERIFIED_IDENTITY: "true"
+      PAYMENTS_CART_REMINDER_ENABLED: "false"
+      PAYMENTS_RECONCILE_INTERVAL_MIN: "0"
+      COMMS_ENABLED: "false"
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  withdrawals:
+    <<: *app
+    image: ${WITHDRAWALS_IMAGE:?Set WITHDRAWALS_IMAGE}
+    env_file: ["${RUNTIME_DIR}/withdrawals.env"]
+    environment:
+      ENV: ${DEPLOY_ENV}
+      WITHDRAWALS_HTTP_ADDR: "[::]:9097"
+      WITHDRAWALS_REQUIRE_BMP: "true"
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+  client:
+    <<: *app
+    image: ${CLIENT_IMAGE:?Set CLIENT_IMAGE}
+    env_file: ["${RUNTIME_DIR}/client.env"]
+    environment: &web-env
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "::"
+      DEMO_LOGIN_ENABLED: "0"
+      VP_FORWARD_ID_TOKEN: "1"
+      VP_PAYMENTS_URL: http://payments:9095
+      VP_WITHDRAWALS_URL: http://withdrawals:9097
+      VP_ENGINE_HTTP_URL: http://engine:9090
+    tmpfs: [/tmp, /app/.next/cache]
+  admin:
+    <<: *app
+    image: ${ADMIN_IMAGE:?Set ADMIN_IMAGE}
+    env_file: ["${RUNTIME_DIR}/admin.env"]
+    environment: *web-env
+    tmpfs: [/tmp, /app/.next/cache]
+  edge:
+    profiles: [edge]
+    image: ${CADDY_IMAGE:?Set CADDY_IMAGE}
+    env_file: ["${RUNTIME_DIR}/edge.env"]
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - edge-data:/data
+      - edge-config:/config
+    logging: *logging
+    networks: [application]
+  backup:
+    profiles: [ops]
+    image: ${BACKUP_IMAGE:?Set BACKUP_IMAGE}
+    env_file: ["${RUNTIME_DIR}/backup.env"]
+    environment:
+      DEPLOY_ENV: ${DEPLOY_ENV}
+      BACKUP_OUTPUT_DIR: /backups
+    read_only: true
+    tmpfs: [/tmp:uid=70,gid=70,mode=0700]
+    volumes:
+      - "${BACKUP_DIR:?Set absolute BACKUP_DIR}:/backups"
+      - backup-work:/work
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [application, data]
+    restart: "no"
+
+volumes:
+  postgres-data:
+  edge-data:
+  edge-config:
+  backup-work:
+networks:
+  application:
+  data:
+    internal: true
