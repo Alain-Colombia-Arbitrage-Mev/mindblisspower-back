@@ -98,7 +98,8 @@ node deploy/portable/release.mjs lock --manifest deploy/portable/artifacts/r2026
 ```
 
 `lock` falla hasta que TODAS las imagenes construidas esten publicadas y su ID
-local siga coincidiendo con el manifiesto. Genera `*.images.env` con digests;
+local siga coincidiendo con el manifiesto. Verifica el digest contra el registro:
+`RepoDigests` local puede existir aun sin un push. Genera `*.images.env` con digests;
 promover ese mismo archivo de staging a produccion, SIN reconstruir aplicaciones.
 Fijar tambien Postgres/Redis por digest en el archivo del proyecto. Nunca
 actualizar una major de Postgres/Timescale cambiando un tag sobre un volumen viejo.
@@ -291,7 +292,7 @@ como parte de una prueba de restauracion.
 ## Verificacion reproducible
 
 ```sh
-node --test deploy/portable/manage.test.mjs
+node --test deploy/portable/manage.test.mjs deploy/portable/release-policy.test.mjs
 docker build -t mindbliss/backup:infra-20261023 deploy/portable/backup
 node deploy/portable/test-backup.mjs --synthetic-docker
 docker build -f deploy/portable/Dockerfile.edge -t mindbliss/edge:infra-20261023 deploy/portable

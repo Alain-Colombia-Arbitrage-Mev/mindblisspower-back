@@ -29,7 +29,9 @@ del equipo local.
 
 ## Verificacion local
 
-- 23 pruebas de politica/configuracion e independencia de volumenes aprobadas.
+- 27 pruebas de politica/configuracion, independencia de volumenes y lock de
+  releases aprobadas. Un digest local NO prueba publicacion; se exige consulta
+  al registro remoto antes de generar referencias promovibles.
 - Build Docker del contenedor de backup aprobado y drill sintetico con PostgreSQL
   17.10 / Timescale 2.27.2 aprobado: exportacion/descifrado/restauracion, roles,
   conservacion de L/R y cuenta bloqueada/descendiente, sumas e hypertable.
@@ -75,3 +77,21 @@ Antes de produccion siguen siendo obligatorios:
 
 Runbooks: `deploy/portable/README.md` y `deploy/portable/RAILWAY.md`, con referencias
 primarias consultadas para comportamiento de Railway, Compose y PostgreSQL.
+
+## Cierre local - 2026-10-24
+
+Release `r20261023-01` construida: ocho imagenes linux/amd64, backend `fd26888`,
+cliente `78e6e7a`, admin `a3225ee`. El manifiesto queda en
+`deploy/portable/artifacts/r20261023-01.json`, estado `built-not-published`.
+Las correcciones posteriores del runner/pruebas no cambian esas imagenes.
+
+Se guardaron esas ocho imagenes mas la base Timescale y Redis en
+`deploy/portable/artifacts/r20261023-01.docker.tar`, 815.195.648 bytes.
+SHA-256: `39f0fb54d532ace93e79a9a55b36ce6c5a32d88f7a3c7afbb702543ddefdabf4`.
+`docker image load` aprobado en el equipo local; los ocho IDs coinciden con el
+manifiesto despues de cargar el archivo. No se probo aun en otro host.
+
+ESTE TAR NO INCLUYE DATOS DE POSTGRES, secretos ni volumenes. No es un backup de
+los 12 GB reales. El drill de backup final se repitio con la imagen versionada y
+paso; su espera de disponibilidad ahora usa TCP para no confundir el servidor
+temporal del entrypoint con el servidor final listo para consultas.

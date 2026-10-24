@@ -39,7 +39,9 @@ try {
   createdContainer = true;
   let ready = false;
   for (let attempt = 0; attempt < 90; attempt++) {
-    const result = spawnSync('docker', ['exec', container, 'pg_isready', '-U', 'postgres'], { encoding: 'utf8' });
+    // The entrypoint temporarily starts a socket-only server for init scripts.
+    // Wait for the final TCP listener, not that transient initialization server.
+    const result = spawnSync('docker', ['exec', container, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres'], { encoding: 'utf8' });
     if (result.status === 0) { ready = true; break; }
     await new Promise(resolve => setTimeout(resolve, 1000));
   }

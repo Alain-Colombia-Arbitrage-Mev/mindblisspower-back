@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-node@v6
         with: {node-version: "24"}
       - name: Environment isolation and deployment policy
-        run: node --test deploy/portable/manage.test.mjs
+        run: node --test deploy/portable/manage.test.mjs deploy/portable/release-policy.test.mjs
       - name: Build portable backup tools
         run: docker build -t mindbliss/backup:infra-20261023 deploy/portable/backup
       - name: Synthetic encrypted restore drill

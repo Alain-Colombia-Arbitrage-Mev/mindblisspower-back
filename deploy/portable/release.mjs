@@ -2,7 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { directory, imageKeys } from './manage.mjs';
+import { directory } from './manage.mjs';
+import { lockImageReferences } from './release-policy.mjs';
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   tag: { type: 'string' }, registry: { type: 'string', default: 'mindbliss' },
@@ -52,18 +53,14 @@ try {
     console.log(`Built without publishing: ${manifestPath}. Test these images before pushing.`);
   } else if (positionals[0] === 'lock' && values.manifest) {
     const manifest = JSON.parse(await readFile(values.manifest, 'utf8'));
-    if (manifest.state !== 'built-not-published') throw new Error('A complete build manifest is required');
-    const lines = [];
-    for (const [name, entry] of Object.entries(manifest.images)) {
-      const image = JSON.parse(run('docker', ['image', 'inspect', entry.ref], backend))[0];
-      if (image.Id !== entry.localId) throw new Error(`Image changed after build: ${name}`);
-      const repo = entry.ref.slice(0, entry.ref.lastIndexOf(':'));
-      const digest = image.RepoDigests?.find(ref => ref.startsWith(`${repo}@sha256:`));
-      if (!digest) throw new Error(`Push and inspect the tested image first: ${name}`);
-      lines.push(`${imageKeys[name]}=${digest}`);
-    }
+    const references = lockImageReferences(manifest,
+      ref => JSON.parse(run('docker', ['image', 'inspect', ref], backend))[0],
+      ref => {
+        const result = spawnSync('docker', ['buildx', 'imagetools', 'inspect', ref], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+        return result.status === 0;
+      });
     const target = `${values.manifest}.images.env`;
-    await writeFile(target, `${lines.join('\n')}\n`, { flag: 'wx' });
+    await writeFile(target, references, { flag: 'wx' });
     console.log(`Immutable image references: ${target}. Pin Postgres/Redis separately.`);
   } else throw new Error('Usage: release.mjs build --tag TAG --registry REGISTRY/NAMESPACE [--platform linux/amd64]; or lock --manifest FILE');
 } catch (error) { console.error(error.message); process.exitCode = 1; }
