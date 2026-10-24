@@ -269,49 +269,17 @@ func (h *Handler) handleAdminActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
-// rateLimit: dos capas (ventana fija 1 min). Antes el contador era GLOBAL por
-// path (3000/min compartido entre TODOS los usuarios): con carga alta los
-// usuarios legítimos se bloqueaban entre sí ("demasiados intentos").
-//   - por cliente+path (240/min): "cliente" = IP real (X-Forwarded-For del
-//     proxy) o, si el BFF no la reenvía, el email del query autenticado —
-//     un abusivo se limita solo a sí mismo.
-//   - global por path (12000/min): backstop que protege la DB ante estampidas.
-//
-// Nil cache o Redis caído ⇒ permite. Excluye webhook y health.
-func (h *Handler) rateLimit(next http.Handler) http.Handler {
-	const perClientPerMinute = 240
-	const perPathPerMinute = 12000
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/webhooks/stripe" || r.URL.Path == "/health" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		client := clientKey(r)
-		if !h.store.cache.allow(r.Context(), "rl:c:"+client+":"+r.Method+":"+r.URL.Path, perClientPerMinute, time.Minute) ||
-			!h.store.cache.allow(r.Context(), "rl:g:"+r.Method+":"+r.URL.Path, perPathPerMinute, time.Minute) {
-			writeErr(w, http.StatusTooManyRequests, "rate_limited")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// clientKey identifica al cliente para rate limiting: primera IP del
-// X-Forwarded-For (Caddy/BFF), o el email del query (llamadas BFF sin XFF),
-// o la IP directa como último recurso.
+// Only a trusted proxy's last forwarded hop is used as the network identity.
 func clientKey(r *http.Request) string {
 	// X-Forwarded-For solo se honra si la conexión viene del proxy local
 	// (Caddy en loopback / red privada). Un cliente directo podría inventar un
 	// XFF distinto por request y fabricar claves ilimitadas, anulando el límite
 	// por-cliente (quedaría solo el backstop global).
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" && fromTrustedProxy(r.RemoteAddr) {
-		if i := strings.IndexByte(xff, ','); i > 0 {
-			return strings.TrimSpace(xff[:i])
+		if i := strings.LastIndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[i+1:])
 		}
 		return strings.TrimSpace(xff)
-	}
-	if email := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("email"))); email != "" {
-		return email
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
@@ -707,6 +675,9 @@ func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
 // presente pero es inválido — el caller distingue ese caso con headerPresent).
 func (h *Handler) verifiedEmail(r *http.Request) (email string, ok bool) {
 	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
+	if identity, exists := r.Context().Value(budgetIdentityKey{}).(verifiedBudgetIdentity); exists && identity.token == raw {
+		return identity.email, true
+	}
 	if raw == "" || h.verifier == nil {
 		return "", false
 	}
