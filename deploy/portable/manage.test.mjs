@@ -35,7 +35,7 @@ function fixture(environment = 'staging') {
   env('api').ENGINE_MTLS_REQUIRED = 'true';
   env('api').BETTER_AUTH_SECRET = 'test-better-auth-secret-not-real-'.repeat(2);
   for (const name of ['api', 'engine', 'payments', 'withdrawals', 'client', 'backup']) {
-    env(name)[name === 'client' ? 'MEMBER_DATABASE_URL' : 'DATABASE_URL'] = `postgres://${name}:test-db-password-not-real@postgres:5432/mindbliss_${environment}`;
+    env(name)[name === 'client' ? 'MEMBER_DATABASE_URL' : 'DATABASE_URL'] = `postgres://${name}:synthetic-db-password-not-real@postgres:5432/mindbliss_${environment}`;
   }
   for (const name of ['engine', 'payments', 'withdrawals']) env(name).ENV = environment;
   env('payments').PAYMENTS_COMPANY_ROOT_AFFILIATE_ID = '101';
@@ -63,15 +63,15 @@ const mutations = [
   ['wrong Stripe environment', c => { c.services.payments.environment.STRIPE_SECRET_KEY = 'sk_test_fake'; }],
   ['missing external backup', c => { c.services.backup.environment.BACKUP_S3_URI = ''; }],
   ['mismatched token', c => { c.services.admin.environment.PAYMENTS_SERVICE_TOKEN = 'wrong'; }],
-  ['cross-environment database', c => { c.services.engine.environment.DATABASE_URL = 'postgres://writer:fake@postgres/mindbliss_staging'; }],
-  ['database superuser', c => { c.services.client.environment.MEMBER_DATABASE_URL = 'postgres://postgres:fake@postgres/mindbliss_production'; }],
+  ['cross-environment database', c => { c.services.engine.environment.DATABASE_URL = 'postgres://writer:fixture@postgres/mindbliss_staging'; }],
+  ['database superuser', c => { c.services.client.environment.MEMBER_DATABASE_URL = 'postgres://postgres:fixture@postgres/mindbliss_production'; }],
   ['shared writer role', c => { c.services.client.environment.MEMBER_DATABASE_URL = c.services.payments.environment.DATABASE_URL; }],
   ['duplicate scheduler', c => { c.services.engine.environment.BONUS_ENGINE_BINARY_CYCLE_ENABLED = 'true'; }],
   ['host networking', c => { c.services.api.network_mode = 'host'; }],
   ['wrong root', c => { c.services.engine.environment.BONUS_ENGINE_COMPANY_ROOT_AFFILIATE_ID = '999'; }],
   ['wrong withdrawal identity', c => { c.services.withdrawals.environment.COGNITO_CLIENT_ID = 'other'; }],
   ['BMP path instead of origin', c => { c.services.withdrawals.environment.BMP_BASE_URL = 'https://bmp.example.invalid/api/v1/'; }],
-  ['weak runtime password', c => { c.services.payments.environment.DATABASE_URL = 'postgres://payments:weak@postgres/mindbliss_production'; }],
+  ['weak runtime password', c => { c.services.payments.environment.DATABASE_URL = 'postgres://payments:test@postgres/mindbliss_production'; }],
 ];
 for (const [name, mutate] of mutations) test(`rejects ${name}`, () => {
   const config = fixture('production'); mutate(config);
@@ -97,6 +97,12 @@ test('actual Compose files resolve to different projects and volumes, with no pu
     for (const name of ['postgres', 'redis', 'engine', 'api', 'payments', 'withdrawals']) assert.equal(config.services[name].ports, undefined);
     assert.equal(config.services.client.environment.DEMO_LOGIN_ENABLED, '0');
     assert.equal(config.services.payments.environment.REQUIRE_VERIFIED_IDENTITY, 'true');
+    for (const name of ['engine', 'api', 'payments', 'withdrawals', 'client', 'admin']) {
+      assert.equal(config.services[name].pids_limit, 256);
+      assert.ok(config.services[name].mem_limit >= 384 * 1024 * 1024);
+      assert.ok(config.services[name].cpus > 0);
+    }
+    assert.ok(config.services.client.tmpfs.includes('/app/.next/cache:uid=65532,gid=65532,mode=0700,size=128m'));
     assert.ok(validateConfig(config, environment).length > 0, 'unfilled templates must not pass preflight');
   }
   assert.notEqual(names[0], names[1]);
@@ -115,7 +121,7 @@ function rdsFixture() {
   });
   for (const name of ['api', 'engine', 'payments', 'withdrawals', 'client', 'backup']) {
     const key = name === 'client' ? 'MEMBER_DATABASE_URL' : 'DATABASE_URL';
-    config.services[name].environment[key] = `postgres://${name}:test-db-password-not-real@${host}:5432/mindbliss_production?sslmode=verify-full&sslrootcert=/run/db-ca/server-ca.pem`;
+    config.services[name].environment[key] = `postgres://${name}:synthetic-db-password-not-real@${host}:5432/mindbliss_production?sslmode=verify-full&sslrootcert=/run/db-ca/server-ca.pem`;
     config.services[name].volumes = [{ type: 'bind', source: '/synthetic/db-ca', target: '/run/db-ca', read_only: true }];
   }
   return config;

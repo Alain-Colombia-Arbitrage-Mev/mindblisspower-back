@@ -22,3 +22,9 @@ separados:
 
 No mezclar estos flujos en login, registro, onboarding ni endpoints publicos.
 Ver `docs/tree-activation-reconciliation.md`.
+
+## Mantenimiento y verificación
+
+Ver [límites de módulos y contratos de seguridad](docs/maintenance-boundaries.md)
+y [responsabilidades de Payments](vp-engine/internal/payments/README.md).
+Las lecturas de recuperación son evidencia, no activaciones ni comisiones calculadas.

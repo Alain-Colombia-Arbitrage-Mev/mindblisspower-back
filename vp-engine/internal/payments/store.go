@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 var (
@@ -28,10 +29,13 @@ type Store struct {
 	dbRead    *pgxpool.Pool // réplica de lectura (opcional); nil ⇒ usa db
 	EngineURL string
 	cache     *Cache         // nil ⇒ sin caché (degrada a DB)
+	treeReads *treeReadCache // display-only branches; isolated per database/Store
 	log       zerolog.Logger // best-effort (comprobantes, eventos); Nop por defecto
 }
 
-func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db, log: zerolog.Nop()} }
+func NewStore(db *pgxpool.Pool) *Store {
+	return &Store{db: db, treeReads: newTreeReadCache(), log: zerolog.Nop()}
+}
 
 // SetCache inyecta la caché Redis (cache-aside). nil = deshabilitada.
 func (s *Store) SetCache(c *Cache) { s.cache = c }
@@ -43,7 +47,10 @@ func (s *Store) SetLogger(l zerolog.Logger) { s.log = l }
 // SetReadPool inyecta la réplica de lectura (READ_DATABASE_URL). Los métodos de
 // SOLO LECTURA (finance/solvency/member) la usan vía reader(); las escrituras
 // siempre van al primary. nil = todo al primary.
-func (s *Store) SetReadPool(p *pgxpool.Pool) { s.dbRead = p }
+func (s *Store) SetReadPool(p *pgxpool.Pool) {
+	s.dbRead = p
+	s.treeReads.invalidate()
+}
 
 // reader devuelve la réplica si está configurada, si no el primary. Lag de
 // réplica aceptable: los reads calientes ya van cacheados 15-20s.
@@ -305,6 +312,9 @@ func (s *Store) MarkIntentRiskStatus(ctx context.Context, paymentIntentID, newSt
 }
 
 func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (string, error) {
+	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+		return "", err
+	}
 	id, err := s.createPurchaseIntent(ctx, in, true)
 	if isUndefinedColumn(err) {
 		return s.createPurchaseIntent(ctx, in, false)

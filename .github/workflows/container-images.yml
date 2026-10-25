@@ -7,12 +7,14 @@ concurrency:
   group: container-images-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  security:
+    uses: ./.github/workflows/dependency-security.yml
   verify:
     uses: ./.github/workflows/postgres-rds.yml
   runtime:
     uses: ./.github/workflows/app-platform-local.yml
   publish:
-    needs: [verify, runtime]
+    needs: [security, verify, runtime]
     if: github.ref_name == github.event.repository.default_branch && vars.DEPLOYMENT_PROVIDER == 'digitalocean'
     environment: container-images
     runs-on: ubuntu-latest

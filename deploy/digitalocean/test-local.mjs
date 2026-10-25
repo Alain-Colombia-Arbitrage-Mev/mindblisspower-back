@@ -19,6 +19,11 @@ const tool = 'mindbliss/backup:infra-20261023';
 const node = 'node:24.16.0-bookworm-slim';
 const images = { engine: 'mindbliss/app-platform-engine:test-20261024', api: 'mindbliss/app-platform-api:test-20261024',
   payments: 'mindbliss/app-platform-payments:test-20261024', withdrawals: 'mindbliss/app-platform-withdrawals:test-20261024' };
+const testImageTag = process.env.MINDBLISS_TEST_IMAGE_TAG;
+if (testImageTag !== undefined) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/.test(testImageTag)) throw new Error('Invalid local test image tag');
+  for (const service of Object.keys(images)) images[service] = `mindbliss/${service}:${testImageTag}`;
+}
 let success = false;
 function docker(args, env = {}, input) {
   const result = spawnSync('docker', args, { input, env: { ...process.env, ...env }, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
@@ -28,7 +33,9 @@ function docker(args, env = {}, input) {
 function run(name, network, image, env, args = [], options = []) {
   const fullName = `${prefix}-${name}`;
   const flags = Object.keys(env).flatMap(key => ['-e', key]);
-  docker(['run', '-d', '--name', fullName, '--network', network, '--network-alias', name.split('-').at(-1),
+  const hardened = ['engine', 'api', 'payments', 'withdrawals'].some(service => name.endsWith(`-${service}`))
+    ? ['--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256', '--memory', '512m', '--cpus', '1'] : [];
+  docker(['run', '-d', '--name', fullName, '--network', network, '--network-alias', name.split('-').at(-1), ...hardened,
     ...options, ...flags, image, ...args], env);
   containers.push(fullName);
   return fullName;
@@ -119,7 +126,7 @@ try {
     report.push({ ...JSON.parse(output), health: `http://127.0.0.1:${port}/health`, database, financialWrites: false });
     console.log(`PASS ${environment}: ${report.at(-1).passed} probes; ${report.at(-1).health}`);
   }
-  await writeFile(path.join(artifact, 'report.json'), JSON.stringify({ synthetic: true, environments: report }, null, 2));
+  await writeFile(path.join(artifact, 'report.json'), JSON.stringify({ synthetic: true, images, environments: report }, null, 2));
   success = true;
 } finally {
   if (!(success && process.argv.includes('--keep'))) {

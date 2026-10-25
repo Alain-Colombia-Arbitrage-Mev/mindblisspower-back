@@ -22,13 +22,14 @@ import (
 // fakeStore implementa StoreAPI con campos-función: permite ejercitar la capa
 // HTTP (contratos de respuesta, mapeo de errores, autorización) sin Postgres.
 type fakeStore struct {
-	requestFn   func(ctx context.Context, email, amount, bankInfo string) (WithdrawalResult, error)
-	listFn      func(ctx context.Context, status string, limit, offset int) ([]AdminWithdrawal, int64, error)
-	setStatusFn func(ctx context.Context, id int64, status, adminEmail string) error
-	isAdminFn   func(ctx context.Context, email string) (bool, error)
-	suspendedFn func(ctx context.Context, email string) (bool, error)
-	emailByIDFn func(ctx context.Context, id int64) (string, error)
-	refreshFn   func(ctx context.Context, id int64, v BMPVerification) error
+	financialWritesFn func(context.Context) error
+	requestFn         func(ctx context.Context, email, amount, bankInfo string) (WithdrawalResult, error)
+	listFn            func(ctx context.Context, status string, limit, offset int) ([]AdminWithdrawal, int64, error)
+	setStatusFn       func(ctx context.Context, id int64, status, adminEmail string) error
+	isAdminFn         func(ctx context.Context, email string) (bool, error)
+	suspendedFn       func(ctx context.Context, email string) (bool, error)
+	emailByIDFn       func(ctx context.Context, id int64) (string, error)
+	refreshFn         func(ctx context.Context, id int64, v BMPVerification) error
 
 	// vínculo BMP alterno (Task 11)
 	requestLinkFn func(ctx context.Context, memberEmail, bmpEmail, ip string, v BMPVerification) (int64, error)
@@ -68,6 +69,13 @@ type fakeStore struct {
 	gotReviewNote      string
 	reviewLinkCalled   bool
 	approvedCalledWith string
+}
+
+func (f *fakeStore) CheckFinancialWrites(ctx context.Context) error {
+	if f.financialWritesFn != nil {
+		return f.financialWritesFn(ctx)
+	}
+	return nil
 }
 
 func (f *fakeStore) RequestWithdrawalWithBMP(ctx context.Context, email, amount, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error) {

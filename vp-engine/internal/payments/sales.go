@@ -23,6 +23,7 @@ const riskChargeStatusesSQL = "'failed','refunded','security_blocked','disputed'
 // SalesRow es el desglose de ventas de un paquete (tier de precio del producto
 // Stripe PACK MINDBLISS) en el período consultado.
 type SalesRow struct {
+	DataSource  string `json:"data_source,omitempty"`
 	PackageID   int64  `json:"package_id"`
 	Name        string `json:"name"`
 	AmountUSD   string `json:"amount_usd"`
@@ -38,20 +39,22 @@ type SalesRow struct {
 // sobre cobros exitosos verificados: paid_at presente, no reembolsados y no
 // marcados como inexistentes en Stripe live.
 type SalesCashSummary struct {
-	TotalStarted             int64  `json:"total_started"`
-	SuccessfulCharges        int64  `json:"successful_charges"`
-	ActivatedSales           int64  `json:"activated_sales"`
-	PackageSalesUSD          string `json:"package_sales_usd"`
-	ActivationFeesUSD        string `json:"activation_fees_usd"`
-	GrossChargedUSD          string `json:"gross_charged_usd"`
-	StripeFeeUSD             string `json:"stripe_fee_usd"`
-	StripeSecurityReserveUSD string `json:"stripe_security_reserve_usd"`
-	StripeReceivableUSD      string `json:"stripe_receivable_usd"`
-	StripeReceivableETA      string `json:"stripe_receivable_eta"`
-	PendingStripePayoutUSD   string `json:"pending_stripe_payout_usd"`
-	AvailableAfterStripeUSD  string `json:"available_after_stripe_usd"`
-	RefundedCharges          int64  `json:"refunded_charges"`
-	RefundedUSD              string `json:"refunded_usd"`
+	DataSource               string                `json:"data_source,omitempty"`
+	StripeRecovery           *StripeRecoveryReview `json:"stripe_recovery,omitempty"`
+	TotalStarted             int64                 `json:"total_started"`
+	SuccessfulCharges        int64                 `json:"successful_charges"`
+	ActivatedSales           int64                 `json:"activated_sales"`
+	PackageSalesUSD          string                `json:"package_sales_usd"`
+	ActivationFeesUSD        string                `json:"activation_fees_usd"`
+	GrossChargedUSD          string                `json:"gross_charged_usd"`
+	StripeFeeUSD             string                `json:"stripe_fee_usd"`
+	StripeSecurityReserveUSD string                `json:"stripe_security_reserve_usd"`
+	StripeReceivableUSD      string                `json:"stripe_receivable_usd"`
+	StripeReceivableETA      string                `json:"stripe_receivable_eta"`
+	PendingStripePayoutUSD   string                `json:"pending_stripe_payout_usd"`
+	AvailableAfterStripeUSD  string                `json:"available_after_stripe_usd"`
+	RefundedCharges          int64                 `json:"refunded_charges"`
+	RefundedUSD              string                `json:"refunded_usd"`
 }
 
 // SecurityPendingChargeSummary totaliza las ventas con riesgo operativo que
@@ -100,6 +103,11 @@ var (
 //   - Revenue  = suma de amount_usd de lo efectivamente cobrado (paid_at not null,
 //     sin reembolsos), incluye pagos aún sin colocar (needs_placement).
 func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return nil, err
+	} else if recovered {
+		return s.recoveredSalesReport(ctx, from)
+	}
 	rows, err := s.reader().Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
 		       count(*),
@@ -130,6 +138,11 @@ func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, er
 }
 
 func (s *Store) SalesCashSummary(ctx context.Context, from time.Time) (SalesCashSummary, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return SalesCashSummary{}, err
+	} else if recovered {
+		return s.recoveredSalesCashSummary(ctx, from)
+	}
 	var c SalesCashSummary
 	if err := s.reader().QueryRow(ctx, `
 		SELECT count(*),
@@ -336,6 +349,11 @@ func (s *Store) RecordOperationalCharge(ctx context.Context, chargeType string, 
 	}
 	if len(reason) < 3 || len(reason) > 500 {
 		return OperationalChargeAdjustment{}, ErrOperationalChargeReason
+	}
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return OperationalChargeAdjustment{}, err
+	} else if recovered {
+		return OperationalChargeAdjustment{}, ErrRecoveryFinancialReview
 	}
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
@@ -573,13 +591,22 @@ func isOperationalChargeTableUnavailable(err error) bool {
 // desde una fecha. GrossCents = sum(total_cents) e incluye el 1% de activación,
 // para ser comparable 1:1 con el bruto de Stripe.
 type DBSalesTotal struct {
-	Count      int64 `json:"count"`
-	GrossCents int64 `json:"gross_cents"`
+	DataSource string `json:"data_source,omitempty"`
+	Count      int64  `json:"count"`
+	GrossCents int64  `json:"gross_cents"`
 }
 
 // SalesTotalsSince agrega los intents ACTIVADOS desde `from` (cuenta + bruto en
 // centavos) para conciliar contra Stripe.
 func (s *Store) SalesTotalsSince(ctx context.Context, from time.Time) (DBSalesTotal, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return DBSalesTotal{}, err
+	} else if recovered {
+		out := DBSalesTotal{DataSource: recoveredStripeSource}
+		err := s.db.QueryRow(ctx, `SELECT count(*),COALESCE(sum(s.captured_minor),0)
+			FROM payments.stripe_sale s WHERE `+recoveredStripePredicate+` AND s.charged_at >= $1`, from).Scan(&out.Count, &out.GrossCents)
+		return out, err
+	}
 	var t DBSalesTotal
 	err := s.reader().QueryRow(ctx, `
 		SELECT count(*), COALESCE(sum(total_cents), 0)
@@ -652,11 +679,15 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	securityCharges, err := h.store.SecurityPendingChargeSummary(r.Context(), from)
-	if err != nil {
-		h.log.Error().Err(err).Msg("security pending charges")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
+	var securityCharges *SecurityPendingChargeSummary
+	if cash.StripeRecovery == nil {
+		charges, err := h.store.SecurityPendingChargeSummary(r.Context(), from)
+		if err != nil {
+			h.log.Error().Err(err).Msg("security pending charges")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		securityCharges = &charges
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"from":             from.Format("2006-01-02"),
@@ -698,6 +729,8 @@ func (h *Handler) handleAdminOperationalCharge(w http.ResponseWriter, r *http.Re
 	}
 	adj, err := h.store.RecordOperationalCharge(r.Context(), req.ChargeType, req.Quantity, req.Reason, adminEmail, occurredAt)
 	switch {
+	case errors.Is(err, ErrRecoveryFinancialReview):
+		writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
 	case errors.Is(err, ErrOperationalChargeType):
 		writeErr(w, http.StatusBadRequest, "invalid_charge_type")
 	case errors.Is(err, ErrOperationalChargeQuantity):
@@ -739,27 +772,35 @@ func parseOperationalChargeOccurredAt(v string) (time.Time, error) {
 // mlm.person (identidad del pagador). Otros productos de Stripe NO aparecen aquí
 // porque nunca generan un purchase_intent.
 type SalesTransaction struct {
-	ID           string `json:"id"`
-	CreatedAt    string `json:"created_at"`
-	Email        string `json:"email"`
-	Name         string `json:"name"`
-	Plan         string `json:"plan"`
-	AmountUSD    string `json:"amount_usd"`
-	FeeUSD       string `json:"fee_usd"`
-	TotalUSD     string `json:"total_usd"`
-	Status       string `json:"status"`
-	Reference    string `json:"reference"` // stripe_payment_intent_id
-	PaidAt       string `json:"paid_at"`
-	ActivatedAt  string `json:"activated_at"`
-	AffiliateID  *int64 `json:"affiliate_id"`   // colocación en el árbol (null = sin colocar)
-	StripeVerify *bool  `json:"stripe_present"` // verificación Stripe live (null = sin verificar)
-	RefundUSD    string `json:"refund_usd"`
-	RefundedAt   string `json:"refunded_at"`
+	DataSource       string `json:"data_source,omitempty"`
+	ReadOnly         bool   `json:"read_only,omitempty"`
+	CommissionStatus string `json:"affiliate_commission_status,omitempty"`
+	ID               string `json:"id"`
+	CreatedAt        string `json:"created_at"`
+	Email            string `json:"email"`
+	Name             string `json:"name"`
+	Plan             string `json:"plan"`
+	AmountUSD        string `json:"amount_usd"`
+	FeeUSD           string `json:"fee_usd"`
+	TotalUSD         string `json:"total_usd"`
+	Status           string `json:"status"`
+	Reference        string `json:"reference"` // stripe_payment_intent_id
+	PaidAt           string `json:"paid_at"`
+	ActivatedAt      string `json:"activated_at"`
+	AffiliateID      *int64 `json:"affiliate_id"`   // colocación en el árbol (null = sin colocar)
+	StripeVerify     *bool  `json:"stripe_present"` // verificación Stripe live (null = sin verificar)
+	RefundUSD        string `json:"refund_usd"`
+	RefundedAt       string `json:"refunded_at"`
 }
 
 // SalesTransactions lista las ventas individuales de membresías desde `from`,
 // con filtro opcional por status y búsqueda por email (user_id). Paginado.
 func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q string, limit, offset int) ([]SalesTransaction, int64, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return nil, 0, err
+	} else if recovered {
+		return s.recoveredSalesTransactions(ctx, from, status, q, limit, offset)
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
@@ -829,7 +870,7 @@ func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Re
 	}
 	status := strings.TrimSpace(qv.Get("status"))
 	switch status {
-	case "", "created", "paid", "activated", "needs_placement", "failed", "expired", "refunded", "security_blocked", "disputed", "chargeback":
+	case "", "created", "paid", "activated", "needs_placement", "failed", "expired", "refunded", "security_blocked", "disputed", "chargeback", "under_review":
 	default:
 		status = "" // status desconocido ⇒ sin filtro (no error)
 	}
@@ -859,6 +900,11 @@ func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Re
 // resultado en stripe_present (true/false). Ids no consultables (sin pi_) dejan
 // stripe_present sin tocar. Devuelve la presencia y el status actual del intent.
 func (s *Store) VerifyTransactionStripe(ctx context.Context, gw *StripeGateway, intentID string) (PaymentIntentPresence, string, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return PIPresenceUnknown, "", err
+	} else if recovered {
+		return PIPresenceUnknown, "", ErrRecoveryFinancialReview
+	}
 	var piID, status string
 	err := s.reader().QueryRow(ctx,
 		`SELECT COALESCE(stripe_payment_intent_id, ''), status FROM payments.purchase_intent WHERE id = $1::uuid`,
@@ -900,6 +946,10 @@ func (h *Handler) handleAdminSalesVerify(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	presence, status, err := h.store.VerifyTransactionStripe(r.Context(), h.gw, id)
+	if errors.Is(err, ErrRecoveryFinancialReview) {
+		writeErr(w, http.StatusConflict, "stripe_recovery_read_only")
+		return
+	}
 	if errors.Is(err, ErrIntentNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return

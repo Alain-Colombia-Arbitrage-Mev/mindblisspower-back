@@ -1,8 +1,6 @@
 package payments
 
 import (
-	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,19 +11,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	stripe "github.com/stripe/stripe-go/v85"
 	"github.com/vicionpower/vp-engine/internal/networkintel"
 )
-
-const maxWebhookBody = int64(1 << 18) // 256 KiB
-
-// idTokenHeader es el header por el que el BFF reenvía el id token Cognito crudo
-// para que el backend re-verifique la identidad (defensa en profundidad, H-2).
-const idTokenHeader = "X-VP-Id-Token"
-
-// actAsHeader: un super_admin autenticado solicita "ver como" otro usuario
-// (impersonación de solo lectura desde el panel admin) enviando el email objetivo.
-const actAsHeader = "X-VP-Act-As"
 
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
@@ -129,131 +116,6 @@ func (h *Handler) SetIdentityVerifier(v IdentityVerifier, requireVerified bool) 
 // automáticamente admins también.
 func (h *Handler) SetSuperAdmins(emails []string) { h.superAdminEmails = emails }
 
-// isSuperAdmin: true si el email está en el allowlist de super-admins.
-func (h *Handler) isSuperAdmin(email string) bool {
-	for _, a := range h.superAdminEmails {
-		if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(email)) {
-			return true
-		}
-	}
-	return false
-}
-
-// isAdminEmail: true si el email es super-admin, está en el allowlist por env, o
-// es is_admin en mlm.person.
-func (h *Handler) isAdminEmail(ctx context.Context, email string) (bool, error) {
-	if h.isSuperAdmin(email) {
-		return true, nil
-	}
-	for _, a := range h.adminEmails {
-		if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(email)) {
-			return true, nil
-		}
-	}
-	return h.store.IsAdmin(ctx, email)
-}
-
-// roleOf devuelve "super_admin" | "admin" | "" (para etiquetas del panel).
-func (h *Handler) roleOf(ctx context.Context, email string) string {
-	if h.isSuperAdmin(email) {
-		return "super_admin"
-	}
-	if admin, _ := h.isAdminEmail(ctx, email); admin {
-		return "admin"
-	}
-	return ""
-}
-
-// Routes monta el mux del servicio.
-func (h *Handler) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/api/payments/checkout", h.handleCheckout)
-	mux.HandleFunc("/api/payments/resume", h.handleResume)
-	mux.HandleFunc("/api/payments/me", h.handleMe)
-	mux.HandleFunc("/api/member/referral", h.handleMemberReferral)
-	mux.HandleFunc("/api/member/profile", h.handleMemberProfile)
-	mux.HandleFunc("/api/member/onboarding", h.handleMemberOnboarding)
-	mux.HandleFunc("/api/member/kyc/upload-url", h.handleKYCUploadURL)
-	mux.HandleFunc("/api/member/kyc/confirm", h.handleKYCConfirm)
-	mux.HandleFunc("/api/member/kyc/documents", h.handleKYCDocuments)
-	mux.HandleFunc("/api/member/news", h.handleMemberNews)
-	mux.HandleFunc("/api/webhooks/stripe", h.handleWebhook)
-	mux.HandleFunc("/api/admin/check", h.handleAdminCheck)
-	mux.HandleFunc("/api/admin/users", h.handleAdminUsers)
-	mux.HandleFunc("/api/admin/users/export", h.handleAdminUsersExport)
-	mux.HandleFunc("/api/admin/user", h.handleAdminUser)
-	mux.HandleFunc("/api/admin/user/branch-tree", h.handleAdminUserBranchTree)
-	mux.HandleFunc("/api/admin/user/tree-relocation", h.handleAdminUserTreeRelocation)
-	mux.HandleFunc("/api/admin/tree/roots", h.handleAdminTreeRoots)
-	mux.HandleFunc("/api/admin/tree/full", h.handleAdminTreeFull)
-	mux.HandleFunc("/api/admin/tree/children", h.handleAdminTreeChildren)
-	mux.HandleFunc("/api/admin/tree/search", h.handleAdminTreeSearch)
-	mux.HandleFunc("/api/admin/summary", h.handleAdminSummary)
-	mux.HandleFunc("/api/admin/block", h.handleAdminBlock)
-	mux.HandleFunc("/api/admin/blacklist", h.handleAdminBlacklist)
-	mux.HandleFunc("/api/admin/blacklist/remove", h.handleAdminBlacklistRemove)
-	mux.HandleFunc("/api/admin/admins", h.handleAdminAdmins)
-	mux.HandleFunc("/api/admin/admins/role", h.handleAdminAdminRole)
-	mux.HandleFunc("/api/admin/payments", h.handleAdminPayments)
-	mux.HandleFunc("/api/admin/payments/refund", h.handleAdminPaymentRefund)
-	mux.HandleFunc("/api/admin/finance", h.handleAdminFinance)
-	mux.HandleFunc("/api/admin/solvency", h.handleAdminSolvency)
-	mux.HandleFunc("/api/admin/plan", h.handleAdminPlan)
-	mux.HandleFunc("/api/admin/plan/proposals", h.handleAdminPlanProposals)
-	mux.HandleFunc("/api/admin/plan/propose", h.handleAdminPlanPropose)
-	mux.HandleFunc("/api/admin/plan/decide", h.handleAdminPlanDecide)
-	mux.HandleFunc("/api/admin/plan/simulate", h.handleAdminPlanSimulate)
-	mux.HandleFunc("/api/admin/activity", h.handleAdminActivity)
-	mux.HandleFunc("/api/admin/sales/report", h.handleAdminSalesReport)
-	mux.HandleFunc("/api/admin/sales/transactions", h.handleAdminSalesTransactions)
-	mux.HandleFunc("/api/admin/sales/verify", h.handleAdminSalesVerify)
-	mux.HandleFunc("/api/admin/operational-charges", h.handleAdminOperationalCharge)
-	mux.HandleFunc("/api/admin/carts/remind", h.handleAdminCartRemind)
-	mux.HandleFunc("/api/admin/carts/summary", h.handleAdminCartsSummary)
-	mux.HandleFunc("/api/admin/sales/reconcile", h.handleAdminSalesReconcile)
-	mux.HandleFunc("/api/admin/sales/sweep", h.handleAdminSalesSweep)
-	mux.HandleFunc("/api/admin/otp-health", h.handleAdminOtpHealth)
-	mux.HandleFunc("/api/admin/otp-check", h.handleAdminOtpCheck)
-	mux.HandleFunc("/api/admin/tickets", h.handleAdminTickets)
-	mux.HandleFunc("/api/admin/tickets/action", h.handleAdminTicketAction)
-	mux.HandleFunc("/api/admin/tickets/agents", h.handleAdminTicketAgents)
-	mux.HandleFunc("/api/admin/email", h.handleAdminEmail)
-	mux.HandleFunc("/api/admin/comms/campaigns", h.handleCommsCampaigns)
-	mux.HandleFunc("/api/admin/comms/campaign", h.handleCommsCampaign)
-	mux.HandleFunc("/api/admin/comms/campaign/preview", h.handleCommsPreview)
-	mux.HandleFunc("/api/admin/comms/campaign/test", h.handleCommsTest)
-	mux.HandleFunc("/api/admin/comms/campaign/submit", h.handleCommsSubmit)
-	mux.HandleFunc("/api/admin/comms/campaign/decide", h.handleCommsDecide)
-	mux.HandleFunc("/api/admin/comms/campaign/control", h.handleCommsControl)
-	mux.HandleFunc("/api/admin/comms/campaign/recipients", h.handleCommsRecipients)
-	mux.HandleFunc("/api/comms/unsubscribe", h.handleCommsUnsubscribe)
-	mux.HandleFunc("/api/admin/news", h.handleAdminNews)
-	mux.HandleFunc("/api/support/access-help", h.handleAccessHelp)
-	mux.HandleFunc("/api/support/email/ingest", h.handleSupportEmailIngest)
-	mux.HandleFunc("/api/support/voice/twilio", h.handleTwilioVoice)
-	mux.HandleFunc("/api/support/voice/twilio/process", h.handleTwilioVoiceProcess)
-	mux.HandleFunc("/api/support/voice/twilio/status", h.handleTwilioVoiceStatus)
-	mux.HandleFunc("/api/support/whatsapp/twilio", h.handleTwilioWhatsApp)
-	mux.HandleFunc("/internal/support/voice/turn", h.handleInternalVoiceTurn)
-	mux.HandleFunc("/api/support/ticket", h.handleMemberTicket)
-	mux.HandleFunc("/api/support/tickets", h.handleMemberTickets)
-	mux.HandleFunc("/api/events/registration", h.handleRegistrationEvent)
-	mux.HandleFunc("/api/registration/precheck", h.handleRegistrationPrecheck)
-	mux.HandleFunc("/api/registration/referral-attribution", h.handleRegistrationReferralAttribution)
-	mux.HandleFunc("/api/auth/user-exists", h.handleAuthUserExists)
-	mux.HandleFunc("/api/admin/health/system", h.handleAdminHealthSystem)
-	mux.HandleFunc("/api/admin/network/health", h.handleNetworkHealth)
-	mux.HandleFunc("/api/admin/network/sustainability", h.handleNetworkSustainability)
-	mux.HandleFunc("/api/admin/command-center/summary", h.handleCommandCenterSummary)
-	mux.HandleFunc("/api/admin/command-center/alerts", h.handleCommandCenterAlerts)
-	mux.HandleFunc("/api/admin/command-center/alerts/{id}/ack", h.handleCommandCenterAlertAck)
-	return h.rateLimit(mux)
-}
-
 // handleAdminActivity: feed de eventos de dominio recientes (Redis Stream).
 func (h *Handler) handleAdminActivity(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdmin(w, r); !ok {
@@ -301,157 +163,6 @@ func fromTrustedProxy(remoteAddr string) bool {
 	return ip.IsLoopback() || ip.IsPrivate()
 }
 
-type planSimulateReq struct {
-	Email   string         `json:"email"`
-	Changes map[string]any `json:"changes"`
-}
-
-// handleAdminPlanSimulate: proyecta θ bajo los cambios propuestos (preview del
-// lock de solvencia, sin persistir nada).
-func (h *Handler) handleAdminPlanSimulate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	if !h.svcAuth(w, r) {
-		return
-	}
-	var req planSimulateReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	email, ok := h.requireAdminIdentity(w, r, req.Email)
-	if !ok {
-		return
-	}
-	req.Email = email
-	sim, err := h.store.SimulatePlanTheta(r.Context(), req.Changes)
-	if err != nil {
-		h.log.Error().Err(err).Msg("simulate plan")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusOK, sim)
-}
-
-// handleAdminPlan: config de comisiones vigente + lista de campos editables.
-func (h *Handler) handleAdminPlan(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAdmin(w, r); !ok {
-		return
-	}
-	cfg, err := h.store.GetActivePlanConfig(r.Context())
-	if err != nil {
-		h.log.Error().Err(err).Msg("active plan")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	editable := make([]string, 0, len(planEditableFields))
-	for _, f := range planEditableFields {
-		editable = append(editable, f.Key)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"config": cfg, "editable": editable, "bounds": planBounds})
-}
-
-func (h *Handler) handleAdminPlanProposals(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAdmin(w, r); !ok {
-		return
-	}
-	items, err := h.store.ListPlanProposals(r.Context())
-	if err != nil {
-		h.log.Error().Err(err).Msg("list proposals")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"proposals": items})
-}
-
-type planProposeReq struct {
-	Email   string         `json:"email"`
-	Changes map[string]any `json:"changes"`
-	Reason  string         `json:"reason"`
-}
-
-func (h *Handler) handleAdminPlanPropose(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	if !h.svcAuth(w, r) {
-		return
-	}
-	var req planProposeReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	email, ok := h.requireAdminIdentity(w, r, req.Email)
-	if !ok {
-		return
-	}
-	req.Email = email
-	id, err := h.store.ProposePlanChange(r.Context(), req.Email, req.Changes, req.Reason)
-	if err != nil {
-		if errors.Is(err, ErrPlanFieldNotEditable) || errors.Is(err, ErrPlanFieldOutOfBounds) {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		h.log.Error().Err(err).Msg("propose plan change")
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	h.log.Info().Int64("request_id", id).Str("by", req.Email).Msg("plan change proposed")
-	writeJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "pending"})
-}
-
-type planDecideReq struct {
-	Email   string `json:"email"`
-	ID      int64  `json:"id"`
-	Approve bool   `json:"approve"`
-	Reason  string `json:"reason"`
-}
-
-func (h *Handler) handleAdminPlanDecide(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	if !h.svcAuth(w, r) {
-		return
-	}
-	var req planDecideReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	email, ok := h.requireAdminIdentity(w, r, req.Email)
-	if !ok {
-		return
-	}
-	req.Email = email
-	if req.ID <= 0 {
-		writeErr(w, http.StatusBadRequest, "missing id")
-		return
-	}
-	status, err := h.store.DecidePlanProposal(r.Context(), req.Email, req.ID, req.Approve, req.Reason)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrApproverIsInitiator):
-			writeErr(w, http.StatusForbidden, "approver_is_initiator")
-		case errors.Is(err, ErrProposalNotPending):
-			writeErr(w, http.StatusConflict, "not_pending")
-		case errors.Is(err, ErrSolvencyLock):
-			writeErr(w, http.StatusConflict, err.Error())
-		default:
-			h.log.Error().Err(err).Msg("decide plan proposal")
-			writeErr(w, http.StatusInternalServerError, "internal")
-		}
-		return
-	}
-	h.log.Info().Int64("request_id", req.ID).Bool("approve", req.Approve).Str("status", status).Str("by", req.Email).Msg("plan proposal decided")
-	writeJSON(w, http.StatusOK, map[string]string{"status": status})
-}
-
 // handleAdminFinance: tablero financiero de la red (entrante, distribuido,
 // pendiente, rangos, tesorería, moneyflow).
 func (h *Handler) handleAdminFinance(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +171,10 @@ func (h *Handler) handleAdminFinance(w http.ResponseWriter, r *http.Request) {
 	}
 	fin, err := h.store.GetAdminFinance(r.Context())
 	if err != nil {
+		if errors.Is(err, ErrRecoveryFinancialReview) {
+			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+			return
+		}
 		h.log.Error().Err(err).Msg("admin finance")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -490,6 +205,10 @@ func (h *Handler) handleNetworkHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	m, rx, err := h.store.BuildNetworkMetrics(r.Context(), h.companyRoot)
 	if err != nil {
+		if errors.Is(err, ErrRecoveryFinancialReview) {
+			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+			return
+		}
 		h.log.Error().Err(err).Msg("build network metrics")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -516,6 +235,10 @@ func (h *Handler) handleNetworkSustainability(w http.ResponseWriter, r *http.Req
 	// ── Live (cheap — siempre fresco) ────────────────────────────────────────
 	m, rx, err := h.store.BuildNetworkMetrics(ctx, h.companyRoot)
 	if err != nil {
+		if errors.Is(err, ErrRecoveryFinancialReview) {
+			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+			return
+		}
 		h.log.Error().Err(err).Msg("sustainability: build network metrics")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -648,143 +371,6 @@ func (h *Handler) handleAuthUserExists(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
-		return false
-	}
-	return true
-}
-
-// verifiedEmail lee el id token del header X-VP-Id-Token y lo re-verifica
-// (firma JWKS + iss + aud==clientId + token_use==id + exp). Devuelve el email
-// verificado (lowercased) y true en éxito. Devuelve ("", false) si el header
-// está ausente o si la verificación falla (fail-closed cuando el header SÍ está
-// presente pero es inválido — el caller distingue ese caso con headerPresent).
-func (h *Handler) verifiedEmail(r *http.Request) (email string, ok bool) {
-	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
-	if identity, exists := r.Context().Value(budgetIdentityKey{}).(verifiedBudgetIdentity); exists && identity.token == raw {
-		return identity.email, true
-	}
-	if raw == "" || h.verifier == nil {
-		return "", false
-	}
-	v, err := h.verifier.VerifyEmail(r.Context(), raw)
-	if err != nil {
-		h.log.Warn().Err(err).Msg("id token verification failed")
-		return "", false
-	}
-	return strings.ToLower(strings.TrimSpace(v)), true
-}
-
-// resolveIdentity deriva la identidad autoritativa de una request ya autenticada
-// por token de servicio, combinando el id token verificado (header) con el email
-// declarado por el cliente (query/body). Reglas (H-2, backward-compatible):
-//
-//   - Header presente + verificación OK ⇒ usa el email VERIFICADO. Si además
-//     viene un email declarado que NO coincide ⇒ 403 (evita que un caller
-//     asuma otra identidad que la de su token).
-//   - Header presente pero inválido ⇒ 401 (fail-closed; no cae al fallback).
-//   - Header ausente:
-//   - requireVerified=true ⇒ 401 (modo estricto).
-//   - requireVerified=false ⇒ fallback al email declarado + warning
-//     ("unverified-identity fallback") para observar callers pendientes.
-//
-// Devuelve el email autoritativo y true si la request puede proceder; en caso
-// contrario ya escribió la respuesta de error y devuelve false.
-func (h *Handler) resolveIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (string, bool) {
-	claimed := strings.ToLower(strings.TrimSpace(claimedEmail))
-
-	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
-	if raw != "" {
-		verified, ok := h.verifiedEmail(r)
-		if !ok {
-			// Header presente pero no verifica ⇒ fail-closed.
-			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
-			return "", false
-		}
-		if claimed != "" && claimed != verified {
-			h.log.Warn().Str("claimed", claimed).Str("verified", verified).Msg("identity mismatch: claimed email != verified id token")
-			writeErr(w, http.StatusForbidden, "identity_mismatch")
-			return "", false
-		}
-		return verified, true
-	}
-
-	// Header ausente.
-	if h.requireVerified {
-		writeErr(w, http.StatusUnauthorized, "id_token_required")
-		return "", false
-	}
-	if claimed == "" {
-		writeErr(w, http.StatusBadRequest, "missing email")
-		return "", false
-	}
-	h.log.Warn().Str("email", claimed).Str("path", r.URL.Path).Msg("unverified-identity fallback (no X-VP-Id-Token)")
-	return claimed, true
-}
-
-// effectiveIdentity resuelve la identidad REAL (token verificado) y, cuando un
-// super_admin lo solicita vía X-VP-Act-As en una request de LECTURA (GET), la
-// identidad EFECTIVA para los gates de datos del panel. Reglas:
-//   - Sin act-as ⇒ efectiva = real.
-//   - Con act-as pero el real NO es super_admin ⇒ se ignora (efectiva = real).
-//   - Con act-as, real super_admin, método != GET ⇒ 403 impersonation_read_only.
-//   - Con act-as, real super_admin, GET ⇒ efectiva = objetivo (auditoría).
-//
-// La AUTORIZACIÓN a impersonar se decide con la identidad REAL, nunca la efectiva.
-func (h *Handler) effectiveIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (real, effective string, ok bool) {
-	real, ok = h.resolveIdentity(w, r, claimedEmail)
-	if !ok {
-		return "", "", false
-	}
-	actAs := strings.ToLower(strings.TrimSpace(r.Header.Get(actAsHeader)))
-	if actAs == "" {
-		return real, real, true
-	}
-	if !h.isSuperAdmin(real) {
-		h.log.Warn().Str("real", real).Str("act_as", actAs).Str("path", r.URL.Path).Msg("act-as ignorado: el llamante no es super_admin")
-		return real, real, true
-	}
-	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusForbidden, "impersonation_read_only")
-		return "", "", false
-	}
-	h.log.Info().Str("real", real).Str("act_as", actAs).Str("path", r.URL.Path).Msg("impersonación (ver como)")
-	return real, actAs, true
-}
-
-// requireAdmin valida token de servicio + identidad verificada (o fallback) +
-// que el email resultante sea admin.
-func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return h.requireAdminIdentity(w, r, r.URL.Query().Get("email"))
-}
-
-// Body-only legacy callers use the same role, ban and impersonation checks.
-func (h *Handler) requireAdminIdentity(w http.ResponseWriter, r *http.Request, claimedEmail string) (string, bool) {
-	if !h.svcAuth(w, r) {
-		return "", false
-	}
-	_, eff, ok := h.effectiveIdentity(w, r, claimedEmail)
-	if !ok {
-		return "", false
-	}
-	if h.rejectIfSuspended(r.Context(), w, eff) {
-		return "", false
-	}
-	admin, err := h.isAdminEmail(r.Context(), eff)
-	if err != nil {
-		h.log.Error().Err(err).Msg("is_admin")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return "", false
-	}
-	if !admin {
-		writeErr(w, http.StatusForbidden, "not_admin")
-		return "", false
-	}
-	return eff, true
-}
-
 func (h *Handler) handleAdminCheck(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
@@ -881,8 +467,6 @@ func atoiDefault(s string, def int) int {
 	return n
 }
 
-// handleMe devuelve los pagos + posición + comisiones del miembro. Lo llama el
-// BFF Next (token de servicio) pasando el email autenticado por Cognito.
 // handleMemberReferral devuelve el código de referido real del miembro (por email).
 func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
@@ -904,13 +488,15 @@ func (h *Handler) handleMemberReferral(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"referral_code": code, "name": name})
 }
 
+// handleMe devuelve los pagos + posición + comisiones del miembro. Lo llama el
+// BFF Next (token de servicio) pasando el email autenticado por Cognito.
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
+	if !h.svcAuth(w, r) {
 		return
 	}
 	email, ok := h.resolveIdentity(w, r, r.URL.Query().Get("email"))
@@ -946,461 +532,6 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
-}
-
-// ── Checkout ────────────────────────────────────────────────────────────────
-
-type checkoutRequest struct {
-	Email         string `json:"email"`
-	PackageID     int    `json:"package_id"`
-	Ref           string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
-	PreferredSide string `json:"preferred_side"` // L/R del enlace; se persiste hasta el webhook de pago
-	Name          string `json:"name"`           // nombre del token (para auto-provisión de mlm.person)
-	Phone         string `json:"phone"`          // teléfono del token (E.164)
-}
-
-type checkoutResponse struct {
-	URL       string `json:"url"`
-	SessionID string `json:"session_id"`
-	TotalUSD  string `json:"total_usd"`
-	FeeUSD    string `json:"fee_usd"`
-}
-
-// handleCheckout crea una sesión de Checkout. Lo llama el BFF Next (que ya
-// validó la sesión Cognito) con el token de servicio + el user_id autenticado.
-func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	// Auth servicio-a-servicio (no Cognito aquí; el BFF ya autenticó al usuario).
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
-	var req checkoutRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	if req.Email == "" || req.PackageID <= 0 {
-		writeErr(w, http.StatusBadRequest, "missing email or package_id")
-		return
-	}
-
-	ctx := r.Context()
-	// Wallet congelada: un usuario baneado/suspendido no puede comprar. Se
-	// evalúa email + señales del token Cognito para bloquear también teléfono y
-	// nombre exacto normalizado.
-	if h.rejectIfBanned(ctx, w, BanCandidate{Email: req.Email, Phone: req.Phone, Name: req.Name}) {
-		return
-	}
-	pack, err := h.store.LookupPack(ctx, req.PackageID)
-	if errors.Is(err, ErrPackNotFound) {
-		writeErr(w, http.StatusNotFound, "package_not_found")
-		return
-	}
-	if err != nil {
-		h.log.Error().Err(err).Msg("lookup pack")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-
-	// Pago único: si el usuario YA tiene esta membresía activa (cupo abierto), no
-	// se permite pagarla otra vez (evita doble cobro por doble-click/reintento).
-	// Las membresías no son suscripción. Un paquete agotado sí permite recompra.
-	// Fail-open ante error de infra (no bloqueamos una compra legítima por un
-	// fallo transitorio; la activación sigue siendo idempotente por payment_intent).
-	if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
-		h.log.Error().Err(err).Str("email", req.Email).Int("package_id", req.PackageID).Msg("check active membership (fail-open)")
-	} else if active {
-		writeErr(w, http.StatusConflict, "Ya tienes esta membresía activa. Las membresías son de pago único.")
-		return
-	}
-
-	// Auto-provisión: usuario nuevo de Cognito sin fila en RDS → crear mlm.person
-	// (idempotente) para que el checkout pueda proceder. La colocación en el árbol
-	// la hace la activación.
-	if _, err := h.store.EnsurePerson(ctx, req.Email, req.Name, req.Phone); err != nil {
-		h.log.Error().Err(err).Str("email", req.Email).Msg("ensure person")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-
-	buyer, err := h.store.ResolveBuyer(ctx, req.Email)
-	if errors.Is(err, ErrBuyerNotFound) {
-		writeErr(w, http.StatusNotFound, "buyer_not_found")
-		return
-	}
-	if err != nil {
-		h.log.Error().Err(err).Msg("resolve buyer")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-
-	if strings.TrimSpace(req.PreferredSide) != "" && normalizePreferredSide(req.PreferredSide) == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_preferred_side")
-		return
-	}
-	sponsor, referralCodeForIntent, preferredSideForIntent, err := h.resolveCheckoutPlacement(ctx, req.Email, buyer, req.Ref, req.PreferredSide)
-	if errors.Is(err, ErrInvalidReferralCode) {
-		writeErr(w, http.StatusBadRequest, "invalid_referral_code")
-		return
-	}
-	if err != nil {
-		h.log.Error().Err(err).Str("email", req.Email).Msg("resolve checkout sponsor")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if buyer.AffiliateID != nil && sponsor != nil {
-		aligned, err := h.store.SponsorIsBinaryAncestor(ctx, *buyer.AffiliateID, *sponsor)
-		if err != nil {
-			h.log.Error().Err(err).Str("email", req.Email).Msg("checkout sponsor/tree alignment")
-			writeErr(w, http.StatusInternalServerError, "internal")
-			return
-		}
-		if !aligned {
-			h.log.Warn().
-				Str("email", req.Email).
-				Int64("affiliate_id", *buyer.AffiliateID).
-				Int64("sponsor_affiliate_id", *sponsor).
-				Msg("checkout blocked: sponsor is not a binary ancestor")
-			writeErr(w, http.StatusConflict, "tree_relocation_required")
-			return
-		}
-	}
-
-	intentID, err := h.store.CreatePurchaseIntent(ctx, PurchaseIntent{
-		UserID:             req.Email, // traceability: identificador externo del comprador
-		PersonID:           buyer.PersonID,
-		AffiliateID:        buyer.AffiliateID,
-		SponsorAffiliateID: sponsor,
-		ReferralCode:       referralCodeForIntent,
-		PreferredSide:      preferredSideForIntent,
-		PackageID:          pack.ID,
-		PV:                 pack.PV,
-		AmountUSD:          pack.AmountUSD,
-		FeeUSD:             pack.FeeUSD(),
-		TotalCents:         pack.TotalCents(),
-		Currency:           "usd",
-	})
-	if err != nil {
-		h.log.Error().Err(err).Msg("create purchase intent")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-
-	meta := map[string]string{
-		"purchase_intent_id": intentID,
-		"email":              req.Email,
-		"person_id":          strconv.FormatInt(buyer.PersonID, 10),
-		"package_id":         strconv.Itoa(pack.ID),
-		"pv":                 strconv.Itoa(pack.PV),
-	}
-	if preferredSideForIntent != "" {
-		meta["preferred_side"] = preferredSideForIntent
-	}
-	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, meta)
-	if err != nil {
-		h.log.Error().Err(err).Str("intent", intentID).Msg("stripe checkout create")
-		writeErr(w, http.StatusBadGateway, "stripe_error")
-		return
-	}
-	if err := h.store.AttachSession(ctx, intentID, sessionID); err != nil {
-		h.log.Error().Err(err).Msg("attach session")
-		// La sesión ya existe en Stripe; no abortamos. El webhook resuelve por
-		// session_id o por purchase_intent_id en metadata si el attach falló.
-	}
-
-	writeJSON(w, http.StatusOK, checkoutResponse{
-		URL: url, SessionID: sessionID,
-		TotalUSD: pack.TotalUSD().StringFixed(2), FeeUSD: pack.FeeUSD().StringFixed(2),
-	})
-}
-
-func (h *Handler) resolveCheckoutSponsor(ctx context.Context, email string, buyer Buyer, ref string) (*int64, string, error) {
-	sponsor, referralCode, _, err := h.resolveCheckoutPlacement(ctx, email, buyer, ref, "")
-	return sponsor, referralCode, err
-}
-
-func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, buyer Buyer, ref, requestedSide string) (*int64, string, string, error) {
-	// Sponsor: el del afiliado existente es autoritativo. Un ?ref=CODE sólo se
-	// usa para compradores aún no colocados; aplicar refs nuevos sobre afiliados
-	// existentes mezcla sesiones/navegadores y puede atribuir sponsors falsos.
-	sponsor := buyer.SponsorAffiliateID
-	referralCode := strings.TrimSpace(ref)
-	referralCodeForIntent := ""
-	preferredSideForIntent := ""
-
-	if buyer.AffiliateID == nil && sponsor == nil {
-		if referralCode != "" {
-			resolvedSponsor, err := h.store.ResolveSponsorByCode(ctx, referralCode)
-			if err != nil {
-				return nil, "", "", err
-			}
-			if resolvedSponsor == nil {
-				return nil, "", "", ErrInvalidReferralCode
-			}
-			sponsor = resolvedSponsor
-			referralCodeForIntent = referralCode
-			preferredSideForIntent = normalizePreferredSide(requestedSide)
-
-			// El registro persistido es autoritativo cuando corresponde al mismo
-			// código. Evita que un almacenamiento local viejo cambie L/R al pagar.
-			registeredReferral, lookupErr := h.store.LookupRegistrationReferral(ctx, email)
-			if lookupErr != nil {
-				return nil, "", "", lookupErr
-			}
-			if registeredReferral != nil && strings.EqualFold(registeredReferral.Code, referralCode) {
-				preferredSideForIntent = registeredReferral.PreferredSide
-			}
-		} else {
-			registeredReferral, err := h.store.LookupRegistrationReferral(ctx, email)
-			if err != nil {
-				return nil, "", "", err
-			}
-			if registeredReferral != nil {
-				sid := registeredReferral.SponsorAffiliateID
-				sponsor = &sid
-				referralCodeForIntent = registeredReferral.Code
-				preferredSideForIntent = registeredReferral.PreferredSide
-			}
-		}
-	}
-
-	// Sin sponsor (sin ?ref ni afiliado previo) → root de empresa (la activación
-	// derrama bajo él). Así nadie queda huérfano y el pago nunca se bloquea.
-	if sponsor == nil && h.companyRoot > 0 {
-		cr := h.companyRoot
-		sponsor = &cr
-	}
-	return sponsor, referralCodeForIntent, preferredSideForIntent, nil
-}
-
-// ── Webhook ──────────────────────────────────────────────────────────────────
-
-func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxWebhookBody)
-	payload, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "read_body")
-		return
-	}
-
-	event, err := h.gw.ConstructEvent(payload, r.Header.Get("Stripe-Signature"))
-	if err != nil {
-		h.log.Warn().Err(err).Msg("webhook signature verification failed")
-		writeErr(w, http.StatusBadRequest, "invalid_signature")
-		return
-	}
-
-	// Audit (best-effort): registra el evento. No es un gate — la idempotencia
-	// real vive en el ledger (external_ref), así que re-procesar es seguro.
-	if dup, derr := h.store.EventSeen(r.Context(), event.ID, string(event.Type)); derr != nil {
-		h.log.Warn().Err(derr).Str("event", event.ID).Msg("record stripe_event")
-	} else if dup {
-		h.log.Info().Str("event", event.ID).Str("type", string(event.Type)).Msg("duplicate event (reprocessing, downstream idempotent)")
-	}
-
-	switch event.Type {
-	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
-		if err := h.handlePaid(r.Context(), event); err != nil {
-			// 500 ⇒ Stripe reintenta con backoff. Seguro: todo el flujo es idempotente.
-			h.log.Error().Err(err).Str("event", event.ID).Msg("process paid event")
-			writeErr(w, http.StatusInternalServerError, "processing_error")
-			return
-		}
-	case "checkout.session.async_payment_failed", "payment_intent.payment_failed":
-		h.markIntentFromEvent(r.Context(), event, "failed")
-	case "checkout.session.expired":
-		h.markIntentFromEvent(r.Context(), event, "expired")
-	case "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed":
-		h.markRiskFromDispute(r.Context(), event)
-	case "review.closed":
-		h.markRiskFromReview(r.Context(), event)
-	default:
-		h.log.Debug().Str("type", string(event.Type)).Msg("unhandled event type")
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"received":true}`))
-}
-
-// markIntentFromEvent extrae el session/payment_intent id de un evento Stripe de
-// fallo o expiración y marca el purchase_intent correspondiente (failed/expired).
-// Best-effort: loguea y NO falla el webhook (respondemos 200; Stripe no reintenta
-// estos eventos). Saca el id según el tipo de objeto del evento.
-func (h *Handler) markIntentFromEvent(ctx context.Context, event stripe.Event, newStatus string) {
-	var sessionID, piID, intentID string
-	if strings.HasPrefix(string(event.Type), "checkout.session.") {
-		var cs stripe.CheckoutSession
-		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
-			h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal checkout.session (fail/expire)")
-			return
-		}
-		sessionID = cs.ID
-		if cs.PaymentIntent != nil {
-			piID = cs.PaymentIntent.ID
-		}
-		if cs.Metadata[MetadataProductTag] == MetadataProductVal {
-			intentID = strings.TrimSpace(cs.Metadata["purchase_intent_id"])
-		}
-	} else {
-		var pi stripe.PaymentIntent
-		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
-			h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal payment_intent (fail)")
-			return
-		}
-		piID = pi.ID
-		if pi.Metadata[MetadataProductTag] == MetadataProductVal {
-			intentID = strings.TrimSpace(pi.Metadata["purchase_intent_id"])
-		}
-	}
-	n, err := h.store.MarkIntentStatus(ctx, sessionID, piID, newStatus)
-	if err == nil && n == 0 && intentID != "" {
-		n, err = h.store.MarkIntentStatusByIntentID(ctx, intentID, piID, newStatus)
-	}
-	if err != nil {
-		h.log.Error().Err(err).Str("event", event.ID).Str("status", newStatus).Msg("mark intent status")
-		return
-	}
-	if n > 0 {
-		h.log.Info().Str("event", event.ID).Str("status", newStatus).Int64("intents", n).Msg("payment intent marked")
-	}
-}
-
-func (h *Handler) markRiskFromDispute(ctx context.Context, event stripe.Event) {
-	var d stripe.Dispute
-	if err := json.Unmarshal(event.Data.Raw, &d); err != nil {
-		h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal dispute")
-		return
-	}
-
-	status := "disputed"
-	switch d.Status {
-	case stripe.DisputeStatusLost:
-		status = "chargeback"
-	case stripe.DisputeStatusPrevented:
-		status = "security_blocked"
-	}
-
-	piID := paymentIntentID(d.PaymentIntent)
-	if piID == "" && d.Charge != nil {
-		piID = paymentIntentID(d.Charge.PaymentIntent)
-	}
-	h.markRiskStatus(ctx, event.ID, piID, status)
-}
-
-func (h *Handler) markRiskFromReview(ctx context.Context, event stripe.Event) {
-	var r stripe.Review
-	if err := json.Unmarshal(event.Data.Raw, &r); err != nil {
-		h.log.Warn().Err(err).Str("event", event.ID).Msg("unmarshal review")
-		return
-	}
-
-	status := ""
-	switch r.ClosedReason {
-	case stripe.ReviewClosedReasonDisputed:
-		status = "disputed"
-	case stripe.ReviewClosedReasonCanceled,
-		stripe.ReviewClosedReasonPaymentNeverSettled,
-		stripe.ReviewClosedReasonRefunded,
-		stripe.ReviewClosedReasonRefundedAsFraud:
-		status = "security_blocked"
-	default:
-		return
-	}
-
-	piID := paymentIntentID(r.PaymentIntent)
-	if piID == "" && r.Charge != nil {
-		piID = paymentIntentID(r.Charge.PaymentIntent)
-	}
-	h.markRiskStatus(ctx, event.ID, piID, status)
-}
-
-func (h *Handler) markRiskStatus(ctx context.Context, eventID, paymentIntentID, status string) {
-	if paymentIntentID == "" {
-		h.log.Warn().Str("event", eventID).Str("status", status).Msg("risk event without payment_intent")
-		return
-	}
-	n, err := h.store.MarkIntentRiskStatus(ctx, paymentIntentID, status)
-	if err != nil {
-		h.log.Error().Err(err).Str("event", eventID).Str("pi", paymentIntentID).Str("status", status).Msg("mark intent risk status")
-		return
-	}
-	if n > 0 {
-		h.log.Info().Str("event", eventID).Str("pi", paymentIntentID).Str("status", status).Int64("intents", n).Msg("payment intent risk marked")
-	}
-}
-
-func paymentIntentID(pi *stripe.PaymentIntent) string {
-	if pi == nil {
-		return ""
-	}
-	return pi.ID
-}
-
-func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {
-	var cs stripe.CheckoutSession
-	if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
-		return err
-	}
-	// Guard de cuenta compartida: la cuenta Stripe la comparten varios negocios.
-	// Solo activamos sesiones marcadas como "PACK MINDBLISS" (estampado en
-	// CreateCheckout). Un evento ajeno que llegue aquí se ignora sin error (200)
-	// para no forzar reintentos de Stripe. Defensa-en-profundidad: el flujo ya
-	// rechaza sesiones sin purchase_intent, pero este gate lo hace explícito.
-	if cs.Metadata[MetadataProductTag] != MetadataProductVal {
-		h.log.Warn().Str("session", cs.ID).Str("event", event.ID).
-			Msg("checkout.session sin marca packmindbliss; ignorando (cuenta compartida)")
-		return nil
-	}
-	// `payment` mode async (crypto/ACH) puede llegar como completed con
-	// payment_status 'unpaid' → solo activar cuando esté pagado.
-	if cs.PaymentStatus != stripe.CheckoutSessionPaymentStatusPaid {
-		h.log.Info().Str("session", cs.ID).Str("payment_status", string(cs.PaymentStatus)).Msg("session not yet paid; waiting for async_payment_succeeded")
-		return nil
-	}
-
-	piID := ""
-	if cs.PaymentIntent != nil {
-		piID = cs.PaymentIntent.ID
-	}
-	if piID == "" {
-		piID = "sess:" + cs.ID // fallback de idempotencia si no llegó el payment_intent
-	}
-	intentID := strings.TrimSpace(cs.Metadata["purchase_intent_id"])
-
-	// Activación atómica e idempotente (marca pagado + coloca + liga paquete + PV).
-	res, err := h.store.ActivatePaidPurchaseForIntent(ctx, cs.ID, piID, intentID)
-	if errors.Is(err, ErrIntentNotFound) {
-		// Sesión desconocida (creada fuera de este servicio). No reintentar.
-		h.log.Warn().Str("session", cs.ID).Msg("paid session has no purchase_intent; skipping")
-		return nil
-	}
-	if err != nil {
-		return err // 500 → Stripe reintenta; todo el flujo es idempotente
-	}
-
-	switch res.Status {
-	case "activated":
-		h.log.Info().Str("session", cs.ID).Str("pi", piID).Int64("affiliate_id", res.AffiliateID).Msg("payment confirmed → package activated")
-	case "needs_placement":
-		// Pago OK pero sin sponsor para colocar: requiere acción de ops/sponsor.
-		h.log.Warn().Str("session", cs.ID).Str("pi", piID).Msg("paid but NEEDS MANUAL PLACEMENT (no sponsor)")
-	case "security_blocked":
-		h.log.Warn().Str("session", cs.ID).Str("pi", piID).Msg("paid session blocked by ban engine; not placed in tree")
-	case "replay":
-		h.log.Info().Str("session", cs.ID).Msg("activation replay (already activated)")
-	}
-	// Nota: el asiento contable (capital + 1% platform_fee en wallet_movement)
-	// queda diferido y se concilia aparte (ver docs). No bloquea la activación.
-	return nil
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

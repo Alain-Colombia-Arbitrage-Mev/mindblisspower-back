@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // ActivationResult describe el desenlace de activar una compra pagada.
@@ -35,6 +36,9 @@ func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentInte
 // creada correctamente en Stripe cuyo stripe_session_id no alcanzó a guardarse
 // en RDS por un fallo transitorio después de CreateCheckout.
 func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, paymentIntentID, purchaseIntentID string) (ActivationResult, error) {
+	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+		return ActivationResult{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return ActivationResult{}, fmt.Errorf("begin tx: %w", err)
@@ -284,6 +288,7 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 }
 
 func (s *Store) invalidateMemberCaches(ctx context.Context, email string) {
+	s.treeReads.invalidate()
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return

@@ -8,15 +8,14 @@
  *      a tree position is chosen. Inserts mlm.affiliate + emits enrollment
  *      event. Lock-ordered by parent path to avoid concurrent placement
  *      races (two recruits placed at the same empty leg simultaneously).
- *   3. registerPvCredit      — emits a tree_event for PV inflow (package
- *      purchase, ROI etc). The trigger fans the delta out to ancestors.
+ * Financial commands are owned by modules/ledger and re-exported below for
+ * compatibility with existing internal callers.
  */
 import { db } from '../db/client';
-import { person, affiliate, treeEvent, transaction, walletMovement, concept } from '../db/schema/mlm';
-import { eq, sql } from 'drizzle-orm';
+import { person } from '../db/schema/mlm';
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { timestampFromDate, timestampDate } from '@bufbuild/protobuf/wkt';
-import { ledgerClient } from '../clients/engine';
+export { postTransaction, registerPvCredit } from '../modules/ledger';
 
 export async function createPersonFromUser(input: {
   userId: string;
@@ -194,83 +193,4 @@ export async function autoPlaceAffiliate(input: z.infer<typeof AutoPlacementSche
 
     return { affiliateId, parentAffiliateId: currentId.toString(), position: chosenSide };
   });
-}
-
-/**
- * Credit PV to an affiliate's leg (e.g. on package purchase).
- * `externalRef` MUST be unique per source event so retries are idempotent.
- */
-export async function registerPvCredit(input: {
-  externalRef: string;
-  affiliateId: bigint;
-  pv: number;
-}) {
-  await db.execute(sql`
-    INSERT INTO mlm.tree_event (
-      external_ref, kind, affiliate_id, pv_delta_left, pv_delta_right
-    ) VALUES (
-      ${input.externalRef}, 'pv_credit', ${input.affiliateId}, ${input.pv}, 0
-    )
-    ON CONFLICT (external_ref) DO NOTHING
-  `);
-}
-
-/**
- * Post a balanced wallet transaction by delegating to vp-engine.LedgerService.
- *
- * REGLA DE ORO (ADR-0002 §12): vp-api NUNCA escribe wallet_movement directo.
- * Toda escritura del ledger pasa por gRPC al motor Go, que es el único dueño
- * de mlm.wallet_movement y mlm.transaction (ADR-0008 §4).
- *
- * Idempotencia: externalRef único por evento. Re-ejecutar con el mismo ref
- * retorna wasIdempotentReplay=true sin duplicar movimientos.
- */
-export async function postTransaction(input: {
-  externalRef: string;
-  description: string;
-  initiatedByPersonId: bigint;
-  actor?: {
-    userId?: string;
-    isAdmin?: boolean;
-    ipAddress?: string;
-    userAgent?: string;
-    traceId?: string;
-  };
-  movements: {
-    walletId: bigint;
-    affiliateId: bigint;
-    conceptId: number;
-    amount: string;            // numeric as string to avoid float
-    reference?: string;
-    postedAt: Date;
-    availableAt?: Date;
-  }[];
-}): Promise<{ txnId: string; wasIdempotentReplay: boolean; postedAt: Date | null }> {
-  const res = await ledgerClient.postTransaction({
-    externalRef: input.externalRef,
-    description: input.description,
-    actor: {
-      personId: input.initiatedByPersonId,
-      userId:    input.actor?.userId    ?? '',
-      isAdmin:   input.actor?.isAdmin   ?? false,
-      ipAddress: input.actor?.ipAddress ?? '',
-      userAgent: input.actor?.userAgent ?? '',
-      traceId:   input.actor?.traceId   ?? '',
-    },
-    movements: input.movements.map((m) => ({
-      walletId:    m.walletId,
-      affiliateId: m.affiliateId,
-      conceptId:   m.conceptId,
-      amount:      m.amount,
-      reference:   m.reference ?? '',
-      postedAt:    timestampFromDate(m.postedAt),
-      availableAt: m.availableAt ? timestampFromDate(m.availableAt) : undefined,
-    })),
-  });
-
-  return {
-    txnId: res.transactionId,
-    wasIdempotentReplay: res.wasIdempotentReplay,
-    postedAt: res.postedAt ? timestampDate(res.postedAt) : null,
-  };
 }

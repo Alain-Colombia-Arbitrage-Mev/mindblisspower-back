@@ -487,6 +487,7 @@ func (s *Store) PreviewOrMoveAdminTreeRelocation(ctx context.Context, in AdminTr
 	if err := tx.Commit(ctx); err != nil {
 		return AdminTreeRelocationSummary{}, fmt.Errorf("tree relocation commit: %w", err)
 	}
+	s.treeReads.invalidate()
 
 	summary.PurchaseIntentsUpdated = paymentRows
 	summary.RegistrationReferralUpdated = referralUpdated

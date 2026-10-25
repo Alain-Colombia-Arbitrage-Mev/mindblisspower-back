@@ -41,6 +41,10 @@ type MemberWithdrawal struct {
 
 // MemberSummary: lo que ve el miembro — sus pagos + posición + comisiones.
 type MemberSummary struct {
+	DataSource             string             `json:"data_source,omitempty"`
+	FinancialStatus        string             `json:"financial_status,omitempty"`
+	PayoutLocked           bool               `json:"payout_locked,omitempty"`
+	StripeSales            []MemberStripeSale `json:"stripe_sales,omitempty"`
 	Positioned             bool               `json:"positioned"`
 	AffiliateID            *int64             `json:"affiliate_id,omitempty"`
 	Rank                   string             `json:"rank"`               // nombre del rango actual (mlm.rank.name_es) o '—'
@@ -65,7 +69,8 @@ type memberContext struct {
 // GetMemberContext devuelve el nombre real (mlm.person) y el código de referido
 // real (mlm.affiliate.invitation_link) del miembro por email — la fuente
 // autoritativa para los 117k migrados (cuyo id token de Cognito puede no traer
-// el nombre). Genera+persiste el código si el afiliado no tiene uno.
+// el nombre). Si no hay código persistido, deriva MP{id} sin escribir en DB;
+// ResolveSponsor ya reconoce ese código por el id del afiliado.
 // Cache-aside 10 min: se consulta en CADA carga del dashboard y el código es
 // inmutable una vez generado — sin cache, la carga pesada de registros
 // martillea RDS con esta query.
@@ -133,11 +138,7 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 	if affID == nil {
 		return name, "", nil // registrado, aún sin colocar en el árbol
 	}
-	newCode := fmt.Sprintf("MP%d", *affID)
-	_, _ = s.db.Exec(ctx,
-		`UPDATE mlm.affiliate SET invitation_link=$2 WHERE id=$1 AND invitation_link IS NULL`,
-		*affID, newCode)
-	return name, newCode, nil
+	return name, fmt.Sprintf("MP%d", *affID), nil
 }
 
 // GetMemberSummary arma el resumen para el miembro identificado por email.
@@ -153,6 +154,15 @@ func (s *Store) GetMemberSummaryFresh(ctx context.Context, email string) (Member
 }
 
 func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) (MemberSummary, error) {
+	// Detect the source on the primary before using operational cached balances.
+	// Imported captures do not prove an affiliate liability or available funds.
+	recovered, err := s.hasRecoveredStripe(ctx)
+	if err != nil {
+		return MemberSummary{}, err
+	}
+	if recovered {
+		return s.recoveredMemberSummary(ctx, email)
+	}
 	var out MemberSummary
 	ckey := "member:" + strings.ToLower(strings.TrimSpace(email))
 	if !fresh && s.cache.get(ctx, ckey, &out) {
@@ -163,7 +173,7 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 	// Identidad → person + affiliate + rango + perfil + fecha de ingreso.
 	var personID int64
 	var affiliateID *int64
-	err := reader.QueryRow(ctx, `
+	err = reader.QueryRow(ctx, `
 		SELECT p.id, a.id,
 		       COALESCE(r.name_es, '—') AS rank,
 		       p.profile::text AS plan,

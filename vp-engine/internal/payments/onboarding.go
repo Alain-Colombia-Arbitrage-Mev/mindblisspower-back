@@ -158,6 +158,7 @@ func (s *Store) SaveMemberOnboarding(
 	}
 
 	s.cache.del(ctx, "refctx:"+strings.ToLower(strings.TrimSpace(email)))
+	s.treeReads.invalidate()
 	return nil
 }
 
