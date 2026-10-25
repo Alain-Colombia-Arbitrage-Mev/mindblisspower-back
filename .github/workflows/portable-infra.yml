@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - deploy/portable/**
+      - deploy/cloudflare/**
       - app/src/clients/engine*
       - app/src/server.ts
       - app/scripts/test-engine-mtls.ts
@@ -35,6 +36,15 @@ jobs:
         run: node deploy/portable/test-backup.mjs --synthetic-docker --postgres-18
       - name: PostgreSQL 17 to 18 encrypted restore drill
         run: node deploy/portable/test-backup.mjs --synthetic-docker --postgres-18 --upgrade-from-17
+      - name: Read-only PlanetScale restore policy tests
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:mode=1777 \
+            -v "$PWD/deploy/cloudflare/restore_plan.py:/tools/restore_plan.py:ro" \
+            -v "$PWD/deploy/cloudflare/test_restore_plan.py:/tools/test_restore_plan.py:ro" \
+            -w /tools --entrypoint python3 mindbliss/backup:pg18-20261025 \
+            -B -m unittest -v test_restore_plan
+      - name: Synthetic provider restore preparation and atomicity drill
+        run: node deploy/cloudflare/test-restore-plan.mjs --synthetic-docker
       - name: Generate disposable mTLS identities (never upload these artifacts)
         run: |
           mkdir -p deploy/portable/artifacts/mtls/runtime deploy/portable/artifacts/mtls/offline
