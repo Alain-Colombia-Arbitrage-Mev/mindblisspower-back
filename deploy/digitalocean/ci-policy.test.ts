@@ -92,4 +92,14 @@ describe('GitHub Actions review policy', () => {
     expect(steps).toContain('--synthetic-docker --postgres-18');
     expect(steps).toContain('--synthetic-docker --postgres-18 --upgrade-from-17');
   });
+  test('PlanetScale restore preparation is synthetic, read-only and cannot use CI secrets', () => {
+    const doc = workflow('portable-infra.yml');
+    const steps = JSON.stringify(doc.jobs.verify.steps);
+    expect(doc.on.pull_request.paths).toContain('deploy/cloudflare/**');
+    expect(doc.permissions).toEqual({ contents: 'read' });
+    expect(steps).not.toContain('${{ secrets.');
+    expect(steps).toContain('--network none --read-only --tmpfs /tmp:mode=1777');
+    expect(steps).toContain('-B -m unittest -v test_restore_plan');
+    expect(steps).toContain('deploy/cloudflare/test-restore-plan.mjs --synthetic-docker');
+  });
 });

@@ -48,3 +48,5 @@ deploy/portable/artifacts/
 *.backend.hcl
 deploy/digitalocean/artifacts/
 deploy/digitalocean/runtime/
+deploy/cloudflare/runtime/
+deploy/cloudflare/artifacts/

@@ -19,6 +19,12 @@ Git. Se retiro la URI antigua sin nombre de variable sin cambiar DATABASE_URL.
 Comprobar la rotacion de la credencial expuesta durante el diagnostico; no
 documentar su valor ni considerar su rotacion validada por una conexion exitosa.
 
+Preparacion de restauracion: [procedimiento y preflight](RESTORE.md). El usuario
+eligio como origen el Docker recuperado y confirmo que la credencial aun NO fue
+rotada. El origen no responde por TCP; no se reinicio ni modifico. El planificador
+es solo lectura/salida de plan, no tiene apply y bloquea antes de conectar si no
+se confirma rotacion y disponibilidad. Ensayo con datos sinteticos, no importacion.
+
 ## Componentes y alcance
 
 | Componente existente | Destino propuesto | Estado |
