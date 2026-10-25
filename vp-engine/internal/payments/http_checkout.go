@@ -7,7 +7,6 @@ import (
 	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -171,17 +170,13 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	meta := map[string]string{
-		"purchase_intent_id": intentID,
-		"email":              req.Email,
-		"person_id":          strconv.FormatInt(buyer.PersonID, 10),
-		"package_id":         strconv.Itoa(pack.ID),
-		"pv":                 strconv.Itoa(pack.PV),
+	checkoutIdentity, err := h.store.checkoutIdentityForIntent(ctx, intentID)
+	if err != nil {
+		h.log.Error().Err(err).Msg("stable checkout owner unavailable")
+		writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+		return
 	}
-	if preferredSideForIntent != "" {
-		meta["preferred_side"] = preferredSideForIntent
-	}
-	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, meta)
+	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, checkoutIdentity)
 	if err != nil {
 		h.log.Error().Err(err).Str("intent", intentID).Msg("stripe checkout create")
 		writeErr(w, http.StatusBadGateway, "stripe_error")

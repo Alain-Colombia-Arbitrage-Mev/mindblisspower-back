@@ -118,7 +118,12 @@ func run() error {
 	// en lugar de confiar en el `email` que envía el cliente. El token de servicio
 	// sigue siendo requerido (segundo factor). En modo REQUIRE_VERIFIED_IDENTITY=false
 	// (default) el header es opcional y hay fallback backward-compatible.
-	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
+	if verifier, enabled, err := payments.ConfiguredBetterAuthVerifier(rootCtx, pool); err != nil {
+		return err
+	} else if enabled {
+		handler.SetIdentityVerifier(verifier, true)
+		logger.Info().Msg("Better Auth verified service identity and MLM subject binding enabled")
+	} else if jwksURL := cfg.JWKSURL(); jwksURL != "" {
 		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
 		if verr != nil {
 			// Sin verificador: si el modo estricto está activo, no podemos arrancar

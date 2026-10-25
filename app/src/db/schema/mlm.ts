@@ -80,6 +80,7 @@ export const pkg = mlmSchema.table('package', {
 // ---------------------------------------------------------------------------
 export const person = mlmSchema.table('person', {
   id: bigint('id', { mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+  publicId: uuid('public_id').notNull().defaultRandom().unique(),
   userId: text('user_id').references(() => user.id, { onDelete: 'restrict' }).unique(),
   legacyIdPerson: integer('legacy_id_person').unique(),
   firstName: text('first_name').notNull(),

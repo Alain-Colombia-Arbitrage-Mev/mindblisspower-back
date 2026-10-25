@@ -48,12 +48,28 @@ const (
 
 // CreateCheckout crea una sesión de Checkout hosted de pago único por el total
 // (pack + 1%). Devuelve (url, sessionID).
-func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, metadata map[string]string) (string, string, error) {
+func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, identity CheckoutIdentity) (string, string, error) {
+	params, err := g.checkoutParams(pack, intentID, identity)
+	if err != nil {
+		return "", "", err
+	}
+	sess, err := session.New(params)
+	if err != nil {
+		return "", "", fmt.Errorf("stripe checkout create: %w", err)
+	}
+	return sess.URL, sess.ID, nil
+}
+
+func (g *StripeGateway) checkoutParams(pack Pack, intentID string, identity CheckoutIdentity) (*stripe.CheckoutSessionParams, error) {
+	metadata, err := identity.metadata(intentID, pack)
+	if err != nil {
+		return nil, err
+	}
 	params := &stripe.CheckoutSessionParams{
 		Mode:              stripe.String(string(stripe.CheckoutSessionModePayment)),
 		SuccessURL:        stripe.String(g.successURL),
 		CancelURL:         stripe.String(g.cancelURL),
-		ClientReferenceID: stripe.String(intentID),
+		ClientReferenceID: stripe.String(identity.PersonPublicID),
 		LineItems: []*stripe.CheckoutSessionLineItemParams{{
 			Quantity:  stripe.Int64(1),
 			PriceData: g.priceData(pack),
@@ -77,18 +93,12 @@ func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, metadata map[
 	}
 	// Marca de producto: garantizada aquí (independiente del caller) para blindar
 	// el webhook en la cuenta Stripe compartida.
-	params.AddMetadata(MetadataProductTag, MetadataProductVal)
-	params.PaymentIntentData.AddMetadata(MetadataProductTag, MetadataProductVal)
 	for k, v := range metadata {
 		params.AddMetadata(k, v)
 		params.PaymentIntentData.AddMetadata(k, v)
 	}
 
-	sess, err := session.New(params)
-	if err != nil {
-		return "", "", fmt.Errorf("stripe checkout create: %w", err)
-	}
-	return sess.URL, sess.ID, nil
+	return params, nil
 }
 
 // priceData construye el precio dinámico (total = pack + 1%). Si hay productID

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -143,14 +142,13 @@ func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	meta := map[string]string{
-		"purchase_intent_id": intentID,
-		"email":              ri.Email,
-		"person_id":          strconv.FormatInt(ri.PersonID, 10),
-		"package_id":         strconv.Itoa(pack.ID),
-		"pv":                 strconv.Itoa(pack.PV),
+	checkoutIdentity, err := h.store.checkoutIdentityForIntent(ctx, intentID)
+	if err != nil {
+		h.log.Error().Err(err).Msg("stable resume owner unavailable")
+		writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+		return
 	}
-	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, meta)
+	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, checkoutIdentity)
 	if err != nil {
 		h.log.Error().Err(err).Str("intent", intentID).Msg("resume: stripe checkout")
 		writeErr(w, http.StatusBadGateway, "stripe_error")

@@ -28,3 +28,6 @@ Ver `docs/tree-activation-reconciliation.md`.
 Ver [límites de módulos y contratos de seguridad](docs/maintenance-boundaries.md)
 y [responsabilidades de Payments](vp-engine/internal/payments/README.md).
 Las lecturas de recuperación son evidencia, no activaciones ni comisiones calculadas.
+
+La integración [Better Auth, mensajería e identidad](docs/auth-identity-cutover.md)
+es opt-in y requiere migración y corte coordinados antes de activarse.

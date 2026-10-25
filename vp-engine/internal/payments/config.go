@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// Config para el binario cmd/vp-payments. Auth = Cognito (ya conectado aguas
-// arriba); este servicio no usa better-auth. El endpoint de checkout confía en
-// el BFF Next mediante un token de servicio compartido; el webhook se
-// autentica por firma de Stripe, no por sesión.
+// Config para el binario cmd/vp-payments. Cognito sigue siendo el proveedor por
+// defecto; AUTH_PROVIDER=better-auth opta por JWT/JWKS y binding MLM estricto.
+// Las sesiones Better Auth viven en el runtime de autenticación, no en Go.
+// El BFF envía además un token de servicio; Stripe usa firma de webhook.
 type Config struct {
 	Env            string
 	LogLevel       string

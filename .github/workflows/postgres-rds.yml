@@ -29,6 +29,8 @@ jobs:
       - run: node --test deploy/portable/manage.test.mjs deploy/portable/release-policy.test.mjs
       - name: API unit, toolchain and synthetic HTTP security checks
         run: docker run --rm --network none mindbliss/rds-api-test
+      - name: Better Auth, identity migration and concurrent OTP contracts on disposable PostgreSQL
+        run: node app/src/modules/identity/test-postgres.mjs --synthetic-docker
       - run: docker run --rm mindbliss/rds-api-test bun audit
   go:
     name: backend-go-race

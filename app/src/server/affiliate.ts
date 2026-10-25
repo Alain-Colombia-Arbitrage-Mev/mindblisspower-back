@@ -12,7 +12,7 @@
  * compatibility with existing internal callers.
  */
 import { db } from '../db/client';
-import { person } from '../db/schema/mlm';
+import { provisionAuthPerson } from '../modules/identity';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 export { postTransaction, registerPvCredit } from '../modules/ledger';
@@ -22,16 +22,9 @@ export async function createPersonFromUser(input: {
   email: string;
   name: string;
 }): Promise<void> {
-  const [first, ...rest] = input.name.trim().split(/\s+/);
-  await db.insert(person).values({
-    userId: input.userId,
-    firstName: first ?? input.email.split('@')[0]!,
-    lastName: rest.join(' ') || '-',
-    email: input.email,
-    phoneNumber: '',
-    status: 'pending',
-    kycStatus: 'not_started',
-  }).onConflictDoNothing({ target: person.email });
+  // Compatibility entry point: authoritative verification and binding come from
+  // PostgreSQL, never the email/name supplied by an internal caller.
+  await provisionAuthPerson(db, { userId: input.userId });
 }
 
 const PlacementSchema = z.object({
