@@ -253,7 +253,9 @@ El programador y las alertas del proveedor real aun NO estan activados.
 1. Descargar ciphertext + manifiesto de una fuente de confianza; conservar
    versionado/immutabilidad. Un SHA detecta corrupcion, no sustituye la confianza
    en el origen. Un dump SQL de un origen no confiable puede ejecutar codigo.
-2. Crear PostgreSQL 17 compatible con las extensiones/versiones del manifiesto.
+2. Crear PostgreSQL compatible con el major y extensiones/versiones del manifiesto.
+   Usar herramientas del major del destino; ver [PostgreSQL 18](#postgresql-18)
+   para la ruta probada 17 a 18. No cambiar el major de una DB existente.
    No restaurar un dump Timescale en Postgres sin Timescale. Validar las reglas
    de upgrade de extensiones; la imagen de backup se niega a exportar otra major.
 3. Revisar el archivo de roles cifrado, recrear los roles requeridos y passwords
@@ -296,6 +298,37 @@ webhooks, secuencias y ultimos registros. Medir duracion y punto de recuperacion
 Despues cambiar DSNs/DNS bajo ventana de mantenimiento, conservando el origen
 intacto y evitando escritores o schedulers duplicados. No reejecutar pagos reales
 como parte de una prueba de restauracion.
+
+## PostgreSQL 18
+
+Actualizacion 2026-10-25: el destino PlanetScale consultado usa PG18.6. Se conserva
+la imagen PG17 por defecto; no se actualiza ningun servidor, volumen o stack QA.
+La variante PG18 se construye explicitamente con una base oficial fijada por digest:
+
+```sh
+docker build -t mindbliss/backup:infra-20261023 deploy/portable/backup
+docker build --build-arg POSTGRES_IMAGE=postgres:18.6-alpine3.23@sha256:dec395d8c09c45609d6deb5c2388a07882d64fa59b1d98c1895792e085f57888 -t mindbliss/backup:pg18-20261025 deploy/portable/backup
+node deploy/portable/test-backup.mjs --synthetic-docker --vanilla-postgres
+node deploy/portable/test-backup.mjs --synthetic-docker --postgres-18
+node deploy/portable/test-backup.mjs --synthetic-docker --postgres-18 --upgrade-from-17
+```
+
+El major de pg_dump debe coincidir con el servidor conectado. El manifiesto guarda
+el major real del origen (17 o 18). Para restaurar un backup 17 a un destino 18 se
+usa la imagen 18; restauraciones hacia un major anterior o no admitido se rechazan
+antes de aplicar DDL. El drill verifica rutas ltree con indice GiST, posiciones,
+placeholders de baneados y montos, ademas de cifrado y protecciones existentes.
+El drill Timescale PG17 tambien sigue vigente; no implica soporte Timescale PG18.
+
+Usar una conexion DIRECTA para backup/restore. El puerto PgBouncer 6432 se rechaza;
+no cambiar silenciosamente la URL de la aplicacion. Mantener URLs/roles distintos
+para aplicacion y administracion. La copia real y su restauracion siguen pendientes.
+
+Estas pruebas usan DBs locales nuevas y sinteticas, no PlanetScale. Sus schemas
+propios y la DB postgres no cumplen las guardas del restaurador portable. Antes de
+importar en ese proveedor se requiere un procedimiento especifico con permisos,
+extensiones, grants, validacion contable y destino aislado; no desactivar guardas.
+No se certifica capacidad de 1.100 usuarios ni RPO/RTO de los datos de la empresa.
 
 ## Verificacion reproducible
 

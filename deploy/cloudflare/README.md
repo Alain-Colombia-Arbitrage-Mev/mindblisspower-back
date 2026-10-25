@@ -2,12 +2,22 @@
 
 Decision del usuario: 2026-10-24. Destino objetivo: Cloudflare para aplicaciones
 y PlanetScale para PostgreSQL. Sustituye la propuesta DigitalOcean; no implica
-que Cloudflare ya este desplegado ni que la base haya sido creada.
+que Cloudflare ya este desplegado.
 
-Estado confirmado: existe la cuenta Cloudflare; el usuario aun no tiene cuenta
-PlanetScale ni una instancia PostgreSQL creada. El dominio principal confirmado
-es mindblisspower.com. No se conocen Account ID, Zone ID, organizacion DB,
-region, plan ni credenciales. No adivinarlos ni compartir secretos por chat.
+Estado actualizado 2026-10-25: existe la cuenta Cloudflare y una conexion
+PlanetScale PostgreSQL 18.6 validada SOLO LECTURA, con TLS y certificado verificado.
+La DB consultada no tiene tablas de la aplicacion; esto no significa que haya
+datos migrados ni que el backend este desplegado. El dominio confirmado es
+mindblisspower.com. No se verificaron Account ID, Zone ID, modalidad Metal/red,
+recursos, tarifa ni entorno asignado a esa DB. No adivinarlos ni publicar secretos.
+
+La configuracion privada backend/.env.local define DATABASE_URL hacia PgBouncer
+en 6432, PGBOUNCER=true y DATABASE_POOL_MAX=5 para la API Bun. No arrancar servicios
+contra una DB vacia. El limite es por instancia Bun, no un presupuesto global de
+Go, Hyperdrive y replicas. El archivo y sus copias .env*.local estan ignorados por
+Git. Se retiro la URI antigua sin nombre de variable sin cambiar DATABASE_URL.
+Comprobar la rotacion de la credencial expuesta durante el diagnostico; no
+documentar su valor ni considerar su rotacion validada por una conexion exitosa.
 
 ## Componentes y alcance
 
@@ -17,9 +27,9 @@ region, plan ni credenciales. No adivinarlos ni compartir secretos por chat.
 | API Bun/Hono | Containers, conservando su runtime | Docker probado; red Cloudflare pendiente |
 | Engine Go | Containers privado HTTP/gRPC mTLS | Sin desplegar |
 | Payments y withdrawals Go | Containers, solo webhook Stripe publico | Sin desplegar |
-| Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Sin contratar |
+| Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Conexion PG18.6 probada; sin importar datos |
 | Lecturas directas de Workers | Hyperdrive | Sin configurar |
-| Backups independientes | pg_dump cifrado, destino externo al proveedor DB | Herramienta local probada; sin schedule cloud |
+| Backups independientes | pg_dump cifrado, destino externo al proveedor DB | Drills Docker PG17/18; sin backup real ni schedule cloud |
 
 Los servicios Go/Bun pueden usar su driver PostgreSQL por TLS directamente;
 Hyperdrive es para el acceso desde Workers, no un runtime ni el alojamiento DB.
@@ -56,10 +66,11 @@ y publicar el mismo candidato probado en el registry compatible elegido.
 
 ## Orden de preparacion
 
-1. Crear/vincular PlanetScale y aprobar una region de Estados Unidos y coste.
-   Elegir explicitamente PostgreSQL. Pedir PG17 si esta disponible: la suite y
-   el backup actuales validan major 17. No aceptar PG18 por defecto sin ampliar
-   pruebas y tooling. La imagen actual de backup se niega ante otro major.
+1. Confirmar en el panel la region, modalidad, recursos, coste y entorno de la DB
+   ya creada. La conexion indica PG18.6: no cambiar el major ni recrear el destino
+   automaticamente. El tooling conserva PG17 y agrega una imagen PG18 separada;
+   los drills nativos 17, 18 y 17 a 18 se detallan en [la guia portable](../portable/README.md#postgresql-18).
+   Esto no certifica aun las migraciones y pruebas de negocio del backend en PG18.
 2. Crear staging con credenciales y roles separados. Verificar TLS/hostname,
    limites de conexiones, permisos, funciones, triggers y extensiones. La lista
    [actual de PlanetScale](https://planetscale.com/docs/postgres/extensions)
@@ -70,6 +81,9 @@ y publicar el mismo candidato probado en el registry compatible elegido.
    filas, montos, secuencias, propietarios, posiciones y placeholders de baneados.
    No tocar mindbliss-local-recovery-20261022 ni la QA existente. Sin Timescale
    en el destino; cualquier conversion requiere un procedimiento independiente.
+   El restaurador portable NO acepta la DB postgres ni schemas preexistentes del
+   proveedor: no relajar esas guardas para importar en PlanetScale. Preparar un
+   procedimiento de importacion especifico y revisado antes de usar datos reales.
 4. Probar backup, PITR y restauracion hacia otra DB. PlanetScale documenta
    [restauracion a ramas nuevas](https://planetscale.com/docs/postgres/backups);
    comprobar las extensiones despues de restaurar, la ventana real de recuperacion
