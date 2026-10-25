@@ -1,9 +1,13 @@
 # Restauracion preparada para PlanetScale
 
-Fecha: 2026-10-25. Alcance: preparar y ensayar la importacion, NO ejecutarla sobre
-PlanetScale ni arrancar aplicaciones. No se relajan las guardas de backup.sh.
+Fecha: 2026-10-25. Este documento describe el planificador de solo lectura y su
+preparacion inicial, NO un comando de importacion. No se relajan sus guardas ni
+las de backup.sh. Posteriormente el usuario autorizo importar el archivo Docker
+verificado: [registro y procedimiento manual especifico](IMPORT-20261025.md).
+Consultar alli el estado actual; no repetir la carga sobre una DB poblada.
+Ninguno de estos pasos autoriza arrancar aplicaciones o jobs financieros.
 
-## Estado y bloqueos reales
+## Preflight inicial (anterior a la importacion autorizada)
 
 - Origen elegido por el usuario: docker:mindbliss-local-recovery-20261022.
 - El contenedor esta activo/unhealthy, pero PostgreSQL rechaza conexiones TCP
