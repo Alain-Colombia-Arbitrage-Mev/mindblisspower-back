@@ -6,11 +6,14 @@ que Cloudflare ya este desplegado.
 
 Estado actualizado 2026-10-25: existe la cuenta Cloudflare y una conexion
 PlanetScale PostgreSQL 18.6 con TLS y certificado verificado. El usuario autorizo
-la importacion del ultimo archivo Docker verificado. El ensayo local completo
-paso, pero la carga cloud aborto por falta de espacio al crear un indice y se
-verifico su rollback completo. PlanetScale sigue SIN tablas de negocio importadas.
-Consultar el resultado y las limitaciones
-en [el registro de importacion](IMPORT-20261025.md). El dominio confirmado es
+la importacion del archivo Docker verificado. Tras ampliar almacenamiento, la
+importacion historica termino y paso las verificaciones de las 61 tablas, arbol,
+usuarios, paquetes, wallets y secuencias. Esto NO valida su vigencia: los datos
+son de junio/julio y NO corresponden a la RDS reciente de septiembre. Mantener
+esta copia como historica; NO depurarla, reemplazarla ni usarla como definitiva.
+El lanzamiento sigue bloqueado hasta recuperar y conciliar la fuente reciente.
+Consultar [el registro de importacion](IMPORT-20261025.md) y la
+[verificacion de procedencia](FRESHNESS-20261025.md). El dominio confirmado es
 mindblisspower.com. Wrangler autentico una unica cuenta y listo Hyperdrive en ella.
 No se verificaron Zone ID, modalidad Metal/red, recursos, tarifa ni entorno
 asignado a esa DB. No adivinarlos ni publicar secretos.
@@ -60,7 +63,7 @@ rotacion de su password. No se desplego Worker ni se cambio DNS.
 | API Bun/Hono | Containers, conservando su runtime | Docker probado; red Cloudflare pendiente |
 | Engine Go | Containers privado HTTP/gRPC mTLS | Sin desplegar |
 | Payments y withdrawals Go | Containers, solo webhook Stripe publico | Sin desplegar |
-| Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Importacion bloqueada por espacio; rollback verificado |
+| Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Copia historica importada/verificada; NO es la fuente definitiva |
 | Lecturas directas de Workers | Hyperdrive | Recurso existente, sin binding de app ni prueba end-to-end |
 | Backups independientes | pg_dump cifrado, destino externo al proveedor DB | Archivo real cifrado local; falta destino externo y schedule cloud |
 
