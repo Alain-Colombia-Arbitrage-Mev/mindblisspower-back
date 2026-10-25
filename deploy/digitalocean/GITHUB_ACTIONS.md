@@ -1,5 +1,10 @@
 # GitHub Actions: revision automatica de Mindbliss
 
+Destino seleccionado actualmente: [Cloudflare + PlanetScale](../cloudflare/README.md).
+Los gates Docker/SQL/seguridad siguen siendo utiles. Las instrucciones DOCR y
+App Platform de este documento son historicas e INACTIVAS; no reactivar el
+proveedor digitalocean para cumplirlas. Falta implementar la entrega Cloudflare.
+
 Fecha: 2026-10-24. Eleccion confirmada: GitHub Actions, sin migracion a GitLab.
 Gates, publicadores Docker y CD image-only preparados. Para el lanzamiento,
 registro y configuracion real seguir [LAUNCH.md](LAUNCH.md). Un workflow

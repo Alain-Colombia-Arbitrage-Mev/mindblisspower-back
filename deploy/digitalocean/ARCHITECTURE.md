@@ -1,5 +1,9 @@
 # Arquitectura objetivo: Mindbliss en DigitalOcean App Platform
 
+Propuesta sustituida el 2026-10-24: el destino elegido por el usuario es
+[Cloudflare + PlanetScale](../cloudflare/README.md). Se conserva este documento
+como referencia historica; no autoriza provisionar o desplegar DigitalOcean.
+
 Fecha: 2026-10-24. Estado: propuesta tecnica definida, NO provisionada.
 Este documento no afirma que las plantillas actuales ya implementen todo el
 diseno ni que las pruebas Docker certifiquen el runtime administrado.

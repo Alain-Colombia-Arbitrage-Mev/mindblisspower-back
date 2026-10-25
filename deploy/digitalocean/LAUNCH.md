@@ -1,5 +1,10 @@
 # Lanzamiento con Docker + GitHub Actions + App Platform
 
+Guia INACTIVA: el usuario eligio [Cloudflare + PlanetScale](../cloudflare/README.md)
+el 2026-10-24. DEPLOYMENT_PROVIDER=cloudflare y DO_LAUNCH_APPROVED=false bloquean
+esta ruta. No cambiar esas variables ni crear apps/DB DigitalOcean siguiendo
+los pasos historicos de este archivo sin una nueva decision explicita.
+
 Actualizado: 2026-10-24. Proyectos confirmados por el usuario: `mindbliss`
 (staging) y `mindbliss-prod` (produccion). Los proyectos no son las apps.
 No se han publicado imagenes en DOCR ni desplegado aplicaciones desde esta tarea.
