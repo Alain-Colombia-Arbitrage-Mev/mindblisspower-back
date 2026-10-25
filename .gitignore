@@ -12,6 +12,7 @@ legacy/
 *.env
 .env
 .env.*
+.env*.local
 !*.env.example
 !**/production.env.example
 !.env.example

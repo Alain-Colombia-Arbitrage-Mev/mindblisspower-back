@@ -9,51 +9,68 @@ if (!process.argv.includes('--synthetic-docker')) throw new Error('Requires --sy
 const id = randomBytes(6).toString('hex');
 const network = `mindbliss-backup-drill-${id}`;
 const container = `${network}-db`;
+const postgres18 = process.argv.includes('--postgres-18');
+const upgrade = process.argv.includes('--upgrade-from-17');
+assert.ok(!upgrade || postgres18, '--upgrade-from-17 requires --postgres-18');
+const targetContainer = upgrade ? `${network}-target` : container;
 const output = path.join(directory, 'artifacts', network);
-const vanilla = process.argv.includes('--vanilla-postgres');
+const vanilla = postgres18 || process.argv.includes('--vanilla-postgres');
+const native17 = 'postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27';
+const native18 = 'postgres:18.6-alpine3.23@sha256:dec395d8c09c45609d6deb5c2388a07882d64fa59b1d98c1895792e085f57888';
 const postgres = vanilla
-  ? 'postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27'
+  ? (postgres18 && !upgrade ? native18 : native17)
   : 'timescale/timescaledb@sha256:526d01720f91772948d1ddd90601bd3d96cfa7e6afa3f3af87d4f0638c6e4d1a';
-const image = 'mindbliss/backup:infra-20261023';
+const image17 = 'mindbliss/backup:infra-20261023';
+const image18 = 'mindbliss/backup:pg18-20261025';
+const image = postgres18 ? image18 : image17;
+const sourceImage = upgrade ? image17 : image;
+const sourceMajor = postgres18 && !upgrade ? 18 : 17;
 const password = randomBytes(24).toString('hex');
 let createdNetwork = false;
-let createdContainer = false;
+const createdContainers = [];
 function docker(args, env = {}, expected = 0) {
   const result = spawnSync('docker', args, { encoding: 'utf8', env: { ...process.env, ...env }, maxBuffer: 8 * 1024 * 1024 });
   if (result.status !== expected) throw new Error(`Docker test step failed (${args[0]}). ${result.stderr || result.stdout}`);
   return result.stdout.trim();
 }
-function query(database, sql) {
-  return docker(['exec', container, 'psql', '-X', '-w', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1', '-At', '-c', sql]);
+function query(database, sql, target = false) {
+  return docker(['exec', target ? targetContainer : container, 'psql', '-X', '-w', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1', '-At', '-c', sql]);
 }
-function backupRun(env, command = 'create', shouldFail = false) {
+function backupRun(env, command = 'create', shouldFail = false, tool = image) {
   const args = ['run', '--rm', '--network', network, '--read-only', '--tmpfs', '/work:uid=70,gid=70,mode=0700', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '-v', `${output}:/backups`];
   for (const key of Object.keys(env)) args.push('-e', key);
-  args.push(image, command);
+  args.push(tool, command);
   const result = spawnSync('docker', args, { encoding: 'utf8', env: { ...process.env, ...env } });
   if (shouldFail) assert.notEqual(result.status, 0, 'unsafe operation unexpectedly succeeded');
   else assert.equal(result.status, 0, result.stderr || result.stdout);
   return result;
 }
+async function startDatabase(name, serverImage, major) {
+  const mount = major === 18 ? '/var/lib/postgresql' : '/var/lib/postgresql/data';
+  docker(['run', '-d', '--name', name, '--network', network, '--tmpfs', mount, '-e', 'POSTGRES_PASSWORD', serverImage], { POSTGRES_PASSWORD: password });
+  createdContainers.push(name);
+  // Initialization also starts a temporary socket-only server; wait for TCP.
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const result = spawnSync('docker', ['exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres'], { encoding: 'utf8' });
+    if (result.status === 0) return;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  assert.fail('synthetic Postgres did not start');
+}
 try {
   await mkdir(output, { recursive: true });
   docker(['network', 'create', '--internal', network]); createdNetwork = true;
-  docker(['run', '-d', '--name', container, '--network', network, '--tmpfs', '/var/lib/postgresql/data', '-e', 'POSTGRES_PASSWORD', postgres], { POSTGRES_PASSWORD: password });
-  createdContainer = true;
-  let ready = false;
-  for (let attempt = 0; attempt < 90; attempt++) {
-    // The entrypoint temporarily starts a socket-only server for init scripts.
-    // Wait for the final TCP listener, not that transient initialization server.
-    const result = spawnSync('docker', ['exec', container, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres'], { encoding: 'utf8' });
-    if (result.status === 0) { ready = true; break; }
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  assert.ok(ready, 'synthetic Postgres did not start');
+  await startDatabase(container, postgres, sourceMajor);
+  if (upgrade) await startDatabase(targetContainer, native18, 18);
   query('postgres', 'CREATE DATABASE drill_source TEMPLATE template0');
   query('drill_source', `${vanilla ? '' : 'CREATE EXTENSION timescaledb;'} CREATE SCHEMA mlm;
     CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,parent_id bigint REFERENCES mlm.affiliate(id),side text,unavailable boolean NOT NULL);
     INSERT INTO mlm.affiliate VALUES(101,NULL,NULL,false),(102,101,'L',true),(103,101,'R',false),(104,102,'R',false);
     CREATE TABLE mlm.sales(time timestamptz NOT NULL,amount numeric NOT NULL);
+    CREATE EXTENSION ltree;
+    CREATE TABLE mlm.node_path(id bigint PRIMARY KEY REFERENCES mlm.affiliate(id),path public.ltree NOT NULL);
+    CREATE INDEX node_path_gist ON mlm.node_path USING gist(path);
+    INSERT INTO mlm.node_path VALUES(101,'101'),(102,'101.102'),(103,'101.103'),(104,'101.102.104');
     ${vanilla ? '' : "SELECT create_hypertable('mlm.sales',by_range('time'));"}
     INSERT INTO mlm.sales VALUES('2026-10-23T10:00:00Z',99.50),('2026-10-23T11:00:00Z',50.25);`);
   // Only this newly created, synthetic directory is given to a helper container.
@@ -62,9 +79,15 @@ try {
   const recipient = docker(['run', '--rm', '--network', 'none', '-v', `${output}:/backups:ro`, '--entrypoint', 'age-keygen', image, '-y', '/backups/drill.agekey']);
   const source = `postgres://postgres:${password}@${container}:5432/drill_source?sslmode=disable`;
   const common = { DATABASE_URL: source, DEPLOY_ENV: 'drill', BACKUP_AGE_RECIPIENT: recipient, BACKUP_OUTPUT_DIR: '/backups', BACKUP_INCLUDE_ROLES: '1' };
-  backupRun({ ...common, BACKUP_AGE_RECIPIENT: '' }, 'create', true);
+  backupRun({ ...common, BACKUP_AGE_RECIPIENT: '' }, 'create', true, sourceImage);
+  const pooled = backupRun({ ...common, DATABASE_URL: source.replace(':5432/', ':6432/') }, 'create', true, sourceImage);
+  assert.match(pooled.stderr, /direct PostgreSQL connection/);
+  if (postgres18) {
+    const mismatch = backupRun(common, 'create', true, upgrade ? image18 : image17);
+    assert.match(mismatch.stderr, /tools major must match/);
+  }
   assert.equal((await readdir(output)).filter(name => name.endsWith('.manifest.json')).length, 0);
-  backupRun(common);
+  backupRun(common, 'create', false, sourceImage);
   const files = await readdir(output);
   assert.ok(!files.some(name => name.endsWith('.dump') || name.endsWith('.sql')), 'plaintext backup escaped the container');
   const manifest = files.find(name => name.endsWith('.manifest.json'));
@@ -73,30 +96,52 @@ try {
   const record = JSON.parse(docker(['run', '--rm', '--network', 'none', '--read-only',
     '-v', `${output}:/backups:ro`, '--entrypoint', 'cat', image, `/backups/${manifest}`]));
   assert.ok(record.roles?.sha256);
+  assert.equal(record.postgresMajor, sourceMajor);
+  assert.ok(record.extensions.some(e => e.name === 'ltree'));
   assert.equal(record.extensions.some(e => e.name === 'timescaledb'), !vanilla);
-  query('postgres', 'CREATE DATABASE drill_restore_ok TEMPLATE template0');
-  const restore = { DATABASE_URL: source.replace('/drill_source?', '/drill_restore_ok?'), BACKUP_MANIFEST: `/backups/${manifest}`, AGE_IDENTITY_FILE: '/backups/drill.agekey', RESTORE_TARGET_NAME: 'drill_restore_ok', RESTORE_CONFIRM: 'drill_restore_ok' };
+  query('postgres', 'CREATE DATABASE drill_restore_ok TEMPLATE template0', true);
+  const target = source.replace(container, targetContainer);
+  const restore = { DATABASE_URL: target.replace('/drill_source?', '/drill_restore_ok?'), BACKUP_MANIFEST: `/backups/${manifest}`, AGE_IDENTITY_FILE: '/backups/drill.agekey', RESTORE_TARGET_NAME: 'drill_restore_ok', RESTORE_CONFIRM: 'drill_restore_ok' };
   backupRun({ ...restore, RESTORE_CONFIRM: 'wrong' }, 'restore', true);
+  const pooledRestore = backupRun({ ...restore, DATABASE_URL: restore.DATABASE_URL.replace(':5432/', ':6432/') }, 'restore', true);
+  assert.match(pooledRestore.stderr, /direct PostgreSQL connection/);
+  if (postgres18) {
+    const mismatch = backupRun(restore, 'restore', true, image17);
+    assert.match(mismatch.stderr, /tools major must match/);
+  }
   backupRun(restore, 'restore');
   const rows = "SELECT json_agg(a ORDER BY id) FROM mlm.affiliate a";
-  assert.equal(query('drill_restore_ok', rows), query('drill_source', rows));
-  assert.equal(query('drill_restore_ok', 'SELECT sum(amount) FROM mlm.sales'), '149.75');
+  assert.equal(query('drill_restore_ok', rows, true), query('drill_source', rows));
+  const paths = 'SELECT json_agg(a ORDER BY id) FROM (SELECT id,path::text FROM mlm.node_path) a';
+  assert.equal(query('drill_restore_ok', paths, true), query('drill_source', paths));
+  assert.equal(query('drill_restore_ok', 'SELECT sum(amount) FROM mlm.sales', true), '149.75');
   if (!vanilla) assert.equal(query('drill_restore_ok', "SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='mlm'"), '1');
   backupRun(restore, 'restore', true); // Never overwrite a populated target.
   backupRun({ ...restore, DATABASE_URL: source, RESTORE_TARGET_NAME: 'drill_source', RESTORE_CONFIRM: 'drill_source' }, 'restore', true);
-  query('postgres', 'CREATE DATABASE drill_restore_corrupt TEMPLATE template0');
+  query('postgres', 'CREATE DATABASE drill_restore_corrupt TEMPLATE template0', true);
+  for (const major of postgres18 ? [19] : [18, 19]) {
+    const invalidManifest = `/backups/invalid-${major}.manifest.json`;
+    docker(['run', '--rm', '--network', 'none', '--read-only', '-v', `${output}:/backups`, '--entrypoint', 'sh', image, '-ec',
+      'jq --argjson major "$1" \' .postgresMajor=$major \' "$2" > "$3"', '--', String(major), `/backups/${manifest}`, invalidManifest]);
+    const rejected = backupRun({ ...restore, DATABASE_URL: target.replace('/drill_source?', '/drill_restore_corrupt?'), RESTORE_TARGET_NAME: 'drill_restore_corrupt', RESTORE_CONFIRM: 'drill_restore_corrupt', BACKUP_MANIFEST: invalidManifest }, 'restore', true);
+    assert.match(rejected.stderr, major === 18 ? /older PostgreSQL major/ : /unsupported PostgreSQL major/);
+    assert.equal(query('drill_restore_corrupt', "SELECT count(*) FROM pg_namespace WHERE nspname='mlm'", true), '0');
+  }
   assert.match(record.database.file, /^drill-[a-zA-Z0-9._-]+\.dump\.age$/);
   docker(['run', '--rm', '--network', 'none', '--read-only', '-v', `${output}:/backups`,
     '--entrypoint', 'sh', image, '-ec', 'printf "%s" corrupt >> "$1"', '--', `/backups/${record.database.file}`]);
-  const result = backupRun({ ...restore, DATABASE_URL: source.replace('/drill_source?', '/drill_restore_corrupt?'), RESTORE_TARGET_NAME: 'drill_restore_corrupt', RESTORE_CONFIRM: 'drill_restore_corrupt' }, 'restore', true);
+  const result = backupRun({ ...restore, DATABASE_URL: target.replace('/drill_source?', '/drill_restore_corrupt?'), RESTORE_TARGET_NAME: 'drill_restore_corrupt', RESTORE_CONFIRM: 'drill_restore_corrupt' }, 'restore', true);
   assert.match(result.stderr, /Checksum mismatch/);
-  assert.equal(query('drill_restore_corrupt', "SELECT count(*) FROM pg_namespace WHERE nspname='mlm'"), '0');
-  console.log(`PASS: encrypted backup + roles archive + ${vanilla ? 'native PostgreSQL' : 'Timescale'} restore + preserved binary positions + refusal of missing encryption, wrong confirmation, populated/non-restore databases and corrupt ciphertext.`);
+  assert.equal(query('drill_restore_corrupt', "SELECT count(*) FROM pg_namespace WHERE nspname='mlm'", true), '0');
+  console.log(`PASS: encrypted backup + roles archive + ${upgrade ? 'PostgreSQL 17 to 18' : vanilla ? `native PostgreSQL ${sourceMajor}` : 'Timescale'} restore + preserved binary positions, ltree paths and amounts + refusal of pooled connections, incompatible versions, missing encryption, wrong confirmation, populated/non-restore databases and corrupt ciphertext.`);
   console.log(`Synthetic evidence only: ${output} (ciphertext intentionally corrupted by final negative test).`);
 } finally {
   // Names are generated here, never read from user settings or existing stacks.
   assert.match(container, /^mindbliss-backup-drill-[a-f0-9]{12}-db$/);
   assert.match(network, /^mindbliss-backup-drill-[a-f0-9]{12}$/);
-  if (createdContainer) docker(['rm', '-f', '-v', container]);
+  for (const name of createdContainers.reverse()) {
+    assert.match(name, /^mindbliss-backup-drill-[a-f0-9]{12}-(db|target)$/);
+    docker(['rm', '-f', '-v', name]);
+  }
   if (createdNetwork) docker(['network', 'rm', network]);
 }

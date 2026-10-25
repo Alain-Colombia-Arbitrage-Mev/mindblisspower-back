@@ -79,4 +79,17 @@ describe('GitHub Actions review policy', () => {
     expect(sqlSteps).toContain('docker run --rm --network none mindbliss/rds-api-test');
     expect(JSON.stringify(doc.jobs.go.steps)).toContain('go test -race');
   });
+  test('portable backup checks retain PG17 and test PG18 plus upgrades without secrets', () => {
+    const doc = workflow('portable-infra.yml');
+    const steps = JSON.stringify(doc.jobs.verify.steps);
+    expect(doc.permissions).toEqual({ contents: 'read' });
+    expect(doc.on.pull_request_target).toBeUndefined();
+    expect(doc.jobs.verify['timeout-minutes']).toBeGreaterThan(0);
+    expect(steps).not.toContain('${{ secrets.');
+    expect(steps).toContain('mindbliss/backup:infra-20261023');
+    expect(steps).toContain('POSTGRES_IMAGE=postgres:18.6-alpine3.23@sha256:dec395d8c09c45609d6deb5c2388a07882d64fa59b1d98c1895792e085f57888');
+    expect(steps).toContain('--synthetic-docker --vanilla-postgres');
+    expect(steps).toContain('--synthetic-docker --postgres-18');
+    expect(steps).toContain('--synthetic-docker --postgres-18 --upgrade-from-17');
+  });
 });
