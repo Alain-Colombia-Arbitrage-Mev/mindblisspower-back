@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // ── Recuperación de carritos abandonados ────────────────────────────────────
@@ -80,6 +81,9 @@ func (s *Store) CartResumeInfo(ctx context.Context, intentID string) (resumeInfo
 
 // ReopenIntent revierte un intent 'expired' a 'created' para reanudar el pago.
 func (s *Store) ReopenIntent(ctx context.Context, intentID string) error {
+	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE payments.purchase_intent SET status='created', updated_at=now() WHERE id=$1::uuid AND status='expired'`,
 		intentID)
@@ -96,6 +100,15 @@ func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
 	intentID, ok := h.verifyResumeToken(strings.TrimSpace(r.URL.Query().Get("t")))
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid_token")
+		return
+	}
+	if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil {
+		if errors.Is(err, ErrRecoveryFinancialReview) {
+			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+		} else {
+			h.log.Error().Err(err).Msg("resume financial mode unavailable")
+			writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
+		}
 		return
 	}
 	ctx := r.Context()

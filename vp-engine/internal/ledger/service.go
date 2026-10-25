@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
 
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 	v1 "github.com/vicionpower/vp-engine/proto/gen/go/vicionpower/v1"
 )
 
@@ -63,6 +64,13 @@ func (s *Service) PostTransaction(
 	if len(in.GetMovements()) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, ErrEmptyMovements)
 	}
+	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+		if errors.Is(err, financialguard.ErrRecoveryReview) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		s.log.Error().Err(err).Msg("financial mutation mode unavailable")
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("financial mutation availability check failed"))
+	}
 
 	actor := in.GetActor()
 	log := s.log.With().
@@ -85,8 +93,8 @@ func (s *Service) PostTransaction(
 	if existingStatus == "posted" {
 		log.Info().Str("txn_id", existingID).Msg("idempotent replay")
 		resp := &v1.PostTransactionResponse{
-			TransactionId:        existingID,
-			WasIdempotentReplay:  true,
+			TransactionId:       existingID,
+			WasIdempotentReplay: true,
 		}
 		if existingPostedAt != nil {
 			resp.PostedAt = tsPB(*existingPostedAt)

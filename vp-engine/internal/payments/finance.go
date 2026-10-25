@@ -26,6 +26,8 @@ type MoneyflowRow struct {
 
 // AdminFinance es el tablero financiero de la red: todo el dinero en un vistazo.
 type AdminFinance struct {
+	DataSource     string                `json:"data_source,omitempty"`
+	StripeRecovery *StripeRecoveryReview `json:"stripe_recovery,omitempty"`
 	// Entrante (caja real vía nuestro checkout Stripe).
 	InflowsUSD       string `json:"inflows_usd"`       // Σ(amount+fee) de compras paid|activated (BRUTO cobrado vía Stripe)
 	PacksPaid        int64  `json:"packs_paid"`        // # de packs pagados
@@ -84,6 +86,11 @@ type AdminFinance struct {
 
 // GetAdminFinance arma el tablero financiero agregando ledger + compras + rangos.
 func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return AdminFinance{}, err
+	} else if recovered {
+		return s.recoveredAdminFinance(ctx)
+	}
 	var f AdminFinance
 	if s.cache.get(ctx, "fin:admin", &f) {
 		return f, nil
@@ -265,6 +272,11 @@ type Solvency struct {
 // continua del período abierto (shadow close en vivo) es la Capa 2; aquí se
 // expone θ histórico real + el período vigente con su techo de pago (α×inflows).
 func (s *Store) GetSolvency(ctx context.Context) (Solvency, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return Solvency{}, err
+	} else if recovered {
+		return Solvency{Health: "UNKNOWN", Alert: "Fondos Stripe pendientes de conciliación; comisiones y solvencia pendientes de cálculo.", Recent: []SolvencyPeriod{}}, nil
+	}
 	var out Solvency
 	if s.cache.get(ctx, "solvency", &out) {
 		return out, nil

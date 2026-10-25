@@ -7,6 +7,9 @@ x-app: &app
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   stop_grace_period: 30s
+  pids_limit: 256
+  mem_limit: 512m
+  cpus: 1
   logging: &logging
     driver: json-file
     options: {max-size: 10m, max-file: "3"}
@@ -37,6 +40,9 @@ services:
     tmpfs: [/data]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 384m
+    cpus: 0.5
     healthcheck:
       test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
       interval: 5s
@@ -59,6 +65,8 @@ services:
       BONUS_ENGINE_BINARY_CYCLE_ENABLED: "false"
       BONUS_ENGINE_SCHEDULER_ENABLED: "false"
       AWS_EC2_METADATA_DISABLED: "true"
+      DB_MAX_CONNS: "8"
+      GOMEMLIMIT: 384MiB
     volumes: ["${RUNTIME_DIR}/tls/server:/run/tls:ro"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -76,6 +84,7 @@ services:
       VP_ENGINE_TLS_CERT: /run/tls/client.crt
       VP_ENGINE_TLS_KEY: /run/tls/client.key
       ENGINE_MTLS_REQUIRED: "true"
+      DATABASE_POOL_MAX: "8"
     volumes: ["${RUNTIME_DIR}/tls/client:/run/tls:ro"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -92,6 +101,8 @@ services:
       PAYMENTS_RECONCILE_INTERVAL_MIN: "0"
       COMMS_ENABLED: "false"
       AWS_EC2_METADATA_DISABLED: "true"
+      PAYMENTS_DB_MAX_CONNS: "8"
+      GOMEMLIMIT: 384MiB
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -105,6 +116,7 @@ services:
       WITHDRAWALS_REQUIRE_BMP: "true"
       WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY: "true"
       AWS_EC2_METADATA_DISABLED: "true"
+      GOMEMLIMIT: 256MiB
     depends_on:
       postgres: {condition: service_healthy}
   client:
@@ -120,13 +132,14 @@ services:
       VP_PAYMENTS_URL: http://payments:9095
       VP_WITHDRAWALS_URL: http://withdrawals:9097
       VP_ENGINE_HTTP_URL: http://engine:9090
-    tmpfs: [/tmp, /app/.next/cache]
+      NODE_OPTIONS: --max-old-space-size=384
+    tmpfs: [/tmp, "/app/.next/cache:uid=65532,gid=65532,mode=0700,size=128m"]
   admin:
     <<: *app
     image: ${ADMIN_IMAGE:?Set ADMIN_IMAGE}
     env_file: ["${RUNTIME_DIR}/admin.env"]
     environment: *web-env
-    tmpfs: [/tmp, /app/.next/cache]
+    tmpfs: [/tmp, "/app/.next/cache:uid=65532,gid=65532,mode=0700,size=128m"]
   edge:
     profiles: [edge]
     image: ${CADDY_IMAGE:?Set CADDY_IMAGE}

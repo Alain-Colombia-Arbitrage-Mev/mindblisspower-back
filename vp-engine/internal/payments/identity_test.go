@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -39,6 +40,14 @@ func reqWithToken(token, claimed string) *http.Request {
 }
 
 func TestVerifiedEmail(t *testing.T) {
+	t.Run("blank verified identity => false", func(t *testing.T) {
+		for _, email := range []string{"", " \t\n"} {
+			h := newTestHandler(fakeVerifier{email: email}, true)
+			if _, ok := h.verifiedEmail(reqWithToken("tok", "")); ok {
+				t.Fatal("empty verifier result must not authenticate")
+			}
+		}
+	})
 	t.Run("no header => false", func(t *testing.T) {
 		h := newTestHandler(fakeVerifier{email: "a@x.com"}, false)
 		if _, ok := h.verifiedEmail(reqWithToken("", "")); ok {
@@ -64,6 +73,85 @@ func TestVerifiedEmail(t *testing.T) {
 			t.Fatal("expected ok=false with nil verifier")
 		}
 	})
+}
+
+func TestServiceAuthFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, configured, supplied string
+		wantOK                     bool
+	}{
+		{"missing configuration and credential", "", "", false},
+		{"blank configuration", " \t", " \t", false},
+		{"missing credential", "service-test-token", "", false},
+		{"wrong credential", "service-test-token", "wrong", false},
+		{"exact credential", "service-test-token", "service-test-token", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{serviceToken: tc.configured, log: zerolog.Nop()}
+			r := httptest.NewRequest(http.MethodGet, "/api/payments/me", nil)
+			r.Header.Set("X-VP-Service-Token", tc.supplied)
+			w := httptest.NewRecorder()
+			if got := h.svcAuth(w, r); got != tc.wantOK {
+				t.Fatalf("authenticated=%v, want %v", got, tc.wantOK)
+			}
+			if !tc.wantOK && w.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d, want 401", w.Code)
+			}
+		})
+	}
+}
+
+func TestVerifiedEmailCachedIdentityCannotOverrideToken(t *testing.T) {
+	for _, tc := range []struct {
+		name, token, cachedToken, cachedEmail, wantEmail string
+		wantOK                                           bool
+	}{
+		{"another token must reverify", "current-token", "other-token", "other@example.test", "verified@example.test", true},
+		{"missing token cannot use cache", "", "", "other@example.test", "", false},
+		{"empty cached identity must reverify", "current-token", "current-token", "", "verified@example.test", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(fakeVerifier{email: "verified@example.test"}, true)
+			r := reqWithToken(tc.token, "")
+			r = r.WithContext(context.WithValue(r.Context(), budgetIdentityKey{}, verifiedBudgetIdentity{token: tc.cachedToken, email: tc.cachedEmail}))
+			email, ok := h.verifiedEmail(r)
+			if email != tc.wantEmail || ok != tc.wantOK {
+				t.Fatalf("identity=%q,%v want %q,%v", email, ok, tc.wantEmail, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestCheckoutCannotClaimAnotherVerifiedIdentity(t *testing.T) {
+	h := NewHandler(nil, nil, "synthetic-service-token", nil, 0, zerolog.Nop())
+	h.SetIdentityVerifier(fakeVerifier{email: "verified@example.test"}, true)
+	r := httptest.NewRequest(http.MethodPost, "/api/payments/checkout", strings.NewReader(`{"email":"other@example.test","package_id":1}`))
+	r.Header.Set("X-VP-Service-Token", "synthetic-service-token")
+	r.Header.Set(idTokenHeader, "synthetic-id-token")
+	w := httptest.NewRecorder()
+	h.handleCheckout(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("checkout identity mismatch must stop before the database, got %d", w.Code)
+	}
+}
+
+func TestUnconfiguredServiceRoutesRejectBeforeDatabase(t *testing.T) {
+	h := NewHandler(nil, nil, "", nil, 0, zerolog.Nop())
+	routes := h.Routes()
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/payments/me?email=member@example.test"},
+		{http.MethodPost, "/api/payments/checkout"},
+		{http.MethodGet, "/api/member/referral?email=member@example.test"},
+		{http.MethodGet, "/api/admin/check?email=admin@example.test"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			routes.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d, want 401", w.Code)
+			}
+		})
+	}
 }
 
 func TestResolveIdentity(t *testing.T) {

@@ -92,6 +92,7 @@ func (s *Store) AddBlacklist(ctx context.Context, fullname, email, phone, birthd
 	if err != nil {
 		return 0, fmt.Errorf("add blacklist: %w", err)
 	}
+	s.treeReads.invalidate()
 	return id, nil
 }
 
@@ -107,6 +108,7 @@ func (s *Store) RemoveBlacklistByID(ctx context.Context, id int64) (string, int6
 		}
 		return "", 0, fmt.Errorf("remove blacklist by id: %w", err)
 	}
+	s.treeReads.invalidate()
 	return email, 1, nil
 }
 
@@ -117,6 +119,7 @@ func (s *Store) RemoveBlacklistByEmail(ctx context.Context, email string) (int64
 	if err != nil {
 		return 0, fmt.Errorf("remove blacklist by email: %w", err)
 	}
+	s.treeReads.invalidate()
 	return tag.RowsAffected(), nil
 }
 

@@ -79,6 +79,7 @@ func (s *Store) UpdateProfile(ctx context.Context, email string, p MemberProfile
 	// Invalida el nombre+código cacheados (GetMemberContext) para que el sidebar
 	// y la sesión reflejen el nombre editado de inmediato (no tras 10 min).
 	s.cache.del(ctx, "refctx:"+strings.ToLower(strings.TrimSpace(email)))
+	s.treeReads.invalidate()
 	return tag.RowsAffected(), nil
 }
 

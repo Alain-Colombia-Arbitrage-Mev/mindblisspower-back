@@ -101,6 +101,7 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 
 // ProductSales: total vendido por producto (vía Stripe, status activated).
 type ProductSales struct {
+	DataSource  string `json:"data_source,omitempty"`
 	PackageID   int    `json:"package_id"`
 	Name        string `json:"name"`
 	AmountUSD   string `json:"amount_usd"`
@@ -111,17 +112,41 @@ type ProductSales struct {
 
 // AdminSummary agrega ventas por producto + totales.
 type AdminSummary struct {
-	Products                  []ProductSales `json:"products"`
-	TotalSold                 int64          `json:"total_sold"`
-	TotalRevenUSD             string         `json:"total_revenue_usd"`
-	TotalUsers                int64          `json:"total_users"`
-	BlockedUsers              int64          `json:"blocked_users"`
-	RefundedUSD               string         `json:"refunded_usd"`
-	SecurityPendingCharges    int64          `json:"security_pending_charges"`
-	SecurityPendingChargesUSD string         `json:"security_pending_charges_usd"`
+	DataSource                string                `json:"data_source,omitempty"`
+	StripeRecovery            *StripeRecoveryReview `json:"stripe_recovery,omitempty"`
+	Products                  []ProductSales        `json:"products"`
+	TotalSold                 int64                 `json:"total_sold"`
+	TotalRevenUSD             string                `json:"total_revenue_usd"`
+	TotalUsers                int64                 `json:"total_users"`
+	BlockedUsers              int64                 `json:"blocked_users"`
+	RefundedUSD               string                `json:"refunded_usd"`
+	SecurityPendingCharges    int64                 `json:"security_pending_charges"`
+	SecurityPendingChargesUSD string                `json:"security_pending_charges_usd"`
 }
 
 func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return AdminSummary{}, err
+	} else if recovered {
+		r, err := s.recoveredStripeReview(ctx, time.Time{})
+		if err != nil {
+			return AdminSummary{}, err
+		}
+		out := AdminSummary{DataSource: recoveredStripeSource, StripeRecovery: r, TotalSold: r.Sales, TotalRevenUSD: r.GrossUSD,
+			RefundedUSD: r.RefundedUSD, Products: []ProductSales{}}
+		rows, err := s.recoveredSalesReport(ctx, time.Time{})
+		if err != nil {
+			return AdminSummary{}, err
+		}
+		for _, row := range rows {
+			out.Products = append(out.Products, ProductSales{DataSource: recoveredStripeSource, PackageID: int(row.PackageID), Name: row.Name, AmountUSD: row.AmountUSD,
+				Sold: row.Paid, RevenueUSD: row.GrossUSD, RefundedUSD: row.RefundedUSD})
+		}
+		if err := s.db.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE blacklisted) FROM mlm.person`).Scan(&out.TotalUsers, &out.BlockedUsers); err != nil {
+			return AdminSummary{}, err
+		}
+		return out, nil
+	}
 	var sum AdminSummary
 	rows, err := s.db.Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
@@ -337,5 +362,6 @@ func (s *Store) SetBlocked(ctx context.Context, personID int64, blocked bool) er
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("set blocked commit: %w", err)
 	}
+	s.treeReads.invalidate()
 	return nil
 }

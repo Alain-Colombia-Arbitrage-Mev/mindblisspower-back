@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 const idTokenHeader = "X-VP-Id-Token"
@@ -32,6 +33,7 @@ type IdentityVerifier interface {
 // como interfaz para que la capa HTTP sea testeable sin Postgres; el único
 // implementador de producción es *Store.
 type StoreAPI interface {
+	CheckFinancialWrites(context.Context) error
 	RequestWithdrawalWithBMP(ctx context.Context, email, amountStr, bankInfo, bmpEmail string, v BMPVerification) (WithdrawalResult, error)
 	ListWithdrawals(ctx context.Context, status string, limit, offset int) ([]AdminWithdrawal, int64, error)
 	SetWithdrawalStatus(ctx context.Context, id int64, status, adminEmail string) error
@@ -102,8 +104,21 @@ func (h *Handler) Routes() http.Handler {
 }
 
 func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
+	if strings.TrimSpace(h.serviceToken) == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VP-Service-Token")), []byte(h.serviceToken)) != 1 {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	return true
+}
+
+func (h *Handler) financialWritesAllowed(w http.ResponseWriter, r *http.Request) bool {
+	if err := h.store.CheckFinancialWrites(r.Context()); err != nil {
+		if errors.Is(err, financialguard.ErrRecoveryReview) {
+			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+		} else {
+			h.log.Error().Err(err).Msg("withdrawal financial mode unavailable")
+			writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
+		}
 		return false
 	}
 	return true
@@ -119,7 +134,8 @@ func (h *Handler) verifiedEmail(r *http.Request) (string, bool) {
 		h.log.Warn().Err(err).Msg("id token verification failed")
 		return "", false
 	}
-	return strings.ToLower(strings.TrimSpace(v)), true
+	email := strings.ToLower(strings.TrimSpace(v))
+	return email, email != ""
 }
 
 // resolveIdentity devuelve el email autoritativo. Header presente e inválido ⇒
@@ -245,6 +261,9 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing amount or bank_info")
 		return
 	}
+	if !h.financialWritesAllowed(w, r) {
+		return
+	}
 	// D10 al SOLICITAR: FAIL-OPEN, deliberadamente al revés que al pagar. Una
 	// solicitud no mueve dinero — queda pendiente de un admin y se vuelve a
 	// verificar (esa vez fail-closed) al pagar. Así que un error de infra se
@@ -275,6 +294,8 @@ func (h *Handler) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.store.RequestWithdrawalWithBMP(r.Context(), email, req.Amount, req.BankInfo, bmpEmail, verification)
 	switch {
+	case errors.Is(err, financialguard.ErrRecoveryReview):
+		writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
 	case errors.Is(err, ErrMinWithdrawal):
 		writeErr(w, http.StatusBadRequest, "min_withdrawal")
 	case errors.Is(err, ErrInsufficient):
@@ -596,6 +617,9 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusBadRequest, "invalid_action")
 		return
 	}
+	if !h.financialWritesAllowed(w, r) {
+		return
+	}
 	// Al PAGAR se re-verifica contra BMP y se persiste el resultado, para que el
 	// candado de admin.go (assertBMPFresh) evalúe datos frescos en vez de la
 	// verificación del día de la solicitud.
@@ -622,6 +646,10 @@ func (h *Handler) handleAdminWithdrawalAction(w http.ResponseWriter, r *http.Req
 	}
 
 	if err := h.store.SetWithdrawalStatus(r.Context(), req.ID, status, adminEmail); err != nil {
+		if errors.Is(err, financialguard.ErrRecoveryReview) {
+			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+			return
+		}
 		// Sólo una transición inválida es culpa del cliente (409). Cualquier otro
 		// error (Postgres caído, etc.) es 500: reportarlo como "transición
 		// rechazada" le mentiría al admin sobre el estado del dinero.

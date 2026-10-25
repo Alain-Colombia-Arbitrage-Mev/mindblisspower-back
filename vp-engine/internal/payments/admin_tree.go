@@ -55,6 +55,12 @@ type AdminTreeSearchResult struct {
 }
 
 func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
+	return s.treeReads.read(ctx, "roots:"+strconv.FormatInt(companyRoot, 10), adminTreeCacheTTL, func(ctx context.Context) ([]AdminTreeNode, error) {
+		return s.listAdminTreeRoots(ctx, companyRoot)
+	})
+}
+
+func (s *Store) listAdminTreeRoots(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
 		WITH configured_root AS (
 		  SELECT a.id, 0 AS priority, COALESCE(a.depth, 0) AS depth
@@ -152,6 +158,12 @@ func (s *Store) ListAdminTreeRoots(ctx context.Context, companyRoot int64) ([]Ad
 }
 
 func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]AdminTreeNode, error) {
+	return s.treeReads.read(ctx, "children:"+strconv.FormatInt(parentID, 10), adminTreeCacheTTL, func(ctx context.Context) ([]AdminTreeNode, error) {
+		return s.listAdminTreeChildren(ctx, parentID)
+	})
+}
+
+func (s *Store) listAdminTreeChildren(ctx context.Context, parentID int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
 		SELECT a.id,
 		       a.parent_id,
@@ -206,6 +218,13 @@ func (s *Store) ListAdminTreeChildren(ctx context.Context, parentID int64) ([]Ad
 }
 
 func (s *Store) ListAdminTreeFull(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
+	// Full exports can be tens of MiB. Collapse simultaneous loads but retain no snapshot.
+	return s.treeReads.read(ctx, "full:"+strconv.FormatInt(companyRoot, 10), 0, func(ctx context.Context) ([]AdminTreeNode, error) {
+		return s.listAdminTreeFull(ctx, companyRoot)
+	})
+}
+
+func (s *Store) listAdminTreeFull(ctx context.Context, companyRoot int64) ([]AdminTreeNode, error) {
 	rows, err := s.reader().Query(ctx, `
 		WITH all_affiliates AS (
 		  SELECT a.id,

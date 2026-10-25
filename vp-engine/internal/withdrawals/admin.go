@@ -217,6 +217,9 @@ func (s *Store) SetWithdrawalStatus(ctx context.Context, id int64, status, admin
 	if !ok {
 		return fmt.Errorf("%w: status %q desconocido", ErrInvalidTransition, status)
 	}
+	if err := s.CheckFinancialWrites(ctx); err != nil {
+		return err
+	}
 
 	// D10: los baneados no cobran. El chequeo al SOLICITAR (handleWithdraw) no
 	// alcanza — a quien lo banean DESPUÉS de solicitar hay que congelarle el

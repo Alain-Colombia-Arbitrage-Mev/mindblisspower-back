@@ -73,6 +73,13 @@ func (h *Handler) handleCommandCenterSummary(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if fin.StripeRecovery != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "stripe_recovery_financial_review_required", "data_source": recoveredStripeSource,
+			"stripe_recovery": fin.StripeRecovery, "review_endpoint": "/api/admin/finance",
+		})
+		return
+	}
 	m, _, err := h.store.BuildNetworkMetrics(ctx, h.companyRoot)
 	if err != nil {
 		h.log.Error().Err(err).Msg("cc summary: network metrics")

@@ -33,14 +33,15 @@ describe('GitHub Actions review policy', () => {
       }
     }
   });
-  test('image publication stays manual, main-only and behind both verification workflows', () => {
+  test('image publication stays manual, main-only and behind every verification workflow', () => {
     const doc = workflow('container-images.yml');
     expect(Object.keys(doc.on)).toEqual(['workflow_dispatch']);
     expect(doc.permissions).toEqual({ contents: 'read' });
     expect(doc.jobs.publish.if).toContain('github.event.repository.default_branch');
     expect(doc.jobs.publish.if).toContain("vars.DEPLOYMENT_PROVIDER == 'digitalocean'");
     expect(doc.jobs.publish.environment).toBe('container-images');
-    expect(doc.jobs.publish.needs).toEqual(['verify', 'runtime']);
+    expect(doc.jobs.publish.needs).toEqual(['security', 'verify', 'runtime']);
+    expect(doc.jobs.security.uses).toBe('./.github/workflows/dependency-security.yml');
     expect(doc.jobs.verify.uses).toBe('./.github/workflows/postgres-rds.yml');
     expect(doc.jobs.runtime.uses).toBe('./.github/workflows/app-platform-local.yml');
     expect(JSON.stringify(doc.jobs.publish)).toContain('registry.digitalocean.com');

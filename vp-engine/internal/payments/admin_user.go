@@ -352,6 +352,7 @@ func (s *Store) UpdatePersonIdentity(ctx context.Context, personID int64, firstN
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, fmt.Errorf("update person identity commit: %w", err)
 	}
+	s.treeReads.invalidate()
 	return tag.RowsAffected(), paymentRows, nil
 }
 
@@ -396,6 +397,7 @@ func (s *Store) SoftDeletePerson(ctx context.Context, personID int64) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("soft delete commit: %w", err)
 	}
+	s.treeReads.invalidate()
 	return nil
 }
 

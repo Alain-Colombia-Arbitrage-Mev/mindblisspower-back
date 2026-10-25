@@ -25,6 +25,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // V2Streams agrupa los candidatos de los streams no-binarios del período.
@@ -534,6 +535,9 @@ func PayV2Streams(
 	periodID int64, v2 *V2Streams, theta decimal.Decimal, postedAt time.Time,
 	companyRootAffiliateID int64,
 ) (decimal.Decimal, error) {
+	if err := financialguard.RequireOperational(ctx, tx); err != nil {
+		return decimal.Zero, err
+	}
 	total := decimal.Zero
 	wallets := map[int64]int64{}    // caché wallet USD por afiliado
 	retWallets := map[int64]int64{} // caché wallet USD-RET por afiliado (separado)
@@ -684,6 +688,9 @@ func AccruePoints(
 	ctx context.Context, tx pgx.Tx, plan *PlanConfig,
 	candidates []Candidate, theta decimal.Decimal,
 ) error {
+	if err := financialguard.RequireOperational(ctx, tx); err != nil {
+		return err
+	}
 	if !plan.PointsEnabled {
 		return nil
 	}

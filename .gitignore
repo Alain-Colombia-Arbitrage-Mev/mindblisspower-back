@@ -50,3 +50,16 @@ deploy/digitalocean/artifacts/
 deploy/digitalocean/runtime/
 deploy/cloudflare/runtime/
 deploy/cloudflare/artifacts/
+
+# Local agent state is not source code and may contain private session data.
+**/.claude-flow/
+**/.superdesign/
+**/ruvector.db*
+**/agentdb.rvf*
+$OUT
+$P
+
+# Private incident runbooks and evidence stay local, outside the public code repo.
+scripts/recovery/
+deploy/portable/IMAGES-20261025.md
+docs/stripe-recovery-read-contract-20261025.md
