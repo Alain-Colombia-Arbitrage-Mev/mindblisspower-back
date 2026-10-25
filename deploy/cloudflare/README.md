@@ -5,9 +5,15 @@ y PlanetScale para PostgreSQL. Sustituye la propuesta DigitalOcean; no implica
 que Cloudflare ya este desplegado.
 
 Estado actualizado 2026-10-25: existe la cuenta Cloudflare y una conexion
-PlanetScale PostgreSQL 18.6 validada SOLO LECTURA, con TLS y certificado verificado.
-La DB consultada no tiene tablas de la aplicacion; esto no significa que haya
-datos migrados ni que el backend este desplegado. El dominio confirmado es
+PlanetScale PostgreSQL 18.6 con TLS y certificado verificado. El usuario autorizo
+la importacion del archivo Docker verificado. Tras ampliar almacenamiento, la
+importacion historica termino y paso las verificaciones de las 61 tablas, arbol,
+usuarios, paquetes, wallets y secuencias. Esto NO valida su vigencia: los datos
+son de junio/julio y NO corresponden a la RDS reciente de septiembre. Mantener
+esta copia como historica; NO depurarla, reemplazarla ni usarla como definitiva.
+El lanzamiento sigue bloqueado hasta recuperar y conciliar la fuente reciente.
+Consultar [el registro de importacion](IMPORT-20261025.md) y la
+[verificacion de procedencia](FRESHNESS-20261025.md). El dominio confirmado es
 mindblisspower.com. Wrangler autentico una unica cuenta y listo Hyperdrive en ella.
 No se verificaron Zone ID, modalidad Metal/red, recursos, tarifa ni entorno
 asignado a esa DB. No adivinarlos ni publicar secretos.
@@ -22,13 +28,14 @@ PgBouncer 6432. El rol observado no puede crear esquemas ni objetos en public;
 no sirve como rol de restauracion. Comprobar la revocacion de la credencial
 anterior; no documentar valores ni confundir conexion exitosa con revocacion.
 
-Preparacion de restauracion: [procedimiento y preflight](RESTORE.md). El usuario
-eligio como origen el Docker recuperado y posteriormente declara credenciales
-rotadas. La nueva conexion directa se valido READ ONLY con TLS; no prueba la
-revocacion de la anterior ni actualiza Hyperdrive. El origen no responde por TCP
-en la ultima revision; no se reinicio ni modifico. El planificador
-es solo lectura/salida de plan, no tiene apply y bloquea antes de conectar si no
-se confirma rotacion y disponibilidad. Ensayo con datos sinteticos, no importacion.
+Preparacion de restauracion: [procedimiento y preflight](RESTORE.md). El
+planificador restore_plan.py sigue siendo solo lectura, sin apply. La importacion
+autorizada usa un procedimiento manual separado, limitado al hash del archivo
+historico: se restauro primero en un nuevo Docker PG18.6 aislado. El original
+no responde por TCP y no se reinicio ni modifico. El usuario declara credenciales
+rotadas; conectar correctamente no demuestra revocacion ni actualiza Hyperdrive.
+La copia contiene datos hasta julio y cero eventos/intentos Stripe: conciliar
+los movimientos posteriores antes de habilitar operaciones financieras.
 
 ### Configuracion local tras renovar credenciales
 
@@ -40,8 +47,8 @@ No acepta CA personalizada, opciones desconocidas, destinos ambiguos ni pool >5.
 Respeta el puerto de la URI suministrada: 5432 directo implica PGBOUNCER=false,
 6432 implica true. Guarda atomicamente solo .env.local ignorado por Git, sin
 copias del secreto ni cambios en las variables legacy separadas. No valida por
-si mismo la vigencia o revocacion de contrasenas. No ejecutar la app contra la
-base vacia: auth.user, mlm.person, affiliate, wallet y wallet_movement no existen.
+si mismo la vigencia o revocacion de contrasenas. Mantener la app detenida hasta
+completar la importacion, verificar integridad y revisar grants/RLS por servicio.
 
 Wrangler quedo autenticado y el inventario solo lectura encontro Hyperdrive
 planetscale-mindbliss-main-35ro: puerto 5432, cache disabled, limite de origen 15.
@@ -56,9 +63,9 @@ rotacion de su password. No se desplego Worker ni se cambio DNS.
 | API Bun/Hono | Containers, conservando su runtime | Docker probado; red Cloudflare pendiente |
 | Engine Go | Containers privado HTTP/gRPC mTLS | Sin desplegar |
 | Payments y withdrawals Go | Containers, solo webhook Stripe publico | Sin desplegar |
-| Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Conexion PG18.6 probada; sin importar datos |
+| Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Copia historica importada/verificada; NO es la fuente definitiva |
 | Lecturas directas de Workers | Hyperdrive | Recurso existente, sin binding de app ni prueba end-to-end |
-| Backups independientes | pg_dump cifrado, destino externo al proveedor DB | Drills Docker PG17/18; sin backup real ni schedule cloud |
+| Backups independientes | pg_dump cifrado, destino externo al proveedor DB | Archivo real cifrado local; falta destino externo y schedule cloud |
 
 Los servicios Go/Bun pueden usar su driver PostgreSQL por TLS directamente;
 Hyperdrive es para el acceso desde Workers, no un runtime ni el alojamiento DB.
