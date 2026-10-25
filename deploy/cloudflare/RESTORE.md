@@ -8,14 +8,15 @@ PlanetScale ni arrancar aplicaciones. No se relajan las guardas de backup.sh.
 - Origen elegido por el usuario: docker:mindbliss-local-recovery-20261022.
 - El contenedor esta activo/unhealthy, pero PostgreSQL rechaza conexiones TCP
   internas en 5432. No se reinicio, reparo, exporto ni modifico su almacenamiento.
-- El usuario confirmo que la credencial expuesta TODAVIA NO fue rotada. No se
-  reutilizo para contactar PlanetScale durante esta preparacion.
+- Actualizacion 2026-10-25: el usuario declara credenciales rotadas. La conexion
+  nueva se valido con TLS y transaccion READ ONLY. Una conexion exitosa no prueba
+  por si sola que la credencial anterior fue revocada ni que Hyperdrive se actualizo.
 - El nombre de la DB de origen, snapshot actual y esquemas a importar siguen sin
   verificar. Los 12,14 GB documentados corresponden a una revision anterior.
-- El destino consultado anteriormente era PG18.6, DB postgres sin tablas de app.
+- El destino se reviso nuevamente: PG18.6, DB postgres sin tablas de app.
   No se verifico que sea una rama staging nueva, ni su modalidad o recursos.
 
-No importar hasta resolver ambos bloqueos y revisar el inventario real. Esta
+No importar hasta resolver el origen, verificar revocacion y revisar el inventario real. Esta
 copia historica no certifica ventas Stripe recientes: conciliar las ultimas
 transacciones antes de considerar cualquier lanzamiento.
 

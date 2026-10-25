@@ -21,6 +21,8 @@ jobs:
         with: {node-version: "24"}
       - name: Environment isolation and deployment policy
         run: node --test deploy/portable/manage.test.mjs deploy/portable/release-policy.test.mjs
+      - name: Private PlanetScale configuration normalization (synthetic only)
+        run: node --test deploy/cloudflare/normalize-env.test.mjs
       - name: Build portable backup tools
         run: docker build -t mindbliss/backup:infra-20261023 deploy/portable/backup
       - name: Build PostgreSQL 18 backup tools

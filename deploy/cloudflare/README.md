@@ -8,22 +8,45 @@ Estado actualizado 2026-10-25: existe la cuenta Cloudflare y una conexion
 PlanetScale PostgreSQL 18.6 validada SOLO LECTURA, con TLS y certificado verificado.
 La DB consultada no tiene tablas de la aplicacion; esto no significa que haya
 datos migrados ni que el backend este desplegado. El dominio confirmado es
-mindblisspower.com. No se verificaron Account ID, Zone ID, modalidad Metal/red,
-recursos, tarifa ni entorno asignado a esa DB. No adivinarlos ni publicar secretos.
+mindblisspower.com. Wrangler autentico una unica cuenta y listo Hyperdrive en ella.
+No se verificaron Zone ID, modalidad Metal/red, recursos, tarifa ni entorno
+asignado a esa DB. No adivinarlos ni publicar secretos.
 
 La configuracion privada backend/.env.local define DATABASE_URL hacia PgBouncer
 en 6432, PGBOUNCER=true y DATABASE_POOL_MAX=5 para la API Bun. No arrancar servicios
 contra una DB vacia. El limite es por instancia Bun, no un presupuesto global de
 Go, Hyperdrive y replicas. El archivo y sus copias .env*.local estan ignorados por
-Git. Se retiro la URI antigua sin nombre de variable sin cambiar DATABASE_URL.
-Comprobar la rotacion de la credencial expuesta durante el diagnostico; no
-documentar su valor ni considerar su rotacion validada por una conexion exitosa.
+Git. Se normalizo la URI renovada sin mostrarla y se verifico el archivo final
+con Node y Bun mediante databaseOptions: conexion correcta, READ ONLY, pool 5 y
+PgBouncer 6432. El rol observado no puede crear esquemas ni objetos en public;
+no sirve como rol de restauracion. Comprobar la revocacion de la credencial
+anterior; no documentar valores ni confundir conexion exitosa con revocacion.
 
 Preparacion de restauracion: [procedimiento y preflight](RESTORE.md). El usuario
-eligio como origen el Docker recuperado y confirmo que la credencial aun NO fue
-rotada. El origen no responde por TCP; no se reinicio ni modifico. El planificador
+eligio como origen el Docker recuperado y posteriormente declara credenciales
+rotadas. La nueva conexion directa se valido READ ONLY con TLS; no prueba la
+revocacion de la anterior ni actualiza Hyperdrive. El origen no responde por TCP
+en la ultima revision; no se reinicio ni modifico. El planificador
 es solo lectura/salida de plan, no tiene apply y bloquea antes de conectar si no
 se confirma rotacion y disponibilidad. Ensayo con datos sinteticos, no importacion.
+
+### Configuracion local tras renovar credenciales
+
+`node deploy/cloudflare/normalize-env.mjs --check` valida la configuracion privada
+sin conectar ni mostrar la URI. `--apply` convierte una unica URI suelta en
+DATABASE_URL, conserva sslmode=verify-full y adapta sslrootcert=system al driver
+Postgres.js (Node usa su almacen de CA; el parametro libpq causaba 42704).
+No acepta CA personalizada, opciones desconocidas, destinos ambiguos ni pool >5.
+Respeta el puerto de la URI suministrada: 5432 directo implica PGBOUNCER=false,
+6432 implica true. Guarda atomicamente solo .env.local ignorado por Git, sin
+copias del secreto ni cambios en las variables legacy separadas. No valida por
+si mismo la vigencia o revocacion de contrasenas. No ejecutar la app contra la
+base vacia: auth.user, mlm.person, affiliate, wallet y wallet_movement no existen.
+
+Wrangler quedo autenticado y el inventario solo lectura encontro Hyperdrive
+planetscale-mindbliss-main-35ro: puerto 5432, cache disabled, limite de origen 15.
+Esto comprueba configuracion, NO una consulta real a traves del binding ni la
+rotacion de su password. No se desplego Worker ni se cambio DNS.
 
 ## Componentes y alcance
 
@@ -34,7 +57,7 @@ se confirma rotacion y disponibilidad. Ensayo con datos sinteticos, no importaci
 | Engine Go | Containers privado HTTP/gRPC mTLS | Sin desplegar |
 | Payments y withdrawals Go | Containers, solo webhook Stripe publico | Sin desplegar |
 | Base relacional | PlanetScale PostgreSQL, NO MySQL/Vitess ni D1 | Conexion PG18.6 probada; sin importar datos |
-| Lecturas directas de Workers | Hyperdrive | Sin configurar |
+| Lecturas directas de Workers | Hyperdrive | Recurso existente, sin binding de app ni prueba end-to-end |
 | Backups independientes | pg_dump cifrado, destino externo al proveedor DB | Drills Docker PG17/18; sin backup real ni schedule cloud |
 
 Los servicios Go/Bun pueden usar su driver PostgreSQL por TLS directamente;
