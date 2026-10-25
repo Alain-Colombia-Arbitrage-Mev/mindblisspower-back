@@ -56,6 +56,21 @@ describe('GitHub Actions review policy', () => {
     expect(doc.jobs.deploy.environment).toBe('${{ inputs.environment }}');
     expect(JSON.stringify(doc.jobs.deploy)).toContain('DO_LAUNCH_APPROVED');
   });
+  test('selecting Cloudflare cannot activate legacy AWS or DigitalOcean writers', () => {
+    const writers = [
+      ...Object.values(workflow('build.yml').jobs),
+      ...Object.values(workflow('deploy.yml').jobs),
+      workflow('container-images.yml').jobs.publish,
+      workflow('app-platform-deploy.yml').jobs.deploy,
+    ] as any[];
+    for (const job of writers) {
+      const condition = String(job.if);
+      expect(condition).toMatch(/vars\.DEPLOYMENT_PROVIDER == '(aws|digitalocean)'/);
+      expect(condition).not.toContain('||');
+      expect(condition).not.toContain('!');
+      expect(condition).not.toContain('cloudflare');
+    }
+  });
   test('API persistence and Go race tests cannot silently disappear from the gates', () => {
     const doc = workflow('postgres-rds.yml');
     const sqlSteps = JSON.stringify(doc.jobs.postgres.steps);

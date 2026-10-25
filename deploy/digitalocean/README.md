@@ -1,5 +1,10 @@
 # Mindbliss: preparacion local para DigitalOcean App Platform
 
+Destino anterior, sustituido el 2026-10-24 por decision del usuario:
+[Cloudflare + PlanetScale](../cloudflare/README.md). DEPLOYMENT_PROVIDER ahora
+es cloudflare. Este material se conserva como pruebas Docker y propuesta
+portable, NO como instrucciones para activar DigitalOcean.
+
 Arquitectura objetivo, dimensionamiento, coste y requisitos de lanzamiento:
 [ARCHITECTURE.md](ARCHITECTURE.md). Es un diseno propuesto, no infraestructura
 ya desplegada. Las plantillas incluyen los seis servicios de aplicacion.
@@ -16,7 +21,8 @@ borrador [backend #4](https://github.com/Alain-Colombia-Arbitrage-Mev/mindblissp
 [cliente #1](https://github.com/Alain-Colombia-Arbitrage-Mev/mindblisspowerfront/pull/1)
 y [admin #2](https://github.com/Alain-Colombia-Arbitrage-Mev/mindblisspower-admin/pull/2).
 Consultar los checks de su revision exacta; ninguna PR se integro desde esta
-tarea. DEPLOYMENT_PROVIDER=digitalocean ya esta configurado en los tres repos.
+tarea. DEPLOYMENT_PROVIDER=digitalocean se configuro inicialmente en los tres
+repos; la seleccion actual es cloudflare, conforme al aviso anterior.
 La propuesta Terraform Alibaba queda inactiva.
 
 ## Resultado local
