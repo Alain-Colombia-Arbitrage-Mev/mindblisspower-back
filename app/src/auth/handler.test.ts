@@ -12,7 +12,8 @@ const env: AuthEnvironment = {
   BETTER_AUTH_SECRET: 'synthetic-auth-secret-with-at-least-32-characters', BETTER_AUTH_URL: 'https://auth.example.test',
   BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
   BETTER_AUTH_PHONE_OTP_ENABLED: 'true', BETTER_AUTH_JWT_ENABLED: 'true', BETTER_AUTH_JWT_ISSUER: 'https://auth.example.test',
-  BETTER_AUTH_JWT_AUDIENCE: 'synthetic-members', RESEND_API_KEY: 'synthetic-not-a-real-key', AUTH_EMAIL_FROM: 'auth@example.test',
+  BETTER_AUTH_JWT_AUDIENCE: 'synthetic-members', CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-not-a-real-key',
+  CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
   SENTDM_API_KEY: 'synthetic-not-a-real-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000000', SENTDM_OTP_CHANNEL: 'sms',
 };
 

@@ -4,7 +4,8 @@ Emails transaccionales + notificaciones in-app.
 
 **Mecánica:**
 - Cada módulo emite eventos; `notifications` escucha y enruta.
-- `notifications.send_email(template, to, data)` usa Resend.
+- `notifications.send_email(template, to, data)` está pendiente de implementar;
+  debe reutilizar el transporte de Cloudflare Email Sending de autenticación.
 - `notifications.send_inapp(personId, type, payload)` inserta en tabla `notification`.
 
 **Templates:** `templates/*.tsx` (JSX → react-email → HTML).
@@ -17,7 +18,7 @@ Emails transaccionales + notificaciones in-app.
 - `tree.affiliate_placed` (cuando alguien se registra bajo el afiliado)
 
 **Pendientes:**
-- [ ] Decidir provider transaccional (Resend ya integrado en `auth.ts`).
+- [ ] Conectar las notificaciones al transporte Cloudflare de `auth/delivery.ts`.
 - [ ] Decidir provider marketing (Loops / Mailgun) — separado de transaccional.
 - [ ] Templates react-email para los 5-7 eventos críticos de fase 1.
 - [ ] Tabla `notification` migrada del legacy.

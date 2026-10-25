@@ -7,6 +7,13 @@ export type AuthDelivery = { email: (message: EmailMessage) => Promise<void>; ph
 export const validPhone = (phone: string) => /^\+[1-9][0-9]{7,14}$/.test(phone);
 const uuid = z.uuid();
 const unavailable = () => new Error('authentication_delivery_unavailable');
+export const cloudflareEmailConfigured = (env: AuthEnvironment) => Boolean(env.CLOUDFLARE_EMAIL_API_TOKEN?.trim()
+  && !/\s/.test(env.CLOUDFLARE_EMAIL_API_TOKEN) && /^[a-f0-9]{32}$/i.test(env.CLOUDFLARE_ACCOUNT_ID || '')
+  && z.email().safeParse(env.AUTH_EMAIL_FROM).success);
+const emailResult = z.object({ success: z.literal(true), errors: z.array(z.unknown()).length(0), result: z.object({
+  delivered: z.array(z.email()), queued: z.array(z.email()), permanent_bounces: z.array(z.email()).length(0),
+  suppressed_recipients: z.array(z.email()).length(0).optional(),
+}) });
 
 // Fixed HTTPS destinations: never accept an upstream URL or retry a send from
 // request input. Provider bodies/errors may contain OTPs and must not escape.
@@ -23,10 +30,16 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
   }
   return {
     async email(message) {
-      if (!env.RESEND_API_KEY || !z.email().safeParse(env.AUTH_EMAIL_FROM).success || !z.email().safeParse(message.to).success) throw unavailable();
-      const result = await post('https://api.resend.com/emails', { authorization: `Bearer ${env.RESEND_API_KEY}`, 'Idempotency-Key': randomUUID() },
+      if (!cloudflareEmailConfigured(env) || !z.email().safeParse(message.to).success) throw unavailable();
+      const response = await post(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/email/sending/send`,
+        { authorization: `Bearer ${env.CLOUDFLARE_EMAIL_API_TOKEN}` },
         { from: env.AUTH_EMAIL_FROM, to: [message.to], subject: message.subject, text: message.text, ...(message.html ? { html: message.html } : {}) });
-      if (!z.object({ id: z.string().min(1) }).safeParse(result).success) throw unavailable();
+      const result = emailResult.safeParse(response);
+      if (!result.success) throw unavailable();
+      const accepted = [...result.data.result.delivered, ...result.data.result.queued];
+      if (accepted.length !== 1 || accepted[0]!.toLowerCase() !== message.to.toLowerCase()) throw unavailable();
+      // Queued/SMTP acceptance is not inbox delivery or identity proof. There
+      // is no undocumented idempotency header or automatic resend/fallback.
     },
     async phone(phone, code) {
       if (!env.SENTDM_API_KEY || !uuid.safeParse(env.SENTDM_OTP_TEMPLATE_ID).success || !validPhone(phone)

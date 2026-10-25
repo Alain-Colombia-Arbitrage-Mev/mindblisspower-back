@@ -25,7 +25,14 @@ El servidor obtiene el usuario de la sesión: el cuerpo no elige persona ni apro
 
 ## Tres canales, dos proveedores
 
-- Correo: Resend existente, con dominio/remitente configurados y verificados.
+- Correo: Cloudflare Email Sending mediante REST desde Bun, con dominio/remitente
+  incorporados y autenticados (SPF, DKIM, DMARC). Email Routing por sí solo no basta.
+  Email Sending está en Beta y el envío a destinatarios arbitrarios requiere Workers
+  Paid. No hace falta desplegar un Worker para esta integración.
+  Configurar `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_API_TOKEN` (permiso limitado
+  `Email Sending: Edit` sobre esa cuenta) y `AUTH_EMAIL_FROM` fuera de Git.
+  No existe fallback a Resend ni se requiere su clave. El éxito HTTP por sí solo no
+  basta: se comprueba que el único destinatario esté aceptado o en cola y sin rechazo.
 - SMS y WhatsApp: Sent v3, plantilla de autenticación aprobada y canal configurado
   exclusivamente en el servidor (`SENTDM_OTP_CHANNEL=sms` o `whatsapp`).
 - Una lista de canales en Sent puede producir varios envíos; no se interpreta como
@@ -35,6 +42,8 @@ El servidor obtiene el usuario de la sesión: el cuerpo no elige persona ni apro
 Los OTP no se guardan en claro ni se registran en logs. Son de un solo uso, con
 caducidad e intentos acotados. Consultar límites y diferencias de la versión
 instalada en [la composición de autenticación](../app/src/auth/README.md).
+Contrato y requisitos de correo: [API REST de Cloudflare](https://developers.cloudflare.com/email-service/api/send-emails/rest-api/)
+y [configuración del dominio](https://developers.cloudflare.com/email-service/get-started/send-emails/).
 
 ## Información mínima en Stripe
 

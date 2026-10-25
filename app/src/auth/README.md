@@ -6,12 +6,20 @@ transports, and `phone-otp.ts` hardens phone OTP storage/consumption.
 Nothing migrates data, sends messages or enables these capabilities on import.
 
 All feature flags default off. Apply the reviewed auth schema before enabling
-them. `RESEND_API_KEY` + `AUTH_EMAIL_FROM` configure email; Sent.dm does **not**
-provide email in its v3 API. `SENTDM_API_KEY`, an approved
+them. `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_API_TOKEN` + `AUTH_EMAIL_FROM`
+configure Cloudflare Email Sending over its fixed HTTPS REST endpoint. The token
+needs only account-scoped `Email Sending: Edit`; the sender domain must be onboarded
+with SPF/DKIM/DMARC and sending enabled. Email Sending is currently Beta; arbitrary
+recipients require the Workers Paid plan. Email Routing alone is not a transactional
+sender. No Worker deployment is required for this backend REST transport.
+Sent.dm does **not** provide email in its v3 API. `SENTDM_API_KEY`, an approved
 `SENTDM_OTP_TEMPLATE_ID` and one `SENTDM_OTP_CHANNEL` (`sms` or `whatsapp`) configure
 phone delivery. Optional template parameter/profile settings are in `.env.example`.
 No automatic cross-channel fallback or retries can duplicate OTP deliveries.
 Sent's `202/QUEUED` is acceptance, not proof of delivery or identity.
+Cloudflare success also requires this one recipient in `delivered` or `queued`,
+without permanent bounce, suppression or API errors. A message ID is not assumed
+to exist in the REST response. There is no Resend dependency or fallback.
 
 Email OTP uses a secret-keyed hash, 5-minute expiry and 3 attempts. Phone OTP
 requires a storage hook because the installed plugin otherwise stores plaintext.
@@ -58,6 +66,9 @@ Verified references, 2026-10-25 (official docs + Context7, checked against insta
 - https://better-auth.com/docs/plugins/email-otp
 - https://better-auth.com/docs/plugins/phone-number
 - https://better-auth.com/docs/plugins/jwt
+- https://developers.cloudflare.com/email-service/api/send-emails/rest-api/
+- https://developers.cloudflare.com/email-service/get-started/send-emails/
+- https://developers.cloudflare.com/email-service/
 - https://docs.sent.dm/start/guides/sending-messages
 - https://docs.sent.dm/reference/api/authentication
 

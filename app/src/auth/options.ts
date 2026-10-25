@@ -3,7 +3,7 @@ import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { emailOTP } from 'better-auth/plugins/email-otp';
 import { phoneNumber } from 'better-auth/plugins/phone-number';
 import { jwt } from 'better-auth/plugins/jwt';
-import { authActionMessage, createAuthDelivery, validPhone, type AuthDelivery, type AuthEnvironment } from './delivery';
+import { authActionMessage, cloudflareEmailConfigured, createAuthDelivery, validPhone, type AuthDelivery, type AuthEnvironment } from './delivery';
 import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification, securePhoneVerifyEndpoint } from './phone-otp';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
@@ -32,7 +32,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
   }
   if (phoneEnabled && (!env.SENTDM_API_KEY || !env.SENTDM_OTP_TEMPLATE_ID || !env.SENTDM_OTP_CHANNEL)) throw new Error('Phone authentication delivery is not configured');
   if (phoneEnabled && !['sms', 'whatsapp'].includes(env.SENTDM_OTP_CHANNEL!)) throw new Error('Select one configured phone authentication channel');
-  if (emailEnabled && (!env.RESEND_API_KEY || !env.AUTH_EMAIL_FROM)) throw new Error('Email authentication delivery is not configured');
+  if (emailEnabled && !cloudflareEmailConfigured(env)) throw new Error('Cloudflare email authentication delivery is not configured');
   if (jwtEnabled && (!env.BETTER_AUTH_JWT_ISSUER || !env.BETTER_AUTH_JWT_AUDIENCE)) throw new Error('JWT issuer and audience must be explicit');
   const plugins: BetterAuthPlugin[] = [];
   if (emailEnabled) plugins.push(emailOTP({ otpLength: 6, expiresIn: 300, allowedAttempts: 3,
