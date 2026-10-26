@@ -16,6 +16,15 @@ import (
 
 const paymentJSON = `{"payment_id":123456789,"invoice_id":"777","order_id":"mindbliss-order_123","payment_status":"finished","price_amount":1353,"price_currency":"usd","pay_amount":15,"actually_paid":15,"pay_currency":"trx"}`
 
+func TestIPNCanonicalKeysMatchJavaScriptEnumeration(t *testing.T) {
+	input := []byte(`{"z":{"10":"ten","2":"two","01":"leading"},"\ue000":1,"\ud83d\ude00":2,"0":"zero","10":"ten","2":"two"}`)
+	got, err := canonicalJSON(input)
+	want := "{\"0\":\"zero\",\"2\":\"two\",\"10\":\"ten\",\"z\":{\"2\":\"two\",\"10\":\"ten\",\"01\":\"leading\"},\"\U0001F600\":2,\"\uE000\":1}"
+	if err != nil || string(got) != want {
+		t.Fatal("IPN keys must follow JavaScript numeric-index and UTF-16 ordering")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

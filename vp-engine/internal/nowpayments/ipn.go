@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -125,7 +126,10 @@ func appendCanonical(dst []byte, value any) ([]byte, error) {
 		for key := range v {
 			keys = append(keys, key)
 		}
-		sort.Strings(keys)
+		// The reference signer sorts keys before assigning them to a JS object.
+		// JSON.stringify then enumerates array-index keys numerically first;
+		// other keys retain UTF-16 lexical order, not UTF-8/code-point order.
+		sort.Slice(keys, func(i, j int) bool { return canonicalKeyLess(keys[i], keys[j]) })
 		dst = append(dst, '{')
 		for i, key := range keys {
 			if i > 0 {
@@ -183,6 +187,25 @@ func appendCanonical(dst []byte, value any) ([]byte, error) {
 	default:
 		return nil, ErrResponse
 	}
+}
+
+func canonicalKeyLess(a, b string) bool {
+	index := func(key string) (uint64, bool) {
+		n, err := strconv.ParseUint(key, 10, 32)
+		return n, err == nil && n < 4294967295 && strconv.FormatUint(n, 10) == key
+	}
+	ai, aIndex := index(a)
+	bi, bIndex := index(b)
+	if aIndex || bIndex {
+		return aIndex && (!bIndex || ai < bi)
+	}
+	au, bu := utf16.Encode([]rune(a)), utf16.Encode([]rune(b))
+	for i := 0; i < len(au) && i < len(bu); i++ {
+		if au[i] != bu[i] {
+			return au[i] < bu[i]
+		}
+	}
+	return len(au) < len(bu)
 }
 
 // JSON.stringify-compatible escaping without HTML or U+2028/U+2029 escaping.
