@@ -4,6 +4,9 @@
 testable Better Auth 1.6.22 configuration; `delivery.ts` contains bounded HTTP
 transports, and `phone-otp.ts` hardens phone OTP storage/consumption.
 Nothing migrates data, sends messages or enables these capabilities on import.
+The framework is MIT licensed and runs in this existing Bun process and PostgreSQL,
+without Better Auth's optional paid managed infrastructure. See the
+[email authentication backend contract](../../../docs/email-auth-backend.md).
 
 All feature flags default off. Apply the reviewed auth schema before enabling
 them. `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_API_TOKEN` + `AUTH_EMAIL_FROM`
@@ -37,6 +40,9 @@ valid. This deliberately trades resend speed for replay safety until a native
 persistent-generation verifier is available. Phone resend cooldown is 60 seconds.
 The recipient budget stores an allowed-after timestamp so framework cleanup
 cannot prune the longer cooldown early. New codes invalidate all older rows.
+The optional non-consuming `/email-otp/check-verification-otp` HTTP route is
+disabled; the actual sign-in route consumes the challenge. A generic successful
+send-request response does not confirm provider acceptance or inbox delivery.
 
 Public phone endpoints (opt-in): `POST /api/auth/phone-number/send-otp` and
 `POST /api/auth/phone-number/verify`. Existing users with already-verified email

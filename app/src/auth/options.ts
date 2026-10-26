@@ -81,7 +81,9 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     session: { expiresIn: 86400 * 7, updateAge: 86400, cookieCache: { enabled: false } },
     verification: { storeInDatabase: true },
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 30 },
-    disabledPaths: ['/phone-number/request-password-reset', '/phone-number/reset-password'],
+    // Sign-in must atomically consume the code. Do not expose the optional
+    // non-consuming checker as a second public verification oracle.
+    disabledPaths: ['/email-otp/check-verification-otp', '/phone-number/request-password-reset', '/phone-number/reset-password'],
     hooks: { before: createAuthMiddleware(async ctx => {
       if (ctx.path === '/sign-in/phone-number' && typeof ctx.body?.phoneNumber === 'string') {
         const user = await ctx.context.adapter.findOne<{ phoneNumberVerified: boolean }>({ model: 'user',

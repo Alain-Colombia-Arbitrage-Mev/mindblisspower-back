@@ -31,3 +31,6 @@ Las lecturas de recuperación son evidencia, no activaciones ni comisiones calcu
 
 La integración [Better Auth, mensajería e identidad](docs/auth-identity-cutover.md)
 es opt-in y requiere migración y corte coordinados antes de activarse.
+El [contrato de códigos por email](docs/email-auth-backend.md) usa la librería
+gratuita dentro de la API existente y Cloudflare para entregar los correos;
+no requiere otro servicio de autenticación de pago.
