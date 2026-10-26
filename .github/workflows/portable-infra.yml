@@ -23,6 +23,8 @@ jobs:
         run: node --test deploy/portable/manage.test.mjs deploy/portable/release-policy.test.mjs
       - name: Private PlanetScale configuration normalization (synthetic only)
         run: node --test deploy/cloudflare/normalize-env.test.mjs
+      - name: Cloudflare cost scenarios (offline, no provider credentials)
+        run: node --test deploy/cloudflare/cost-model.test.mjs
       - name: Verified archive import guards (synthetic only, no database contact)
         run: node --test deploy/cloudflare/import-verified-candidate.test.mjs
       - name: Build portable backup tools
