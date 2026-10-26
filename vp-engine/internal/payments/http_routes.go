@@ -22,6 +22,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/member/kyc/documents", h.handleKYCDocuments)
 	mux.HandleFunc("/api/member/news", h.handleMemberNews)
 	mux.HandleFunc("/api/webhooks/stripe", h.handleWebhook)
+	mux.HandleFunc("/api/webhooks/nowpayments", h.handleNOWPaymentsWebhook)
 	mux.HandleFunc("/api/admin/check", h.handleAdminCheck)
 	mux.HandleFunc("/api/admin/users", h.handleAdminUsers)
 	mux.HandleFunc("/api/admin/users/export", h.handleAdminUsersExport)

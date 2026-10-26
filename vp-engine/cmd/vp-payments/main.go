@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vicionpower/vp-engine/internal/nowpayments"
 	"github.com/vicionpower/vp-engine/internal/payments"
 	"github.com/vicionpower/vp-engine/internal/shared/db"
 	"github.com/vicionpower/vp-engine/internal/shared/log"
@@ -83,6 +84,16 @@ func run() error {
 		gw = payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods, os.Getenv("ENV"))
 	}
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
+	if cfg.ExternalProvidersEnabled() && cfg.NOWPayments.MembershipsEnabled {
+		nowClient, nowErr := nowpayments.New(cfg.NOWPayments.ClientConfig())
+		if nowErr != nil {
+			return nowErr
+		}
+		if err := handler.SetNOWPayments(nowClient, cfg.NOWPayments.Environment, cfg.NOWPayments.CallbackURL, cfg.NOWPayments.SuccessURL, cfg.NOWPayments.CancelURL); err != nil {
+			return err
+		}
+		logger.Info().Msg("NOWPayments membership checkout explicitly enabled; financial readiness guards still apply")
+	}
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
 	handler.SetSupportAI(cfg.SupportAIURL, cfg.SupportAIServiceToken, cfg.SupportAIAutoDraft, cfg.SupportAIAutoReply)

@@ -78,21 +78,64 @@ func (s *Store) CartResumeInfo(ctx context.Context, intentID string) (resumeInfo
 	return ri, nil
 }
 
-// ReopenIntent revierte un intent 'expired' a 'created' para reanudar el pago.
+// ReopenIntent reserves an existing Stripe intent before another external
+// checkout is created. It rechecks the current state and the other provider
+// under the same person lock used by both new-checkout paths.
 func (s *Store) ReopenIntent(ctx context.Context, intentID string) error {
 	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(ctx,
-		`UPDATE payments.purchase_intent SET status='created', updated_at=now() WHERE id=$1::uuid AND status='expired'`,
-		intentID)
-	return err
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin resume reservation: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var personID int64
+	var packageID int
+	var status, email string
+	// Activation locks the intent before its person; keep the same lock order.
+	if err := tx.QueryRow(ctx, `SELECT person_id,package_id,status FROM payments.purchase_intent WHERE id=$1::uuid FOR UPDATE`, intentID).
+		Scan(&personID, &packageID, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrIntentNotFound
+		}
+		return fmt.Errorf("lock resume intent: %w", err)
+	}
+	if status != "created" && status != "expired" {
+		return ErrActivationState
+	}
+	if err := tx.QueryRow(ctx, `SELECT email::text FROM mlm.person WHERE id=$1 FOR NO KEY UPDATE`, personID).Scan(&email); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrCheckoutIdentityReview
+		}
+		return fmt.Errorf("lock resume owner: %w", err)
+	}
+	decision, err := banDecisionFor(ctx, tx, BanCandidate{Email: email})
+	if err != nil {
+		return err
+	}
+	if decision.Blocked {
+		return ErrCheckoutIdentityReview
+	}
+	if err := checkoutOutstanding(ctx, tx, personID, packageID, "stripe"); err != nil {
+		return err
+	}
+	if status == "expired" {
+		if _, err := tx.Exec(ctx, `UPDATE payments.purchase_intent SET status='created',updated_at=now() WHERE id=$1::uuid`, intentID); err != nil {
+			return fmt.Errorf("reserve resumed intent: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit resume reservation: %w", err)
+	}
+	return nil
 }
 
 // handleResume: GET /api/payments/resume?t=<token> — regenera la sesión de
 // Stripe de un carrito abandonado y devuelve {url}. Lo llama el BFF de
 // growth-hub (token de servicio) desde el link público del correo.
 func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	if !h.svcAuth(w, r) {
 		return
 	}
@@ -148,14 +191,31 @@ func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "checkout_identity_review_required")
 		return
 	}
+	// Reserve before asking Stripe for another payable checkout. In particular,
+	// an expired Stripe cart must not bypass an outstanding NOW membership.
+	if err := h.store.ReopenIntent(ctx, intentID); err != nil {
+		switch {
+		case errors.Is(err, ErrNOWPaymentsOutstanding):
+			writeErr(w, http.StatusConflict, "membership_payment_pending_review")
+		case errors.Is(err, ErrActivationState), errors.Is(err, ErrIntentNotFound):
+			writeErr(w, http.StatusConflict, "not_resumable")
+		case errors.Is(err, ErrCheckoutIdentityReview):
+			writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+		default:
+			h.log.Error().Msg("resume reservation unavailable")
+			writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
+		}
+		return
+	}
+	if h.gw == nil {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_unavailable")
+		return
+	}
 	url, sessionID, err := h.gw.CreateCheckout(pack, intentID, checkoutIdentity)
 	if err != nil {
 		h.log.Error().Err(err).Str("intent", intentID).Msg("resume: stripe checkout")
 		writeErr(w, http.StatusBadGateway, "stripe_error")
 		return
-	}
-	if ri.Status == "expired" {
-		_ = h.store.ReopenIntent(ctx, intentID)
 	}
 	if err := h.store.AttachSession(ctx, intentID, sessionID); err != nil {
 		h.log.Error().Err(err).Msg("resume: attach session")

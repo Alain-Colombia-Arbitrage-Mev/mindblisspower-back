@@ -315,17 +315,47 @@ func (s *Store) CreatePurchaseIntent(ctx context.Context, in PurchaseIntent) (st
 	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
 		return "", err
 	}
-	id, err := s.createPurchaseIntent(ctx, in, true)
-	if isUndefinedColumn(err) {
-		return s.createPurchaseIntent(ctx, in, false)
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", fmt.Errorf("begin purchase intent: %w", err)
 	}
-	return id, err
+	defer tx.Rollback(ctx) //nolint:errcheck
+	// NOWPayments takes this same person lock before reserving a membership.
+	// Hold it through the insert: checking first without the lock permits two
+	// different providers to create independently payable invoices concurrently.
+	var personID int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM mlm.person WHERE id=$1 FOR NO KEY UPDATE`, in.PersonID).Scan(&personID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrBuyerNotFound
+		}
+		return "", fmt.Errorf("lock purchase owner: %w", err)
+	}
+	if err := checkoutOutstanding(ctx, tx, personID, in.PackageID, "stripe"); err != nil {
+		return "", err
+	}
+	// Legacy installations may lack the two referral snapshot columns. Decide
+	// from the catalog before INSERT; recovering from undefined_column inside
+	// this transaction without a savepoint would leave the transaction aborted.
+	var hasReferralColumns bool
+	if err := tx.QueryRow(ctx, `SELECT count(*)=2 FROM pg_catalog.pg_attribute
+ WHERE attrelid='payments.purchase_intent'::regclass AND attname IN ('referral_code','preferred_side')
+   AND attnum>0 AND NOT attisdropped`).Scan(&hasReferralColumns); err != nil {
+		return "", fmt.Errorf("inspect purchase intent schema: %w", err)
+	}
+	id, err := s.createPurchaseIntent(ctx, tx, in, hasReferralColumns)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit purchase intent: %w", err)
+	}
+	return id, nil
 }
 
-func (s *Store) createPurchaseIntent(ctx context.Context, in PurchaseIntent, includeReferralCode bool) (string, error) {
+func (s *Store) createPurchaseIntent(ctx context.Context, q rowQuerier, in PurchaseIntent, includeReferralCode bool) (string, error) {
 	var id string
 	if !includeReferralCode {
-		err := s.db.QueryRow(ctx, `
+		err := q.QueryRow(ctx, `
 			INSERT INTO payments.purchase_intent (
 				user_id, person_id, affiliate_id, sponsor_affiliate_id,
 				package_id, pv, amount_usd, fee_usd, total_cents, currency, status
@@ -339,7 +369,7 @@ func (s *Store) createPurchaseIntent(ctx context.Context, in PurchaseIntent, inc
 		return id, nil
 	}
 
-	err := s.db.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO payments.purchase_intent (
 			user_id, person_id, affiliate_id, sponsor_affiliate_id, referral_code, preferred_side,
 			package_id, pv, amount_usd, fee_usd, total_cents, currency, status

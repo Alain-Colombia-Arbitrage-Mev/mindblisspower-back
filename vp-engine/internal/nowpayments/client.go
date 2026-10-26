@@ -69,6 +69,14 @@ type Client struct {
 func (*Client) String() string   { return "nowpayments.Client{credentials:redacted}" }
 func (*Client) GoString() string { return "nowpayments.Client{credentials:redacted}" }
 
+// Environment is non-secret provenance for persisted payment evidence.
+func (c *Client) Environment() string {
+	if c != nil && c.baseURL == sandboxAPI {
+		return "sandbox"
+	}
+	return "production"
+}
+
 func New(cfg Config) (*Client, error) {
 	key, secret := strings.TrimSpace(cfg.APIKey), strings.TrimSpace(cfg.IPNSecret)
 	if key == "" || len(key) > 4096 || strings.ContainsAny(key, "\r\n") || len(secret) > 4096 {
