@@ -16,26 +16,21 @@ type ActivationResult struct {
 	AffiliateID int64
 }
 
-// ActivatePaidPurchase marca la compra como pagada y la ACTIVA de forma atómica
-// e idempotente, todo en una transacción:
+// activateVerifiedCheckout valida un Checkout y activa la compra de forma
+// atómica e idempotente, todo en una transacción:
 //  1. resuelve el afiliado del comprador (lo auto-coloca bajo su sponsor si aún
 //     no está en el árbol — regla weak-leg),
 //  2. liga el paquete (mlm.affiliate_package status='active') — esto es lo que
 //     hace que el motor vea el principal/PV,
 //  3. acredita PV (mlm.tree_event pv_credit) para que el binario lo propague.
 //
-// NO escribe el ledger (wallet_movement): el asiento contable capital+1% se
-// concilia aparte. Idempotente: re-ejecutar (reintento de Stripe) no duplica
-// — dedupe por status='activated' y por transaction_hash/external_ref.
-func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentIntentID string) (ActivationResult, error) {
-	return s.ActivatePaidPurchaseForIntent(ctx, sessionID, paymentIntentID, "")
+// Conserva el inflow contable del pack (no saldo retirable). Los reintentos
+// no duplican paquetes/PV/ledger y jamás reabren estados terminales de riesgo.
+func (s *Store) activateVerifiedCheckout(ctx context.Context, evidence checkoutEvidence) (ActivationResult, error) {
+	return s.activatePaidPurchase(ctx, evidence.sessionID, evidence.paymentIntentID, evidence.purchaseIntentID, &evidence)
 }
 
-// ActivatePaidPurchaseForIntent permite activar usando el id interno del
-// purchase_intent que viaja en metadata de Stripe. Es el fallback para una sesión
-// creada correctamente en Stripe cuyo stripe_session_id no alcanzó a guardarse
-// en RDS por un fallo transitorio después de CreateCheckout.
-func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, paymentIntentID, purchaseIntentID string) (ActivationResult, error) {
+func (s *Store) activatePaidPurchase(ctx context.Context, sessionID, paymentIntentID, purchaseIntentID string, evidence *checkoutEvidence) (ActivationResult, error) {
 	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
 		return ActivationResult{}, err
 	}
@@ -55,31 +50,47 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 		pv            int
 		status        string
 		preferredSide string
+		storedSession string
+		storedPayment string
+		currency      string
+		totalCents    int64
 	)
 	const lockIntentBySession = `
 		SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status,
-		       COALESCE(preferred_side, '')
+		       COALESCE(preferred_side, ''), COALESCE(stripe_session_id, ''),
+		       COALESCE(stripe_payment_intent_id, ''), currency, total_cents
 		  FROM payments.purchase_intent
 		 WHERE stripe_session_id = $1
 		 FOR UPDATE
 	`
 	err = tx.QueryRow(ctx, lockIntentBySession, sessionID).Scan(
 		&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide,
+		&storedSession, &storedPayment, &currency, &totalCents,
 	)
 	if errors.Is(err, pgx.ErrNoRows) && strings.TrimSpace(purchaseIntentID) != "" {
 		err = tx.QueryRow(ctx, `
 			SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status,
-			       COALESCE(preferred_side, '')
+			       COALESCE(preferred_side, ''), COALESCE(stripe_session_id, ''),
+			       COALESCE(stripe_payment_intent_id, ''), currency, total_cents
 			  FROM payments.purchase_intent
 			 WHERE id = $1::uuid
 			 FOR UPDATE
-		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide)
+		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide,
+			&storedSession, &storedPayment, &currency, &totalCents)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActivationResult{}, ErrIntentNotFound
 	}
 	if err != nil {
 		return ActivationResult{}, fmt.Errorf("lock intent: %w", err)
+	}
+	if evidence != nil {
+		if err := evidence.matchesIntent(intentID, storedSession, storedPayment, currency, totalCents); err != nil {
+			return ActivationResult{}, err
+		}
+	}
+	if err := activationStateAllowed(status); err != nil {
+		return ActivationResult{}, err
 	}
 
 	if status == "activated" {

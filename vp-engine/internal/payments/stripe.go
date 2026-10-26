@@ -22,10 +22,17 @@ type StripeGateway struct {
 	paymentMethods []string
 	pmConfig       string // payment_method_configuration (pmc_…) gestionada en el dashboard; si está, gana sobre paymentMethods
 	productID      string // "PACK MINDBLISS" (prod_…); si está, el cargo se asocia a ese producto
+	requireLive    bool
 }
 
-func NewStripeGateway(secretKey, webhookSecret, successURL, cancelURL, productID, pmConfig string, methods []string) *StripeGateway {
+func NewStripeGateway(secretKey, webhookSecret, successURL, cancelURL, productID, pmConfig string, methods []string, environments ...string) *StripeGateway {
 	stripe.Key = secretKey // la API clásica usa la key global del paquete
+	// Production and unspecified environments always require real live money.
+	// Test captures are accepted only with an explicit development/test config.
+	requireLive := true
+	if len(environments) == 1 && (environments[0] == "development" || environments[0] == "test") {
+		requireLive = false
+	}
 	return &StripeGateway{
 		webhookSecret:  webhookSecret,
 		successURL:     successURL,
@@ -33,6 +40,7 @@ func NewStripeGateway(secretKey, webhookSecret, successURL, cancelURL, productID
 		paymentMethods: methods,
 		pmConfig:       pmConfig,
 		productID:      productID,
+		requireLive:    requireLive,
 	}
 }
 
@@ -205,29 +213,24 @@ func (g *StripeGateway) RefundPaymentIntent(piID string, amountCents int64, reas
 	return r.ID, nil
 }
 
-// SessionPaid consulta a Stripe el estado de una Checkout Session concreta (para
-// el sweep de reconciliación cuando el webhook se perdió). Devuelve (pagada,
-// paymentIntentID). Solo confirma pagos de PACK MINDBLISS: exige la marca
-// packmindbliss=true en el metadato de la sesión (aísla la cuenta compartida).
-func (g *StripeGateway) SessionPaid(sessionID string) (bool, string, error) {
+// paidCheckout preserves the complete capture evidence for the locked intent
+// comparison. A paid flag and PaymentIntent ID alone cannot prove the amount.
+func (g *StripeGateway) paidCheckout(sessionID string) (checkoutEvidence, bool, error) {
 	cs, err := session.Get(sessionID, nil)
 	if err != nil {
-		return false, "", fmt.Errorf("stripe session get %s: %w", sessionID, err)
+		return checkoutEvidence{}, false, fmt.Errorf("stripe session get %s: %w", sessionID, err)
 	}
 	if cs.Metadata[MetadataProductTag] != MetadataProductVal {
-		return false, "", nil // sesión ajena a la cuenta compartida; ignorar
+		return checkoutEvidence{}, false, nil // sesión ajena a la cuenta compartida; ignorar
 	}
 	if cs.PaymentStatus != stripe.CheckoutSessionPaymentStatusPaid {
-		return false, "", nil
+		return checkoutEvidence{}, false, nil
 	}
-	piID := ""
-	if cs.PaymentIntent != nil {
-		piID = cs.PaymentIntent.ID
+	evidence, err := evidenceFromCheckout(cs, g.requireLive)
+	if err != nil || cs.ID != sessionID {
+		return checkoutEvidence{}, false, ErrCheckoutEvidence
 	}
-	if piID == "" {
-		piID = "sess:" + cs.ID
-	}
-	return true, piID, nil
+	return evidence, true, nil
 }
 
 // ConstructEvent verifica la firma del webhook contra el payload crudo.

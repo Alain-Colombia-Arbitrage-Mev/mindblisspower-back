@@ -78,7 +78,9 @@ func run() error {
 	}
 	var gw *payments.StripeGateway
 	if cfg.ExternalProvidersEnabled() {
-		gw = payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
+		// Only an explicitly configured development/test environment permits test captures.
+		// cfg.Env defaults to development for local ergonomics; it is not proof of opt-in.
+		gw = payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods, os.Getenv("ENV"))
 	}
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)

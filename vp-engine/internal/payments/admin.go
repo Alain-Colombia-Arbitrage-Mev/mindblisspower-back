@@ -36,6 +36,7 @@ func (s *Store) IsAdmin(ctx context.Context, email string) (bool, error) {
 
 // AdminUser es una fila de la tabla de usuarios del panel.
 type AdminUser struct {
+	DataSource     string `json:"data_source,omitempty"`
 	PersonID       int64  `json:"person_id"`
 	Name           string `json:"name"`
 	Email          string `json:"email"`
@@ -54,6 +55,13 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
+	if offset < 0 {
+		offset = 0
+	}
+	recovered, err := s.hasRecoveredStripe(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	var total int64
 	if err := s.db.QueryRow(ctx, `
 		SELECT count(*) FROM mlm.person p
@@ -62,26 +70,7 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
 
-	rows, err := s.db.Query(ctx, `
-		SELECT p.id,
-		       trim(p.first_name||' '||p.last_name) AS name,
-		       p.email, p.status::text, COALESCE(p.blacklisted,false),
-		       COALESCE(r.name_es,'—') AS rank,
-		       COALESCE(a.left_count,0), COALESCE(a.right_count,0),
-		       (a.id IS NOT NULL) AS positioned,
-		       COALESCE((SELECT SUM(amount_usd+fee_usd) FROM payments.purchase_intent pi
-		                  WHERE (pi.person_id = p.id OR (pi.person_id IS NULL AND lower(pi.user_id)=lower(p.email)))
-		                    AND pi.status IN ('paid','activated')
-		                    AND pi.stripe_present IS DISTINCT FROM false),0)::text AS total_paid,
-		       COALESCE((SELECT count(*) FROM mlm.affiliate_package ap
-		                  WHERE ap.affiliate_id=a.id AND ap.status='active'),0) AS active_packages
-		  FROM mlm.person p
-		  LEFT JOIN mlm.affiliate a ON a.person_id=p.id
-		  LEFT JOIN mlm.rank r      ON r.id=a.current_rank_id
-		 WHERE ($1='' OR p.email ILIKE '%'||$1||'%' OR (p.first_name||' '||p.last_name) ILIKE '%'||$1||'%')
-		 ORDER BY p.id DESC
-		 LIMIT $2 OFFSET $3
-	`, q, limit, offset)
+	rows, err := s.db.Query(ctx, adminUsersReadSQL(recovered), q, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
@@ -90,6 +79,9 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 	out := []AdminUser{}
 	for rows.Next() {
 		var u AdminUser
+		if recovered {
+			u.DataSource = recoveredStripeSource
+		}
 		if err := rows.Scan(&u.PersonID, &u.Name, &u.Email, &u.Status, &u.Blocked, &u.Rank,
 			&u.LeftCount, &u.RightCount, &u.Positioned, &u.TotalPaidUSD, &u.ActivePackages); err != nil {
 			return nil, 0, fmt.Errorf("scan user: %w", err)
@@ -97,6 +89,39 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 		out = append(out, u)
 	}
 	return out, total, rows.Err()
+}
+
+func adminUsersReadSQL(recovered bool) string {
+	paid := `COALESCE((SELECT SUM(amount_usd+fee_usd) FROM payments.purchase_intent pi
+		WHERE (pi.person_id = p.id OR (pi.person_id IS NULL AND lower(pi.user_id)=lower(p.email)))
+		AND pi.status IN ('paid','activated')
+		AND pi.stripe_present IS DISTINCT FROM false),0)::text`
+	if recovered {
+		// Captures are attributed only by the independently verified identity.
+		// Never match email, metadata candidates or unrelated checkout intents.
+		// This is gross captured money, not net proceeds, activation or commission.
+		paid = `COALESCE((SELECT SUM(s.captured_minor)::numeric/100
+			FROM payments.stripe_sale s
+			JOIN recovery.stripe_sale_identity i USING(payment_intent_id)
+			WHERE i.person_id=p.id AND i.identity_verified AND ` + recoveredStripePredicate + `),0)::numeric(24,2)::text`
+	}
+	return `
+		SELECT p.id,
+		       trim(p.first_name||' '||p.last_name) AS name,
+		       p.email, p.status::text, COALESCE(p.blacklisted,false),
+		       COALESCE(r.name_es,'—') AS rank,
+		       COALESCE(a.left_count,0), COALESCE(a.right_count,0),
+		       (a.id IS NOT NULL) AS positioned,
+		       ` + paid + ` AS total_paid,
+		       COALESCE((SELECT count(*) FROM mlm.affiliate_package ap
+		                  WHERE ap.affiliate_id=a.id AND ap.status='active'),0) AS active_packages
+		  FROM mlm.person p
+		  LEFT JOIN mlm.affiliate a ON a.person_id=p.id
+		  LEFT JOIN mlm.rank r      ON r.id=a.current_rank_id
+		 WHERE ($1='' OR p.email ILIKE '%'||$1||'%' OR (p.first_name||' '||p.last_name) ILIKE '%'||$1||'%')
+		 ORDER BY p.id DESC
+		 LIMIT $2 OFFSET $3
+	`
 }
 
 // ProductSales: total vendido por producto (vía Stripe, status activated).
