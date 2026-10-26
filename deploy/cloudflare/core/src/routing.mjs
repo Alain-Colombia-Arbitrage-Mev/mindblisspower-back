@@ -11,10 +11,9 @@ export const GRPC_TUNNEL_HOST = 'engine-grpc.core.internal';
 export const GRPC_TUNNEL_PATH = '/v1/engine-tunnel';
 export const TUNNEL_PROTOCOL = 'mindbliss-opaque-tcp-v1';
 const AUTH_ONLY_PATHS = Object.freeze({
-  GET: new Set(['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/api/auth/phone-number/opt-in', '/health']),
+  GET: new Set(['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/health']),
   POST: new Set(['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out',
-    '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email',
-    '/api/auth/phone-number/send-otp', '/api/auth/phone-number/verify', '/api/auth/phone-number/revoke-consent']),
+    '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email']),
 });
 
 function failure(error, status) {
@@ -109,6 +108,12 @@ export async function dispatchCore(request, env, resolve) {
   if (!Object.hasOwn(SERVICES, url.hostname) || url.username || url.password || url.hash
     || !['http:', 'https:'].includes(url.protocol) || url.port) return failure('not_found', 404);
   if (!METHODS.has(request.method) || request.headers.has('upgrade')) return failure('method_not_allowed', 405);
+  // Email-only policy is independent of infrastructure readiness. Do not even
+  // instantiate an API Container for phone status, consent, delivery or login.
+  let decodedPath = url.pathname;
+  try { for (let index = 0; index < 2; index++) decodedPath = decodeURIComponent(decodedPath); }
+  catch { return failure('not_found', 404); }
+  if (/^\/api\/auth\/(?:phone-number(?:\/|$)|sign-in\/phone-number(?:\/|$))/.test(decodedPath)) return failure('not_found', 404);
   if (!['staging', 'production'].includes(env.CORE_ENV)) return failure('core_unconfigured', 503);
   // Exact auth routes can launch independently; this never starts Go, exposes a
   // business read, permits identity claims, or relaxes the financial write gate.

@@ -35,13 +35,29 @@
     "mobileBrowser": {"viewport": "375x812", "registrationErrorsAreFieldBound": true, "firstInvalidFieldFocused": true, "anonymousSmsFormHidden": true, "horizontalOverflow": false},
     "independentAuthBridgeAudit": "No P0/P1 blockers found in reviewed changes"
   },
-  "pendingActivation": [
-    "Confirm and apply the additive migration _meta/migration/75_sms_auth_opt_in.sql to the explicitly reviewed target",
-    "Grant the existing isolated auth runtime only SELECT, INSERT and UPDATE on auth.sms_opt_in and verify effective privileges",
-    "Configure SENTDM_API_KEY and an approved SENTDM_OTP_TEMPLATE_ID for SENTDM_OTP_CHANNEL=sms using private secret storage",
-    "Enable AUTH_SMS_OPT_IN_SCHEMA_READY only after schema/grant verification and AUTH_SMS_OPT_IN_ENABLED only after provider readiness",
-    "Deploy the reviewed versions; this review did not deploy or activate SMS"
-  ],
+  "pendingActivation": [],
+  "subsequentUserDecision": {
+    "authenticationChannel": "email only",
+    "emailProvider": "Cloudflare",
+    "smsActivationCancelled": true,
+    "sentDmConfigurationRequired": false,
+    "smsConsentMigrationRequired": false,
+    "followUpVerification": {
+      "portalTestsPassed": 291,
+      "cloudflareCoreTestsPassed": 32,
+      "emailOnlyFocusedBackendTestsPassed": 4,
+      "portalTypecheck": "passed",
+      "portalLint": "passed",
+      "phoneRoutesRejectedBeforeUpstream": true,
+      "phoneFlagsCannotBeReactivatedByStaleConfiguration": true
+    },
+    "notes": [
+      "The optional SMS implementation and earlier SMS test results above describe the prior review, not an activated product feature",
+      "The follow-up change removes SMS entry points from the portal and blocks private phone routes and provider credential forwarding",
+      "Do not apply migration 75 or enable SMS flags for the current email-only scope",
+      "Profile, KYC and strict authentication acknowledgement fixes remain in scope"
+    ]
+  },
   "limitations": [
     "This is a scoped engineering review, not a guarantee that every possible defect has been eliminated",
     "Go race detection was unavailable because the local toolchain has CGO disabled",

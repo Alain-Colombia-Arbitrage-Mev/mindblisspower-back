@@ -33,49 +33,27 @@ Never deploy an administrative/shared database credential. Production mTLS uses
 separate server/client leaves, with its CA private key kept outside application
 services. Rotate the90-day leaves before their expiry.
 
-## Optional SMS verification
+## Email-only authentication
 
-Email stays the registration/login authority. SMS is a separately consented,
-authenticated profile opt-in, not SMS login, marketing permission, signup,
-identity linking, or permission to move a network node. No automatic WhatsApp
-fallback or message retry is configured.
+This release uses email only for registration, verification and login. It does
+not provide SMS, WhatsApp, phone login, or a phone-consent feature. The Worker
+always sets `BETTER_AUTH_PHONE_OTP_ENABLED=false` and
+`BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY=false`; even stale SMS flags set to `true`
+and complete provider credentials cannot override this policy. No `SENTDM_*`
+value is forwarded to any Container.
 
-Both `AUTH_SMS_OPT_IN_ENABLED` and `AUTH_SMS_OPT_IN_SCHEMA_READY` default to the
-literal string `false` in staging and production. Nothing here applies a schema
-migration, provisions provider secrets, enables SMS, or changes a financial gate.
-An operator must first review and apply additive auth migration 75, verify its
-restricted auth-role grants and backups, then assert schema readiness. Until
-readiness is `true`, the API status handler never queries `auth.sms_opt_in`.
-
-The API Container receives `BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY=true` only when
-both `AUTH_CUTOVER_VERIFIED` and `AUTH_SMS_OPT_IN_SCHEMA_READY` are exactly `true`.
-This permits current-consent status/revocation even with SMS sending disabled or
-provider configuration missing. Auth status does not require a financial JWT.
-Only these additional exact routes are accepted by the existing private auth
-release: `GET /api/auth/phone-number/opt-in` and `POST` to
-`/api/auth/phone-number/send-otp`, `/api/auth/phone-number/verify`, and
-`/api/auth/phone-number/revoke-consent`. Better Auth requires a verified email
-session and explicit consent before sending; schema/provider gates remain in
-the backend. Other phone login/reset routes remain closed.
-
-Sending additionally requires `AUTH_SMS_OPT_IN_ENABLED=true` and validated
-private `SENTDM_API_KEY` (nonblank, no whitespace), an operator-approved
-`SENTDM_OTP_TEMPLATE_ID` (nonzero UUID), and `SENTDM_OTP_CHANNEL=sms`. Optional
-`SENTDM_PROFILE_ID` must be a nonzero UUID; `SENTDM_OTP_PARAMETER` defaults to
-`code` and permits only 1–64 letters, digits or underscores. Approval of the
-template and sender must be checked with Sent.dm separately: valid UUID syntax
-is not evidence of approval or delivery. Only this explicit allowlist reaches
-the API Container; Go services receive no SMS credentials. Missing/malformed SMS
-configuration sets `BETTER_AUTH_PHONE_OTP_ENABLED=false` without disabling email.
-Revoking consent is still allowed after the provider has been switched off.
+All `/api/auth/phone-number/*` and `/api/auth/sign-in/phone-number` requests return
+404 before resolving an API Container, including when full core readiness is
+enabled. The optional SMS-consent table is not queried, and migration 75 is not
+required for this email-only release. Do not provision SMS secrets or apply that
+migration as an email setup step. Existing email/JWT gates and read-only financial
+restrictions are unchanged.
 
 `worker-configuration.d.ts` is an ignored, generated local artifact, not a test
 fixture. Regenerate it with `npm run types:staging` after changing Worker vars;
-the two SMS flags are derived from `wrangler.jsonc`. If local secret typing is
-needed, use a separate local `Cloudflare.Env` interface augmentation with optional
-string fields for `SENTDM_API_KEY`, `SENTDM_OTP_TEMPLATE_ID`, `SENTDM_OTP_CHANNEL`,
-`SENTDM_PROFILE_ID` and `SENTDM_OTP_PARAMETER`. Never put secret values into that
-stub or version the generated platform declarations. Unit tests require neither
+the dormant SMS flags are derived from `wrangler.jsonc` but cannot enable phone
+features. Never put secret values into a type stub or version the generated
+platform declarations. Unit tests require neither
 generated types nor provider credentials and run from a fresh checkout.
 
 ```sh

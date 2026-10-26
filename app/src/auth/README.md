@@ -1,5 +1,12 @@
 # Authentication composition
 
+Current product decision (2026-10-26): **email only**, using Better Auth and
+Cloudflare email delivery. The portal exposes no SMS controls or phone-auth
+routes; Cloudflare also blocks those private routes and forces phone/schema
+flags off without forwarding sent.dm credentials. Do not configure sent.dm or
+apply migration 75 for this release. The optional SMS implementation documented
+below is retained as inactive reference; it is not a registration dependency.
+
 `auth.ts` wires the PostgreSQL adapter and identity module. `options.ts` is the
 testable Better Auth 1.6.22 configuration; `delivery.ts` contains bounded HTTP
 transports, `phone-otp.ts` hardens OTP storage/consumption, and

@@ -48,22 +48,6 @@ function postgresTarget(value) {
   } catch { throw new Error('Invalid service database configuration'); }
 }
 
-// An operator asserts template approval by enabling SMS only after provider
-// review. Format validation cannot prove delivery or approval. Missing SMS
-// configuration disables SMS alone; it must never prevent email authentication.
-function smsConfiguration(env) {
-  const uuid = value => typeof value === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-  if (typeof env.SENTDM_API_KEY !== 'string' || !env.SENTDM_API_KEY.trim() || /\s/.test(env.SENTDM_API_KEY)
-    || !uuid(env.SENTDM_OTP_TEMPLATE_ID) || env.SENTDM_OTP_CHANNEL !== 'sms'
-    || (env.SENTDM_PROFILE_ID !== undefined && env.SENTDM_PROFILE_ID !== '' && !uuid(env.SENTDM_PROFILE_ID))
-    || (env.SENTDM_OTP_PARAMETER !== undefined && typeof env.SENTDM_OTP_PARAMETER !== 'string')
-    || !/^[a-zA-Z0-9_]{1,64}$/.test(env.SENTDM_OTP_PARAMETER || 'code')) return null;
-  return { SENTDM_API_KEY: env.SENTDM_API_KEY, SENTDM_OTP_TEMPLATE_ID: env.SENTDM_OTP_TEMPLATE_ID,
-    SENTDM_OTP_CHANNEL: 'sms', SENTDM_OTP_PARAMETER: env.SENTDM_OTP_PARAMETER || 'code',
-    ...(env.SENTDM_PROFILE_ID ? { SENTDM_PROFILE_ID: env.SENTDM_PROFILE_ID } : {}) };
-}
-
 /** Explicit per-container secret mapping; never forwards the whole Worker env. */
 export function containerEnvironment(service, env) {
   if (!Object.hasOwn(MAP, service) || !['staging', 'production'].includes(env.CORE_ENV)) throw new Error('Invalid core service configuration');
@@ -82,13 +66,10 @@ export function containerEnvironment(service, env) {
     const emailEnabled = env.AUTH_CUTOVER_VERIFIED === 'true';
     values.BETTER_AUTH_EMAIL_OTP_ENABLED = String(emailEnabled);
     values.BETTER_AUTH_JWT_ENABLED = String(emailEnabled);
-    // Schema readiness is independent of provider availability: status/revoke
-    // remain possible during an SMS outage, but never query an unmigrated table.
-    const smsSchemaReady = emailEnabled && env.AUTH_SMS_OPT_IN_SCHEMA_READY === 'true';
-    const sms = smsSchemaReady && env.AUTH_SMS_OPT_IN_ENABLED === 'true' ? smsConfiguration(env) : null;
-    values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY = String(smsSchemaReady);
-    values.BETTER_AUTH_PHONE_OTP_ENABLED = String(Boolean(sms));
-    if (sms) Object.assign(values, sms);
+    // Email-only release. Stale Worker flags or provider secrets cannot enable
+    // phone delivery or make the backend query an optional SMS-consent table.
+    values.BETTER_AUTH_PHONE_OTP_ENABLED = 'false';
+    values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY = 'false';
     if (emailEnabled) {
       for (const key of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'AUTH_EMAIL_FROM', 'AUTH_JWT_ISSUER', 'AUTH_JWT_AUDIENCE']) {
         if (typeof env[key] !== 'string' || !env[key].trim()) throw new Error('Email authentication secrets are incomplete');

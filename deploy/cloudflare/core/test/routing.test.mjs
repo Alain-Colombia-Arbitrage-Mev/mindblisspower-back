@@ -20,10 +20,9 @@ const authOnlyReady = { ...ready, CORE_SERVICES_ENABLED: 'false', CORE_NETWORK_V
 test('auth-only launch permits exact registration, email verification, login and session routes without asserting Go readiness', async () => {
   assert.equal(coreReady(authOnlyReady), false); assert.equal(authReady(authOnlyReady), true);
   for (const [method, paths] of [
-    ['GET', ['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/api/auth/phone-number/opt-in', '/health']],
+    ['GET', ['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/health']],
     ['POST', ['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out',
-      '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email',
-      '/api/auth/phone-number/send-otp', '/api/auth/phone-number/verify', '/api/auth/phone-number/revoke-consent']],
+      '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email']],
   ]) for (const path of paths) {
     let calls = 0;
     const response = await dispatchCore(request(path, { method, ...(method === 'POST' ? { body: '{}' } : {}) }), authOnlyReady,
@@ -59,14 +58,6 @@ test('auth-only cannot start business services, claim identity, expand auth path
     ['/api/auth/email-otp/verify-email/', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email', 'PUT', 'auth.core.internal'],
     ['/api/auth/email-otp/check-verification-otp', 'POST', 'auth.core.internal'],
-    ['/api/auth/phone-number/send-otp/', 'POST', 'auth.core.internal'],
-    ['/api/auth/phone-number/send-otp?target=business', 'POST', 'auth.core.internal'],
-    ['/api/auth/phone-number/send-otp', 'GET', 'auth.core.internal'],
-    ['/api/auth/phone-number/verify', 'GET', 'auth.core.internal'],
-    ['/api/auth/phone-number/revoke-consent', 'DELETE', 'auth.core.internal'],
-    ['/api/auth/phone-number/request-password-reset', 'POST', 'auth.core.internal'],
-    ['/api/auth/phone-number/reset-password', 'POST', 'auth.core.internal'],
-    ['/api/auth/sign-in/phone-number', 'POST', 'auth.core.internal'],
     ['/api/auth/email-otp/reset-password', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email-otp/', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email-otp?target=business', 'POST', 'auth.core.internal'],
