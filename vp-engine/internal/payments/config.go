@@ -19,6 +19,7 @@ import (
 // Las sesiones Better Auth viven en el runtime de autenticación, no en Go.
 // El BFF envía además un token de servicio; Stripe usa firma de webhook.
 type Config struct {
+	ReadOnly       bool // Explicit SERVICE_READ_ONLY: no providers, writes or background jobs.
 	Env            string
 	LogLevel       string
 	HTTPListenAddr string
@@ -164,7 +165,12 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("load env file %s: %w", p, err)
 		}
 	}
+	readOnly, err := loadServiceReadOnly()
+	if err != nil {
+		return nil, err
+	}
 	c := &Config{
+		ReadOnly:       readOnly,
 		Env:            env("ENV", "development"),
 		LogLevel:       env("LOG_LEVEL", "info"),
 		HTTPListenAddr: env("PAYMENTS_HTTP_ADDR", "0.0.0.0:9095"),
@@ -253,10 +259,26 @@ func LoadConfig() (*Config, error) {
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
-	if c.StripeSecretKey == "" {
+	if c.ReadOnly {
+		c.RequireVerifiedIdentity = true
+		c.AdminEmails = splitCSV(os.Getenv("PAYMENTS_ADMIN_EMAILS"))
+		c.SuperAdminEmails = splitCSV(os.Getenv("PAYMENTS_SUPER_ADMIN_EMAILS"))
+		// Provider material is intentionally discarded, even if accidentally set.
+		// Read-only startup must not require or initialize financial integrations.
+		c.StripeSecretKey, c.StripeWebhookSecret, c.StripeProductID, c.StripePMConfig = "", "", "", ""
+		c.NATSURL, c.NATSUser, c.NATSPassword = "", "", ""
+		c.RedisAddr, c.RedisPassword = "", ""
+		c.ReconcileInterval, c.CartReminderInterval = 0, 0
+		c.CartReminderEnabled, c.CommsEnabled = false, false
+		c.SupportAIAutoDraft, c.SupportAIAutoReply = false, false
+		c.SupportAIServiceToken, c.TwilioWebhookAuthToken = "", ""
+		c.KYCBucket, c.KYCOCRAPIKey = "", ""
+		c.CommsUnsubscribeSecret, c.CommsSQSQueueURL = "", ""
+	}
+	if !c.ReadOnly && c.StripeSecretKey == "" {
 		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required")
 	}
-	if c.StripeWebhookSecret == "" {
+	if !c.ReadOnly && c.StripeWebhookSecret == "" {
 		return nil, fmt.Errorf("STRIPE_WEBHOOK_SECRET is required")
 	}
 	if c.ServiceToken == "" {

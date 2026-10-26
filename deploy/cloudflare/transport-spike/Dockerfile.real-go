@@ -1,0 +1,9 @@
+FROM mindbliss/rds-go-test:20261024 AS build
+WORKDIR /workspace/vp-engine
+COPY vp-engine/ ./
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /engine ./cmd/vp-engine
+COPY deploy/cloudflare/transport-spike/go-jwks-probe.go ./cmd/transport-jwks-probe/main.go
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /go-jwks-probe ./cmd/transport-jwks-probe
+FROM mindbliss/engine:auth-identity-20261025
+COPY --from=build /engine /app-bin
+COPY --from=build /go-jwks-probe /go-jwks-probe

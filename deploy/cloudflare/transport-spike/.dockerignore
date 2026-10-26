@@ -1,0 +1,9 @@
+runtime/
+.wrangler/
+node_modules/
+*.log
+*.key
+*.crt
+*.pem
+.dev.vars*
+.env*

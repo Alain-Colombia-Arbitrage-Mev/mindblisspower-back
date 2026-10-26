@@ -1,0 +1,87 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mindbliss-core",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-10-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": { "enabled": false },
+  "limits": { "cpu_ms": 50 },
+  "dev": { "enable_containers": false },
+  "env": {
+    "staging": {
+      "name": "mindbliss-core-staging",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [],
+      "vars": {
+        "CORE_ENV": "staging",
+        "CORE_SERVICES_ENABLED": "false",
+        "CORE_NETWORK_VERIFIED": "false",
+        "CORE_READINESS_PROBE_ENABLED": "false",
+        "CORE_REPORTS_ENABLED": "false",
+        "CORE_DATA_ACCESS_VERIFIED": "false",
+        "AUTH_SERVICES_ENABLED": "false",
+        "AUTH_CUTOVER_VERIFIED": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "API_CONTAINER", "class_name": "CoreApi" },
+          { "name": "ENGINE_CONTAINER", "class_name": "CoreEngine" },
+          { "name": "PAYMENTS_CONTAINER", "class_name": "CorePayments" },
+          { "name": "WITHDRAWALS_CONTAINER", "class_name": "CoreWithdrawals" }
+        ]
+      },
+      "exports": {
+        "CoreApi": { "type": "durable-object", "storage": "sqlite", "container": "core-api" },
+        "CoreEngine": { "type": "durable-object", "storage": "sqlite", "container": "core-engine" },
+        "CorePayments": { "type": "durable-object", "storage": "sqlite", "container": "core-payments" },
+        "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
+      },
+      "containers": [
+        { "name": "core-api", "image": "../../../app/Dockerfile", "image_build_context": "../../../app", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-engine", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-engine" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-payments", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-payments" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-withdrawals", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-withdrawals" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" }
+      ]
+    },
+    "production": {
+      "name": "mindbliss-core-production",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [],
+      "vars": {
+        "CORE_ENV": "production",
+        "CORE_SERVICES_ENABLED": "false",
+        "CORE_NETWORK_VERIFIED": "false",
+        "CORE_READINESS_PROBE_ENABLED": "false",
+        "CORE_REPORTS_ENABLED": "true",
+        "CORE_DATA_ACCESS_VERIFIED": "true",
+        "AUTH_SERVICES_ENABLED": "true",
+        "AUTH_CUTOVER_VERIFIED": "true"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "API_CONTAINER", "class_name": "CoreApi" },
+          { "name": "ENGINE_CONTAINER", "class_name": "CoreEngine" },
+          { "name": "PAYMENTS_CONTAINER", "class_name": "CorePayments" },
+          { "name": "WITHDRAWALS_CONTAINER", "class_name": "CoreWithdrawals" }
+        ]
+      },
+      "exports": {
+        "CoreApi": { "type": "durable-object", "storage": "sqlite", "container": "core-api" },
+        "CoreEngine": { "type": "durable-object", "storage": "sqlite", "container": "core-engine" },
+        "CorePayments": { "type": "durable-object", "storage": "sqlite", "container": "core-payments" },
+        "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
+      },
+      "containers": [
+        { "name": "core-api", "image": "../../../app/Dockerfile", "image_build_context": "../../../app", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-engine", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-engine" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-payments", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-payments" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-withdrawals", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-withdrawals" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" }
+      ]
+    }
+  }
+}

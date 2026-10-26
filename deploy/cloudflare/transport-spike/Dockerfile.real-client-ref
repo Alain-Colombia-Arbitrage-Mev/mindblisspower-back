@@ -1,0 +1,1 @@
+FROM mindbliss/cf-core-client-test:20261025

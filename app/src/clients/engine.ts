@@ -10,7 +10,9 @@ import { createClient, type Client } from '@connectrpc/connect';
 import { createGrpcTransport } from '@connectrpc/connect-node';
 import { LedgerService } from '@proto/ledger_pb.js';
 import { engineTransportOptions } from './engine-transport';
+import { startEngineTunnel } from './engine-tunnel';
 
-const transport = createGrpcTransport(engineTransportOptions(process.env));
+const tunnel = await startEngineTunnel(process.env);
+const transport = createGrpcTransport(engineTransportOptions(process.env, undefined, tunnel?.address));
 
 export const ledgerClient: Client<typeof LedgerService> = createClient(LedgerService, transport);

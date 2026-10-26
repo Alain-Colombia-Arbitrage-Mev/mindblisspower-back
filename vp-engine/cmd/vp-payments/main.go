@@ -76,7 +76,10 @@ func run() error {
 			logger.Info().Str("addr", cfg.RedisAddr).Msg("Redis cache-aside habilitado")
 		}
 	}
-	gw := payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
+	var gw *payments.StripeGateway
+	if cfg.ExternalProvidersEnabled() {
+		gw = payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods)
+	}
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
@@ -145,7 +148,7 @@ func run() error {
 
 	// KYC: subida de documentos a S3 con URLs presignadas. Sin bucket configurado
 	// los endpoints KYC responden 503 (rollout seguro).
-	if cfg.KYCBucket != "" {
+	if cfg.ExternalProvidersEnabled() && cfg.KYCBucket != "" {
 		kycS3, kerr := payments.NewKYCS3(rootCtx, cfg.KYCBucket, cfg.KYCRegion)
 		if kerr != nil {
 			logger.Warn().Err(kerr).Msg("KYC S3 init failed; KYC endpoints disabled")
@@ -159,7 +162,7 @@ func run() error {
 
 	// Filtro OCR de pasaportes (OpenRouter visión). Sin API key el OCR se
 	// desactiva y los pasaportes quedan in_review para revisión manual.
-	if cfg.KYCOCRAPIKey != "" {
+	if cfg.ExternalProvidersEnabled() && cfg.KYCOCRAPIKey != "" {
 		ocr := payments.NewKYCOCR(cfg.KYCOCRAPIKey, cfg.KYCOCRModel)
 		handler.SetKYCOCR(ocr)
 		model := cfg.KYCOCRModel
@@ -173,7 +176,7 @@ func run() error {
 
 	// Cognito admin: deshabilitar/rehabilitar login al banear/desbanear. Sin user
 	// pool configurado, el banear solo aplica el flag en la DB (sin cortar login).
-	if cfg.CognitoUserPoolID != "" {
+	if cfg.ExternalProvidersEnabled() && cfg.CognitoUserPoolID != "" {
 		region := cfg.AWSRegion
 		if region == "" {
 			region = "us-east-1"
@@ -190,7 +193,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
-		Handler:           handler.Routes(),
+		Handler:           cfg.ReadOnlyHandler(handler.Routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -207,131 +210,133 @@ func run() error {
 
 	// Alert evaluator: runs every 5 minutes, non-fatal — an evaluator error must
 	// never crash the service.
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		alertLog := logger.With().Str("component", "alert-evaluator").Logger()
-		alertLog.Info().Msg("alert evaluator started (every 5m)")
-		for {
-			select {
-			case <-rootCtx.Done():
-				alertLog.Info().Msg("alert evaluator stopped")
-				return
-			case <-ticker.C:
-				open, evalErr := store.EvaluateAlerts(rootCtx)
-				if evalErr != nil {
-					alertLog.Error().Err(evalErr).Msg("EvaluateAlerts failed (non-fatal)")
+	if cfg.BackgroundJobsEnabled() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			alertLog := logger.With().Str("component", "alert-evaluator").Logger()
+			alertLog.Info().Msg("alert evaluator started (every 5m)")
+			for {
+				select {
+				case <-rootCtx.Done():
+					alertLog.Info().Msg("alert evaluator stopped")
+					return
+				case <-ticker.C:
+					open, evalErr := store.EvaluateAlerts(rootCtx)
+					if evalErr != nil {
+						alertLog.Error().Err(evalErr).Msg("EvaluateAlerts failed (non-fatal)")
+					} else {
+						alertLog.Info().Int("open_alerts", open).Msg("alert evaluation complete")
+					}
+				}
+			}
+		}()
+
+		// Sweep de reconciliación: recupera pagos cuyo webhook se perdió (Stripe pagó
+		// pero el intent quedó sin activar). Non-fatal — nunca debe tumbar el servicio.
+		if cfg.ReconcileInterval > 0 {
+			go func() {
+				ticker := time.NewTicker(cfg.ReconcileInterval)
+				defer ticker.Stop()
+				recLog := logger.With().Str("component", "reconcile-sweep").Logger()
+				recLog.Info().Dur("interval", cfg.ReconcileInterval).Dur("min_age", cfg.ReconcileMinAge).Msg("reconcile sweep started")
+				for {
+					select {
+					case <-rootCtx.Done():
+						recLog.Info().Msg("reconcile sweep stopped")
+						return
+					case <-ticker.C:
+						res, err := handler.ReconcileStuckPayments(rootCtx, cfg.ReconcileMinAge, 500)
+						if err != nil {
+							recLog.Error().Err(err).Msg("reconcile sweep failed (non-fatal)")
+						} else if res.Activated > 0 || res.Errors > 0 {
+							recLog.Info().Int("checked", res.Checked).Int("paid_found", res.PaidFound).
+								Int("activated", res.Activated).Int("errors", res.Errors).Msg("reconcile sweep complete")
+						}
+					}
+				}
+			}()
+		}
+
+		// Sweep de recuperación de carritos abandonados: recuerda por email los
+		// checkouts 'created' que nunca se pagaron. cutoff = arranque del servicio ⇒
+		// solo carritos NUEVOS reciben recordatorio automático (los viejos se manejan
+		// manualmente desde el panel). Non-fatal.
+		if cfg.CartReminderEnabled && cfg.CartReminderInterval > 0 {
+			cartCutoff := time.Now().UTC()
+			go func() {
+				ticker := time.NewTicker(cfg.CartReminderInterval)
+				defer ticker.Stop()
+				cartLog := logger.With().Str("component", "cart-reminder").Logger()
+				cartLog.Info().Dur("interval", cfg.CartReminderInterval).Time("cutoff", cartCutoff).Msg("cart reminder sweep started")
+				for {
+					select {
+					case <-rootCtx.Done():
+						cartLog.Info().Msg("cart reminder sweep stopped")
+						return
+					case <-ticker.C:
+						if sent, err := handler.RemindAbandonedCarts(rootCtx, cartCutoff, 2); err != nil {
+							cartLog.Error().Err(err).Msg("cart reminder sweep failed (non-fatal)")
+						} else if sent > 0 {
+							cartLog.Info().Int("sent", sent).Msg("cart reminders sent")
+						}
+					}
+				}
+			}()
+		}
+
+		// Sweep de respaldo del OCR de KYC: reprocesa pasaportes con ocr_status
+		// 'pending' que quedaron atascados (p. ej. un reinicio a mitad del análisis).
+		// El camino normal es la goroutine disparada al confirmar; esto es resiliencia.
+		if cfg.KYCOCRAPIKey != "" && cfg.KYCBucket != "" {
+			go func() {
+				ticker := time.NewTicker(3 * time.Minute)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-rootCtx.Done():
+						return
+					case <-ticker.C:
+						handler.RunKYCOCRSweep(rootCtx)
+					}
+				}
+			}()
+		}
+
+		// Comunicados masivos: sender (solo donde COMMS_ENABLED=true, i.e. APP) y
+		// consumer de eventos SES por SQS. Non-fatal.
+		if cfg.CommsEnabled {
+			// Falla el arranque si la URL One-Click (RFC 8058) no se puede determinar:
+			// sin ella la cabecera List-Unsubscribe-Post apuntaría a la página visible,
+			// Gmail la trataría como un enlace normal y la baja en un clic dejaría de
+			// funcionar en silencio, con el costo de reputación que eso implica.
+			if cfg.CommsUnsubscribeOneClickURL == "" &&
+				strings.Replace(cfg.CommsUnsubscribeBaseURL, "/baja", "/api/comms/unsubscribe", 1) == cfg.CommsUnsubscribeBaseURL {
+				logger.Fatal().
+					Str("base", cfg.CommsUnsubscribeBaseURL).
+					Msg("COMMS_ENABLED=true pero no se puede derivar la URL One-Click: setear COMMS_UNSUBSCRIBE_ONECLICK_URL, o que COMMS_UNSUBSCRIBE_BASE_URL contenga /baja")
+			}
+			sender := payments.NewCommsSender(store, store, payments.CommsSenderConfig{
+				RatePerSec: cfg.CommsSendRatePerSec, BatchSize: cfg.CommsBatchSize, SESConfigSet: cfg.CommsSESConfigSet,
+				UnsubscribeSecret: []byte(cfg.CommsUnsubscribeSecret), UnsubscribeBase: cfg.CommsUnsubscribeBaseURL,
+				UnsubscribeOneClickBase: cfg.CommsUnsubscribeOneClickURL,
+				ReplyTo:                 cfg.CommsReplyTo,
+				LegalName:               cfg.CommsLegalName,
+				PostalAddress:           cfg.CommsPostalAddress,
+			}, logger.With().Str("component", "comms-sender").Logger())
+			handler.SetComms(sender, cfg.CommsMaxAudience, cfg.CommsMaxPerDay, cfg.CommsMaxTestSends, []byte(cfg.CommsUnsubscribeSecret))
+			go sender.Loop(rootCtx)
+			if cfg.CommsSQSQueueURL != "" {
+				if q, err := payments.NewSQSQueueClient(rootCtx, cfg.CommsSQSQueueURL); err != nil {
+					logger.Error().Err(err).Msg("comms: SQS client init failed; sin seguimiento de entregas")
 				} else {
-					alertLog.Info().Int("open_alerts", open).Msg("alert evaluation complete")
+					go payments.NewCommsEventConsumer(store, q, logger.With().Str("component", "comms-events").Logger()).Loop(rootCtx)
 				}
 			}
+		} else if cfg.CommsUnsubscribeSecret != "" {
+			// Sin sender pero con secreto: el endpoint de baja sigue funcionando (WORKER/staging)
+			handler.SetComms(nil, 0, 0, 0, []byte(cfg.CommsUnsubscribeSecret))
 		}
-	}()
-
-	// Sweep de reconciliación: recupera pagos cuyo webhook se perdió (Stripe pagó
-	// pero el intent quedó sin activar). Non-fatal — nunca debe tumbar el servicio.
-	if cfg.ReconcileInterval > 0 {
-		go func() {
-			ticker := time.NewTicker(cfg.ReconcileInterval)
-			defer ticker.Stop()
-			recLog := logger.With().Str("component", "reconcile-sweep").Logger()
-			recLog.Info().Dur("interval", cfg.ReconcileInterval).Dur("min_age", cfg.ReconcileMinAge).Msg("reconcile sweep started")
-			for {
-				select {
-				case <-rootCtx.Done():
-					recLog.Info().Msg("reconcile sweep stopped")
-					return
-				case <-ticker.C:
-					res, err := handler.ReconcileStuckPayments(rootCtx, cfg.ReconcileMinAge, 500)
-					if err != nil {
-						recLog.Error().Err(err).Msg("reconcile sweep failed (non-fatal)")
-					} else if res.Activated > 0 || res.Errors > 0 {
-						recLog.Info().Int("checked", res.Checked).Int("paid_found", res.PaidFound).
-							Int("activated", res.Activated).Int("errors", res.Errors).Msg("reconcile sweep complete")
-					}
-				}
-			}
-		}()
-	}
-
-	// Sweep de recuperación de carritos abandonados: recuerda por email los
-	// checkouts 'created' que nunca se pagaron. cutoff = arranque del servicio ⇒
-	// solo carritos NUEVOS reciben recordatorio automático (los viejos se manejan
-	// manualmente desde el panel). Non-fatal.
-	if cfg.CartReminderEnabled && cfg.CartReminderInterval > 0 {
-		cartCutoff := time.Now().UTC()
-		go func() {
-			ticker := time.NewTicker(cfg.CartReminderInterval)
-			defer ticker.Stop()
-			cartLog := logger.With().Str("component", "cart-reminder").Logger()
-			cartLog.Info().Dur("interval", cfg.CartReminderInterval).Time("cutoff", cartCutoff).Msg("cart reminder sweep started")
-			for {
-				select {
-				case <-rootCtx.Done():
-					cartLog.Info().Msg("cart reminder sweep stopped")
-					return
-				case <-ticker.C:
-					if sent, err := handler.RemindAbandonedCarts(rootCtx, cartCutoff, 2); err != nil {
-						cartLog.Error().Err(err).Msg("cart reminder sweep failed (non-fatal)")
-					} else if sent > 0 {
-						cartLog.Info().Int("sent", sent).Msg("cart reminders sent")
-					}
-				}
-			}
-		}()
-	}
-
-	// Sweep de respaldo del OCR de KYC: reprocesa pasaportes con ocr_status
-	// 'pending' que quedaron atascados (p. ej. un reinicio a mitad del análisis).
-	// El camino normal es la goroutine disparada al confirmar; esto es resiliencia.
-	if cfg.KYCOCRAPIKey != "" && cfg.KYCBucket != "" {
-		go func() {
-			ticker := time.NewTicker(3 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-rootCtx.Done():
-					return
-				case <-ticker.C:
-					handler.RunKYCOCRSweep(rootCtx)
-				}
-			}
-		}()
-	}
-
-	// Comunicados masivos: sender (solo donde COMMS_ENABLED=true, i.e. APP) y
-	// consumer de eventos SES por SQS. Non-fatal.
-	if cfg.CommsEnabled {
-		// Falla el arranque si la URL One-Click (RFC 8058) no se puede determinar:
-		// sin ella la cabecera List-Unsubscribe-Post apuntaría a la página visible,
-		// Gmail la trataría como un enlace normal y la baja en un clic dejaría de
-		// funcionar en silencio, con el costo de reputación que eso implica.
-		if cfg.CommsUnsubscribeOneClickURL == "" &&
-			strings.Replace(cfg.CommsUnsubscribeBaseURL, "/baja", "/api/comms/unsubscribe", 1) == cfg.CommsUnsubscribeBaseURL {
-			logger.Fatal().
-				Str("base", cfg.CommsUnsubscribeBaseURL).
-				Msg("COMMS_ENABLED=true pero no se puede derivar la URL One-Click: setear COMMS_UNSUBSCRIBE_ONECLICK_URL, o que COMMS_UNSUBSCRIBE_BASE_URL contenga /baja")
-		}
-		sender := payments.NewCommsSender(store, store, payments.CommsSenderConfig{
-			RatePerSec: cfg.CommsSendRatePerSec, BatchSize: cfg.CommsBatchSize, SESConfigSet: cfg.CommsSESConfigSet,
-			UnsubscribeSecret: []byte(cfg.CommsUnsubscribeSecret), UnsubscribeBase: cfg.CommsUnsubscribeBaseURL,
-			UnsubscribeOneClickBase: cfg.CommsUnsubscribeOneClickURL,
-			ReplyTo:                 cfg.CommsReplyTo,
-			LegalName:               cfg.CommsLegalName,
-			PostalAddress:           cfg.CommsPostalAddress,
-		}, logger.With().Str("component", "comms-sender").Logger())
-		handler.SetComms(sender, cfg.CommsMaxAudience, cfg.CommsMaxPerDay, cfg.CommsMaxTestSends, []byte(cfg.CommsUnsubscribeSecret))
-		go sender.Loop(rootCtx)
-		if cfg.CommsSQSQueueURL != "" {
-			if q, err := payments.NewSQSQueueClient(rootCtx, cfg.CommsSQSQueueURL); err != nil {
-				logger.Error().Err(err).Msg("comms: SQS client init failed; sin seguimiento de entregas")
-			} else {
-				go payments.NewCommsEventConsumer(store, q, logger.With().Str("component", "comms-events").Logger()).Loop(rootCtx)
-			}
-		}
-	} else if cfg.CommsUnsubscribeSecret != "" {
-		// Sin sender pero con secreto: el endpoint de baja sigue funcionando (WORKER/staging)
-		handler.SetComms(nil, 0, 0, 0, []byte(cfg.CommsUnsubscribeSecret))
 	}
 
 	errCh := make(chan error, 1)

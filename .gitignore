@@ -50,6 +50,8 @@ deploy/digitalocean/artifacts/
 deploy/digitalocean/runtime/
 deploy/cloudflare/runtime/
 deploy/cloudflare/artifacts/
+**/.wrangler/
+deploy/cloudflare/core/worker-configuration.d.ts
 
 # Local agent state is not source code and may contain private session data.
 **/.claude-flow/

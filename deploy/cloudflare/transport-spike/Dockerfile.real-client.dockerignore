@@ -1,0 +1,11 @@
+**
+!app/
+!app/src/
+!app/src/clients/
+!app/src/clients/engine-transport.ts
+!app/src/clients/engine-tunnel.ts
+!app/src/clients/opaque-tcp-relay.mjs
+!deploy/
+!deploy/cloudflare/
+!deploy/cloudflare/transport-spike/
+!deploy/cloudflare/transport-spike/core-real-client.ts

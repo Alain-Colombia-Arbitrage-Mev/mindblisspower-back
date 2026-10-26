@@ -12,6 +12,7 @@
  * compatibility with existing internal callers.
  */
 import { db } from '../db/client';
+import { authDb } from '../db/auth-client';
 import { provisionAuthPerson } from '../modules/identity';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -24,7 +25,7 @@ export async function createPersonFromUser(input: {
 }): Promise<void> {
   // Compatibility entry point: authoritative verification and binding come from
   // PostgreSQL, never the email/name supplied by an internal caller.
-  await provisionAuthPerson(db, { userId: input.userId });
+  await provisionAuthPerson(authDb, { userId: input.userId });
 }
 
 const PlacementSchema = z.object({
