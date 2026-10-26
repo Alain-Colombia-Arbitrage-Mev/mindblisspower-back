@@ -24,10 +24,7 @@
         "CORE_REPORTS_ENABLED": "false",
         "CORE_DATA_ACCESS_VERIFIED": "false",
         "AUTH_SERVICES_ENABLED": "false",
-        "AUTH_CUTOVER_VERIFIED": "false",
-        "BETTER_AUTH_REGISTRATION_SMS_REQUIRED": "false",
-        "AUTH_SMS_OPT_IN_ENABLED": "false",
-        "AUTH_SMS_OPT_IN_SCHEMA_READY": "false"
+        "AUTH_CUTOVER_VERIFIED": "false"
       },
       "durable_objects": {
         "bindings": [
@@ -63,10 +60,7 @@
         "CORE_REPORTS_ENABLED": "true",
         "CORE_DATA_ACCESS_VERIFIED": "true",
         "AUTH_SERVICES_ENABLED": "true",
-        "AUTH_CUTOVER_VERIFIED": "true",
-        "BETTER_AUTH_REGISTRATION_SMS_REQUIRED": "false",
-        "AUTH_SMS_OPT_IN_ENABLED": "false",
-        "AUTH_SMS_OPT_IN_SCHEMA_READY": "false"
+        "AUTH_CUTOVER_VERIFIED": "true"
       },
       "durable_objects": {
         "bindings": [

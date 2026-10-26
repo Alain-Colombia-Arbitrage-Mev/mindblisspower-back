@@ -60,6 +60,7 @@ try {
     CREATE SCHEMA extension_private; CREATE EXTENSION unaccent WITH SCHEMA extension_private;
     CREATE ROLE synthetic_shared_legacy NOLOGIN; GRANT pg_read_all_data,pg_write_all_data TO synthetic_shared_legacy;
     CREATE TABLE auth.user(id text PRIMARY KEY,email text NOT NULL UNIQUE,email_verified boolean NOT NULL DEFAULT false,name text,
+      contact_phone_e164 text,contact_whatsapp_e164 text,
       created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TYPE mlm.person_status AS ENUM('pending','active','suspended','banned','deleted');
     CREATE TYPE mlm.kyc_status AS ENUM('not_started','in_review','approved','rejected','expired');
@@ -100,6 +101,7 @@ try {
   asRole(reader, 'SELECT subject,provider,person_id FROM identity.auth_binding; SELECT subject,resolved_at,reason FROM identity.link_conflict');
   for (const table of ['session','account','verification','jwks','rate_limit']) asRole(reader, `SELECT * FROM auth.${table}`, /permission denied/);
   asRole(reader, 'SELECT * FROM auth.user', /permission denied/);
+  asRole(reader, 'SELECT contact_phone_e164,contact_whatsapp_e164 FROM auth.user', /permission denied/);
   for (const statement of ["UPDATE mlm.wallet_movement SET amount=0", 'DELETE FROM mlm.affiliate', 'TRUNCATE mlm.person',
     "INSERT INTO auth.user(id,email) VALUES('denied','denied@example.test')", 'SELECT mlm.synthetic_mutation()']) asRole(reader, statement, /permission denied/);
   events.push('reader_real_projection_normalization_and_secret_write_denials');
@@ -149,7 +151,8 @@ try {
     }finally{await write.end();await read.end()}
   `;
   const output = must(['run', '--rm', '--pull=never', '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp',
-    '--mount', `type=bind,source=${app}/src,target=/app/src,readonly`, '--entrypoint', 'bun',
+    '--mount', `type=bind,source=${app}/src,target=/app/src,readonly`,
+    '--mount', `type=bind,source=${app}/node_modules/libphonenumber-js,target=/app/node_modules/libphonenumber-js,readonly`, '--entrypoint', 'bun',
     'mindbliss/api-test:auth-identity-20261025', '--no-env-file', '-e', integration]);
   assert.match(output, /"leastPrivilegeLogins":true/);
   events.push('real_email_otp_session_and_identity_on_restricted_logins');

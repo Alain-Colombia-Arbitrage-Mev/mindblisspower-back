@@ -66,6 +66,14 @@ beforeAll(async () => {
   await connection`DELETE FROM auth.account WHERE id IN ('duplicate-one','duplicate-two')`;
   await connection`DELETE FROM auth.user WHERE id IN ('duplicate-one','duplicate-two')`;
   await applyMigration();
+  // Registration contact columns are additive and private to the auth writer.
+  await connection.unsafe('CREATE ROLE mindbliss_auth_core_v1 NOLOGIN');
+  const contactMigration = (await readFile(new URL('../../../../_meta/migration/76_registration_contact_details.sql', import.meta.url), 'utf8'))
+    .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
+  const contactConnection = await connection.reserve();
+  try { await contactConnection.unsafe(contactMigration); }
+  catch (error) { await contactConnection.unsafe('ROLLBACK'); throw error; }
+  finally { contactConnection.release(); }
   const smsMigration = (await readFile(new URL('../../../../_meta/migration/75_sms_auth_opt_in.sql', import.meta.url), 'utf8'))
     .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
   const smsConnection = await connection.reserve();

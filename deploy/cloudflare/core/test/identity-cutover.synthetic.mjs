@@ -13,6 +13,7 @@ const migrationSource=readFileSync(new URL('../../../../_meta/migration/72_cloud
 const migration=migrationSource.replaceAll('REPLACE_WITH_CURATED_DATABASE',database);
 const migration72Sha256=createHash('sha256').update(migrationSource).digest('hex');
 const authCore=readFileSync(new URL('../../../../_meta/migration/71_better_auth_core_only.sql',import.meta.url),'utf8').replaceAll('REPLACE_WITH_CURATED_DATABASE',database);
+const contactStorage=readFileSync(new URL('../../../../_meta/migration/76_registration_contact_details.sql',import.meta.url),'utf8').replaceAll('REPLACE_WITH_CURATED_DATABASE',database);
 const bootstrap=readFileSync(new URL('../role-bootstrap.example.sql',import.meta.url),'utf8').replaceAll('REPLACE_WITH_CURATED_DATABASE',database);
 const app=fileURLToPath(new URL('../../../../app',import.meta.url));
 const cases=[];let created=false;
@@ -80,6 +81,7 @@ try{
     /newly_accessible_definer_requires_review/,'DROP FUNCTION mlm.synthetic_definer()');
   cases.push('target_empty_enrollment_role_membership_person_trigger_public_acl_guards_atomic');
   sql(migration);sql(migration,/existing_identity_state_requires_review/);
+  sql(contactStorage);
   assert.equal(sql("SELECT md5(string_agg((to_jsonb(p)-'public_id')::text,'' ORDER BY id)) FROM mlm.person p"),personHash);
   assert.equal(sql("SELECT md5(string_agg(to_jsonb(a)::text,'' ORDER BY id)) FROM mlm.affiliate a"),treeHash);
   assert.equal(sql("SELECT md5(string_agg(to_jsonb(r)::text,'' ORDER BY rolname)) FROM pg_roles r"),rolesHash);
@@ -113,7 +115,7 @@ try{
     // REAL database identity hooks. Only delivery transport is fake; owner is
     // restricted to explicitly identified fixture/bootstrap/operator actions.
     const auth=betterAuth(createAuthOptions(env,drizzleAdapter(w,{provider:'pg',schema,usePlural:false}),
-      {provision:userId=>provisionAuthPerson(w,{userId}),binding:userId=>getAuthPersonBinding(w,{userId})},delivery));
+      {provision:userId=>provisionAuthPerson(w,{userId}),binding:userId=>getAuthPersonBinding(w,{userId}),registrationAllowed:async()=>true},delivery));
     const request=(path,body,cookie)=>auth.handler(new Request(env.BETTER_AUTH_URL+'/api/auth'+path,{method:body===undefined?'GET':'POST',
       headers:{origin:'https://portal.example.test','content-type':'application/json','x-forwarded-for':'192.0.2.72',...(cookie?{cookie}:{})},
       ...(body===undefined?{}:{body:JSON.stringify(body)})}));
@@ -166,7 +168,9 @@ try{
     }finally{await owner.end();await write.end();await read.end()}
   `;
   const output=must(['run','--rm','--pull=never','--network',`container:${name}`,'--read-only','--tmpfs','/tmp',
-    '--mount',`type=bind,source=${app}/src,target=/app/src,readonly`,'--entrypoint','bun','mindbliss/api-test:auth-identity-20261025','--no-env-file','-e',integration]);
+    '--mount',`type=bind,source=${app}/src,target=/app/src,readonly`,
+    '--mount',`type=bind,source=${app}/node_modules/libphonenumber-js,target=/app/node_modules/libphonenumber-js,readonly`,
+    '--entrypoint','bun','mindbliss/api-test:auth-identity-20261025','--no-env-file','-e',integration]);
   assert.match(output,/"realBusinessIdentityHooks":true/);assert.match(output,/"legacyAutoLink":false/);
   cases.push('real_better_auth_hooks_staff_otp_no_affiliate_legacy_verification_then_operator_approval');
   assert.equal(sql("SELECT md5(string_agg(to_jsonb(a)::text,'' ORDER BY id)) FROM mlm.affiliate a"),treeHash);

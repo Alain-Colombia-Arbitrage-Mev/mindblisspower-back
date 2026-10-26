@@ -7,7 +7,8 @@
  * We mirror them here so Drizzle queries against sessions and OAuth accounts
  * are typed. Don't edit shapes manually — `better-auth migrate` will rewrite
  * any schema diff against the version of better-auth we're on. Plugin fields
- * below are mirrored by the reviewed additive identity migration 70.
+ * below are mirrored by the reviewed additive identity migration 70. Optional
+ * customer contact fields are managed by reviewed additive migration 76.
  */
 import { pgSchema, text, timestamp, boolean, integer, bigint, index, uniqueIndex } from 'drizzle-orm/pg-core';
 
@@ -21,6 +22,9 @@ export const user = authSchema.table('user', {
   image: text('image'),
   phoneNumber: text('phone_number').unique('auth_user_phone_unique'),
   phoneNumberVerified: boolean('phone_number_verified').notNull().default(false),
+  // Migration 76. Self-declared customer contacts, not login identifiers.
+  contactPhone: text('contact_phone_e164'),
+  contactWhatsapp: text('contact_whatsapp_e164'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

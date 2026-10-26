@@ -33,41 +33,32 @@ Never deploy an administrative/shared database credential. Production mTLS uses
 separate server/client leaves, with its CA private key kept outside application
 services. Rotate the90-day leaves before their expiry.
 
-## Email login and separately gated registration SMS
+## Email-only registration and login
 
-Login always uses email. SMS proof during registration is a separate capability
-controlled by the exact string `BETTER_AUTH_REGISTRATION_SMS_REQUIRED=true`.
-Both checked-in environments default to `false`; deployment alone does not enable
-SMS or send messages. The Worker always sets `BETTER_AUTH_PHONE_OTP_ENABLED=false`
-and `BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY=false`. Obsolete opt-in flags cannot enable
-phone login, WhatsApp, or the authenticated SMS-consent feature.
+Registration requires email verification; login uses email. Telephone and
+WhatsApp are optional, unverified customer contact data, never authentication
+factors, identity-linking evidence, or permission to send marketing messages.
+This Worker contains no SMS-provider forwarding path or configuration switch.
 
-Only with verified auth cutover and the registration flag enabled can the API
-Container receive a complete, validated `SENTDM_API_KEY`, `SENTDM_OTP_TEMPLATE_ID`
-and `SENTDM_OTP_CHANNEL=sms` configuration. `SENTDM_PROFILE_ID` is optional and
-must be a UUID; `SENTDM_OTP_PARAMETER` defaults to `code` and accepts only 1–64
-ASCII letters, numbers or underscores. Credentials are never forwarded to Go.
-Missing or malformed provider configuration does not disable email login: the
-API still receives the registration requirement as `true` but no SMS credentials,
-so registration must fail closed rather than skip proof.
+All `/api/auth/registration/*`, `/api/auth/phone-number/*` and
+`/api/auth/sign-in/phone-number` requests return 404 before resolving any
+Container. The namespace roots, queries, alternate methods and hosts, suffixes,
+HTTP downgrades and encoded variants remain denied even with full core readiness
+or obsolete SMS flags set to `true`. Old phone-proof cookies cannot reopen them.
 
-The separate flag allows only exact HTTPS POST requests to
-`auth.core.internal/api/auth/registration/phone/send` and
-`auth.core.internal/api/auth/registration/phone/verify`. Queries, alternate methods
-or hosts, suffixes, encoded variants and other registration routes are rejected
-before resolving a Container, including with full core readiness.
-
-All `/api/auth/phone-number/*` and `/api/auth/sign-in/phone-number` requests return
-404 before resolving an API Container, including when registration SMS and full
-core readiness are enabled. The optional SMS-consent table is not queried, and
-migration 75 is not required for registration phone proof. Existing email/JWT
-gates and read-only financial restrictions are unchanged.
+The API Container always receives `BETTER_AUTH_PHONE_OTP_ENABLED=false`,
+`BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY=false` and
+`BETTER_AUTH_REGISTRATION_SMS_REQUIRED=false` as defensive compatibility settings.
+The Worker does not read or forward any `SENTDM_*` or `AUTH_SMS_*` values, even if
+old provider secrets remain configured remotely. No SMS-consent schema or
+migration 75 is required. Email/JWT gates, signed BFF context and read-only
+financial restrictions are unchanged.
 
 `worker-configuration.d.ts` is an ignored, generated local artifact, not a test
 fixture. Regenerate it with `npm run types:staging` after changing Worker vars;
-the registration flag and obsolete dormant flags are derived from
-`wrangler.jsonc`. Never put secret values into a type stub or version the generated
-platform declarations. Unit tests require neither
+the email/infrastructure bindings are derived from `wrangler.jsonc`. Obsolete SMS
+variables have been removed from both environments. Never put secret values into
+a type stub or version the generated platform declarations. Unit tests require neither
 generated types nor provider credentials and run from a fresh checkout.
 
 ```sh

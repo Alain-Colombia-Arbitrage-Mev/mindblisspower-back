@@ -7,6 +7,14 @@ flags off without forwarding sent.dm credentials. Do not configure sent.dm or
 apply migration 75 for this release. The optional SMS implementation documented
 below is retained as inactive reference; it is not a registration dependency.
 
+Public registration now accepts optional customer `contactPhone` and
+`contactWhatsapp` fields, with country-code-aware E.164 validation. These are
+self-declared contact details only: never phone verification, message consent
+or legacy identity-link authority. Migration 76 must be reviewed and applied
+before deploying the matching runtime; it adds nullable, non-unique private
+auth columns without updating legacy people, network positions or ranks.
+See [email registration and customer contacts](../../docs/registration-contacts.md).
+
 `auth.ts` wires the PostgreSQL adapter and identity module. `options.ts` is the
 testable Better Auth 1.6.22 configuration; `delivery.ts` contains bounded HTTP
 transports, `phone-otp.ts` hardens OTP storage/consumption, and

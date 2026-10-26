@@ -10,6 +10,8 @@ const password = randomBytes(24).toString('hex');
 const app = fileURLToPath(new URL('../../../', import.meta.url));
 const migration = fileURLToPath(new URL('../../../../_meta/migration/70_stable_identity_bindings.sql', import.meta.url));
 const smsMigration = fileURLToPath(new URL('../../../../_meta/migration/75_sms_auth_opt_in.sql', import.meta.url));
+const contactMigration = fileURLToPath(new URL('../../../../_meta/migration/76_registration_contact_details.sql', import.meta.url));
+const phoneLibrary = fileURLToPath(new URL('../../../node_modules/libphonenumber-js', import.meta.url));
 let created = false;
 const docker = args => {
   const result = spawnSync('docker', args, { encoding: 'utf8' });
@@ -30,8 +32,10 @@ try {
   const args = ['run', '--rm', '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp:mode=1777',
     '-v', `${app}/src:/app/src:ro`, '-v', `${migration}:/_meta/migration/70_stable_identity_bindings.sql:ro`,
     '-v', `${smsMigration}:/_meta/migration/75_sms_auth_opt_in.sql:ro`,
+    '-v', `${contactMigration}:/_meta/migration/76_registration_contact_details.sql:ro`,
+    '-v', `${phoneLibrary}:/app/node_modules/libphonenumber-js:ro`,
     '-e', 'IDENTITY_SYNTHETIC_DOCKER=1', '-e', `IDENTITY_TEST_DATABASE_URL=postgres://postgres:${password}@127.0.0.1:5432/identity_synthetic`,
-    'mindbliss/rds-api-test', 'bun', '--no-env-file', 'test', 'src/modules/identity/model.test.ts', 'src/modules/identity/identity.integration.test.ts'];
+    '--entrypoint', 'bun', 'mindbliss/api-test:auth-identity-20261025', '--no-env-file', 'test', 'src/modules/identity/model.test.ts', 'src/modules/identity/identity.integration.test.ts'];
   const result = spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
   // The only connection string contains a disposable random password; suppress
   // it defensively even if a driver ever includes it in an unexpected error.

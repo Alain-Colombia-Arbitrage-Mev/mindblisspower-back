@@ -15,7 +15,8 @@ export async function getAuthPersonBinding(database: Pick<IdentityDatabase, 'exe
 export async function provisionAuthPerson(database: IdentityDatabase, input: { userId: string }): Promise<IdentityResult> {
   const { userId } = userInput.parse(input);
   return database.transaction(async tx => {
-    const locked = await tx.execute(sql`SELECT id FROM auth.user WHERE id=${userId} FOR UPDATE`);
+    const locked = await tx.execute<{ id: string; contact_phone_e164: string | null }>(sql`
+      SELECT id,contact_phone_e164 FROM auth.user WHERE id=${userId} FOR UPDATE`);
     if (!locked.length) return { status: 'quarantined' };
     const auth = (await principal(tx, userId))!;
     const existing = principalResult(auth);
@@ -39,7 +40,7 @@ export async function provisionAuthPerson(database: IdentityDatabase, input: { u
     const [first, ...last] = (auth.name ?? '').trim().split(/\s+/);
     const created = await tx.execute<{ id: string }>(sql`
       INSERT INTO mlm.person(user_id,first_name,last_name,email,phone_number,status,kyc_status)
-      VALUES(${userId},${first || auth.auth_email.split('@')[0]!},${last.join(' ') || '-'},${auth.auth_email},'','pending','not_started') RETURNING id::text`);
+      VALUES(${userId},${first || auth.auth_email.split('@')[0]!},${last.join(' ') || '-'},${auth.auth_email},${locked[0]!.contact_phone_e164 ?? ''},'pending','not_started') RETURNING id::text`);
     const result = await bind(tx, userId, created[0]!.id, 'new_registration');
     return { ...result, status: 'created' };
   });

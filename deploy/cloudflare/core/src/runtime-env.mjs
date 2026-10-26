@@ -48,18 +48,6 @@ function postgresTarget(value) {
   } catch { throw new Error('Invalid service database configuration'); }
 }
 
-function registrationSmsProvider(env) {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const parameter = env.SENTDM_OTP_PARAMETER === undefined ? 'code' : env.SENTDM_OTP_PARAMETER;
-  if (typeof env.SENTDM_API_KEY !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(env.SENTDM_API_KEY)
-    || typeof env.SENTDM_OTP_TEMPLATE_ID !== 'string' || !uuid.test(env.SENTDM_OTP_TEMPLATE_ID)
-    || env.SENTDM_OTP_CHANNEL !== 'sms' || typeof parameter !== 'string' || !/^[a-zA-Z0-9_]{1,64}$/.test(parameter)
-    || (env.SENTDM_PROFILE_ID !== undefined && (typeof env.SENTDM_PROFILE_ID !== 'string' || !uuid.test(env.SENTDM_PROFILE_ID)))) return null;
-  return { SENTDM_API_KEY: env.SENTDM_API_KEY, SENTDM_OTP_TEMPLATE_ID: env.SENTDM_OTP_TEMPLATE_ID,
-    SENTDM_OTP_CHANNEL: 'sms', SENTDM_OTP_PARAMETER: parameter,
-    ...(env.SENTDM_PROFILE_ID ? { SENTDM_PROFILE_ID: env.SENTDM_PROFILE_ID } : {}) };
-}
-
 /** Explicit per-container secret mapping; never forwards the whole Worker env. */
 export function containerEnvironment(service, env) {
   if (!Object.hasOwn(MAP, service) || !['staging', 'production'].includes(env.CORE_ENV)) throw new Error('Invalid core service configuration');
@@ -78,16 +66,12 @@ export function containerEnvironment(service, env) {
     const emailEnabled = env.AUTH_CUTOVER_VERIFIED === 'true';
     values.BETTER_AUTH_EMAIL_OTP_ENABLED = String(emailEnabled);
     values.BETTER_AUTH_JWT_ENABLED = String(emailEnabled);
-    // Registration proof is a separate capability, never phone login or the
-    // optional authenticated SMS-consent feature. Old flags cannot enable either.
+    // Email-only registration/login is a fixed deployment policy, not a feature
+    // flag. Never pass SMS provider credentials, even when stale Worker secrets
+    // or flags remain configured. Contact phones do not imply verification.
     values.BETTER_AUTH_PHONE_OTP_ENABLED = 'false';
     values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY = 'false';
-    const registrationSmsRequired = emailEnabled && env.BETTER_AUTH_REGISTRATION_SMS_REQUIRED === 'true';
-    values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED = String(registrationSmsRequired);
-    // Do not make an incomplete SMS configuration disable established email
-    // sessions. Keep the requirement enabled but omit provider credentials so
-    // registration fails closed instead of silently bypassing phone proof.
-    if (registrationSmsRequired) Object.assign(values, registrationSmsProvider(env) || {});
+    values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED = 'false';
     if (emailEnabled) {
       for (const key of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'AUTH_EMAIL_FROM', 'AUTH_JWT_ISSUER', 'AUTH_JWT_AUDIENCE']) {
         if (typeof env[key] !== 'string' || !env[key].trim()) throw new Error('Email authentication secrets are incomplete');

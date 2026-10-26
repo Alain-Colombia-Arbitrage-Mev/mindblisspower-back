@@ -1,12 +1,12 @@
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { DB } from '../db/client';
-import { validPhone } from './delivery';
+import { validContactPhone } from './registration-contacts';
 
 export const registrationCandidate = z.object({
   email: z.string().trim().toLowerCase().max(320).pipe(z.email()),
   name: z.string().trim().min(1).max(200),
-  phone: z.string().refine(validPhone).optional(),
+  phone: z.string().refine(validContactPhone).optional(),
   birthDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
     const parsed = new Date(`${value}T00:00:00.000Z`);
     return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;

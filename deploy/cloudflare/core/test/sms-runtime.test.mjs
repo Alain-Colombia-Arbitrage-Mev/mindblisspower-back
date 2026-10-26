@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { containerEnvironment } from '../src/runtime-env.mjs';
-import { dispatchCore, coreReady } from '../src/routing.mjs';
+import { dispatchCore, dispatchContainerOutbound, coreReady } from '../src/routing.mjs';
 
 const gates = { CORE_ENV: 'production', CORE_SERVICES_ENABLED: 'false', CORE_NETWORK_VERIFIED: 'false',
   CORE_DATA_ACCESS_VERIFIED: 'true', AUTH_SERVICES_ENABLED: 'true', AUTH_CUTOVER_VERIFIED: 'true' };
@@ -16,66 +16,111 @@ const fixture = () => ({ ...gates,
   CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-email-key', AUTH_EMAIL_FROM: 'auth@example.invalid',
   AUTH_JWT_ISSUER: 'https://portal.example.invalid', AUTH_JWT_AUDIENCE: 'synthetic',
 });
-const dormantSms = { AUTH_SMS_OPT_IN_ENABLED: 'true', AUTH_SMS_OPT_IN_SCHEMA_READY: 'true',
+const staleSms = { AUTH_SMS_OPT_IN_ENABLED: 'true', AUTH_SMS_OPT_IN_SCHEMA_READY: 'true',
   BETTER_AUTH_PHONE_OTP_ENABLED: 'true', BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY: 'true',
+  BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true',
   SENTDM_API_KEY: 'synthetic-not-real', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000001', SENTDM_OTP_CHANNEL: 'sms',
   SENTDM_PROFILE_ID: '00000000-0000-4000-8000-000000000002', SENTDM_OTP_PARAMETER: 'code' };
-const phonePaths = ['/api/auth/phone-number/opt-in', '/api/auth/phone-number/send-otp', '/api/auth/phone-number/verify',
-  '/api/auth/phone-number/revoke-consent', '/api/auth/phone-number/request-password-reset', '/api/auth/phone-number/reset-password',
-  '/api/auth/sign-in/phone-number'];
-const registrationPaths = ['/api/auth/registration/phone/send', '/api/auth/registration/phone/verify'];
+const phonePaths = ['/api/auth/phone-number', '/api/auth/phone-number/opt-in', '/api/auth/phone-number/send-otp',
+  '/api/auth/phone-number/verify', '/api/auth/phone-number/revoke-consent', '/api/auth/phone-number/request-password-reset',
+  '/api/auth/phone-number/reset-password', '/api/auth/sign-in/phone-number',
+  '/api/auth/registration', '/api/auth/registration/phone', '/api/auth/registration/phone/send',
+  '/api/auth/registration/phone/verify', '/api/auth/registration/phone/status'];
+const noSms = values => {
+  assert.equal(Object.keys(values).some(key => key.startsWith('SENTDM_') || key.startsWith('AUTH_SMS_')), false);
+};
 
-test('email-only runtime keeps phone delivery and consent-table readiness forced off', () => {
-  for (const config of [{}, dormantSms, { ...dormantSms, SENTDM_OTP_CHANNEL: 'whatsapp' }]) {
+test('email-only runtime permanently disables phone auth and never forwards SMS provider credentials', () => {
+  for (const config of [{}, staleSms, { ...staleSms, SENTDM_OTP_CHANNEL: 'whatsapp' }]) {
     const values = containerEnvironment('api', { ...fixture(), ...config });
     assert.equal(values.BETTER_AUTH_PHONE_OTP_ENABLED, 'false');
     assert.equal(values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY, 'false');
+    assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
     assert.equal(values.BETTER_AUTH_EMAIL_OTP_ENABLED, 'true');
     assert.equal(values.BETTER_AUTH_JWT_ENABLED, 'true');
-    assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
-    assert.equal(Object.keys(values).some(key => key.startsWith('SENTDM_') || key.startsWith('AUTH_SMS_')), false);
+    noSms(values);
   }
 });
 
-test('obsolete SMS flags and malformed provider values cannot break working email', () => {
-  for (const value of [undefined, false, true, 'false', 'TRUE', '1', 'true']) {
-    const values = containerEnvironment('api', { ...fixture(), ...dormantSms, AUTH_SMS_OPT_IN_ENABLED: value,
-      AUTH_SMS_OPT_IN_SCHEMA_READY: value, SENTDM_API_KEY: {}, SENTDM_OTP_TEMPLATE_ID: 'invalid' });
+test('all obsolete registration flags are ignored, including exact true, regardless of provider validity', () => {
+  for (const value of [undefined, false, true, 'false', 'TRUE', '1', 'true', 'true ', {}]) {
+    const values = containerEnvironment('api', { ...fixture(), ...staleSms, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: value,
+      AUTH_SMS_OPT_IN_ENABLED: value, AUTH_SMS_OPT_IN_SCHEMA_READY: value, SENTDM_API_KEY: {}, SENTDM_OTP_TEMPLATE_ID: 'invalid' });
     assert.equal(values.BETTER_AUTH_PHONE_OTP_ENABLED, 'false');
     assert.equal(values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY, 'false');
+    assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
     assert.equal(values.BETTER_AUTH_EMAIL_OTP_ENABLED, 'true');
     assert.equal(values.CLOUDFLARE_EMAIL_API_TOKEN, 'synthetic-email-key');
+    noSms(values);
   }
 });
 
-test('phone paths return 404 even with registration proof enabled and full core readiness', async () => {
+test('email runtime never even reads dormant provider secrets', () => {
+  const env = fixture();
+  for (const key of Object.keys(staleSms)) {
+    Object.defineProperty(env, key, { get: () => assert.fail(`obsolete SMS configuration was accessed: ${key}`) });
+  }
+  const values = containerEnvironment('api', env);
+  assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
+  assert.equal(values.BETTER_AUTH_EMAIL_OTP_ENABLED, 'true');
+  noSms(values);
+});
+
+test('all phone registration and login routes return 404 before resolving any Container, even with stale true flags', async () => {
   for (const fullCore of [false, true]) {
-    const env = { ...gates, ...dormantSms, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true',
-      CORE_SERVICES_ENABLED: String(fullCore), CORE_NETWORK_VERIFIED: String(fullCore) };
+    const env = { ...gates, ...staleSms, CORE_SERVICES_ENABLED: String(fullCore), CORE_NETWORK_VERIFIED: String(fullCore) };
     assert.equal(coreReady(env), fullCore);
     for (const path of phonePaths) for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
-      for (const host of ['auth.core.internal', 'core.internal']) {
+      for (const host of ['auth.core.internal', 'core.internal', 'payments.core.internal', 'withdrawals.core.internal']) {
         const response = await dispatchCore(new Request(`https://${host}${path}`, { method }), env,
           () => assert.fail('email-only phone request started a Container'));
-        assert.equal(response.status, 404, `${method} ${path}`);
+        assert.equal(response.status, 404, `${method} ${host}${path}`);
         assert.equal(response.headers.get('cache-control'), 'private, no-store');
       }
     }
   }
 });
 
-test('phone path suffixes, query strings and encoded path forms cannot evade email-only denial', async () => {
-  const env = { ...gates, ...dormantSms, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
-  for (const path of [...phonePaths.map(path => `${path}/`), ...phonePaths.map(path => `${path}?target=other`),
-    '/api/auth/phone%2dnumber/send-otp', '/api/auth/phone%252dnumber/verify', '/api/auth/sign-in%2fphone-number']) {
-    const response = await dispatchCore(new Request(`https://auth.core.internal${path}`, { method: 'POST' }), env,
-      () => assert.fail('encoded phone request escaped'));
-    assert.equal(response.status, 404, path);
+test('phone denial is independent of missing infrastructure/auth gates and request upgrade headers', async () => {
+  for (const env of [{}, { ...gates, CORE_ENV: 'development' }, { ...gates, AUTH_CUTOVER_VERIFIED: 'false' }]) {
+    for (const path of phonePaths) {
+      const response = await dispatchCore(new Request(`https://auth.core.internal${path}`,
+        { headers: { upgrade: 'websocket' } }), env, () => assert.fail('unconfigured phone request started a Container'));
+      assert.equal(response.status, 404, path);
+    }
   }
 });
 
-test('email authentication exact routes remain usable with stale SMS flags but no phone capability', async () => {
-  const env = { ...gates, ...dormantSms };
+test('Container outbound cannot reach removed phone capabilities with any infrastructure readiness', async () => {
+  for (const env of [{}, { ...gates, ...staleSms }, { ...gates, ...staleSms, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' }]) {
+    for (const source of ['api', 'engine', 'payments', 'withdrawals', 'unknown']) for (const path of phonePaths) {
+      const response = await dispatchContainerOutbound(source, new Request(`https://auth.core.internal${path}`, { method: 'POST' }), env,
+        () => assert.fail('Container outbound revived phone auth'));
+      assert.equal(response.status, 404, `${source}:${path}`);
+      assert.equal(response.headers.get('cache-control'), 'private, no-store');
+    }
+  }
+});
+
+test('phone path suffixes, query strings, HTTP downgrade and nested encodings cannot evade denial', async () => {
+  let nestedSlash = '/';
+  for (let index = 0; index < 10; index++) nestedSlash = encodeURIComponent(nestedSlash);
+  const env = { ...gates, ...staleSms, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
+  const variants = [...phonePaths.flatMap(path => [`${path}/`, `${path}/extra`, `${path}?purpose=login`]),
+    '/api/auth/phone%2dnumber/send-otp', '/api/auth/phone%252dnumber/verify', '/api/auth/sign-in%2fphone-number',
+    '/api/auth/registration/phone/%73end', '/api/auth/registration/phone/%2573end',
+    '/api/auth/registration/phone/%252573end', '/api/auth/registration%2fphone/send',
+    '/api/auth/registr%61tion/phone/verify', '/api%2fauth/registration/phone/send',
+    `/api${nestedSlash}auth/registration/phone/send`];
+  for (const protocol of ['https', 'http']) for (const path of variants) {
+    const response = await dispatchCore(new Request(`${protocol}://auth.core.internal${path}`, { method: 'POST' }), env,
+      () => assert.fail('encoded phone request escaped'));
+    assert.equal(response.status, 404, `${protocol}:${path}`);
+  }
+});
+
+test('email authentication exact routes remain usable with every obsolete SMS flag set true', async () => {
+  const env = { ...gates, ...staleSms };
   for (const [method, path] of [['GET', '/api/auth/get-session'], ['GET', '/api/auth/token'], ['GET', '/api/auth/jwks'],
     ['POST', '/api/auth/sign-up/email'], ['POST', '/api/auth/email-otp/send-verification-otp'],
     ['POST', '/api/auth/email-otp/verify-email'], ['POST', '/api/auth/sign-in/email-otp'], ['POST', '/api/auth/sign-in/email']]) {
@@ -83,11 +128,12 @@ test('email authentication exact routes remain usable with stale SMS flags but n
     const response = await dispatchCore(new Request(`https://auth.core.internal${path}`, { method }), env,
       service => { calls++; assert.equal(service, 'api'); return { fetch: async () => Response.json({ synthetic: true }) }; });
     assert.equal(response.status, 200); assert.equal(calls, 1);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
   }
 });
 
-test('registration SMS never forwards secrets to Go or alters read-only financial gates', async () => {
-  const env = { ...fixture(), ...dormantSms, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true',
+test('phone removal never forwards provider secrets to Go or alters read-only financial gates', async () => {
+  const env = { ...fixture(), ...staleSms,
     ENGINE_DATABASE_URL: 'postgres://engine.branch:synthetic@db.example.invalid/app?sslmode=verify-full',
     ENGINE_ROOT_AFFILIATE_ID: '50793', ENGINE_TLS_CERT_PEM: 'synthetic', ENGINE_TLS_KEY_PEM: 'synthetic', ENGINE_TLS_CLIENT_CA_PEM: 'synthetic',
     PAYMENTS_DATABASE_URL: 'postgres://payments.branch:synthetic@db.example.invalid/app?sslmode=verify-full',
@@ -97,7 +143,7 @@ test('registration SMS never forwards secrets to Go or alters read-only financia
   };
   for (const service of ['engine', 'payments', 'withdrawals']) {
     const values = containerEnvironment(service, env);
-    assert.equal(Object.keys(values).some(key => key.startsWith('SENTDM_') || key.startsWith('AUTH_SMS_')), false);
+    noSms(values);
     assert.equal(values.STRIPE_SECRET_KEY, undefined);
     assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, undefined);
     if (service === 'engine') assert.equal(values.BONUS_ENGINE_SCHEDULER_ENABLED, 'false');
@@ -110,120 +156,12 @@ test('registration SMS never forwards secrets to Go or alters read-only financia
   }
 });
 
-test('checked-in environments retain dormant false flags and no provider secrets', () => {
+test('checked-in environments contain no phone-auth flags or provider settings', () => {
   const config = JSON.parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
   for (const name of ['staging', 'production']) {
-    assert.equal(config.env[name].vars.AUTH_SMS_OPT_IN_ENABLED, 'false');
-    assert.equal(config.env[name].vars.AUTH_SMS_OPT_IN_SCHEMA_READY, 'false');
-    assert.equal(config.env[name].vars.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
+    for (const flag of ['AUTH_SMS_OPT_IN_ENABLED', 'AUTH_SMS_OPT_IN_SCHEMA_READY', 'BETTER_AUTH_REGISTRATION_SMS_REQUIRED']) {
+      assert.equal(config.env[name].vars[flag], undefined);
+    }
     assert.equal(Object.keys(config.env[name].vars).some(key => key.startsWith('SENTDM_')), false);
-  }
-});
-
-test('only exact true with verified email auth can scope SMS credentials to the API Container', () => {
-  for (const flag of [undefined, false, true, 'false', 'TRUE', '1', 'true ', {}]) {
-    const values = containerEnvironment('api', { ...fixture(), ...dormantSms, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: flag });
-    assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
-    assert.equal(Object.keys(values).some(key => key.startsWith('SENTDM_')), false);
-  }
-  const values = containerEnvironment('api', { ...fixture(), ...dormantSms, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true' });
-  assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'true');
-  for (const key of ['SENTDM_API_KEY', 'SENTDM_OTP_TEMPLATE_ID', 'SENTDM_OTP_CHANNEL', 'SENTDM_PROFILE_ID', 'SENTDM_OTP_PARAMETER']) {
-    assert.equal(values[key], dormantSms[key]);
-  }
-  assert.equal(values.BETTER_AUTH_PHONE_OTP_ENABLED, 'false');
-  assert.equal(values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY, 'false');
-  assert.equal(values.BETTER_AUTH_EMAIL_OTP_ENABLED, 'true');
-  const unverified = containerEnvironment('api', { ...fixture(), ...dormantSms, AUTH_CUTOVER_VERIFIED: 'false',
-    BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true' });
-  assert.equal(unverified.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
-  assert.equal(Object.keys(unverified).some(key => key.startsWith('SENTDM_')), false);
-  const minimal = containerEnvironment('api', { ...fixture(), ...dormantSms, SENTDM_PROFILE_ID: undefined,
-    SENTDM_OTP_PARAMETER: undefined, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true' });
-  assert.equal(minimal.SENTDM_PROFILE_ID, undefined);
-  assert.equal(minimal.SENTDM_OTP_PARAMETER, 'code');
-});
-
-test('incomplete SMS configuration fails closed for registration without breaking email startup', () => {
-  for (const override of [{ SENTDM_API_KEY: undefined }, { SENTDM_API_KEY: {} }, { SENTDM_API_KEY: 'contains space' },
-    { SENTDM_API_KEY: 'unsafe\nkey' }, { SENTDM_API_KEY: 'unsafe\u0000key' }, { SENTDM_API_KEY: 'a'.repeat(4097) },
-    { SENTDM_OTP_TEMPLATE_ID: undefined }, { SENTDM_OTP_TEMPLATE_ID: 'invalid' }, { SENTDM_OTP_TEMPLATE_ID: {} },
-    { SENTDM_OTP_CHANNEL: undefined }, { SENTDM_OTP_CHANNEL: 'whatsapp' }, { SENTDM_OTP_CHANNEL: 'SMS' },
-    { SENTDM_PROFILE_ID: 'invalid' }, { SENTDM_PROFILE_ID: {} }, { SENTDM_OTP_PARAMETER: '' },
-    { SENTDM_OTP_PARAMETER: 'unsafe\nparameter' }, { SENTDM_OTP_PARAMETER: {} }]) {
-    const values = containerEnvironment('api', { ...fixture(), ...dormantSms, ...override, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true' });
-    assert.equal(values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'true');
-    assert.equal(Object.keys(values).some(key => key.startsWith('SENTDM_')), false);
-    assert.equal(values.BETTER_AUTH_EMAIL_OTP_ENABLED, 'true');
-    assert.equal(values.BETTER_AUTH_JWT_ENABLED, 'true');
-    assert.equal(values.CLOUDFLARE_EMAIL_API_TOKEN, 'synthetic-email-key');
-    assert.equal(values.BETTER_AUTH_PHONE_OTP_ENABLED, 'false');
-    assert.equal(values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY, 'false');
-  }
-});
-
-test('default-off or malformed registration flag rejects phone proof before resolving any Container', async () => {
-  for (const flag of [undefined, false, true, 'false', 'TRUE', '1', 'true ', {}]) {
-    for (const fullCore of [false, true]) for (const path of registrationPaths) {
-      const response = await dispatchCore(new Request(`https://auth.core.internal${path}`, { method: 'POST' }),
-        { ...gates, ...dormantSms, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: flag,
-          CORE_SERVICES_ENABLED: String(fullCore), CORE_NETWORK_VERIFIED: String(fullCore) }, () => assert.fail('registration SMS started while off'));
-      assert.equal(response.status, 404);
-      assert.equal(response.headers.get('cache-control'), 'private, no-store');
-    }
-  }
-});
-
-test('registration proof allows only two exact POST routes independently of Go readiness', async () => {
-  const env = { ...gates, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true' };
-  assert.equal(coreReady(env), false);
-  for (const path of registrationPaths) {
-    let calls = 0;
-    const response = await dispatchCore(new Request(`https://auth.core.internal${path}`, { method: 'POST', body: '{"synthetic":true}',
-      headers: { 'x-vp-auth-signature': 'synthetic-context', cookie: 'proof=synthetic', 'cf-container-target-port': '50051' } }), env,
-    service => { calls++; assert.equal(service, 'api'); return { fetch: async forwarded => {
-      assert.equal(forwarded.method, 'POST');
-      assert.equal(await forwarded.text(), '{"synthetic":true}');
-      assert.equal(forwarded.headers.get('x-vp-auth-signature'), 'synthetic-context');
-      assert.equal(forwarded.headers.get('cookie'), 'proof=synthetic');
-      assert.equal(forwarded.headers.get('cf-container-target-port'), null);
-      assert.equal(forwarded.redirect, 'manual');
-      return Response.json({ synthetic: true });
-    } }; });
-    assert.equal(response.status, 200); assert.equal(calls, 1);
-    assert.equal(response.headers.get('cache-control'), 'private, no-store');
-  }
-  // Even with no provider, email reaches the backend; only signup/SMS fail there.
-  for (const path of ['/api/auth/sign-in/email-otp', '/api/auth/email-otp/send-verification-otp']) {
-    assert.equal((await dispatchCore(new Request(`https://auth.core.internal${path}`, { method: 'POST' }), env,
-      () => ({ fetch: async () => Response.json({ synthetic: true }) }))).status, 200);
-  }
-});
-
-test('registration proof rejects alternate hosts, methods, queries, suffixes and encoded forms even when core is ready', async () => {
-  let nestedSlash = '/';
-  for (let index = 0; index < 10; index++) nestedSlash = encodeURIComponent(nestedSlash);
-  for (const fullCore of [false, true]) {
-    const env = { ...gates, BETTER_AUTH_REGISTRATION_SMS_REQUIRED: 'true',
-      CORE_SERVICES_ENABLED: String(fullCore), CORE_NETWORK_VERIFIED: String(fullCore) };
-    for (const path of registrationPaths) for (const method of ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
-      assert.equal((await dispatchCore(new Request(`https://auth.core.internal${path}`, { method }), env,
-        () => assert.fail('alternate method escaped'))).status, 404);
-    }
-    for (const [host, protocol] of [['core.internal', 'https'], ['payments.core.internal', 'https'],
-      ['withdrawals.core.internal', 'https'], ['auth.core.internal', 'http']]) {
-      assert.equal((await dispatchCore(new Request(`${protocol}://${host}${registrationPaths[0]}`, { method: 'POST' }), env,
-        () => assert.fail('alternate origin escaped'))).status, 404);
-    }
-    for (const path of ['/api/auth/registration', '/api/auth/registration/', '/api/auth/registration/phone',
-      '/api/auth/registration/phone/status', '/api/auth/registration/phone/send/', '/api/auth/registration/phone/verify/extra',
-      '/api/auth/registration/phone/send?purpose=login', '/api/auth/registration/phone/verify?proof=other',
-      '/api/auth/registration/phone/%73end', '/api/auth/registration/phone/%2573end',
-      '/api/auth/registration/phone/%252573end', '/api/auth/registration%2fphone/send',
-      '/api/auth/registr%61tion/phone/verify', '/api%2fauth/registration/phone/send',
-      `/api${nestedSlash}auth/registration/phone/send`]) {
-      assert.equal((await dispatchCore(new Request(`https://auth.core.internal${path}`, { method: 'POST' }), env,
-        () => assert.fail(`registration path escaped: ${path}`))).status, 404, path);
-    }
   }
 });
