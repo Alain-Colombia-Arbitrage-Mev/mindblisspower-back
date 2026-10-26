@@ -18,7 +18,7 @@ export function securePhoneVerification(secret: string, verification: { identifi
 }
 
 export async function consumePhoneOTP(secret: string, phone: string, code: string, ctx?: GenericEndpointContext, ownerBound = false) {
-  if (!ctx || !(ownerBound ? /^sms-opt-in:[a-f0-9]{64}$/.test(phone) : validPhone(phone))) return false;
+  if (!ctx || !(ownerBound ? /^(?:sms-opt-in|registration-phone):[a-f0-9]{64}$/.test(phone) : validPhone(phone))) return false;
   const adapter = ctx.context.adapter;
   type Challenge = { id: string; value: string; expiresAt: Date };
   let current = (await adapter.findMany<Challenge>({ model: 'verification',

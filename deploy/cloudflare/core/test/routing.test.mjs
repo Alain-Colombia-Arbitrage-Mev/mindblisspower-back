@@ -323,6 +323,7 @@ test('the versioned environments contain no public ingress, scheduler, secrets o
     assert.equal(env.vars.CORE_REPORTS_ENABLED, name === 'production' ? 'true' : 'false');
     assert.equal(env.vars.CORE_DATA_ACCESS_VERIFIED, name === 'production' ? 'true' : 'false');
     assert.equal(env.vars.AUTH_CUTOVER_VERIFIED, name === 'production' ? 'true' : 'false');
+    assert.equal(env.vars.BETTER_AUTH_REGISTRATION_SMS_REQUIRED, 'false');
     assert.equal(env.vars.AUTH_SMS_OPT_IN_ENABLED, 'false');
     assert.equal(env.vars.AUTH_SMS_OPT_IN_SCHEMA_READY, 'false');
     assert.equal(env.containers.length, 4);

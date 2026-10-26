@@ -46,8 +46,8 @@ describe('Bun authentication writer composition', () => {
       const calls = [];
       mock.module('./src/db/auth-client.ts', () => ({ authDb: writer }));
       mock.module('./src/db/client.ts', () => ({ db: reader }));
-      mock.module('better-auth/adapters/drizzle', () => ({ drizzleAdapter(database, options) {
-        assert.equal(database, writer); assert.equal(options.provider, 'pg'); return adapter;
+      mock.module('./src/auth/postgres-auth-adapter.ts', () => ({ postgresAuthAdapter(database) {
+        assert.equal(database, writer); return adapter;
       } }));
       mock.module('./src/modules/identity/index.ts', () => ({
         provisionAuthPerson(database, input) { assert.equal(database, writer); calls.push(['provision', input.userId]); return { status: 'existing' }; },

@@ -15,6 +15,7 @@ const AUTH_ONLY_PATHS = Object.freeze({
   POST: new Set(['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out',
     '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email']),
 });
+const REGISTRATION_PHONE_PATHS = new Set(['/api/auth/registration/phone/send', '/api/auth/registration/phone/verify']);
 
 function failure(error, status) {
   return Response.json({ error }, { status, headers: { 'Cache-Control': 'private, no-store' } });
@@ -42,9 +43,15 @@ function reportOnlyRequest(request, url) {
     && ['GET', 'HEAD', 'OPTIONS'].includes(request.method) && url.pathname !== '/api/member/identity/claim';
 }
 
-function authOnlyRequest(request, url) {
+function registrationPhoneRequest(request, url, env) {
+  return env.BETTER_AUTH_REGISTRATION_SMS_REQUIRED === 'true' && request.method === 'POST'
+    && url.protocol === 'https:' && url.hostname === 'auth.core.internal' && !url.search
+    && REGISTRATION_PHONE_PATHS.has(url.pathname);
+}
+
+function authOnlyRequest(request, url, env) {
   return url.protocol === 'https:' && url.hostname === 'auth.core.internal' && !url.search
-    && Boolean(AUTH_ONLY_PATHS[request.method]?.has(url.pathname));
+    && (Boolean(AUTH_ONLY_PATHS[request.method]?.has(url.pathname)) || registrationPhoneRequest(request, url, env));
 }
 
 export function isGrpcTunnelRequest(request) {
@@ -108,16 +115,25 @@ export async function dispatchCore(request, env, resolve) {
   if (!Object.hasOwn(SERVICES, url.hostname) || url.username || url.password || url.hash
     || !['http:', 'https:'].includes(url.protocol) || url.port) return failure('not_found', 404);
   if (!METHODS.has(request.method) || request.headers.has('upgrade')) return failure('method_not_allowed', 405);
-  // Email-only policy is independent of infrastructure readiness. Do not even
-  // instantiate an API Container for phone status, consent, delivery or login.
+  // Phone login and the old opt-in capability remain unavailable, independently
+  // of infrastructure readiness or the separate registration SMS requirement.
   let decodedPath = url.pathname;
-  try { for (let index = 0; index < 2; index++) decodedPath = decodeURIComponent(decodedPath); }
+  try {
+    for (let index = 0; index < 8; index++) {
+      const next = decodeURIComponent(decodedPath);
+      if (next === decodedPath) break;
+      decodedPath = next;
+    }
+  }
   catch { return failure('not_found', 404); }
+  // Excessively nested encodings must not escape the namespace guards below.
+  if (decodedPath.includes('%')) return failure('not_found', 404);
   if (/^\/api\/auth\/(?:phone-number(?:\/|$)|sign-in\/phone-number(?:\/|$))/.test(decodedPath)) return failure('not_found', 404);
+  if (/^\/api\/auth\/registration(?:\/|$)/.test(decodedPath) && !registrationPhoneRequest(request, url, env)) return failure('not_found', 404);
   if (!['staging', 'production'].includes(env.CORE_ENV)) return failure('core_unconfigured', 503);
   // Exact auth routes can launch independently; this never starts Go, exposes a
   // business read, permits identity claims, or relaxes the financial write gate.
-  const authOnly = !coreReady(env) && authReady(env) && authOnlyRequest(request, url);
+  const authOnly = !coreReady(env) && authReady(env) && authOnlyRequest(request, url, env);
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);

@@ -6,6 +6,7 @@ import { authActionMessage, cloudflareEmailConfigured, createAuthDelivery, smsDe
 import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification } from './phone-otp';
 import { smsOptInPlugin } from './phone-opt-in';
 import { registrationCandidate, type RegistrationCandidate } from './registration';
+import { registrationPhonePlugin, registrationPhoneProof } from './registration-phone';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
@@ -22,9 +23,12 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
   const emailEnabled = env.BETTER_AUTH_EMAIL_OTP_ENABLED === 'true';
   const phoneEnabled = env.BETTER_AUTH_PHONE_OTP_ENABLED === 'true';
   const jwtEnabled = env.BETTER_AUTH_JWT_ENABLED === 'true';
+  const registrationPhoneRequired = env.BETTER_AUTH_REGISTRATION_SMS_REQUIRED === 'true';
+  const registrationPhoneConfigured = smsDeliveryConfigured(env)
+    && (env.NODE_ENV !== 'production' || (env.AUTH_BFF_SHARED_SECRET || '').length >= 32);
   const secret = env.BETTER_AUTH_SECRET || '';
-  if ((emailEnabled || phoneEnabled || jwtEnabled) && (secret.length < 32 || !env.BETTER_AUTH_URL)) throw new Error('Better Auth feature configuration incomplete');
-  if (emailEnabled || phoneEnabled || jwtEnabled) {
+  if ((emailEnabled || phoneEnabled || jwtEnabled || registrationPhoneRequired) && (secret.length < 32 || !env.BETTER_AUTH_URL)) throw new Error('Better Auth feature configuration incomplete');
+  if (emailEnabled || phoneEnabled || jwtEnabled || registrationPhoneRequired) {
     for (const value of [env.BETTER_AUTH_URL, ...(env.BETTER_AUTH_TRUSTED_ORIGINS || '').split(','), ...(jwtEnabled ? [env.BETTER_AUTH_JWT_ISSUER] : [])].filter(Boolean)) {
       let url: URL;
       try { url = new URL(value!.trim()); } catch { throw new Error('Authentication URLs must be explicit and valid'); }
@@ -46,6 +50,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
   plugins.push(smsOptInPlugin(secret, delivery, {
     enabled: phoneEnabled && smsDeliveryConfigured(env), schemaReady: env.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY === 'true',
   }));
+  plugins.push(registrationPhonePlugin(secret, delivery, { enabled: registrationPhoneRequired, configured: registrationPhoneConfigured }));
   if (jwtEnabled) plugins.push(jwt({ disableSettingJwtHeader: true,
     jwks: { keyPairConfig: { alg: 'RS256', modulusLength: 2048 }, rotationInterval: 86400 * 30 },
     jwt: { issuer: env.BETTER_AUTH_JWT_ISSUER!, audience: env.BETTER_AUTH_JWT_AUDIENCE!, expirationTime: '5m',
@@ -66,7 +71,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
       if (error instanceof APIError && error.statusCode === 503
-        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE'].includes(error.body?.code || '')) return;
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'REGISTRATION_PHONE_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
@@ -87,8 +92,14 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     disabledPaths: ['/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password'],
     hooks: { before: createAuthMiddleware(async ctx => {
       if (ctx.path === '/sign-up/email') {
+        const verifiedPhone = registrationPhoneRequired ? await registrationPhoneProof(secret, ctx, String(ctx.body?.email || ''), {
+          configured: registrationPhoneConfigured, secureCookie: new URL(env.BETTER_AUTH_URL!).protocol === 'https:',
+        }) : null;
+        if (registrationPhoneRequired && (ctx.body?.phoneNumber !== undefined || ctx.body?.phoneNumberVerified !== undefined)) {
+          throw new APIError('BAD_REQUEST', { code: 'REGISTRATION_PHONE_INVALID', message: 'Invalid registration verification' });
+        }
         const candidate = registrationCandidate.safeParse({ email: ctx.body?.email, name: ctx.body?.name,
-          ...(ctx.body?.phoneNumber === undefined ? {} : { phone: ctx.body.phoneNumber }),
+          ...(verifiedPhone ? { phone: verifiedPhone.phoneNumber } : ctx.body?.phoneNumber === undefined ? {} : { phone: ctx.body.phoneNumber }),
           ...(ctx.body?.birthDate === undefined ? {} : { birthDate: ctx.body.birthDate }) });
         if (!candidate.success) throw new APIError('BAD_REQUEST', { message: 'Invalid registration details' });
         if (!identity.registrationAllowed) throw new APIError('SERVICE_UNAVAILABLE', {
@@ -127,7 +138,18 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         }
         return { data: secured };
       } } },
-      user: { create: { after: async user => { await identity.provision(user.id); } } },
+      user: { create: {
+        before: async (user, ctx) => {
+          if (!registrationPhoneRequired) return;
+          const verifiedPhone = await registrationPhoneProof(secret, ctx, user.email, {
+            configured: registrationPhoneConfigured, secureCookie: new URL(env.BETTER_AUTH_URL!).protocol === 'https:', consume: true,
+          });
+          // Only server proof may set these fields. If a later INSERT fails,
+          // the proof stays spent: require a new SMS, never restore a replay.
+          return { data: { ...user, phoneNumber: verifiedPhone.phoneNumber, phoneNumberVerified: true } };
+        },
+        after: async user => { await identity.provision(user.id); },
+      } },
       session: { create: { before: async (session, ctx) => {
         const user = await ctx?.context.internalAdapter.findUserById(session.userId);
         if (!user || user.emailVerified !== true) return false;
