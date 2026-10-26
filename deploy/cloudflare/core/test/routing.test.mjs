@@ -17,11 +17,12 @@ test('disabled or incomplete gates never instantiate a container', async () => {
 
 const authOnlyReady = { ...ready, CORE_SERVICES_ENABLED: 'false', CORE_NETWORK_VERIFIED: 'false', AUTH_SERVICES_ENABLED: 'true' };
 
-test('auth-only launch permits exactly OTP, session, token, JWKS and internal health without asserting Go readiness', async () => {
+test('auth-only launch permits exact registration, email verification, login and session routes without asserting Go readiness', async () => {
   assert.equal(coreReady(authOnlyReady), false); assert.equal(authReady(authOnlyReady), true);
   for (const [method, paths] of [
     ['GET', ['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/health']],
-    ['POST', ['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out']],
+    ['POST', ['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out',
+      '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email']],
   ]) for (const path of paths) {
     let calls = 0;
     const response = await dispatchCore(request(path, { method, ...(method === 'POST' ? { body: '{}' } : {}) }), authOnlyReady,
@@ -50,8 +51,12 @@ test('auth-only cannot start business services, claim identity, expand auth path
     ['/api/member/identity/claim', 'POST', 'auth.core.internal'],
     ['/api/member/balance', 'GET', 'auth.core.internal'],
     ['/api/affiliates', 'GET', 'core.internal'],
-    ['/api/auth/sign-up/email', 'POST', 'auth.core.internal'],
-    ['/api/auth/sign-in/email', 'POST', 'auth.core.internal'],
+    ['/api/auth/sign-up/email/', 'POST', 'auth.core.internal'],
+    ['/api/auth/sign-up/email?role=admin', 'POST', 'auth.core.internal'],
+    ['/api/auth/sign-up/email', 'GET', 'auth.core.internal'],
+    ['/api/auth/sign-up/email', 'POST', 'core.internal'],
+    ['/api/auth/email-otp/verify-email/', 'POST', 'auth.core.internal'],
+    ['/api/auth/sign-in/email', 'PUT', 'auth.core.internal'],
     ['/api/auth/email-otp/check-verification-otp', 'POST', 'auth.core.internal'],
     ['/api/auth/phone-number/send-otp', 'POST', 'auth.core.internal'],
     ['/api/auth/email-otp/reset-password', 'POST', 'auth.core.internal'],

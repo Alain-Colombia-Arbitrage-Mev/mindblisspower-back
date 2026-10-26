@@ -28,6 +28,7 @@ function fixture(emailVerified = true) {
   let bindingEmail = email;
   let bindingFailed = false;
   const identity: AuthIdentity = {
+    registrationAllowed: async () => true,
     provision: async () => ({ status: emailVerified ? bindingStatus : 'verification_required' }),
     binding: async () => {
       if (bindingFailed) throw new Error('synthetic-sensitive-sql-and-token');

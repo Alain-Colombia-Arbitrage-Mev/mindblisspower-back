@@ -40,10 +40,12 @@ describe('Bun authentication writer composition', () => {
       import assert from 'node:assert/strict';
       import { mock } from 'bun:test';
       const writer = { synthetic: 'writer' };
+      const reader = { synthetic: 'reader' };
       const adapter = { synthetic: 'adapter' };
       let identity;
       const calls = [];
       mock.module('./src/db/auth-client.ts', () => ({ authDb: writer }));
+      mock.module('./src/db/client.ts', () => ({ db: reader }));
       mock.module('better-auth/adapters/drizzle', () => ({ drizzleAdapter(database, options) {
         assert.equal(database, writer); assert.equal(options.provider, 'pg'); return adapter;
       } }));
@@ -51,6 +53,10 @@ describe('Bun authentication writer composition', () => {
         provisionAuthPerson(database, input) { assert.equal(database, writer); calls.push(['provision', input.userId]); return { status: 'existing' }; },
         getAuthPersonBinding(database, input) { assert.equal(database, writer); calls.push(['binding', input.userId]); return { status: 'existing' }; },
       }));
+      mock.module('./src/auth/registration.ts', () => ({ registrationAllowed(database, input) {
+        assert.equal(database, reader); assert.equal(input.email, 'registration@example.test');
+        calls.push(['registration', input.email]); return true;
+      } }));
       mock.module('./src/auth/options.ts', () => ({ createAuthOptions(_env, database, policy) {
         assert.equal(database, adapter); identity = policy; return { synthetic: 'options' };
       } }));
@@ -59,7 +65,8 @@ describe('Bun authentication writer composition', () => {
       assert.equal(auth.options.synthetic, 'options');
       await identity.provision('synthetic-user');
       await identity.binding('synthetic-user');
-      assert.deepEqual(calls, [['provision', 'synthetic-user'], ['binding', 'synthetic-user']]);
+      await identity.registrationAllowed({ email: 'registration@example.test', name: 'Synthetic Registration' });
+      assert.deepEqual(calls, [['provision', 'synthetic-user'], ['binding', 'synthetic-user'], ['registration', 'registration@example.test']]);
     `);
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);

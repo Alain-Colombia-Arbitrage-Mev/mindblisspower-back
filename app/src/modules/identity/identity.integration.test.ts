@@ -192,6 +192,7 @@ integration('real Better Auth + Drizzle + PostgreSQL verifies email, binds ident
   const typedDatabase = drizzle(connection, { schema: authSchema });
   const auth = betterAuth(createAuthOptions(env, drizzleAdapter(typedDatabase, { provider: 'pg', schema: authSchema, usePlural: false }), {
     provision: userId => provisionAuthPerson(database, { userId }), binding: userId => getAuthPersonBinding(database, { userId }),
+    registrationAllowed: async () => true,
   }, delivery));
   const request = (path: string, body?: unknown, cookie?: string) => auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
     method: body === undefined ? 'GET' : 'POST', headers: { origin: 'https://portal.example.test',
@@ -274,7 +275,7 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
       };
     },
   });
-  const identity = { provision: (userId: string) => provisionAuthPerson(database, { userId }), binding: (userId: string) => getAuthPersonBinding(database, { userId }) };
+  const identity = { provision: (userId: string) => provisionAuthPerson(database, { userId }), binding: (userId: string) => getAuthPersonBinding(database, { userId }), registrationAllowed: async () => true };
   const replicaA = betterAuth(createAuthOptions(env, pausableFactory, identity, delivery));
   const replicaB = betterAuth(createAuthOptions(env, factory, identity, delivery));
   const request = (replica: typeof replicaA, path: string, body: unknown) => replica.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {

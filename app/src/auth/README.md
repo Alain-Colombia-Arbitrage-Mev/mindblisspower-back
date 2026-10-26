@@ -63,6 +63,13 @@ unchanged until an explicit deployment cutover.
 Identity provisioning never claims a legacy person by matching an email. A
 `claim_required`/quarantined auth session cannot obtain a financial JWT. Legacy
 linking is a separate approved, single-use claim policy.
+Public email signup first requires an injected, read-only registration decision.
+The production composition uses the business reader, never the auth writer, and
+queries the canonical database with the same normalization and ban predicates as
+Go's `BanDecisionFor`: email/phone/name blacklist, optional exact birth date,
+person blacklisted/status, and affiliate suspension. No decision is cached.
+An absent checker, unavailable database or malformed result fails closed before
+creating an auth user or delivering email; rejection reasons stay private.
 The token email comes from that current binding, not the auth profile; a changed
 or mismatched email is rejected before a JWT can reach email-based legacy reads.
 

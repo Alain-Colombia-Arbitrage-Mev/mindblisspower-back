@@ -33,6 +33,7 @@ function fixture(providerStatus = 200) {
   const calls: ProviderCall[] = [];
   const provisioned: string[] = [];
   const identity: AuthIdentity = {
+    registrationAllowed: async () => true,
     provision: async userId => { provisioned.push(userId); return { status: 'existing' }; },
     binding: async () => ({ status: 'existing', email,
       publicId: '00000000-0000-4000-8000-000000000002' }),
@@ -193,5 +194,83 @@ test('Cloudflare rejection is generic, never retries or falls back, and cannot e
     expect(app.provisioned).toHaveLength(0);
     await expectNoDeliverySecrets(response, app.code());
     expect(await (await app.request('/get-session')).json()).toBeNull();
+  }
+});
+
+test('registration verifies its own OTP and then signs in with the original password without a second email', async () => {
+  const app = fixture();
+  app.store.user!.length = 0;
+  const password = 'Synthetic-Registration-Password-123';
+  const signup = await app.request('/sign-up/email', {
+    name: 'Synthetic Registration', email, password,
+    // Public registration must not turn client-provided fields into authority.
+    emailVerified: true, role: 'superadmin', personId: 'attacker-selected-person',
+  });
+  expect(signup.status).toBe(200);
+  expect((await signup.clone().json() as { token: unknown }).token).toBeNull();
+  expect(signup.headers.has('set-cookie')).toBe(false);
+  expect(app.store.user).toHaveLength(1);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.user![0]!.role).toBeUndefined();
+  expect(app.store.user![0]!.personId).toBeUndefined();
+  expect(app.store.session).toHaveLength(0);
+  expect(app.calls).toHaveLength(1);
+  const code = app.code();
+  expect(app.store.verification![0]!.identifier).toBe(`email-verification-otp-${email}`);
+  expect(JSON.stringify(app.store.account)).not.toContain(password);
+  await expectNoDeliverySecrets(signup, code);
+
+  const earlyLogin = await app.request('/sign-in/email', { email, password });
+  expect(earlyLogin.status).toBe(403);
+  expect(app.store.session).toHaveLength(0);
+  expect(app.calls).toHaveLength(1);
+
+  // A signup verification code is not an interchangeable login code.
+  const wrongPurpose = await app.request('/sign-in/email-otp', { email, otp: code });
+  expect(wrongPurpose.status).toBe(400);
+  expect(app.store.session).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(1);
+
+  app.restart();
+  const verified = await app.request('/email-otp/verify-email', { email, otp: code });
+  expect(verified.status).toBe(200);
+  expect((await verified.clone().json() as { token: unknown }).token).toBeNull();
+  expect(verified.headers.has('set-cookie')).toBe(false);
+  expect(app.store.user![0]!.emailVerified).toBe(true);
+  expect(app.store.session).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(0);
+  expect(app.store.account![0]!.password).toBeTruthy();
+  expect((await app.request('/email-otp/verify-email', { email, otp: code })).status).toBe(400);
+
+  const login = await app.request('/sign-in/email', { email, password });
+  expect(login.status).toBe(200);
+  expect(app.store.session).toHaveLength(1);
+  expect(app.calls).toHaveLength(1);
+  const sessionCookie = login.headers.getSetCookie().find(value => value.includes('better-auth.session_token='));
+  expect(sessionCookie).toContain('HttpOnly');
+  expect(sessionCookie).toContain('Secure');
+  expect(sessionCookie).toContain('SameSite=Lax');
+  const session = await app.request('/get-session', undefined, cookies(login));
+  expect((await session.json() as { user: { email: string; emailVerified: boolean } }).user)
+    .toMatchObject({ email, emailVerified: true });
+  await expectNoDeliverySecrets(login, code);
+});
+
+test('registration validation cannot create an account or contact Cloudflare for an invalid password or email', async () => {
+  for (const input of [
+    { name: 'Synthetic Registration', email, password: 'short' },
+    { name: 'Synthetic Registration', email: 'not-an-email', password: 'Synthetic-Registration-Password-123' },
+  ]) {
+    const app = fixture();
+    app.store.user!.length = 0;
+    const response = await app.request('/sign-up/email', input);
+    expect(response.status).toBe(400);
+    expect(response.headers.has('set-cookie')).toBe(false);
+    expect(app.store.user).toHaveLength(0);
+    expect(app.store.account).toHaveLength(0);
+    expect(app.store.verification).toHaveLength(0);
+    expect(app.store.session).toHaveLength(0);
+    expect(app.calls).toHaveLength(0);
+    expect(app.provisioned).toHaveLength(0);
   }
 });

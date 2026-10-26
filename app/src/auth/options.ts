@@ -5,11 +5,13 @@ import { phoneNumber } from 'better-auth/plugins/phone-number';
 import { jwt } from 'better-auth/plugins/jwt';
 import { authActionMessage, cloudflareEmailConfigured, createAuthDelivery, validPhone, type AuthDelivery, type AuthEnvironment } from './delivery';
 import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification, securePhoneVerifyEndpoint } from './phone-otp';
+import { registrationCandidate, type RegistrationCandidate } from './registration';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
   provision: (userId: string) => Promise<BoundIdentity>;
   binding: (userId: string) => Promise<BoundIdentity>;
+  registrationAllowed?: (candidate: RegistrationCandidate) => Promise<boolean>;
 };
 const messagePaths = new Set(['/sign-up/email', '/send-verification-email', '/request-password-reset',
   '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp', '/phone-number/send-otp']);
@@ -66,6 +68,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // Replace unexpected DB/provider errors before that outer fallback sees
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
+      if (error instanceof APIError && error.statusCode === 503 && error.body?.code === 'REGISTRATION_PRECHECK_UNAVAILABLE') return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
@@ -85,6 +88,20 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // non-consuming checker as a second public verification oracle.
     disabledPaths: ['/email-otp/check-verification-otp', '/phone-number/request-password-reset', '/phone-number/reset-password'],
     hooks: { before: createAuthMiddleware(async ctx => {
+      if (ctx.path === '/sign-up/email') {
+        const candidate = registrationCandidate.safeParse({ email: ctx.body?.email, name: ctx.body?.name,
+          ...(ctx.body?.phoneNumber === undefined ? {} : { phone: ctx.body.phoneNumber }),
+          ...(ctx.body?.birthDate === undefined ? {} : { birthDate: ctx.body.birthDate }) });
+        if (!candidate.success) throw new APIError('BAD_REQUEST', { message: 'Invalid registration details' });
+        if (!identity.registrationAllowed) throw new APIError('SERVICE_UNAVAILABLE', {
+          code: 'REGISTRATION_PRECHECK_UNAVAILABLE', message: 'Registration temporarily unavailable' });
+        let allowed: boolean;
+        try { allowed = await identity.registrationAllowed(candidate.data); }
+        catch { throw new APIError('SERVICE_UNAVAILABLE', {
+          code: 'REGISTRATION_PRECHECK_UNAVAILABLE', message: 'Registration temporarily unavailable' }); }
+        if (allowed !== true) throw new APIError('FORBIDDEN', {
+          code: 'REGISTRATION_NOT_ALLOWED', message: 'Registration not allowed' });
+      }
       if (ctx.path === '/sign-in/phone-number' && typeof ctx.body?.phoneNumber === 'string') {
         const user = await ctx.context.adapter.findOne<{ phoneNumberVerified: boolean }>({ model: 'user',
           where: [{ field: 'phoneNumber', value: ctx.body.phoneNumber }] });
