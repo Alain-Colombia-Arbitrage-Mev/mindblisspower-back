@@ -2,7 +2,8 @@
 
 `auth.ts` wires the PostgreSQL adapter and identity module. `options.ts` is the
 testable Better Auth 1.6.22 configuration; `delivery.ts` contains bounded HTTP
-transports, and `phone-otp.ts` hardens phone OTP storage/consumption.
+transports, `phone-otp.ts` hardens OTP storage/consumption, and
+`phone-opt-in.ts` implements the authenticated optional SMS permission flow.
 Nothing migrates data, sends messages or enables these capabilities on import.
 The framework is MIT licensed and runs in this existing Bun process and PostgreSQL,
 without Better Auth's optional paid managed infrastructure. See the
@@ -24,9 +25,10 @@ Cloudflare success also requires this one recipient in `delivered` or `queued`,
 without permanent bounce, suppression or API errors. A message ID is not assumed
 to exist in the REST response. There is no Resend dependency or fallback.
 
-Email OTP uses a secret-keyed hash, 5-minute expiry and 3 attempts. Phone OTP
-requires a storage hook because the installed plugin otherwise stores plaintext.
-Its custom verifier consumes the database verification row atomically, persists
+Email and SMS OTP use a secret-keyed hash, 5-minute expiry and 3 attempts. The
+SMS challenge is hashed before adapter creation and bound to the initiating
+authenticated user, phone and random generation. Its custom verifier consumes
+the database verification row atomically, persists
 failed-attempt counts using row-ID/value/expiry compare-and-swap; failed codes
 never delete/recreate a challenge. It never treats SMS proof as verified email.
 A persistent per-recipient send cooldown and Better Auth's database-backed IP/path limiter
@@ -44,12 +46,47 @@ The optional non-consuming `/email-otp/check-verification-otp` HTTP route is
 disabled; the actual sign-in route consumes the challenge. A generic successful
 send-request response does not confirm provider acceptance or inbox delivery.
 
-Public phone endpoints (opt-in): `POST /api/auth/phone-number/send-otp` and
-`POST /api/auth/phone-number/verify`. Existing users with already-verified email
-can use `disableSession:false` to sign in; use `disableSession:true` for proof
-without a new session. There is no phone-only signup or temporary-email claim.
-Phone password reset is deliberately disabled: the installed 1.6.22 reset path
-does not use its custom `verifyOTP` callback. Use email reset instead.
+SMS is optional, after email verification **and actual email login**. It cannot
+replace email proof, create a session, issue a JWT, approve a historical account
+claim, place a network node or authorize marketing. Every endpoint below requires
+a verified-email session, including limited `claim_required` sessions. POST also
+requires an explicitly trusted Origin. No user ID is accepted from the caller.
+
+- `GET /api/auth/phone-number/opt-in` returns exactly `{ available,
+  consentVersion: "sms-auth-v1", optedIn, phoneNumber: string|null,
+  phoneNumberVerified }`.
+- `POST /api/auth/phone-number/send-otp` requires `{ phoneNumber: E.164,
+  consent: true, consentVersion: "sms-auth-v1" }`, with no additional fields.
+  Success is `{ ok: true, resendAfter: 60 }`, meaning queued acceptance, not
+  possession proof. Both destination and authenticated-user cooldowns apply.
+- `POST /api/auth/phone-number/verify` requires `{ phoneNumber, code: sixDigits,
+  updatePhoneNumber: true, disableSession: true }`; success is
+  `{ ok: true, phoneNumberVerified: true, optedIn: true }`. It cannot create or
+  replace the existing session cookie. A compare-and-swap on the current consent
+  generation prevents a verifier in flight from restoring revoked consent.
+- `POST /api/auth/phone-number/revoke-consent` requires `{}`; success is
+  `{ ok: true, optedIn: false }`. It invalidates pending challenges and persists
+  revocation separately from evidence that the user once proved the phone.
+
+Migration 75 creates `auth.sms_opt_in` separately; no auth.user columns or
+existing contacts are backfilled. The record stores current consent version,
+explicit request time, proof time and revocation time; it is not a marketing
+subscription or an immutable event-history ledger. The operator must review the
+database guard and effective grants, permitting only the existing auth runtime
+role SELECT/INSERT/UPDATE on this relation. Check default/inherited grants too.
+Do not execute the migration at app startup. Only after that review set
+`BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY=true`. Before readiness, status returns
+`available:false` without querying the new table; existing email login continues.
+If readiness is mistakenly enabled without the table, SMS returns a redacted
+503, not successful opt-in. No schema change is applied automatically.
+
+Actual sending additionally requires `BETTER_AUTH_PHONE_OTP_ENABLED=true`, an
+approved SMS template and valid sent.dm configuration with channel `sms`.
+Missing configuration and WhatsApp-only setup keep SMS unavailable; there is no
+silent fallback, automatic resend, provider activation or paid managed component.
+When unavailable, authenticated send/verify return 404. Phone-number sign-in,
+anonymous phone signup and phone password reset are disabled; use email login
+and email reset instead. Removing consent does not disable email access.
 
 JWT is opt-in, RS256/2048 with encrypted private keys in `auth.jwks`, explicit
 issuer/audience and 5-minute expiry. `GET /api/auth/token` requires an authenticated

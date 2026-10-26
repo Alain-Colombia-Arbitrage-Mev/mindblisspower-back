@@ -1,10 +1,10 @@
 import type { BetterAuthOptions, BetterAuthPlugin } from 'better-auth';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { emailOTP } from 'better-auth/plugins/email-otp';
-import { phoneNumber } from 'better-auth/plugins/phone-number';
 import { jwt } from 'better-auth/plugins/jwt';
-import { authActionMessage, cloudflareEmailConfigured, createAuthDelivery, validPhone, type AuthDelivery, type AuthEnvironment } from './delivery';
-import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification, securePhoneVerifyEndpoint } from './phone-otp';
+import { authActionMessage, cloudflareEmailConfigured, createAuthDelivery, smsDeliveryConfigured, type AuthDelivery, type AuthEnvironment } from './delivery';
+import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification } from './phone-otp';
+import { smsOptInPlugin } from './phone-opt-in';
 import { registrationCandidate, type RegistrationCandidate } from './registration';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
@@ -14,7 +14,7 @@ export type AuthIdentity = {
   registrationAllowed?: (candidate: RegistrationCandidate) => Promise<boolean>;
 };
 const messagePaths = new Set(['/sign-up/email', '/send-verification-email', '/request-password-reset',
-  '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp', '/phone-number/send-otp']);
+  '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp']);
 
 /** Pure composition: tests supply an adapter, identity policy and mock senders. */
 export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOptions['database'], identity: AuthIdentity,
@@ -32,8 +32,6 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) throw new Error('Authentication URLs must use HTTPS');
     }
   }
-  if (phoneEnabled && (!env.SENTDM_API_KEY || !env.SENTDM_OTP_TEMPLATE_ID || !env.SENTDM_OTP_CHANNEL)) throw new Error('Phone authentication delivery is not configured');
-  if (phoneEnabled && !['sms', 'whatsapp'].includes(env.SENTDM_OTP_CHANNEL!)) throw new Error('Select one configured phone authentication channel');
   if (emailEnabled && !cloudflareEmailConfigured(env)) throw new Error('Cloudflare email authentication delivery is not configured');
   if (jwtEnabled && (!env.BETTER_AUTH_JWT_ISSUER || !env.BETTER_AUTH_JWT_AUDIENCE)) throw new Error('JWT issuer and audience must be explicit');
   const plugins: BetterAuthPlugin[] = [];
@@ -43,12 +41,11 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     sendVerificationOTP: async ({ email, otp, type }) => delivery.email({ to: email,
       subject: type === 'forget-password' ? 'Código para restablecer tu contraseña' : 'Código de acceso de Mindbliss Power',
       text: `Tu código es ${otp}. Vence en 5 minutos. No compartas este código.` }) }));
-  if (phoneEnabled) {
-    const phone = phoneNumber({ otpLength: 6, expiresIn: 300, allowedAttempts: 3,
-      requireVerification: true, phoneNumberValidator: validPhone,
-      sendOTP: async ({ phoneNumber: destination, code }) => delivery.phone(destination, code) });
-    plugins.push({ ...phone, endpoints: { ...phone.endpoints, verifyPhoneNumber: securePhoneVerifyEndpoint(secret) } });
-  }
+  // SMS is authenticated profile opt-in, never an anonymous login or signup
+  // alternative. Incomplete SMS setup disables SMS only, not working email.
+  plugins.push(smsOptInPlugin(secret, delivery, {
+    enabled: phoneEnabled && smsDeliveryConfigured(env), schemaReady: env.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY === 'true',
+  }));
   if (jwtEnabled) plugins.push(jwt({ disableSettingJwtHeader: true,
     jwks: { keyPairConfig: { alg: 'RS256', modulusLength: 2048 }, rotationInterval: 86400 * 30 },
     jwt: { issuer: env.BETTER_AUTH_JWT_ISSUER!, audience: env.BETTER_AUTH_JWT_AUDIENCE!, expirationTime: '5m',
@@ -68,7 +65,8 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // Replace unexpected DB/provider errors before that outer fallback sees
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
-      if (error instanceof APIError && error.statusCode === 503 && error.body?.code === 'REGISTRATION_PRECHECK_UNAVAILABLE') return;
+      if (error instanceof APIError && error.statusCode === 503
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
@@ -86,7 +84,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 30 },
     // Sign-in must atomically consume the code. Do not expose the optional
     // non-consuming checker as a second public verification oracle.
-    disabledPaths: ['/email-otp/check-verification-otp', '/phone-number/request-password-reset', '/phone-number/reset-password'],
+    disabledPaths: ['/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password'],
     hooks: { before: createAuthMiddleware(async ctx => {
       if (ctx.path === '/sign-up/email') {
         const candidate = registrationCandidate.safeParse({ email: ctx.body?.email, name: ctx.body?.name,
@@ -101,13 +99,6 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
           code: 'REGISTRATION_PRECHECK_UNAVAILABLE', message: 'Registration temporarily unavailable' }); }
         if (allowed !== true) throw new APIError('FORBIDDEN', {
           code: 'REGISTRATION_NOT_ALLOWED', message: 'Registration not allowed' });
-      }
-      if (ctx.path === '/sign-in/phone-number' && typeof ctx.body?.phoneNumber === 'string') {
-        const user = await ctx.context.adapter.findOne<{ phoneNumberVerified: boolean }>({ model: 'user',
-          where: [{ field: 'phoneNumber', value: ctx.body.phoneNumber }] });
-        // The stock plugin sends before checking the password. Verification is
-        // an explicit, rate-limited send flow instead of a login side effect.
-        if (user && user.phoneNumberVerified !== true) throw new APIError('FORBIDDEN', { message: 'Phone verification required' });
       }
       if (messagePaths.has(ctx.path)) {
         const recipient = ctx.body?.email || ctx.body?.phoneNumber;

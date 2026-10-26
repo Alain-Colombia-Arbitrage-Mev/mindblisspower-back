@@ -75,3 +75,18 @@ export const rateLimit = authSchema.table('rate_limit', {
   count: integer('count').notNull(),
   lastRequest: bigint('last_request', { mode: 'number' }).notNull(),
 });
+
+// Additive migration 75. This separate relation is never queried by email
+// login; explicit schema readiness gates only the optional SMS endpoints.
+export const smsOptIn = authSchema.table('sms_opt_in', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().unique().references(() => user.id, { onDelete: 'cascade' }),
+  phoneNumber: text('phone_number').notNull(),
+  consentVersion: text('consent_version').notNull(),
+  consentedAt: timestamp('consented_at', { withTimezone: true }).notNull(),
+  verifiedAt: timestamp('verified_at', { withTimezone: true }),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  challengeId: text('challenge_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});

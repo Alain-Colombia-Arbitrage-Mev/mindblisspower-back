@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-26",
+  "scope": ["customer portal", "administrative auth bridge", "Better Auth API", "Go member profile", "private Cloudflare routing"],
+  "productionChanged": false,
+  "realAuthMessagesSent": 0,
+  "productionDatabaseQueries": 0,
+  "financialGatesChanged": false,
+  "fixes": [
+    "KYC name-only updates preserve omitted phone, country and payout wallet with a presence-aware atomic SQL update",
+    "Profile editing requires a valid authoritative initial read and a typed persisted-write acknowledgement",
+    "Malformed HTTP 200 auth responses cannot confirm login, logout, verification or SMS operations",
+    "Reviewed registration cannot be bypassed through generic public sign-up proxy routes",
+    "Optional authenticated SMS consent is explicit, versioned, revocable and separate from marketing",
+    "SMS challenges are bound to account, phone and generation with persistent recipient/account cooldowns, bounded attempts and atomic consumption",
+    "SMS verification does not create sessions, tokens, historical identity bindings or tree nodes",
+    "Legacy Cognito phone controls and non-persistent 2FA/digest claims are removed from the Better Auth profile flow",
+    "Exact private SMS routes and scoped provider configuration preserve default-off and financial recovery gates",
+    "Generated local Cloudflare type files are not required for clean-checkout unit tests"
+  ],
+  "verification": {
+    "portalTests": {"passed": 289, "failed": 0},
+    "adminTests": {"passed": 231, "failed": 0},
+    "backendBunTests": {"runtime": "1.4.4", "passed": 107, "skipped": 14, "failed": 0, "network": "disabled"},
+    "isolatedPostgresTests": {"version": "17.11", "passed": 12, "network": "isolated", "productionDatabaseUsed": false},
+    "cloudflareCoreTests": {"passed": 32, "failed": 0},
+    "goProfileTests": {"passed": 6, "failed": 0},
+    "goPackagesCompile": "passed",
+    "portalTypecheck": "passed",
+    "backendTypecheck": "passed",
+    "portalLint": "passed",
+    "adminLint": {"errors": 0, "preExistingTreeWarnings": 9},
+    "portalWorkersProductionBuildAndStagingDryRun": "passed",
+    "adminWorkersProductionBuildAndStagingDryRun": "passed",
+    "isolatedWorkerd": {"portalProbesPassed": 29, "adminProbesPassed": 23, "network": "disabled", "databaseQueries": 0, "realMessages": 0},
+    "mobileBrowser": {"viewport": "375x812", "registrationErrorsAreFieldBound": true, "firstInvalidFieldFocused": true, "anonymousSmsFormHidden": true, "horizontalOverflow": false},
+    "independentAuthBridgeAudit": "No P0/P1 blockers found in reviewed changes"
+  },
+  "pendingActivation": [
+    "Confirm and apply the additive migration _meta/migration/75_sms_auth_opt_in.sql to the explicitly reviewed target",
+    "Grant the existing isolated auth runtime only SELECT, INSERT and UPDATE on auth.sms_opt_in and verify effective privileges",
+    "Configure SENTDM_API_KEY and an approved SENTDM_OTP_TEMPLATE_ID for SENTDM_OTP_CHANNEL=sms using private secret storage",
+    "Enable AUTH_SMS_OPT_IN_SCHEMA_READY only after schema/grant verification and AUTH_SMS_OPT_IN_ENABLED only after provider readiness",
+    "Deploy the reviewed versions; this review did not deploy or activate SMS"
+  ],
+  "limitations": [
+    "This is a scoped engineering review, not a guarantee that every possible defect has been eliminated",
+    "Go race detection was unavailable because the local toolchain has CGO disabled",
+    "No real provider delivery or inbox receipt was tested",
+    "Financial operations and unrelated backend services remain under their existing release gates"
+  ]
+}

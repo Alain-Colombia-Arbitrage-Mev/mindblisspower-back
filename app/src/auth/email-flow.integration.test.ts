@@ -116,7 +116,7 @@ test('email-only Cloudflare OTP creates a real secure session only after proving
   expect(replay.headers.has('set-cookie')).toBe(false);
   expect(app.store.session).toHaveLength(1);
   expect((await app.request('/token')).status).toBe(404);
-  expect((await app.request('/phone-number/send-otp', { phoneNumber: '+12025550123' })).status).toBe(404);
+  expect((await app.request('/phone-number/send-otp', { phoneNumber: '+12025550123', consent: true, consentVersion: 'sms-auth-v1' })).status).toBe(401);
   expect(app.calls).toHaveLength(1);
 });
 

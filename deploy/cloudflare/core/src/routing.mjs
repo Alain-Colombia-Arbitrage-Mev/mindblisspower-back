@@ -11,9 +11,10 @@ export const GRPC_TUNNEL_HOST = 'engine-grpc.core.internal';
 export const GRPC_TUNNEL_PATH = '/v1/engine-tunnel';
 export const TUNNEL_PROTOCOL = 'mindbliss-opaque-tcp-v1';
 const AUTH_ONLY_PATHS = Object.freeze({
-  GET: new Set(['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/health']),
+  GET: new Set(['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/api/auth/phone-number/opt-in', '/health']),
   POST: new Set(['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out',
-    '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email']),
+    '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email',
+    '/api/auth/phone-number/send-otp', '/api/auth/phone-number/verify', '/api/auth/phone-number/revoke-consent']),
 });
 
 function failure(error, status) {

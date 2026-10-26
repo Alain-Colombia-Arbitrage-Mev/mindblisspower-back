@@ -66,6 +66,12 @@ beforeAll(async () => {
   await connection`DELETE FROM auth.account WHERE id IN ('duplicate-one','duplicate-two')`;
   await connection`DELETE FROM auth.user WHERE id IN ('duplicate-one','duplicate-two')`;
   await applyMigration();
+  const smsMigration = (await readFile(new URL('../../../../_meta/migration/75_sms_auth_opt_in.sql', import.meta.url), 'utf8'))
+    .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
+  const smsConnection = await connection.reserve();
+  try { await smsConnection.unsafe(smsMigration); }
+  catch (error) { await smsConnection.unsafe('ROLLBACK'); throw error; }
+  finally { smsConnection.release(); }
   legacyPublicId = (await connection`SELECT public_id::text FROM mlm.person WHERE id=1`)[0]!.public_id;
   for (const [id, email, verified] of [['legacy-user', 'legacy@example.test', true], ['new-user', 'new@example.test', true], ['unverified-user', 'unverified@example.test', false], ['admin-user', 'operator@example.test', true], ['other-user', 'other@example.test', true]] as const) {
     await connection`INSERT INTO auth.user(id,email,email_verified,name) VALUES(${id},${email},${verified},'Synthetic Member')`;
@@ -182,6 +188,7 @@ integration('real Better Auth + Drizzle + PostgreSQL verifies email, binds ident
     BETTER_AUTH_SECRET: 'synthetic-postgres-auth-secret-at-least-32-characters', BETTER_AUTH_URL: 'https://auth.example.test',
     BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
     BETTER_AUTH_PHONE_OTP_ENABLED: 'true', BETTER_AUTH_JWT_ENABLED: 'true', BETTER_AUTH_JWT_ISSUER: 'https://auth.example.test',
+    BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY: 'true',
     BETTER_AUTH_JWT_AUDIENCE: 'synthetic-postgres-members', CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-not-a-real-key',
     CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
     SENTDM_API_KEY: 'synthetic-not-a-real-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000000', SENTDM_OTP_CHANNEL: 'sms',
@@ -231,15 +238,18 @@ integration('real Better Auth + Drizzle + PostgreSQL verifies email, binds ident
   expect(JSON.stringify(jwks)).not.toMatch(/private_key|privateKey/);
   const phone = '+12025550157';
   await connection`UPDATE auth.user SET phone_number=${phone} WHERE id=${userId}`;
-  expect((await request('/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+  expect((await request('/phone-number/send-otp', { phoneNumber: phone, consent: true, consentVersion: 'sms-auth-v1' }, cookie)).status).toBe(200);
   const phoneCode = phoneCodes.at(-1)!;
-  const phoneRecords = await connection`SELECT value FROM auth.verification WHERE identifier=${phone}`;
+  const phoneRecords = await connection`SELECT value FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`;
   expect(phoneRecords).toHaveLength(1); expect(phoneRecords[0]!.value).toMatch(/^h1_[a-f0-9]{64}:0$/);
   expect(phoneRecords[0]!.value).not.toContain(phoneCode);
-  const replays = await Promise.all([1, 2].map(() => request('/phone-number/verify', { phoneNumber: phone, code: phoneCode, disableSession: true })));
+  const replays = await Promise.all([1, 2].map(() => request('/phone-number/verify', { phoneNumber: phone, code: phoneCode, disableSession: true, updatePhoneNumber: true }, cookie)));
   expect(replays.filter(response => response.status === 200)).toHaveLength(1);
   expect(replays.filter(response => response.status === 400)).toHaveLength(1);
-  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier=${phone}`)[0]!.n).toBe(0);
+  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`)[0]!.n).toBe(0);
+  const consent = (await connection`SELECT consent_version,consented_at,verified_at,revoked_at FROM auth.sms_opt_in WHERE user_id=${userId}`)[0]!;
+  expect(consent.consent_version).toBe('sms-auth-v1'); expect(Number.isFinite(new Date(consent.consented_at).getTime())).toBe(true);
+  expect(Number.isFinite(new Date(consent.verified_at).getTime())).toBe(true); expect(consent.revoked_at).toBeNull();
   expect((await connection`SELECT phone_number_verified FROM auth.user WHERE id=${userId}`)[0]!.phone_number_verified).toBe(true);
   expect((await connection`SELECT count(*)::int AS n FROM auth.rate_limit`)[0]!.n).toBeGreaterThan(0);
   expect((await getAuthPersonBinding(database, { userId })).publicId).toBe(bound.publicId);
@@ -249,13 +259,16 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
   const env: AuthEnvironment = {
     BETTER_AUTH_SECRET: 'synthetic-replica-auth-secret-at-least-32-characters', BETTER_AUTH_URL: 'https://auth.example.test',
     BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_PHONE_OTP_ENABLED: 'true',
+    BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY: 'true', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
+    CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-not-a-real-key', CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
     SENTDM_API_KEY: 'synthetic-not-a-real-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000000', SENTDM_OTP_CHANNEL: 'sms',
   };
   const phone = '+12025550159';
   await connection`INSERT INTO auth.user(id,email,email_verified,name,phone_number) VALUES('replica-user','replica@example.test',true,'Replica Fixture',${phone})`;
   await provisionAuthPerson(database, { userId: 'replica-user' });
   const codes: string[] = [];
-  const delivery: AuthDelivery = { email: async () => {}, phone: async (_phone, code) => { codes.push(code); } };
+  const messages: EmailMessage[] = [];
+  const delivery: AuthDelivery = { email: async message => { messages.push(message); }, phone: async (_phone, code) => { codes.push(code); } };
   let arrived!: () => void;
   let release!: () => void;
   const paused = new Promise<void>(resolve => { arrived = resolve; });
@@ -278,14 +291,22 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
   const identity = { provision: (userId: string) => provisionAuthPerson(database, { userId }), binding: (userId: string) => getAuthPersonBinding(database, { userId }), registrationAllowed: async () => true };
   const replicaA = betterAuth(createAuthOptions(env, pausableFactory, identity, delivery));
   const replicaB = betterAuth(createAuthOptions(env, factory, identity, delivery));
+  let cookie = '';
   const request = (replica: typeof replicaA, path: string, body: unknown) => replica.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
     method: 'POST', headers: { origin: 'https://portal.example.test', 'content-type': 'application/json',
-      'x-forwarded-for': replica === replicaA ? '192.0.2.45' : '192.0.2.46' }, body: JSON.stringify(body),
+      'x-forwarded-for': replica === replicaA ? '192.0.2.45' : '192.0.2.46', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body),
   }));
-  expect((await request(replicaA, '/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+  expect((await request(replicaA, '/email-otp/send-verification-otp', { email: 'replica@example.test', type: 'sign-in' })).status).toBe(200);
+  const loginOtp = /\b(\d{6})\b/.exec(messages.at(-1)!.text)![1]!;
+  const login = await request(replicaA, '/sign-in/email-otp', { email: 'replica@example.test', otp: loginOtp });
+  expect(login.status).toBe(200);
+  cookie = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+  const consentBody = { phoneNumber: phone, consent: true, consentVersion: 'sms-auth-v1' };
+  const proof = (code: string) => ({ phoneNumber: phone, code, disableSession: true, updatePhoneNumber: true });
+  expect((await request(replicaA, '/phone-number/send-otp', consentBody)).status).toBe(200);
   const firstCode = codes.at(-1)!;
   const wrongCode = firstCode === '000000' ? '111111' : '000000';
-  const wrong = request(replicaA, '/phone-number/verify', { phoneNumber: phone, code: wrongCode, disableSession: true });
+  const wrong = request(replicaA, '/phone-number/verify', proof(wrongCode));
   let newCode: string;
   try {
     let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -296,15 +317,16 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
     // remains present while replica B rotates to B in the actual adapter hook.
     for (let attempt = 0; attempt < 3; attempt++) {
       await connection`UPDATE auth.rate_limit SET last_request=${Date.now() - 1} WHERE key=${recipientBudgetKey(env.BETTER_AUTH_SECRET!, phone)}`;
-      expect((await request(replicaB, '/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+      await connection`UPDATE auth.rate_limit SET last_request=${Date.now() - 1} WHERE key=${recipientBudgetKey(env.BETTER_AUTH_SECRET!, 'sms-user:replica-user')}`;
+      expect((await request(replicaB, '/phone-number/send-otp', consentBody)).status).toBe(200);
       if (codes.at(-1) !== firstCode) break;
     }
     newCode = codes.at(-1)!;
     expect(newCode).not.toBe(firstCode);
   } finally { release(); }
   expect((await wrong).status).toBe(400);
-  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier=${phone}`)[0]!.n).toBe(1);
-  expect((await request(replicaA, '/phone-number/verify', { phoneNumber: phone, code: firstCode, disableSession: true })).status).toBe(400);
-  expect((await request(replicaB, '/phone-number/verify', { phoneNumber: phone, code: newCode!, disableSession: true })).status).toBe(200);
-  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier=${phone}`)[0]!.n).toBe(0);
+  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`)[0]!.n).toBe(1);
+  expect((await request(replicaA, '/phone-number/verify', proof(firstCode))).status).toBe(400);
+  expect((await request(replicaB, '/phone-number/verify', proof(newCode!))).status).toBe(200);
+  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`)[0]!.n).toBe(0);
 }, 30_000);

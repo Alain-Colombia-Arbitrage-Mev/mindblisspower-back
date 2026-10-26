@@ -1,8 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { GenericEndpointContext } from '@better-auth/core';
-import { APIError, createAuthEndpoint, getSessionFromCtx } from 'better-auth/api';
-import { setSessionCookie } from 'better-auth/cookies';
-import { z } from 'zod';
+import { APIError } from 'better-auth/api';
 import { validPhone } from './delivery';
 
 export const otpHash = (secret: string, purpose: string, code: string) => createHmac('sha256', secret).update(`${purpose}\0${code}`).digest('hex');
@@ -19,8 +17,8 @@ export function securePhoneVerification(secret: string, verification: { identifi
   return { ...verification, value: `h1_${otpHash(secret, `phone:${verification.identifier}`, match[1]!)}:${match[2] || '0'}` };
 }
 
-export async function consumePhoneOTP(secret: string, phone: string, code: string, ctx?: GenericEndpointContext) {
-  if (!ctx || !validPhone(phone)) return false;
+export async function consumePhoneOTP(secret: string, phone: string, code: string, ctx?: GenericEndpointContext, ownerBound = false) {
+  if (!ctx || !(ownerBound ? /^sms-opt-in:[a-f0-9]{64}$/.test(phone) : validPhone(phone))) return false;
   const adapter = ctx.context.adapter;
   type Challenge = { id: string; value: string; expiresAt: Date };
   let current = (await adapter.findMany<Challenge>({ model: 'verification',
@@ -51,31 +49,6 @@ export async function consumePhoneOTP(secret: string, phone: string, code: strin
     ] }) ?? undefined;
   }
   return false;
-}
-
-/** Replace the installed plugin's verifier/cleanup, not its schema or sender. */
-export function securePhoneVerifyEndpoint(secret: string) {
-  return createAuthEndpoint('/phone-number/verify', { method: 'POST', body: z.object({
-    phoneNumber: z.string().refine(validPhone), code: z.string(),
-    disableSession: z.boolean().optional(), updatePhoneNumber: z.boolean().optional(),
-  }) }, async ctx => {
-    const { phoneNumber: phone, code, disableSession, updatePhoneNumber } = ctx.body;
-    const current = updatePhoneNumber ? await getSessionFromCtx(ctx) : null;
-    if (updatePhoneNumber && !current) throw new APIError('UNAUTHORIZED', { message: 'Session required' });
-    const owner = await ctx.context.adapter.findOne<{ id: string; emailVerified: boolean }>({ model: 'user', where: [{ field: 'phoneNumber', value: phone }] });
-    if (updatePhoneNumber && owner && owner.id !== current!.user.id) throw new APIError('BAD_REQUEST', { message: 'Invalid verification' });
-    const userId = updatePhoneNumber ? current!.user.id : owner?.id;
-    if (!userId) throw new APIError('BAD_REQUEST', { message: 'Invalid verification' });
-    if (!disableSession && !(updatePhoneNumber ? current!.user.emailVerified : owner!.emailVerified)) throw new APIError('FORBIDDEN', { message: 'Verify email before signing in' });
-    if (!await consumePhoneOTP(secret, phone, code, ctx)) throw new APIError('BAD_REQUEST', { message: 'Invalid verification' });
-    const user = await ctx.context.internalAdapter.updateUser(userId, { phoneNumber: phone, phoneNumberVerified: true });
-    if (!user) throw new APIError('BAD_REQUEST', { message: 'Invalid verification' });
-    const session = !disableSession ? current?.session || await ctx.context.internalAdapter.createSession(user.id) : null;
-    if (!disableSession && !session) throw new APIError('FORBIDDEN', { message: 'Session unavailable' });
-    if (session) await setSessionCookie(ctx, { session, user });
-    return ctx.json({ status: true, token: session?.token || null, user: { id: user.id, email: user.email,
-      emailVerified: user.emailVerified, name: user.name, phoneNumber: phone, phoneNumberVerified: true } });
-  });
 }
 
 // Per-recipient send cooldown in the same persistent, unique-key rate-limit

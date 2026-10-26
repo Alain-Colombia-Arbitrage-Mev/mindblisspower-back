@@ -83,7 +83,8 @@ test('Sent v3 transport pins an approved channel/template and never uses email o
     const body = JSON.parse(request?.body as string);
     expect(body.channel).toEqual(['whatsapp']);
     expect(body.template.parameters.code).toBe('123456');
-    return Response.json({ success: true, data: { status: 'QUEUED', recipients: [{ message_id: 'synthetic-id' }] } }, { status: 202 });
+    return Response.json({ success: true, error: null, data: { status: 'QUEUED', template_id: configuration.SENTDM_OTP_TEMPLATE_ID,
+      recipients: [{ message_id: 'synthetic-id', to: '+12025550123', channel: 'whatsapp' }] } }, { status: 202 });
   }) as typeof fetch);
   await delivery.phone('+12025550123', '123456');
   expect(calls).toBe(1);
@@ -96,4 +97,22 @@ test('missing credentials and malformed provider success fail closed with no sen
   expect(calls).toBe(0);
   await expect(createAuthDelivery(configuration, fetchImpl).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
   await expect(createAuthDelivery(configuration, (async () => { throw new Error('private 123456'); }) as unknown as typeof fetch).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+});
+
+test('Sent acceptance must identify the requested recipient, pinned channel and approved template', async () => {
+  const data = { status: 'QUEUED', template_id: configuration.SENTDM_OTP_TEMPLATE_ID,
+    recipients: [{ message_id: 'synthetic-id', to: '+12025550123', channel: 'whatsapp' }] };
+  for (const result of [
+    { success: true, data: { status: 'QUEUED', recipients: [{ message_id: 'old-incomplete-ack' }] } },
+    { success: true, error: { message: 'private 123456' }, data },
+    { success: true, data: { ...data, template_id: '00000000-0000-4000-8000-000000000002' } },
+    { success: true, data: { ...data, recipients: [{ ...data.recipients[0], to: '+12025550124' }] } },
+    { success: true, data: { ...data, recipients: [{ ...data.recipients[0], channel: 'sms' }] } },
+    { success: true, data: { ...data, recipients: [...data.recipients, ...data.recipients] } },
+  ]) {
+    let calls = 0;
+    const delivery = createAuthDelivery(configuration, (async () => { calls++; return Response.json(result, { status: 202 }); }) as unknown as typeof fetch);
+    await expect(delivery.phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+    expect(calls).toBe(1);
+  }
 });
