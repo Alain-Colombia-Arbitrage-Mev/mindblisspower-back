@@ -74,7 +74,12 @@ func run() error {
 	}
 
 	// Misma defensa H-2 que vp-payments: re-verificar el id token Cognito.
-	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
+	if verifier, enabled, err := payments.ConfiguredBetterAuthVerifier(rootCtx, pool); err != nil {
+		return err
+	} else if enabled {
+		handler.SetIdentityVerifier(verifier, true)
+		logger.Info().Msg("Better Auth verified service identity and MLM subject binding enabled")
+	} else if jwksURL := cfg.JWKSURL(); jwksURL != "" {
 		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
 		if verr != nil {
 			if cfg.RequireVerifiedIdentity {

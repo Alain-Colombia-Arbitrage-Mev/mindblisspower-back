@@ -5,10 +5,15 @@ import { apiErrorHandler } from './http/errors';
 import { registerAffiliateRoutes } from './http/affiliate-routes';
 import { registerTransactionRoutes } from './http/transaction-routes';
 import { registerCommandCenterRoutes } from './http/command-center-routes';
+import { registerIdentityRoutes } from './http/identity-routes';
+import { authProxyContext } from './http/auth-proxy-context';
 import type { ApiEnvironment } from './http/types';
 
 const app = new Hono<ApiEnvironment>();
 app.onError(apiErrorHandler);
+app.use('/api/auth/*', bodyLimit({ maxSize: 32 * 1024,
+  onError: c => c.json({ error: 'request_too_large' }, 413) }));
+app.use('/api/auth/*', authProxyContext(process.env.AUTH_BFF_SHARED_SECRET));
 
 // Mount Better Auth — handles /api/auth/* (signup, signin, signout, callbacks)
 app.on(['POST', 'GET'], '/api/auth/*', (c) => auth.handler(c.req.raw));
@@ -27,6 +32,7 @@ app.use('/api/*', bodyLimit({ maxSize: 256 * 1024,
 registerAffiliateRoutes(app);
 registerTransactionRoutes(app);
 registerCommandCenterRoutes(app);
+registerIdentityRoutes(app);
 
 app.get('/health', (c) => c.text('ok'));
 

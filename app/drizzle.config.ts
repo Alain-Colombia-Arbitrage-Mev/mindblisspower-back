@@ -4,9 +4,9 @@ import { defineConfig } from 'drizzle-kit';
 // read/written via raw SQL through the same client; no Drizzle codegen needed.
 export default defineConfig({
   dialect: 'postgresql',
-  schema: ['./src/db/schema/auth.ts', './src/db/schema/mlm.ts'],
+  schema: ['./src/db/schema/auth.ts', './src/db/schema/mlm.ts', './src/db/schema/identity.ts'],
   out: './drizzle',
-  schemaFilter: ['auth', 'mlm'],
+  schemaFilter: ['auth', 'mlm', 'identity'],
   dbCredentials: { url: process.env.DATABASE_URL! },
   // Never let drizzle-kit drop columns automatically — schema_mlm.sql owns the
   // shape. drizzle migrations only add things the app needs (e.g. new auth

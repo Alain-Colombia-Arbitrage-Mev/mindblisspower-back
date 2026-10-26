@@ -42,6 +42,7 @@ CREATE EXTENSION ltree VERSION '1.2';
 \ir /qa-schema/migration/67_comms_campaigns.sql
 \ir /qa-schema/migration/68_blacklist_normalization_schema.sql
 \ir /qa-schema/migration/69_tree_pv_truth_safe_path.sql
+\ir /qa-schema/migration/70_stable_identity_bindings.sql
 \ir /qa-schema/member-read.sql
 
 INSERT INTO mlm.asset (id, symbol, name, is_fiat, decimals)

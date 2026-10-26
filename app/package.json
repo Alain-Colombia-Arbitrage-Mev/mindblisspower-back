@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/server.ts",
+    "dev:local": "bun --env-file=../.env.local --watch src/server.ts",
     "start": "bun src/server.ts",
+    "start:local": "bun --env-file=../.env.local src/server.ts",
     "test": "bun test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
@@ -24,7 +26,6 @@
     "drizzle-orm": "^0.45.4",
     "hono": "^4.13.13",
     "postgres": "^3.4.5",
-    "resend": "^6.12.3",
     "zod": "^4.6.7"
   },
   "devDependencies": {

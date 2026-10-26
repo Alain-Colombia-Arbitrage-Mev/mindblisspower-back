@@ -66,3 +66,26 @@ return `503` and ledger posting returns gRPC `FailedPrecondition` for recovery.
 A populated plan does not automatically unlock the recovered database. Releasing
 funds requires a separately reviewed operational transition. Profile, identity,
 support and read-only evidence queries are not authorized to create commissions.
+
+## Optional Better Auth identity
+
+Cognito remains the default, including its existing claim policy. To opt in to
+Better Auth, configure `AUTH_PROVIDER=better-auth`, `BETTER_AUTH_JWKS_URL`,
+`BETTER_AUTH_JWT_ISSUER` and `BETTER_AUTH_JWT_AUDIENCE` explicitly. All three Go
+services then require a verified service JWT on the existing identity header.
+They accept RS256 only, a subject, verified email/authentication booleans and a
+maximum five-minute lifetime. They never accept a Better Auth session cookie as
+a service JWT, share an HMAC secret, or fall back to Cognito after token failure.
+
+The verified subject must have an explicit `identity.auth_binding` to a business
+person. Matching email alone never claims a migrated identity. Missing bindings
+or conflicting canonical email require review. Deploy the prepared identity
+migration and least-privilege grants before enabling this provider; startup does
+not run migrations or change the default provider.
+
+Future Stripe checkouts use a server-derived public person UUID for
+`client_reference_id`. Session and PaymentIntent receive the same small identifier
+allowlist from the persisted purchase owner. They do not receive contact details,
+balances or network snapshots. Sponsor eligibility is rechecked without changing
+the saved placement policy. Existing Stripe customers and historical metadata are
+not modified, and the recovery financial write lock remains in force.
