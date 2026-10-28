@@ -24,9 +24,10 @@
 - A subsequent metadata-only provider query filtered exactly the authorized
   administrative recipient and confirmed `delivered` at 23:06:42 Bogotá on
   October 27, with no technical error. This means acceptance by Gmail's mail
-  server, not visibility in the inbox. The control message was accepted/queued,
-  but a delivered event for it was not yet available. User inbox confirmation
-  remains pending. No message preview, body, headers or OTP was inspected.
+  server, not visibility in the inbox. The owner subsequently confirmed that the
+  control message to the other authorized address arrived in the inbox, not spam.
+  No message preview, body, headers or OTP was inspected. No further real email
+  tests were sent during publication.
 
 ## Implementation
 
@@ -41,27 +42,37 @@ and cooldown feedback without changing the design or private cache policies.
 No SQL migration, role change, financial write, tree/rank update or Chatwoot work.
 
 Verification: portal 390 tests plus typecheck and scoped ESLint passed. Admin
-280 tests passed; the final exact-429 Retry-After adjustment separately passed
-six focused helper tests and ESLint. Backend full suite passed 124 tests with
-14 PostgreSQL-environment skips; the added exact-DELETE SQL regression also
-passed, along with typecheck, toolchain generation and 24 isolated HTTP probes.
-Docker/pinned-Linux and isolated PostgreSQL verification remain pending.
+281 tests passed, including the exact-429 Retry-After adjustment. The pinned
+Linux Bun 1.4.4 image passed 125 tests, with 14 environment-dependent skips,
+typecheck, toolchain generation and 24 isolated HTTP probes. Separate isolated
+PostgreSQL fixtures passed: contacts 46 assertions, identity 12 tests / 114
+assertions, and registration/blacklist 14 assertions. These used synthetic data,
+no production credentials or real provider calls; all fixture Containers were
+removed. Portal and admin workerd smoke passed 50 and 31 probes respectively,
+with network disabled; the exported portal artifact also passed all 50 probes.
 
 ## Publication status
 
-Source changes and automated verification are prepared. Publication of this fix
-is **pending**, not claimed complete: Docker Desktop's Linux engine is unavailable
-and reports an October 22 `com.docker.build.exe` process preventing startup.
-No Docker data was deleted or reset, no database Container was removed, and no
-old artifact was deployed as if it contained the fixes. The owner was asked to
-restore Docker Desktop before the immutable API and portal builds are published.
+Published after the owner restored Docker Desktop. Its Linux engine 29.1.3 was
+verified without resetting or deleting Docker data. All three production dry-runs
+passed before publication; previous local portal artifacts were preserved under
+each repository's ignored `.wrangler/artifacts-before-email-delivery-20261027`.
 
-When the engine is available: run the pinned Bun 1.4.4 Docker tests and isolated
-PostgreSQL fixtures, build both portals, run offline Worker smoke and dry-runs,
-then publish only the API image and portal Workers. Preserve the three Go image
-digests and readiness gates; no full financial rollout. Confirm deployed versions
-and perform read-only smoke checks. Do not send additional real email tests
-without checking the owner's existing authorization and pending challenge state.
+- Core Worker: `5eb1f63e-0d43-4583-87a4-97c189079a4b`.
+- API application: version **4**, healthy, no rollout pending; source `c4345b2`.
+- API image: `registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-email-delivery-fix@sha256:5d7efe50df0b1d49bea63285b3e6be3d3e651dc82a515400321d5659c0b32934`.
+- Portal Worker: `49d6c274-825d-4421-b6c5-2b2661214f68`, source `5195b4c`.
+- Admin Worker: `df107b2a-2769-4cca-9f37-c9fd8fe86f3e`, source `960e8ca`.
+
+The API-only rollout reported no changes to the three Go applications. Their
+image digests, versions and update timestamps were compared before/after and are
+identical; financial/readiness gates remain unchanged. Chatwoot was not touched.
+Read-only production smoke passed 13 portal and 9 admin probes: login/register,
+anonymous session/authorization, JWKS, CSRF, disabled phone auth, exact static
+cache headers, ETag 304 and uncached missing assets. The four new JS chunks were
+also retrieved successfully. No live account was created, no OTP redeemed, no
+payment made and no additional email sent. These public probes do not substitute
+for a human completing a fresh real registration.
 
 References checked: [Cloudflare REST send contract](https://developers.cloudflare.com/email-service/api/send-emails/rest-api/),
 [activity states](https://developers.cloudflare.com/email-service/observability/logs/),
