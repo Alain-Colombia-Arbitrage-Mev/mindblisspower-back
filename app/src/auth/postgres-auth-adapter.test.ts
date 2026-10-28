@@ -8,7 +8,12 @@ import * as schema from '../db/schema/auth';
 function fixture(rows: Record<string, unknown>[] = [{ id: 'synthetic-row', count: 5 }]) {
   const builder = drizzle.mock({ schema });
   const statements: { sql: string; params: unknown[] }[] = [];
-  const database = { update(table: PgTable) {
+  const database = { delete(table: PgTable) {
+    return { where(condition: SQL) {
+      statements.push(builder.delete(table).where(condition).toSQL());
+      return Promise.resolve({ rowCount: rows.length });
+    } };
+  }, update(table: PgTable) {
     return { set(assignments: Record<string, unknown>) {
       return { where(condition: SQL) {
         return { async returning() {
@@ -36,6 +41,26 @@ test('guarded PostgreSQL counter uses one direct UPDATE with all outer CAS predi
   expect(query.sql).toContain('"key" ='); expect(query.sql).toContain('"count" <'); expect(query.sql).toContain('"last_request" >');
   expect(query.sql).not.toContain(secretKey);
   expect(query.params).toContain(secretKey); expect(query.params).toContain(5); expect(query.params).toContain(100);
+});
+
+test('confirmed delivery rejection deletes only the parameterized purpose and HMAC generation with all guards on the outer PostgreSQL DELETE', async () => {
+  const app = fixture();
+  const identifier = "email-verification-otp-synthetic-' OR true; --@example.test";
+  const values = [0, 1, 2, 3].map(attempt => `${'a'.repeat(64)}:${attempt}`);
+  expect(await app.adapter.deleteMany({ model: 'verification', where: [
+    { field: 'identifier', value: identifier }, { field: 'value', operator: 'in', value: values },
+  ] })).toBe(1);
+  expect(app.statements).toHaveLength(1);
+  const query = app.statements[0]!;
+  expect(query.sql).toStartWith('delete from "auth"."verification" where ');
+  expect(query.sql).toContain('"identifier" =');
+  expect(query.sql).toContain('"value" in (');
+  expect(query.sql).toContain(' and ');
+  expect(query.sql.toLowerCase()).not.toContain('select');
+  expect(query.sql.toLowerCase()).not.toContain(' like ');
+  expect(query.sql).not.toContain(identifier);
+  for (const value of values) expect(query.sql).not.toContain(value);
+  expect(query.params).toEqual([identifier, ...values]);
 });
 
 test('OTP attempt CAS preserves value and expiry guards on the outer UPDATE', async () => {

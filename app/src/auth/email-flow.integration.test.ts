@@ -24,7 +24,7 @@ const env: AuthEnvironment = {
 
 type CloudflareBody = { from: string; to: string[]; subject: string; text: string };
 type ProviderCall = { url: string; request: RequestInit; body: CloudflareBody };
-function fixture(providerStatus = 200) {
+function fixture(providerStatus: number | ((body: CloudflareBody) => Response | Promise<Response>) = 200) {
   const store: MemoryDB = {
     user: [{ id: 'synthetic-email-flow-user', name: 'Synthetic Member', email,
       emailVerified: true, createdAt: new Date(), updatedAt: new Date() }],
@@ -41,6 +41,7 @@ function fixture(providerStatus = 200) {
   const delivery = createAuthDelivery(env, (async (url, request) => {
     const body = JSON.parse(request?.body as string) as CloudflareBody;
     calls.push({ url: String(url), request: request!, body });
+    if (typeof providerStatus === 'function') return providerStatus(body);
     return providerStatus === 200
       ? Response.json({ success: true, errors: [], result: {
         delivered: [], queued: body.to, permanent_bounces: [],
@@ -145,6 +146,9 @@ test('email OTP wrong attempts and recipient cooldown persist across handler res
   app.restart();
   const blockedSend = await requestCode(app);
   expect(blockedSend.status).toBe(429);
+  const retryAfter = Number(blockedSend.headers.get('retry-after'));
+  expect(retryAfter).toBeGreaterThanOrEqual(299);
+  expect(retryAfter).toBeLessThanOrEqual(301);
   expect(app.calls).toHaveLength(1);
   expect(app.store.session).toHaveLength(0);
   await expectNoDeliverySecrets(blockedSend, code);
@@ -181,12 +185,12 @@ test('unknown email stays generic without Cloudflare send or automatic account c
   expect(await response.text()).not.toContain('unknown-email-flow@example.test');
 });
 
-test('Cloudflare rejection is generic, never retries or falls back, and cannot establish a session', async () => {
+test('Cloudflare rejection stays generic, never retries or falls back, and never automatically establishes a session', async () => {
   for (const status of [401, 429, 500]) {
     const app = fixture(status);
     const response = await requestCode(app);
-    // Better Auth deliberately swallows sender failures inside
-    // runInBackgroundOrAwait; this generic answer is not delivery confirmation.
+    // Login deliberately remains generic for known/unknown addresses. This is
+    // a request acknowledgement, not delivery confirmation or a session.
     expect(response.status).toBe(200);
     expect(response.headers.has('set-cookie')).toBe(false);
     expect(app.calls).toHaveLength(1);
@@ -195,6 +199,69 @@ test('Cloudflare rejection is generic, never retries or falls back, and cannot e
     await expectNoDeliverySecrets(response, app.code());
     expect(await (await app.request('/get-session')).json()).toBeNull();
   }
+});
+
+test('a confirmed Cloudflare rejection invalidates only its code while keeping the recipient cooldown and anti-enumeration', async () => {
+  for (const status of [400, 401, 403, 404, 429]) {
+    const app = fixture(status);
+    app.store.verification!.push({ id: 'unrelated-generation', identifier: 'email-verification-otp-another@example.test',
+      value: `${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', '123456')}:0`, expiresAt: new Date(Date.now() + 300_000),
+      createdAt: new Date(), updatedAt: new Date() });
+    const response = await requestCode(app);
+    expect(response.status).toBe(200);
+    expect((await redeemCode(app)).status).toBe(400);
+    expect(app.store.verification!.map(row => row.id)).toEqual(['unrelated-generation']);
+    expect((await requestCode(app)).status).toBe(429);
+    expect(app.calls).toHaveLength(1);
+    expect((await requestCode(app, 'unknown-email-flow@example.test')).status).toBe(200);
+    expect(app.calls).toHaveLength(1);
+    expect(app.store.session).toHaveLength(0);
+  }
+});
+
+test('registration reports a confirmed delivery rejection without granting access and the failure does not leak into other requests', async () => {
+  const app = fixture(403);
+  app.store.user!.length = 0;
+  const response = await app.request('/sign-up/email', { name: 'Synthetic Registration', email, password: 'Synthetic-Registration-Password-123' });
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE' });
+  expect(response.headers.has('set-cookie')).toBe(false);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.account).toHaveLength(1);
+  expect(app.store.verification).toHaveLength(0);
+  expect((await app.request('/email-otp/verify-email', { email, otp: app.code() })).status).toBe(400);
+  expect(app.store.session).toHaveLength(0);
+  expect((await requestCode(app, 'unknown-email-flow@example.test')).status).toBe(200);
+});
+
+test('an ambiguous Cloudflare timeout or 5xx keeps a possibly delivered OTP usable without automatic retries', async () => {
+  for (const failure of [500, () => { throw new DOMException('synthetic transport timeout', 'AbortError'); }]) {
+    const app = fixture(failure);
+    expect((await requestCode(app)).status).toBe(200);
+    expect(app.store.verification).toHaveLength(1);
+    expect((await redeemCode(app)).status).toBe(200);
+    expect(app.store.session).toHaveLength(1);
+    expect(app.calls).toHaveLength(1);
+  }
+});
+
+test('simultaneous successful and rejected registrations keep delivery state isolated per request', async () => {
+  const acceptedAddress = 'parallel-accepted@example.test';
+  const app = fixture(async body => {
+    await new Promise(resolve => setTimeout(resolve, body.to[0] === acceptedAddress ? 15 : 5));
+    return body.to[0] === acceptedAddress
+      ? Response.json({ success: true, errors: [], result: { delivered: [], queued: body.to, permanent_bounces: [] } })
+      : Response.json({ success: false, errors: [{ code: 10102 }] }, { status: 403 });
+  });
+  app.store.user!.length = 0;
+  const signup = (recipient: string) => app.request('/sign-up/email', {
+    name: 'Synthetic Parallel Registration', email: recipient, password: 'Synthetic-Registration-Password-123',
+  });
+  const [rejected, accepted] = await Promise.all([signup(email), signup(acceptedAddress)]);
+  expect(rejected.status).toBe(503);
+  expect(accepted.status).toBe(200);
+  expect(app.store.verification!.map(row => row.identifier)).toEqual([`email-verification-otp-${acceptedAddress}`]);
+  expect(app.store.session).toHaveLength(0);
 });
 
 test('registration verifies its own OTP and then signs in with the original password without a second email', async () => {

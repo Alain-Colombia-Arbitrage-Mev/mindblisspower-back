@@ -60,11 +60,19 @@ export async function limitRecipient(secret: string, recipient: string, ctx: Gen
   const adapter = ctx.context.adapter;
   const existing = await adapter.findOne<{ lastRequest: number }>({ model: 'rateLimit', where: [{ field: 'key', value: key }] });
   const now = Date.now();
+  const throttled = (allowedAfter: number) => new APIError('TOO_MANY_REQUESTS', {
+    message: 'Please wait before requesting another message',
+  }, { 'Retry-After': String(Math.max(1, Math.ceil((allowedAfter - Date.now()) / 1000))) });
   if (!existing) {
     try { await adapter.create({ model: 'rateLimit', data: { key, count: 1, lastRequest: now + cooldownMs } }); return; }
-    catch { throw new APIError('TOO_MANY_REQUESTS', { message: 'Please wait before requesting another message' }); }
+    catch { throw throttled(now + cooldownMs); }
   }
   const changed = await adapter.incrementOne({ model: 'rateLimit', where: [{ field: 'key', value: key },
     { field: 'lastRequest', operator: 'lte', value: now }], increment: {}, set: { count: 1, lastRequest: now + cooldownMs } });
-  if (!changed) throw new APIError('TOO_MANY_REQUESTS', { message: 'Please wait before requesting another message' });
+  if (!changed) {
+    // A replica may have reserved this row since our read. Report its actual
+    // persistent deadline without resetting or weakening either send budget.
+    const latest = await adapter.findOne<{ lastRequest: number }>({ model: 'rateLimit', where: [{ field: 'key', value: key }] });
+    throw throttled(latest?.lastRequest ?? existing.lastRequest);
+  }
 }

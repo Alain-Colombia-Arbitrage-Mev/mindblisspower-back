@@ -61,6 +61,20 @@ The optional non-consuming `/email-otp/check-verification-otp` HTTP route is
 disabled; the actual sign-in route consumes the challenge. A generic successful
 send-request response does not confirm provider acceptance or inbox delivery.
 
+Delivery failure handling (2026-10-27): Better Auth's background-await helper
+swallows sender exceptions, even when no background task handler is configured.
+The transport therefore emits only a safe `auth_email_delivery` classification
+with HTTP status and numeric provider code: never destinations, recipient
+hashes, OTPs, action URLs, tokens, provider messages or response bodies.
+Login/reset retain generic responses to avoid account enumeration. Registration
+returns `503/AUTH_EMAIL_DELIVERY_UNAVAILABLE` after a confirmed provider rejection;
+the created account remains unverified and can request verification later.
+Only an explicit rejection removes the matching purpose/address/HMAC challenge
+generation. Timeouts, 5xx and malformed acknowledgements may follow acceptance,
+so their codes remain usable if received. None of these paths automatically
+resend, weaken attempt limits, reset cooldowns or grant a session. Recipient
+cooldown rejections include `Retry-After` from the persistent deadline.
+
 SMS is optional, after email verification **and actual email login**. It cannot
 replace email proof, create a session, issue a JWT, approve a historical account
 claim, place a network node or authorize marketing. Every endpoint below requires
