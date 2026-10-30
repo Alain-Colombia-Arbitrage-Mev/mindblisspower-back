@@ -24,7 +24,7 @@ const env: AuthEnvironment = {
 
 type CloudflareBody = { from: string; to: string[]; subject: string; text: string };
 type ProviderCall = { url: string; request: RequestInit; body: CloudflareBody };
-function fixture(providerStatus: number | ((body: CloudflareBody) => Response | Promise<Response>) = 200) {
+function fixture(providerStatus: number | ((body: CloudflareBody) => Response | Promise<Response>) = 200, failBudgetWrites = false) {
   const store: MemoryDB = {
     user: [{ id: 'synthetic-email-flow-user', name: 'Synthetic Member', email,
       emailVerified: true, createdAt: new Date(), updatedAt: new Date() }],
@@ -48,7 +48,16 @@ function fixture(providerStatus: number | ((body: CloudflareBody) => Response | 
       } })
       : Response.json({ success: false, errors: [{ message: 'synthetic-sensitive-provider-error' }] }, { status: providerStatus });
   }) as typeof fetch);
-  const create = () => betterAuth(createAuthOptions(env, memoryAdapter(store), identity, delivery));
+  const create = () => betterAuth(createAuthOptions(env, (options: Parameters<ReturnType<typeof memoryAdapter>>[0]) => {
+    const adapter = memoryAdapter(store)(options);
+    return { ...adapter, create: async <T extends Record<string, unknown>, R = T>(input: {
+      model: string; data: Omit<T, 'id'>; select?: string[]; forceAllowId?: boolean;
+    }): Promise<R> => {
+      if (failBudgetWrites && input.model === 'rateLimit' && typeof input.data.key === 'string'
+        && input.data.key.startsWith('auth-recipient:')) throw new Error('synthetic-sensitive-budget-storage-failure');
+      return adapter.create<T, R>(input);
+    } };
+  }, identity, delivery));
   let auth = create();
   const request = (path: string, body?: unknown, cookie?: string) => auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
     method: body === undefined ? 'GET' : 'POST',
@@ -183,6 +192,48 @@ test('unknown email stays generic without Cloudflare send or automatic account c
   expect(app.provisioned).toHaveLength(0);
   expect(response.headers.has('set-cookie')).toBe(false);
   expect(await response.text()).not.toContain('unknown-email-flow@example.test');
+});
+
+test('login delivery eligibility depends only on an access account, not verified status or a legacy business identity', async () => {
+  for (const verified of [true, false]) {
+    const app = fixture();
+    app.store.user![0]!.emailVerified = verified;
+    expect((await requestCode(app)).status).toBe(200);
+    expect(app.calls).toHaveLength(1);
+    expect(app.store.verification).toHaveLength(1);
+    // Sending must never itself mark ownership or grant an access session.
+    expect(app.store.user![0]!.emailVerified).toBe(verified);
+    expect(app.store.session).toHaveLength(0);
+    expect(app.provisioned).toHaveLength(0);
+  }
+  const legacyOnly = fixture();
+  legacyOnly.store.user!.length = 0;
+  // A business/legacy binding callback is deliberately not a source of auth
+  // users. Do not consult it or mint an access account to make delivery happen.
+  const response = await requestCode(legacyOnly);
+  expect(response.status).toBe(200);
+  expect(legacyOnly.calls).toHaveLength(0);
+  expect(legacyOnly.store.user).toHaveLength(0);
+  expect(legacyOnly.store.verification).toHaveLength(0);
+  expect(legacyOnly.store.session).toHaveLength(0);
+  expect(legacyOnly.provisioned).toHaveLength(0);
+});
+
+test('HTTP budget storage outage returns generic 503 without retry delay or provider/account side effects', async () => {
+  for (const recipient of [email, 'unknown-budget-outage@example.test']) {
+    const app = fixture(200, true);
+    const response = await requestCode(app, recipient);
+    expect(response.status).toBe(503);
+    expect(await response.clone().json()).toEqual({ code: 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', message: 'Authentication temporarily unavailable' });
+    expect(response.headers.get('retry-after')).toBeNull();
+    expect(response.headers.has('set-cookie')).toBe(false);
+    expect(await response.text()).not.toContain('synthetic-sensitive');
+    expect(app.calls).toHaveLength(0);
+    expect(app.store.user).toHaveLength(1);
+    expect(app.store.verification).toHaveLength(0);
+    expect(app.store.session).toHaveLength(0);
+    expect(app.provisioned).toHaveLength(0);
+  }
 });
 
 test('Cloudflare rejection stays generic, never retries or falls back, and never automatically establishes a session', async () => {

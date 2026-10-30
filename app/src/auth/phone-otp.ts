@@ -58,21 +58,41 @@ export const recipientBudgetKey = (secret: string, recipient: string) => `auth-r
 export async function limitRecipient(secret: string, recipient: string, ctx: GenericEndpointContext, cooldownMs = 60_000) {
   const key = recipientBudgetKey(secret, recipient);
   const adapter = ctx.context.adapter;
-  const existing = await adapter.findOne<{ lastRequest: number }>({ model: 'rateLimit', where: [{ field: 'key', value: key }] });
+  const unavailable = () => new APIError('SERVICE_UNAVAILABLE', {
+    code: 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', message: 'Authentication temporarily unavailable',
+  });
+  const read = async () => {
+    try {
+      const row = await adapter.findOne<{ lastRequest: number }>({ model: 'rateLimit', where: [{ field: 'key', value: key }] });
+      if (row && !Number.isSafeInteger(row.lastRequest)) throw unavailable();
+      return row;
+    } catch { throw unavailable(); }
+  };
+  const existing = await read();
   const now = Date.now();
   const throttled = (allowedAfter: number) => new APIError('TOO_MANY_REQUESTS', {
     message: 'Please wait before requesting another message',
   }, { 'Retry-After': String(Math.max(1, Math.ceil((allowedAfter - Date.now()) / 1000))) });
   if (!existing) {
     try { await adapter.create({ model: 'rateLimit', data: { key, count: 1, lastRequest: now + cooldownMs } }); return; }
-    catch { throw throttled(now + cooldownMs); }
+    catch {
+      // A unique-key race is a real reservation, but an outage/denied INSERT
+      // is not evidence of throttling. Re-read without clearing/retrying any
+      // reservation. An aborted transaction also fails closed as unavailable.
+      const reserved = await read();
+      if (reserved && reserved.lastRequest > Date.now()) throw throttled(reserved.lastRequest);
+      throw unavailable();
+    }
   }
-  const changed = await adapter.incrementOne({ model: 'rateLimit', where: [{ field: 'key', value: key },
-    { field: 'lastRequest', operator: 'lte', value: now }], increment: {}, set: { count: 1, lastRequest: now + cooldownMs } });
+  let changed;
+  try {
+    changed = await adapter.incrementOne({ model: 'rateLimit', where: [{ field: 'key', value: key },
+      { field: 'lastRequest', operator: 'lte', value: now }], increment: {}, set: { count: 1, lastRequest: now + cooldownMs } });
+  } catch { throw unavailable(); }
   if (!changed) {
     // A replica may have reserved this row since our read. Report its actual
     // persistent deadline without resetting or weakening either send budget.
-    const latest = await adapter.findOne<{ lastRequest: number }>({ model: 'rateLimit', where: [{ field: 'key', value: key }] });
+    const latest = await read();
     throw throttled(latest?.lastRequest ?? existing.lastRequest);
   }
 }
