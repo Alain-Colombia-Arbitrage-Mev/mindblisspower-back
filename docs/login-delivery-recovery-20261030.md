@@ -58,10 +58,30 @@ Sin red externa ni proveedores reales. La matriz de elegibilidad confirma envío
 para cuentas existentes verificadas/no verificadas y ningún envío/provisionamiento
 para un correo ausente.
 
-Publicación de esta nueva corrección pendiente de completar y registrar los IDs
-de versiones. No se afirma una nueva prueba real de entrega sin autorización y
-comprobación del proveedor. La migración masiva de accesos no forma parte de los
-cambios técnicos descritos.
+Publicación completada, después de dry-runs y revisión independiente de seguridad:
+
+- Fuentes API: `42a5ae2`; Core Worker `53d0bddc-2624-4ccd-9868-61467d573e77`.
+- API application versión 5: una instancia saludable, cero errores, sin rollout
+  activo. Imagen inmutable
+  `registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-login-recovery-20261030@sha256:ba14d85cf8de2a0315caba70991c7374a5ff8dde2e1574c5d610f13288da1356`.
+- Fuentes portal: `7e2ca2c`; Worker `469f02c7-7d8b-40c0-ba10-5f78f57acaea`.
+- Fuentes admin: `4cebdcd`; Worker `0a02e808-ab8c-40b7-a22b-f31b3f660c79`.
+
+Portal: 397 pruebas, typecheck y lint aprobados; admin: 285 pruebas y lint
+aprobados. Builds Linux y smoke workerd offline sobre imagen y exportación exacta
+aprobados: 50 sondas del portal y 31 del admin, sin red, DB ni mensajes reales.
+Los artefactos locales anteriores se conservaron en el directorio ignorado
+`.wrangler/artifacts-before-login-recovery-20261030` de cada frontend.
+
+Comprobaciones públicas después de publicar: 13 sondas del portal y 10 del admin
+aprobadas, incluyendo login/registro, sesiones anónimas, permisos, JWKS, rechazo
+CSRF, rechazo de cuerpo sin destinatario, assets con ETag y 404 sin caché larga.
+No son una prueba de entrega de OTP. No hubo nuevos mensajes reales ni cuentas.
+La migración masiva de accesos y las nuevas pruebas reales siguen pendientes de
+respuesta del propietario; no forman parte de esta publicación técnica.
+
+Las versiones, digests y timestamps de los tres servicios Go se compararon antes
+y después: sin cambios. Puertas financieras, árbol/rangos y Chatwoot intactos.
 
 Referencias: [Email OTP](https://better-auth.com/docs/plugins/email-otp),
 [Cloudflare REST](https://developers.cloudflare.com/email-service/api/send-emails/rest-api/),
