@@ -133,3 +133,27 @@ test('operational runtime uses a third isolated writer without upgrading the bus
   const config = JSON.parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
   for (const name of ['production', 'staging']) assert.equal(config.env[name].vars.NOWPAYMENTS_OPERATIONAL_ENABLED, String(name === 'production'));
 });
+
+test('PlanetScale operational writer requires the same nonempty routing branch as reader and capture', () => {
+  const planetary = { ...secrets,
+    PAYMENTS_DATABASE_URL: secrets.PAYMENTS_DATABASE_URL.replace('db.example.invalid', 'region-1.psdb.cloud'),
+    NOWPAYMENTS_WEBHOOK_DATABASE_URL: secrets.NOWPAYMENTS_WEBHOOK_DATABASE_URL.replace('db.example.invalid', 'region-1.psdb.cloud'),
+    NOWPAYMENTS_OPERATIONAL_DATABASE_URL: secrets.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('db.example.invalid', 'region-1.psdb.cloud') };
+  assert.equal(containerEnvironment('payments', planetary).NOWPAYMENTS_OPERATIONAL_ENABLED, 'true');
+  for (const changed of [
+    { NOWPAYMENTS_OPERATIONAL_DATABASE_URL: planetary.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('operational.branch:', 'operational.other:') },
+    { NOWPAYMENTS_OPERATIONAL_DATABASE_URL: planetary.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('operational.branch:', 'operational:') },
+    { NOWPAYMENTS_WEBHOOK_DATABASE_URL: planetary.NOWPAYMENTS_WEBHOOK_DATABASE_URL.replace('capture.branch:', 'capture.other:') },
+    { PAYMENTS_DATABASE_URL: planetary.PAYMENTS_DATABASE_URL.replace('reader.branch:', 'reader:') },
+  ]) assert.throws(() => containerEnvironment('payments', { ...planetary, ...changed }),
+    error => error.message === 'NOWPayments operational database isolation is not configured');
+  // Existing capture-only behavior is not broadened or changed by the new operational boundary.
+  assert.equal(containerEnvironment('payments', { ...planetary, NOWPAYMENTS_OPERATIONAL_ENABLED: 'false',
+    NOWPAYMENTS_WEBHOOK_DATABASE_URL: planetary.NOWPAYMENTS_WEBHOOK_DATABASE_URL.replace('capture.branch:', 'capture.other:') }).NOWPAYMENTS_OPERATIONAL_ENABLED, 'false');
+  const multipart = { ...planetary,
+    PAYMENTS_DATABASE_URL: planetary.PAYMENTS_DATABASE_URL.replace('reader.branch:', 'reader.region.branch:'),
+    NOWPAYMENTS_WEBHOOK_DATABASE_URL: planetary.NOWPAYMENTS_WEBHOOK_DATABASE_URL.replace('capture.branch:', 'capture.region.branch:'),
+    NOWPAYMENTS_OPERATIONAL_DATABASE_URL: planetary.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('operational.branch:', 'operational.other.branch:') };
+  assert.throws(() => containerEnvironment('payments', multipart), /operational database isolation is not configured/);
+  assert.equal(containerEnvironment('payments', { ...multipart, NOWPAYMENTS_OPERATIONAL_DATABASE_URL: multipart.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('operational.other.branch:', 'operational.region.branch:') }).NOWPAYMENTS_OPERATIONAL_ENABLED, 'true');
+});

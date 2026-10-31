@@ -18,7 +18,7 @@ This release does not enable external withdrawals or provider payouts.
 ## Release artifacts
 
 - API: `mindbliss/api-verified-link-20261031@sha256:7e14a9faae32428eda7b932bcea12d5de4f2b2ebe6f949ad8027db59ecf38f97`.
-- Payments: `mindbliss/payments-now-readiness-20261031@sha256:26819997f46a4a8b6a12cd16d35b99e6643c96582887fce98e4fe20ea9ae5777` (includes the READ ONLY readiness regression fix, commit `f711034`).
+- Payments: `mindbliss/payments-now-live-20261031@sha256:26819997f46a4a8b6a12cd16d35b99e6643c96582887fce98e4fe20ea9ae5777` (includes the READ ONLY readiness regression fix, commit `f711034`). The release alias has identical bytes and forces a fresh process after correcting runtime connection routing to port 5432.
 - Registry: `registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/`.
 - Core Engine and Withdrawals images stay at their previously published digests.
 - Migrations 33, 77, 78, 79, 80 and the exact explicit runtime ACL manifest are
@@ -29,6 +29,11 @@ and authentication. The operator credential is never deployed. Checkout binds
 the verified JWT subject to the stable person binding, not just a supplied email.
 Migration 78 permits only unique eligible nonprivileged legacy email linking
 after verification; conflicting/blocked/privileged accounts retain review.
+The runtime writer must match the report/capture host, **port 5432**, database
+and complete PlanetScale branch-routing suffix. The local operator's pooled
+6432 URL is not a runtime template. Verify a fresh restricted login with TLS
+and READ ONLY before publishing a corrected secret; then restart Payments
+through the pinned rollout so a running process adopts the new environment.
 
 ## Backup and rollout gates
 

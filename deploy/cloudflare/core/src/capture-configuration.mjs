@@ -1,5 +1,6 @@
 import { nowpaymentsCaptureReady } from './routing.mjs';
 import { containerEnvironment } from './runtime-env.mjs';
+import { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
 
 const REQUIRED = Object.freeze(['PAYMENTS_DATABASE_URL', 'PAYMENTS_SERVICE_TOKEN', 'CORE_SUPER_ADMIN_EMAILS',
   'PAYMENTS_ROOT_AFFILIATE_ID', 'AUTH_JWT_ISSUER', 'AUTH_JWT_AUDIENCE', 'NOWPAYMENTS_WEBHOOK_DATABASE_URL',
@@ -9,10 +10,14 @@ const ERRORS = Object.freeze({
   'Invalid service database configuration': 'INVALID_DATABASE_CONFIGURATION',
   'NOWPayments capture configuration is incomplete': 'CAPTURE_CONFIGURATION_INCOMPLETE',
   'NOWPayments capture database isolation is not configured': 'DATABASE_ISOLATION_INVALID',
+  'NOWPayments operational configuration is incomplete': 'OPERATIONAL_CONFIGURATION_INCOMPLETE',
+  'NOWPayments operational database isolation is not configured': 'OPERATIONAL_DATABASE_ISOLATION_INVALID',
   'Invalid core service configuration': 'INVALID_CORE_CONFIGURATION',
 });
 const empty = () => ({ requiredBindingsPresent: false, readWriteHostEqual: false, readWritePortEqual: false,
   readWriteDatabaseEqual: false, readWriteUserDifferent: false, readTlsVerifyFull: false, writeTlsVerifyFull: false,
+  writerPresent: false, writerReaderHostEqual: false, writerReaderPortEqual: false, writerReaderDatabaseEqual: false,
+  writerReaderBranchSuffixSame: false, writerUsersDifferent: false, writerTlsVerifyFull: false,
   branchSuffixSame: false, runtimeMappingValid: false, errorEnum: 'DIAGNOSTICS_DISABLED', readerTarget: null });
 
 function database(value) {
@@ -21,7 +26,7 @@ function database(value) {
     const url = new URL(value);
     if (!['postgres:', 'postgresql:'].includes(url.protocol)) return null;
     const user = decodeURIComponent(url.username);
-    const suffix = user.includes('.') ? user.slice(user.lastIndexOf('.') + 1) : '';
+    const suffix = user.includes('.') ? user.slice(user.indexOf('.') + 1) : '';
     return { host: url.hostname, port: url.port || '5432', database: url.pathname, user, suffix,
       tls: url.searchParams.get('sslmode') === 'verify-full' };
   } catch { return null; }
@@ -49,6 +54,18 @@ export function captureConfiguration(env) {
       result.readWriteDatabaseEqual = read.database === write.database;
       result.readWriteUserDifferent = read.user !== write.user;
       result.branchSuffixSame = Boolean(read.suffix && write.suffix && read.suffix === write.suffix);
+    }
+    if (nowpaymentsOperationalReady(env)) {
+      result.writerPresent = typeof env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL === 'string' && Boolean(env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.trim());
+      const writer = database(env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL);
+      result.writerTlsVerifyFull = writer?.tls === true;
+      if (read && writer) {
+        result.writerReaderHostEqual = read.host === writer.host;
+        result.writerReaderPortEqual = read.port === writer.port;
+        result.writerReaderDatabaseEqual = read.database === writer.database;
+        result.writerReaderBranchSuffixSame = Boolean(read.suffix && writer.suffix && read.suffix === writer.suffix);
+        result.writerUsersDifferent = Boolean(write && writer.user !== read.user && writer.user !== write.user);
+      }
     }
     containerEnvironment('payments', env);
     result.runtimeMappingValid = true;

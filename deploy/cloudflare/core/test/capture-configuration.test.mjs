@@ -11,7 +11,10 @@ const enabled = { CORE_ENV: 'production', AUTH_SERVICES_ENABLED: 'true', CORE_DA
   NOWPAYMENTS_WEBHOOK_DATABASE_URL: 'postgres://capture.branch:private-password@db.example.invalid/app?sslmode=verify-full',
   NOWPAYMENTS_API_KEY: 'private-api-key', NOWPAYMENTS_IPN_SECRET: 'private-ipn-secret' };
 const keys = ['requiredBindingsPresent', 'readWriteHostEqual', 'readWritePortEqual', 'readWriteDatabaseEqual',
-  'readWriteUserDifferent', 'readTlsVerifyFull', 'writeTlsVerifyFull', 'branchSuffixSame', 'runtimeMappingValid', 'errorEnum', 'readerTarget'];
+  'readWriteUserDifferent', 'readTlsVerifyFull', 'writeTlsVerifyFull',
+  'writerPresent', 'writerReaderHostEqual', 'writerReaderPortEqual', 'writerReaderDatabaseEqual',
+  'writerReaderBranchSuffixSame', 'writerUsersDifferent', 'writerTlsVerifyFull',
+  'branchSuffixSame', 'runtimeMappingValid', 'errorEnum', 'readerTarget'];
 function safe(result) {
   assert.deepEqual(Object.keys(result), keys);
   assert.ok(Object.entries(result).every(([key, value]) => key === 'errorEnum' ? /^[A-Z_]+$/.test(value)
@@ -33,7 +36,7 @@ test('capture configuration RPC projection is gated and never reads secrets whil
 test('capture configuration RPC projects only comparison booleans and a static error enum without starting services', () => {
   const result = captureConfiguration(enabled); safe(result);
   assert.equal(result.errorEnum, 'NONE');
-  assert.ok(Object.entries(result).filter(([key]) => !['errorEnum', 'readerTarget'].includes(key)).every(([, value]) => value === true));
+  assert.ok(Object.entries(result).filter(([key]) => !['errorEnum', 'readerTarget'].includes(key) && !key.startsWith('writer')).every(([, value]) => value === true));
   assert.deepEqual(result.readerTarget, { host: 'redacted', port: 5432, database: 'redacted' });
 });
 
@@ -86,4 +89,43 @@ test('configuration diagnosis is a zero-argument private entrypoint RPC, never p
   assert.doesNotMatch(probe, /fetch\(|request\.url|request\.headers|target/);
   const source = readFileSync(new URL('../src/capture-configuration.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /fetch\(|console\.|getContainer|resolveFor|\.length/);
+});
+
+test('operational writer projection distinguishes port, branch, users and TLS without exposing any credential', () => {
+  const operational = { ...enabled, NOWPAYMENTS_OPERATIONAL_ENABLED: 'true', NOWPAYMENTS_MEMBERSHIPS_ENABLED: 'true', NOWPAYMENTS_ENGINE_ENABLED: 'true',
+    PAYMENTS_DATABASE_URL: 'postgres://reader.branch:private-password@region-1.psdb.cloud/app?sslmode=verify-full',
+    NOWPAYMENTS_WEBHOOK_DATABASE_URL: 'postgres://capture.branch:private-password@region-1.psdb.cloud/app?sslmode=verify-full',
+    NOWPAYMENTS_OPERATIONAL_DATABASE_URL: 'postgres://operations.branch:private-password@region-1.psdb.cloud/app?sslmode=verify-full' };
+  const valid = captureConfiguration(operational); safe(valid);
+  assert.equal(valid.runtimeMappingValid, true);
+  for (const key of keys.filter(key => key.startsWith('writer'))) assert.equal(valid[key], true);
+  for (const [url, key, expected] of [
+    ['postgres://operations.branch:private-password@region-1.psdb.cloud:6432/app?sslmode=verify-full', 'writerReaderPortEqual', 'OPERATIONAL_DATABASE_ISOLATION_INVALID'],
+    ['postgres://operations.other:private-password@region-1.psdb.cloud/app?sslmode=verify-full', 'writerReaderBranchSuffixSame', 'OPERATIONAL_DATABASE_ISOLATION_INVALID'],
+    [operational.NOWPAYMENTS_WEBHOOK_DATABASE_URL, 'writerUsersDifferent', 'OPERATIONAL_DATABASE_ISOLATION_INVALID'],
+    ['postgres://operations.branch:private-password@region-1.psdb.cloud/app?sslmode=disable', 'writerTlsVerifyFull', 'INVALID_DATABASE_CONFIGURATION'],
+    ['', 'writerPresent', 'OPERATIONAL_CONFIGURATION_INCOMPLETE'],
+  ]) {
+    const result = captureConfiguration({ ...operational, NOWPAYMENTS_OPERATIONAL_DATABASE_URL: url }); safe(result);
+    assert.equal(result[key], false); assert.equal(result.errorEnum, expected); assert.equal(result.runtimeMappingValid, false);
+    assert.doesNotMatch(JSON.stringify(result), /operations\.|private-password|sslmode|\/app/);
+  }
+  const portOnly = captureConfiguration({ ...operational, NOWPAYMENTS_OPERATIONAL_DATABASE_URL: operational.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('/app?', ':6432/app?') });
+  assert.equal(portOnly.writerReaderBranchSuffixSame, true); assert.equal(portOnly.writerReaderPortEqual, false);
+  const multipart = { ...operational,
+    PAYMENTS_DATABASE_URL: operational.PAYMENTS_DATABASE_URL.replace('reader.branch:', 'reader.region.branch:'),
+    NOWPAYMENTS_WEBHOOK_DATABASE_URL: operational.NOWPAYMENTS_WEBHOOK_DATABASE_URL.replace('capture.branch:', 'capture.region.branch:'),
+    NOWPAYMENTS_OPERATIONAL_DATABASE_URL: operational.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('operations.branch:', 'operations.other.branch:') };
+  const mismatch = captureConfiguration(multipart); safe(mismatch);
+  assert.equal(mismatch.branchSuffixSame, true); assert.equal(mismatch.writerReaderBranchSuffixSame, false);
+  assert.equal(mismatch.errorEnum, 'OPERATIONAL_DATABASE_ISOLATION_INVALID');
+  const matching = captureConfiguration({ ...multipart, NOWPAYMENTS_OPERATIONAL_DATABASE_URL: multipart.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.replace('operations.other.branch:', 'operations.region.branch:') });
+  assert.equal(matching.writerReaderBranchSuffixSame, true); assert.equal(matching.runtimeMappingValid, true);
+});
+
+test('capture-only diagnosis does not read a dormant operational credential', () => {
+  const env = { ...enabled, NOWPAYMENTS_OPERATIONAL_ENABLED: 'false' };
+  Object.defineProperty(env, 'NOWPAYMENTS_OPERATIONAL_DATABASE_URL', { get() { assert.fail('inactive writer read'); } });
+  const result = captureConfiguration(env); safe(result);
+  assert.equal(result.writerPresent, false); assert.equal(result.errorEnum, 'NONE');
 });

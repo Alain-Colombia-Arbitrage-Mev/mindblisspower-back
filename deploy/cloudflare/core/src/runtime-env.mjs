@@ -46,7 +46,8 @@ function postgresTarget(value) {
     }
     const user = decodeURIComponent(url.username);
     if (['postgres', 'app_admin', 'pscale_superuser'].includes(user.split('.')[0])) throw new Error();
-    return { host: url.hostname, port: url.port || '5432', database: url.pathname, user };
+    const suffix = user.includes('.') ? user.slice(user.indexOf('.') + 1) : '';
+    return { host: url.hostname, port: url.port || '5432', database: url.pathname, user, suffix };
   } catch { throw new Error('Invalid service database configuration'); }
 }
 
@@ -82,13 +83,16 @@ export function containerEnvironment(service, env) {
     }
     if (nowpaymentsOperationalReady(env)) {
       if (typeof env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL !== 'string'
+        || !env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.trim()
         || env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.length > 8192 || /[\r\n]/.test(env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL)) {
         throw new Error('NOWPayments operational configuration is incomplete');
       }
       const writer = postgresTarget(env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL);
       const capture = postgresTarget(env.NOWPAYMENTS_WEBHOOK_DATABASE_URL);
       if (writer.host !== target.host || writer.port !== target.port || writer.database !== target.database
-        || writer.user === target.user || writer.user === capture.user) {
+        || writer.user === target.user || writer.user === capture.user
+        || (target.host.endsWith('.psdb.cloud') && (!target.suffix || !capture.suffix || !writer.suffix
+          || writer.suffix !== target.suffix || writer.suffix !== capture.suffix))) {
         throw new Error('NOWPayments operational database isolation is not configured');
       }
       Object.assign(values, { NOWPAYMENTS_MEMBERSHIPS_ENABLED: 'true', NOWPAYMENTS_OPERATIONAL_ENABLED: 'true', NOWPAYMENTS_ENGINE_ENABLED: 'true',
