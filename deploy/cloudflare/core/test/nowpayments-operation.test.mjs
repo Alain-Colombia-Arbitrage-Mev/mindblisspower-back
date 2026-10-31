@@ -12,7 +12,7 @@ const env = { CORE_ENV: 'production', CORE_SERVICES_ENABLED: 'false', CORE_NETWO
   STRIPE_CHECKOUT_ENABLED: 'false', PAYMENTS_SERVICE_TOKEN: 'synthetic-service-token', NOWPAYMENTS_API_KEY: 'synthetic-provider-key' };
 const headers = { 'content-type': 'application/json', 'x-vp-service-token': env.PAYMENTS_SERVICE_TOKEN,
   'x-vp-id-token': 'synthetic.verified.jwt' };
-const checkout = (body = { provider: 'nowpayments', package_id: 4, email: 'buyer@example.invalid' }, path = '/api/payments/checkout', extra = {}) =>
+const checkout = (body = { provider: 'nowpayments', package_id: 4, email: 'buyer@example.invalid', purchase_request_id: order }, path = '/api/payments/checkout', extra = {}) =>
   new Request(`https://payments.core.internal${path}`, { method: 'POST', body: JSON.stringify(body), headers, ...extra });
 const never = () => assert.fail('unrelated capability must remain closed');
 const invoice = () => ({ price_amount: 100.00, price_currency: 'usd', order_id: order, order_description: 'Mindbliss Power membership',

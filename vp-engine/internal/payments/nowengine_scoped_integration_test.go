@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,6 +35,7 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
 			t.Fatal(name, err)
 		}
 	}
+	applyNOWPurchaseLifecycleMigration(t, ctx, pool)
 	admin := seedAdmin(t, ctx, pool, "devfidubit@gmail.com")
 	var root int64
 	if err := pool.QueryRow(ctx, `INSERT INTO mlm.affiliate(person_id,parent_id,position,status) VALUES($1,NULL,NULL,'active') RETURNING id`, admin).Scan(&root); err != nil {
@@ -117,7 +119,7 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
 			t.Fatal(err)
 		}
 		affiliates[name] = affiliate
-		order, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: subject, Email: email, Environment: "production", PackageID: 8001})
+		order, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: subject, Email: email, Environment: "production", PackageID: 8001, PurchaseRequestID: uuid.NewString()})
 		if err != nil {
 			t.Fatal("create engine-owned NOW order", name, err)
 		}

@@ -35,6 +35,7 @@ type NOWPaymentsMembershipInput struct {
 	PackageID          int
 	SponsorAffiliateID *int64
 	PreferredSide      string
+	PurchaseRequestID  string // One explicit purchase intent, retained across retries.
 }
 
 type NOWPaymentsMembershipAttempt struct {
@@ -46,6 +47,8 @@ type NOWPaymentsMembershipAttempt struct {
 	PricingPolicy, ProviderCostUSD, CommissionBaseUSD string
 	TotalCents                                        int64
 	PreferredSide, State, InvoiceID, PaymentID        string
+	Reused                                            bool // Internal: never call the provider for this attempt.
+	Reusable                                          bool // Internal: independently checked unpaid snapshot.
 }
 
 type NOWPaymentsReceiptResult struct {
@@ -91,6 +94,22 @@ func (s *Store) LookupNOWPaymentsMembership(ctx context.Context, orderID, enviro
 // invoice request. A conflict never starts a second provider request, including
 // after a timeout whose actual provider outcome is unknown.
 func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsMembershipInput) (NOWPaymentsMembershipAttempt, error) {
+	// Retrying a rolled-back serialization failure is local-only. The external
+	// invoice is requested only after this function commits a genuinely new order.
+	for range 3 {
+		out, err := s.createNOWPaymentsMembership(ctx, in)
+		var conflict *pgconn.PgError
+		if !errors.As(err, &conflict) || conflict.Code != "40001" {
+			return out, err
+		}
+	}
+	return NOWPaymentsMembershipAttempt{}, ErrNOWPaymentsOutstanding
+}
+
+func (s *Store) createNOWPaymentsMembership(ctx context.Context, in NOWPaymentsMembershipInput) (NOWPaymentsMembershipAttempt, error) {
+	if s.nowOperational && !validNOWPaymentsOrderID(in.PurchaseRequestID) {
+		return NOWPaymentsMembershipAttempt{}, ErrNOWPurchaseRequestInvalid
+	}
 	if err := s.requireNOWMembershipMode(ctx); err != nil {
 		return NOWPaymentsMembershipAttempt{}, err
 	}
@@ -128,6 +147,21 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 	if err := checkoutOutstanding(ctx, tx, personID, in.PackageID, "nowpayments"); err != nil {
 		return NOWPaymentsMembershipAttempt{}, err
 	}
+	if s.nowOperational {
+		allowed, err := nowPurchaseCollectionAllowed(ctx, tx, personID, in.Email)
+		if err != nil {
+			return NOWPaymentsMembershipAttempt{}, err
+		}
+		if !allowed {
+			return NOWPaymentsMembershipAttempt{}, ErrCheckoutIdentityReview
+		}
+		if reused, found, err := lookupNOWPurchaseRequest(ctx, tx, in, personID, publicID); found || err != nil {
+			if err != nil {
+				return NOWPaymentsMembershipAttempt{}, err
+			}
+			return reused, tx.Commit(ctx)
+		}
+	}
 	// Existing placements always win over referral input.
 	if affiliateID != nil {
 		in.SponsorAffiliateID = existingSponsor
@@ -143,13 +177,15 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 		}
 	}
 	var active bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mlm.affiliate a
+	if !s.nowOperational {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mlm.affiliate a
  JOIN mlm.affiliate_package ap ON ap.affiliate_id=a.id LEFT JOIN mlm.package_cap_state cs ON cs.affiliate_package_id=ap.id
  WHERE a.person_id=$1 AND ap.package_id=$2 AND ap.status='active' AND cs.closed_at IS NULL)`, personID, in.PackageID).Scan(&active); err != nil {
-		return NOWPaymentsMembershipAttempt{}, fmt.Errorf("verify NOWPayments active membership: %w", err)
-	}
-	if active {
-		return NOWPaymentsMembershipAttempt{}, ErrNOWPaymentsActiveMembership
+			return NOWPaymentsMembershipAttempt{}, fmt.Errorf("verify NOWPayments active membership: %w", err)
+		}
+		if active {
+			return NOWPaymentsMembershipAttempt{}, ErrNOWPaymentsActiveMembership
+		}
 	}
 	var pack Pack
 	var amount string
@@ -188,6 +224,9 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 	}
 	if s.nowOperational {
 		if err := s.prepareNOWOperationalOrder(ctx, tx, out); err != nil {
+			return NOWPaymentsMembershipAttempt{}, err
+		}
+		if err := bindNOWPurchaseRequest(ctx, tx, in, out.ID); err != nil {
 			return NOWPaymentsMembershipAttempt{}, err
 		}
 	}

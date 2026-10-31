@@ -1,4 +1,4 @@
--- Explicit, additive runtime ACL manifest for reviewed migrations 79 + 80.
+-- Explicit, additive runtime ACL manifest for reviewed migrations 79 + 80 + 84.
 -- Operator ONLY: create a fresh LOGIN NOINHERIT NOSUPERUSER NOCREATEDB
 -- NOCREATEROLE NOREPLICATION NOBYPASSRLS role separately. In the SAME transaction
 -- set_config('mindbliss.nowpayments_operations_role','reviewed-role-name',true),
@@ -31,7 +31,8 @@ BEGIN
   payments.nowpayments_operational_order,payments.nowpayments_operational_pv_source,payments.nowpayments_operational_inflow,
   payments.nowpayments_operational_job,payments.nowpayments_webhook_capture,payments.nowpayments_engine_control,
   payments.nowpayments_engine_period,payments.nowpayments_engine_binary_state,payments.nowpayments_engine_roi_state,
-  payments.nowpayments_engine_roi_rate_day,payments.nowpayments_engine_obligation,payments.nowpayments_engine_payment TO %I',target);
+  payments.nowpayments_engine_roi_rate_day,payments.nowpayments_engine_obligation,payments.nowpayments_engine_payment,
+  payments.nowpayments_purchase_request,payments.nowpayments_purchase_cancellation TO %I',target);
  EXECUTE format('GRANT SELECT(id,external_ref) ON mlm.transaction TO %I',target);
  EXECUTE format('GRANT INSERT ON payments.nowpayments_membership_attempt,payments.nowpayments_membership_receipt,
   payments.nowpayments_payment_binding,payments.nowpayments_operational_order,payments.nowpayments_operational_pv_source,
@@ -39,9 +40,9 @@ BEGIN
   payments.nowpayments_engine_binary_state,payments.nowpayments_engine_roi_state,payments.nowpayments_engine_roi_rate_day,
   payments.nowpayments_engine_obligation,payments.nowpayments_engine_payment,mlm.affiliate,mlm.affiliate_closure,
   mlm.affiliate_package,mlm.package_cap_state,mlm.investment_cd,mlm.wallet,mlm.transaction,
-  mlm.wallet_movement,mlm.retirement_plan TO %I',target);
+  mlm.wallet_movement,mlm.retirement_plan,payments.nowpayments_purchase_request,payments.nowpayments_purchase_cancellation TO %I',target);
  EXECUTE format('GRANT UPDATE(updated_at) ON mlm.person TO %I',target);
- EXECUTE format('GRANT UPDATE(state,invoice_id,payment_id,review_reason,updated_at) ON payments.nowpayments_membership_attempt TO %I',target);
+ EXECUTE format('GRANT UPDATE(state,invoice_id,payment_id,review_reason,updated_at,checkout_open) ON payments.nowpayments_membership_attempt TO %I',target);
  EXECUTE format('GRANT UPDATE(state,affiliate_id,affiliate_package_id,investment_cd_id,pv_source_id,inflow_id,activated_at,updated_at) ON payments.nowpayments_operational_order TO %I',target);
  EXECUTE format('GRANT UPDATE(capture_id,state,attempts,available_at,lease_token,lease_until,last_error_code,updated_at) ON payments.nowpayments_operational_job TO %I',target);
  EXECUTE format('GRANT UPDATE(left_count,right_count,updated_at) ON mlm.affiliate TO %I',target);

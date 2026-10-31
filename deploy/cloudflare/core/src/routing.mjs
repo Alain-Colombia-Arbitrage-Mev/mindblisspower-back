@@ -1,5 +1,6 @@
 import { NOWPAYMENTS_CHECKOUT, NOWPAYMENTS_MAX_INVOICE_BODY, nowpaymentsOperationalReady,
   operationalCheckoutRequest, parseCheckout, validOperationalInvoice } from './nowpayments-operation.mjs';
+import { NOWPAYMENTS_PURCHASE_MAX_BODY, nowpaymentsPurchaseRequest, purchasesNamespace } from './nowpayments-purchases.mjs';
 export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
 
 export const SERVICES = Object.freeze({
@@ -235,6 +236,17 @@ export async function dispatchCore(request, env, resolve) {
   // Scheduled processing is generated inside this Worker only. Never forward
   // this namespace from a portal, admin, public HTTP or private fetch caller.
   if (checkoutPath.startsWith('/api/payments/internal')) return failure('not_found', 404);
+  const purchasePath = purchasesNamespace(checkoutPath);
+  let purchaseRequest = false;
+  if (purchasePath) {
+    if (request.method === 'POST') {
+      try { body = await boundedBody(request, NOWPAYMENTS_PURCHASE_MAX_BODY); }
+      catch { return failure('request_too_large', 413); }
+    }
+    purchaseRequest = nowpaymentsPurchaseRequest(request, url, body, env, reportsReady(env) && authReady(env));
+    // Reserved paths never fall through generic report or full-Core gates.
+    if (!purchaseRequest) return failure('purchase_service_unavailable', 503);
+  }
   const capturePath = [NOWPAYMENTS_IPN_PATH, NOWPAYMENTS_STATUS_PATH].includes(checkoutPath);
   const captureRequest = capturePath && nowpaymentsCaptureReady(env) && nowpaymentsCaptureRequest(request, url);
   // Reserved capture endpoints do not fall through the broad reports/read gate,
@@ -276,13 +288,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest && !operationalCheckout) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest && !operationalCheckout && !purchaseRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim');
-  if (!read && !authWrite && !captureRequest && !operationalCheckout) return failure('financial_review_required', 503);
+  if (!read && !authWrite && !captureRequest && !operationalCheckout && !purchaseRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);

@@ -36,6 +36,12 @@ func (c *Config) ReadOnlyHandler(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
+		if r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery &&
+			((r.Method == http.MethodGet && r.URL.Path == nowPurchasesPath && (c.NOWPaymentsOperational.Enabled || c.NOWPaymentsCapture.Enabled)) ||
+				(r.Method == http.MethodPost && c.NOWPaymentsOperational.Enabled && (r.URL.Path == nowPurchasesPath+"/resume" || r.URL.Path == nowPurchasesPath+"/cancel"))) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if c.NOWPaymentsOperational.Enabled && r.Method == http.MethodGet && r.URL.Path == nowReadyPath && r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery {
 			next.ServeHTTP(w, r)
 			return

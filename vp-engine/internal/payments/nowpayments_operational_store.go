@@ -91,6 +91,15 @@ func (s *Store) processNOWOperationalPayment(ctx context.Context, environment st
 	if err != nil {
 		return "", err
 	}
+	// Abandonment never discards a later authenticated receipt. Even a waiting
+	// notification on that timeless invoice is held for review, not reactivated.
+	var abandoned bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payments.nowpayments_purchase_cancellation WHERE attempt_id=$1::uuid)`, signed.OrderID).Scan(&abandoned); err != nil {
+		return "", err
+	}
+	if abandoned {
+		return "security_blocked", nil
+	}
 	if !result.Finished || result.MultiplePayments {
 		if result.MultiplePayments || (api.Status != "waiting" && api.Status != "confirming" && api.Status != "confirmed" && api.Status != "sending") {
 			_, err = s.db.Exec(ctx, `UPDATE payments.nowpayments_operational_order SET state='risk_review',updated_at=now() WHERE attempt_id=$1::uuid AND state IN('awaiting_payment','activated')`, signed.OrderID)

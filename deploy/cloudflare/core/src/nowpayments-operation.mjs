@@ -28,7 +28,8 @@ export function operationalCheckoutRequest(request, url, payload, env) {
     && typeof env.PAYMENTS_SERVICE_TOKEN === 'string' && env.PAYMENTS_SERVICE_TOKEN.length >= 16
     && request.headers.get('x-vp-service-token') === env.PAYMENTS_SERVICE_TOKEN
     && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(request.headers.get('x-vp-id-token') ?? '')
-    && (request.headers.get('x-vp-id-token')?.length ?? 0) <= 16384 && payload?.provider === 'nowpayments';
+    && (request.headers.get('x-vp-id-token')?.length ?? 0) <= 16384 && payload?.provider === 'nowpayments'
+    && UUID.test(payload?.purchase_request_id ?? '') && payload.purchase_request_id !== '00000000-0000-0000-0000-000000000000';
 }
 
 /** Validate only the fixed merchant invoice contract emitted by our Go client. */

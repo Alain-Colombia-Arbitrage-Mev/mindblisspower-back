@@ -87,10 +87,16 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 	}
 	attempt, err := flow.store.CreateNOWPaymentsMembership(r.Context(), NOWPaymentsMembershipInput{
 		Email: req.Email, Subject: req.authSubject, Environment: flow.environment, PackageID: req.PackageID,
-		SponsorAffiliateID: sponsor, PreferredSide: side,
+		SponsorAffiliateID: sponsor, PreferredSide: side, PurchaseRequestID: req.PurchaseRequestID,
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrNOWPurchaseRequestInvalid):
+			writeErr(w, http.StatusBadRequest, "invalid_purchase_request_id")
+		case errors.Is(err, ErrNOWPurchaseRequestConflict):
+			writeErr(w, http.StatusConflict, "purchase_request_conflict")
+		case errors.Is(err, ErrNOWPurchaseProcessed):
+			writeErr(w, http.StatusConflict, "membership_purchase_already_processed")
 		case errors.Is(err, ErrNOWPaymentsOutstanding):
 			writeErr(w, http.StatusConflict, "membership_payment_pending_review")
 		case errors.Is(err, ErrNOWPaymentsActiveMembership):
@@ -122,10 +128,17 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 		fulfillment = "awaiting_payment"
 	}
 	writeJSON(w, http.StatusOK, checkoutResponse{URL: invoice.URL, Provider: "nowpayments",
-		TotalUSD: total, FeeUSD: attempt.FeeUSD, FulfillmentStatus: fulfillment})
+		TotalUSD: total, FeeUSD: attempt.FeeUSD, FulfillmentStatus: fulfillment, OrderID: attempt.ID, Reused: attempt.Reused})
 }
 
 func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt NOWPaymentsMembershipAttempt) (nowpayments.Invoice, error) {
+	if attempt.Reused {
+		if !flow.operational || !attempt.Reusable || attempt.Environment != flow.environment || attempt.State != "invoice_created" || attempt.TotalCents <= 0 || !validNOWPaymentsOrderID(attempt.ID) {
+			return nowpayments.Invoice{}, nowpayments.ErrEvidence
+		}
+		invoiceURL, err := nowPurchaseInvoiceURL(flow.environment, attempt.InvoiceID)
+		return nowpayments.Invoice{ID: attempt.InvoiceID, URL: invoiceURL}, err
+	}
 	if !validNOWPaymentsOrderID(attempt.ID) || attempt.Environment != flow.environment ||
 		attempt.State != "creating_invoice" || attempt.TotalCents <= 0 {
 		return nowpayments.Invoice{}, nowpayments.ErrEvidence

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
@@ -92,6 +93,7 @@ func TestNOWMemberPolicyReadOnlyPostgres(t *testing.T) {
 			t.Fatal(name, err)
 		}
 	}
+	applyNOWPurchaseLifecycleMigration(t, ctx, pool)
 	admin := seedAdmin(t, ctx, pool, "policy-admin@example.test")
 	seedActivePlan(t, ctx, pool, admin)
 	var root int64
@@ -107,7 +109,7 @@ func TestNOWMemberPolicyReadOnlyPostgres(t *testing.T) {
 	}
 	store := NewNOWPaymentsOperationalStore(pool)
 	store.SetNOWOperationalReadiness(func(context.Context, pgx.Tx) error { return nil })
-	order, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: "signed-subject", Email: "member@example.test", Environment: "production", PackageID: 8301, SponsorAffiliateID: &root})
+	order, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: "signed-subject", Email: "member@example.test", Environment: "production", PackageID: 8301, SponsorAffiliateID: &root, PurchaseRequestID: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +125,7 @@ func TestNOWMemberPolicyReadOnlyPostgres(t *testing.T) {
 	if state, err := store.processNOWOperationalPayment(ctx, "production", payment, payment, hash); err != nil || state != "activated" {
 		t.Fatal(state, err)
 	}
-	if _, err := pool.Exec(ctx, `CREATE ROLE mindbliss_payments_20261025 LOGIN NOINHERIT PASSWORD 'synthetic-read-model';
+	if _, err := pool.Exec(ctx, `DO $$ BEGIN CREATE ROLE mindbliss_payments_20261025 LOGIN NOINHERIT PASSWORD 'synthetic-read-model'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
  GRANT USAGE ON SCHEMA auth,identity,mlm,payments TO mindbliss_payments_20261025;
  GRANT SELECT(id,email,email_verified) ON auth.user TO mindbliss_payments_20261025;
  GRANT SELECT(subject,person_id,provider) ON identity.auth_binding TO mindbliss_payments_20261025;
@@ -229,7 +231,7 @@ func TestNOWMemberPolicyReadOnlyPostgres(t *testing.T) {
  INSERT INTO identity.auth_binding(subject,person_id,link_method) SELECT 'other-policy-subject',id,'new_registration' FROM mlm.person WHERE user_id='other-policy-subject';`); err != nil {
 		t.Fatal(err)
 	}
-	other, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: "other-policy-subject", Email: "other-policy@example.test", Environment: "production", PackageID: 8301, SponsorAffiliateID: &root})
+	other, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: "other-policy-subject", Email: "other-policy@example.test", Environment: "production", PackageID: 8301, SponsorAffiliateID: &root, PurchaseRequestID: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}

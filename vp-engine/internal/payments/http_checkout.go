@@ -13,14 +13,15 @@ import (
 // ── Checkout ────────────────────────────────────────────────────────────────
 
 type checkoutRequest struct {
-	authSubject   string // Verified server identity; never decoded from browser JSON.
-	Email         string `json:"email"`
-	PackageID     int    `json:"package_id"`
-	Ref           string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
-	PreferredSide string `json:"preferred_side"` // L/R del enlace; se persiste hasta el webhook de pago
-	Name          string `json:"name"`           // nombre del token (para auto-provisión de mlm.person)
-	Phone         string `json:"phone"`          // teléfono del token (E.164)
-	Provider      string `json:"provider"`       // stripe (default) or nowpayments; membership purchase only
+	authSubject       string // Verified server identity; never decoded from browser JSON.
+	Email             string `json:"email"`
+	PackageID         int    `json:"package_id"`
+	Ref               string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
+	PreferredSide     string `json:"preferred_side"` // L/R del enlace; se persiste hasta el webhook de pago
+	Name              string `json:"name"`           // nombre del token (para auto-provisión de mlm.person)
+	Phone             string `json:"phone"`          // teléfono del token (E.164)
+	Provider          string `json:"provider"`       // stripe (default) or nowpayments; membership purchase only
+	PurchaseRequestID string `json:"purchase_request_id"`
 }
 
 type checkoutResponse struct {
@@ -30,6 +31,8 @@ type checkoutResponse struct {
 	FeeUSD            string `json:"fee_usd"`
 	Provider          string `json:"provider"`
 	FulfillmentStatus string `json:"fulfillment_status,omitempty"`
+	OrderID           string `json:"order_id,omitempty"`
+	Reused            bool   `json:"reused"`
 }
 
 // handleCheckout crea una sesión de Checkout. Lo llama el BFF Next (que ya
@@ -101,6 +104,10 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		boundNOWBuyer = &buyer
 	}
 	nowOperational := provider == "nowpayments" && h.nowMemberships != nil && h.nowMemberships.operational
+	if nowOperational && !validNOWPaymentsOrderID(req.PurchaseRequestID) {
+		writeErr(w, http.StatusBadRequest, "invalid_purchase_request_id")
+		return
+	}
 	if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil && !nowOperational {
 		if errors.Is(err, ErrRecoveryFinancialReview) {
 			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
@@ -129,17 +136,18 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pago único: si el usuario YA tiene esta membresía activa (cupo abierto), no
-	// se permite pagarla otra vez (evita doble cobro por doble-click/reintento).
-	// Las membresías no son suscripción. Un paquete agotado sí permite recompra.
-	// A failed eligibility query must not create another external charge.
-	if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
-		h.log.Error().Msg("membership eligibility unavailable")
-		writeErr(w, http.StatusServiceUnavailable, "membership_eligibility_unavailable")
-		return
-	} else if active {
-		writeErr(w, http.StatusConflict, "Ya tienes esta membresía activa. Las membresías son de pago único.")
-		return
+	// Preserve Stripe/review eligibility. NOW operational purchases use their own
+	// durable request key and one-open-SKU constraint; multiple active CDs are
+	// allowed only there, never by weakening the legacy collection guard.
+	if !nowOperational {
+		if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
+			h.log.Error().Msg("membership eligibility unavailable")
+			writeErr(w, http.StatusServiceUnavailable, "membership_eligibility_unavailable")
+			return
+		} else if active {
+			writeErr(w, http.StatusConflict, "Ya tienes esta membresía activa. Las membresías son de pago único.")
+			return
+		}
 	}
 
 	// Auto-provisión: usuario nuevo de Cognito sin fila en RDS → crear mlm.person

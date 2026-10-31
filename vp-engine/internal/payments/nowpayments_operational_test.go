@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"net/http"
@@ -120,6 +121,7 @@ func TestNOWPaymentsOperationalActivationIntegration(t *testing.T) {
 			t.Fatal(name, err)
 		}
 	}
+	applyNOWPurchaseLifecycleMigration(t, ctx, pool)
 	if _, err := pool.Exec(ctx, `INSERT INTO auth.user(id,email,email_verified) VALUES('synthetic-operational','operational@example.test',true);
  INSERT INTO mlm.person(first_name,last_name,email,phone_number,status,user_id) VALUES('Synthetic','Operational','operational@example.test','0','active','synthetic-operational');
  INSERT INTO identity.auth_binding(subject,person_id,link_method) SELECT 'synthetic-operational',id,'new_registration' FROM mlm.person WHERE user_id='synthetic-operational';
@@ -131,7 +133,7 @@ func TestNOWPaymentsOperationalActivationIntegration(t *testing.T) {
 	}
 	store := NewNOWPaymentsOperationalStore(pool)
 	store.SetNOWOperationalReadiness(func(context.Context, pgx.Tx) error { return nil })
-	in := NOWPaymentsMembershipInput{Subject: "synthetic-operational", Email: "operational@example.test", Environment: "production", PackageID: 7901}
+	in := NOWPaymentsMembershipInput{Subject: "synthetic-operational", Email: "operational@example.test", Environment: "production", PackageID: 7901, PurchaseRequestID: uuid.NewString()}
 	if _, err := store.CreateNOWPaymentsMembership(ctx, in); !errors.Is(err, ErrNOWOperationalPlan) {
 		t.Fatal("invoice order proceeded without active approved plan", err)
 	}
@@ -153,11 +155,13 @@ func TestNOWPaymentsOperationalActivationIntegration(t *testing.T) {
  mlm.cd_roi_tier,mlm.asset,mlm.concept,mlm.package_cap_state,mlm.blacklist,mlm.wallet,mlm.affiliate_package,mlm.investment_cd,
  mlm.tree_event,payments.purchase_intent,payments.nowpayments_membership_attempt,payments.nowpayments_membership_receipt,
  payments.nowpayments_payment_binding,payments.nowpayments_operational_order,payments.nowpayments_operational_pv_source,
- payments.nowpayments_operational_inflow,payments.nowpayments_operational_job,payments.nowpayments_webhook_capture TO now_ops_synthetic;
+ payments.nowpayments_operational_inflow,payments.nowpayments_operational_job,payments.nowpayments_webhook_capture,
+ payments.nowpayments_purchase_request,payments.nowpayments_purchase_cancellation TO now_ops_synthetic;
  GRANT INSERT ON payments.nowpayments_membership_attempt,payments.nowpayments_membership_receipt,payments.nowpayments_payment_binding,
  payments.nowpayments_operational_order,payments.nowpayments_operational_pv_source,payments.nowpayments_operational_inflow,payments.nowpayments_operational_job,
- mlm.affiliate,mlm.affiliate_closure,mlm.affiliate_package,mlm.package_cap_state,mlm.investment_cd,mlm.wallet TO now_ops_synthetic;
- GRANT UPDATE(state,invoice_id,payment_id,review_reason,updated_at) ON payments.nowpayments_membership_attempt TO now_ops_synthetic;
+ mlm.affiliate,mlm.affiliate_closure,mlm.affiliate_package,mlm.package_cap_state,mlm.investment_cd,mlm.wallet,
+ payments.nowpayments_purchase_request,payments.nowpayments_purchase_cancellation TO now_ops_synthetic;
+ GRANT UPDATE(state,invoice_id,payment_id,review_reason,updated_at,checkout_open) ON payments.nowpayments_membership_attempt TO now_ops_synthetic;
  GRANT UPDATE(updated_at) ON mlm.person TO now_ops_synthetic;
  GRANT UPDATE(state,affiliate_id,affiliate_package_id,investment_cd_id,pv_source_id,inflow_id,activated_at,updated_at) ON payments.nowpayments_operational_order TO now_ops_synthetic;
  GRANT UPDATE(capture_id,state,attempts,available_at,lease_token,lease_until,last_error_code,updated_at) ON payments.nowpayments_operational_job TO now_ops_synthetic;
@@ -282,6 +286,7 @@ func TestNOWPaymentsOperationalActivationIntegration(t *testing.T) {
 	}
 	heldInput := in
 	heldInput.PackageID = 7904
+	heldInput.PurchaseRequestID = uuid.NewString()
 	heldOrder, err := store.CreateNOWPaymentsMembership(ctx, heldInput)
 	if err != nil {
 		t.Fatal(err)
@@ -336,6 +341,7 @@ func TestNOWPaymentsOperationalActivationIntegration(t *testing.T) {
 			defer wg.Done()
 			candidate := in
 			candidate.PackageID = id
+			candidate.PurchaseRequestID = uuid.NewString()
 			_, err := store.CreateNOWPaymentsMembership(ctx, candidate)
 			results <- err
 		}(pkg)
