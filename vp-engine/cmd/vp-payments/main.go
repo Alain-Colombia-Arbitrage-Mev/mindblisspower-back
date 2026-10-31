@@ -85,6 +85,28 @@ func run() error {
 	}
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
 	handler.SetStripeCheckoutEnabled(cfg.StripeCheckoutEnabled)
+	if cfg.NOWPaymentsCapture.Enabled {
+		capturePool, captureErr := db.Open(rootCtx, cfg.NOWPaymentsCapture.DatabaseURL, 2, cfg.DBConnLifetime)
+		if captureErr != nil {
+			return errors.New("NOWPayments capture database unavailable")
+		}
+		defer capturePool.Close()
+		var readerRole, captureRole string
+		if err := pool.QueryRow(rootCtx, `SELECT current_user`).Scan(&readerRole); err != nil {
+			return errors.New("cannot verify payments reader role")
+		}
+		if err := capturePool.QueryRow(rootCtx, `SELECT current_user`).Scan(&captureRole); err != nil || readerRole == captureRole {
+			return errors.New("NOWPayments capture requires a distinct restricted database login")
+		}
+		captureClient, captureErr := nowpayments.New(cfg.NOWPaymentsCapture.Client)
+		if captureErr != nil {
+			return captureErr
+		}
+		if err := handler.SetNOWPaymentsCapture(captureClient, payments.NewNOWPaymentsCaptureStore(capturePool), cfg.NOWPaymentsCapture.Client.Environment); err != nil {
+			return err
+		}
+		logger.Info().Msg("NOWPayments signed notification capture enabled; checkout and financial activation unchanged")
+	}
 	if cfg.ExternalProvidersEnabled() && cfg.NOWPayments.MembershipsEnabled {
 		nowClient, nowErr := nowpayments.New(cfg.NOWPayments.ClientConfig())
 		if nowErr != nil {

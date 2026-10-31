@@ -7,6 +7,10 @@ export const SERVICES = Object.freeze({
 });
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const MAX_BODY = 256 * 1024;
+const MAX_NOWPAYMENTS_IPN_BODY = 128 * 1024;
+const NOWPAYMENTS_IPN_PATH = '/api/webhooks/nowpayments';
+const NOWPAYMENTS_STATUS_PATH = '/api/payments/nowpayments/status';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const GRPC_TUNNEL_HOST = 'engine-grpc.core.internal';
 export const GRPC_TUNNEL_PATH = '/v1/engine-tunnel';
 export const TUNNEL_PROTOCOL = 'mindbliss-opaque-tcp-v1';
@@ -35,6 +39,20 @@ export function authReady(env) {
 export function reportsReady(env) {
   return ['staging', 'production'].includes(env.CORE_ENV) && env.CORE_REPORTS_ENABLED === 'true'
     && env.CORE_DATA_ACCESS_VERIFIED === 'true' && env.AUTH_CUTOVER_VERIFIED === 'true';
+}
+
+/** Evidence capture is not permission to create an invoice or fulfil a purchase. */
+export function nowpaymentsCaptureReady(env) {
+  return authReady(env) && env.NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED === 'true';
+}
+
+function nowpaymentsCaptureRequest(request, url) {
+  if (url.protocol !== 'https:' || url.hostname !== 'payments.core.internal') return false;
+  if (url.pathname === NOWPAYMENTS_IPN_PATH) return request.method === 'POST' && !url.search;
+  if (url.pathname !== NOWPAYMENTS_STATUS_PATH || request.method !== 'GET') return false;
+  const order = url.searchParams.get('order_id');
+  // No caller-selected account, pagination or provider endpoint may be forwarded.
+  return UUID_PATTERN.test(order ?? '') && url.search === `?order_id=${order}`;
 }
 
 function reportOnlyRequest(request, url) {
@@ -72,9 +90,27 @@ export function isGrpcTunnelRequest(request) {
 }
 
 /** Only ContainerProxy may call this route. A caller cannot select an origin. */
-export async function dispatchContainerOutbound(source, request, env, resolve) {
+export async function dispatchContainerOutbound(source, request, env, resolve, internetFetch = fetch) {
   let url;
   try { url = new URL(request.url); } catch { return failure('not_found', 404); }
+  if (url.hostname === 'api.nowpayments.io') {
+    // The capture client can only verify an existing payment. Invoices, payouts,
+    // aliases, redirects and API key-bearing requests to another origin are denied.
+    if (source !== 'payments' || !nowpaymentsCaptureReady(env)) return failure('core_not_ready', 503);
+    if (url.protocol !== 'https:' || url.port || url.username || url.password || url.search || url.hash
+      || request.method !== 'GET' || request.headers.has('upgrade')
+      || !/^\/v1\/payment\/[1-9][0-9]{0,63}$/.test(url.pathname)) return failure('not_found', 404);
+    try {
+      const forwarded = new Request(request, { redirect: 'manual',
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(12000)]) });
+      const response = await internetFetch(forwarded);
+      if (response.status < 200 || response.status >= 300) {
+        await response.body?.cancel();
+        return failure('upstream_unavailable', 503);
+      }
+      return response;
+    } catch { return failure('upstream_unavailable', 503); }
+  }
   if (blockedPhoneAuthPath(url.pathname)) return failure('not_found', 404);
   const privateJwks = ['payments', 'withdrawals'].includes(source) && url.hostname === 'auth.core.internal'
     && url.protocol === 'https:' && !url.search && !url.port && !url.username && !url.password && !url.hash
@@ -94,9 +130,9 @@ export async function dispatchContainerOutbound(source, request, env, resolve) {
   return dispatchCore(request, env, resolve);
 }
 
-async function boundedBody(request) {
+async function boundedBody(request, limit = MAX_BODY) {
   const length = request.headers.get('content-length');
-  if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY)) throw new Error('body_limit');
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > limit)) throw new Error('body_limit');
   if (!request.body) return undefined;
   const reader = request.body.getReader();
   const parts = [];
@@ -106,7 +142,7 @@ async function boundedBody(request) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY) { await reader.cancel(); throw new Error('body_limit'); }
+      if (size > limit) { await reader.cancel(); throw new Error('body_limit'); }
       parts.push(value);
     }
   } finally { reader.releaseLock(); }
@@ -140,6 +176,19 @@ export async function dispatchCore(request, env, resolve) {
     }
   } catch { return failure('not_found', 404); }
   checkoutPath = checkoutPath.replace(/\/+/g, '/').replace(/\/+$/, '');
+  const capturePath = [NOWPAYMENTS_IPN_PATH, NOWPAYMENTS_STATUS_PATH].includes(checkoutPath);
+  const captureRequest = capturePath && nowpaymentsCaptureReady(env) && nowpaymentsCaptureRequest(request, url);
+  // Reserved capture endpoints do not fall through the broad reports/read gate,
+  // even if the regular infrastructure is ready or the path is encoded/aliased.
+  if (capturePath && !captureRequest) return failure('nowpayments_capture_unavailable', 503);
+  if (captureRequest && request.method === 'POST') {
+    if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')
+      || request.headers.has('content-encoding')
+      || !/^[a-f0-9]{128}$/i.test(request.headers.get('x-nowpayments-sig') ?? '')) return failure('invalid_webhook_request', 400);
+    try { body = await boundedBody(request, MAX_NOWPAYMENTS_IPN_BODY); }
+    catch { return failure('request_too_large', 413); }
+    if (!body?.length) return failure('invalid_webhook_request', 400);
+  }
   if (env.STRIPE_CHECKOUT_ENABLED !== 'true' && serviceHostname(url.hostname)) {
     if (checkoutPath === '/api/payments/resume') return failure('stripe_checkout_disabled', 503);
     if (checkoutPath === '/api/payments/checkout' && request.method === 'POST') {
@@ -161,13 +210,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !reportsOnly) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim');
-  if (!read && !authWrite) return failure('financial_review_required', 503);
+  if (!read && !authWrite && !captureRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);

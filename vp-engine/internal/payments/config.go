@@ -42,9 +42,10 @@ type Config struct {
 
 	StripeSecretKey     string
 	StripeWebhookSecret string
-	StripeProductID     string              // Producto Stripe "PACK MINDBLISS" (prod_…)
-	StripePMConfig      string              // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
-	NOWPayments         NOWPaymentsSettings `json:"-"` // Server-only; not a financial activation gate.
+	StripeProductID     string                     // Producto Stripe "PACK MINDBLISS" (prod_…)
+	StripePMConfig      string                     // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
+	NOWPayments         NOWPaymentsSettings        `json:"-"` // Server-only; not a financial activation gate.
+	NOWPaymentsCapture  NOWPaymentsCaptureSettings `json:"-"` // Isolated append-only notification capture.
 
 	// ServiceToken: secreto compartido que el BFF Next debe enviar en
 	// X-VP-Service-Token para crear sesiones de checkout.
@@ -269,6 +270,10 @@ func LoadConfig() (*Config, error) {
 
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
+	}
+	c.NOWPaymentsCapture, err = loadNOWPaymentsCaptureSettings(c.DatabaseURL)
+	if err != nil {
+		return nil, err
 	}
 	if c.ReadOnly {
 		c.StripeCheckoutEnabled = false

@@ -19,6 +19,8 @@
       "vars": {
         "CORE_ENV": "staging",
         "STRIPE_CHECKOUT_ENABLED": "false",
+        "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "false",
+        "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "false",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
@@ -56,6 +58,8 @@
       "vars": {
         "CORE_ENV": "production",
         "STRIPE_CHECKOUT_ENABLED": "false",
+        "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "false",
+        "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "true",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",

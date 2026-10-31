@@ -33,6 +33,13 @@ func (c *Config) ReadOnlyHandler(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
+		// This explicit exception only captures signed evidence into a separate
+		// restricted pool; it does not unlock checkout or operational finances.
+		if c.NOWPaymentsCapture.Enabled && r.URL.RawPath == "" && ((r.Method == http.MethodPost && r.URL.Path == "/api/webhooks/nowpayments" && r.URL.RawQuery == "" && !r.URL.ForceQuery) ||
+			(r.Method == http.MethodGet && r.URL.Path == "/api/payments/nowpayments/status")) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 			writeErr(w, http.StatusServiceUnavailable, "service_read_only")
 			return

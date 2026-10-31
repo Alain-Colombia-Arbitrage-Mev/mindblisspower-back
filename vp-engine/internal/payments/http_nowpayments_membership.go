@@ -134,6 +134,10 @@ func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt N
 // invoke activateVerifiedCheckout (Stripe-specific), post a wallet movement,
 // change a node/rank, or infer the old Stripe reserve/commission percentages.
 func (h *Handler) handleNOWPaymentsWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.nowCapture != nil {
+		h.handleNOWPaymentsCapture(w, r)
+		return
+	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")

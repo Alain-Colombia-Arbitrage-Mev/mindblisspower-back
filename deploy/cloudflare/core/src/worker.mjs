@@ -81,7 +81,7 @@ export class PrivateCoreProbe extends WorkerEntrypoint {
 }
 for (const [source, Class, hosts] of [
   ['api', CoreApi, ['engine-grpc.core.internal', 'engine.core.internal']],
-  ['payments', CorePayments, ['engine.core.internal', 'auth.core.internal']],
+  ['payments', CorePayments, ['engine.core.internal', 'auth.core.internal', 'api.nowpayments.io']],
   ['withdrawals', CoreWithdrawals, ['auth.core.internal']],
 ]) {
   // Assignment is required: static fields would shadow the SDK's registry setter.

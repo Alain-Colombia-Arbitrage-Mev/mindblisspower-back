@@ -57,7 +57,26 @@ export function containerEnvironment(service, env) {
     values[target] = env[source];
   }
   const target = postgresTarget(values.DATABASE_URL);
-  if (service === 'payments') values.STRIPE_CHECKOUT_ENABLED = String(env.STRIPE_CHECKOUT_ENABLED === 'true');
+  if (service === 'payments') {
+    values.STRIPE_CHECKOUT_ENABLED = String(env.STRIPE_CHECKOUT_ENABLED === 'true');
+    // Capture has a separate, append-only database role. The report connection
+    // remains a reader; no provider can create invoices or fulfil memberships.
+    values.NOWPAYMENTS_MEMBERSHIPS_ENABLED = 'false';
+    const captureEnabled = env.NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED === 'true';
+    values.NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED = String(captureEnabled);
+    if (captureEnabled) {
+      for (const key of ['NOWPAYMENTS_WEBHOOK_DATABASE_URL', 'NOWPAYMENTS_API_KEY', 'NOWPAYMENTS_IPN_SECRET']) {
+        if (typeof env[key] !== 'string' || !env[key].trim() || env[key].length > (key.endsWith('DATABASE_URL') ? 8192 : 4096)
+          || /[\r\n]/.test(env[key])) throw new Error('NOWPayments capture configuration is incomplete');
+      }
+      const capture = postgresTarget(env.NOWPAYMENTS_WEBHOOK_DATABASE_URL);
+      if (capture.host !== target.host || capture.port !== target.port || capture.database !== target.database
+        || capture.user === target.user) throw new Error('NOWPayments capture database isolation is not configured');
+      Object.assign(values, { NOWPAYMENTS_WEBHOOK_DATABASE_URL: env.NOWPAYMENTS_WEBHOOK_DATABASE_URL,
+        NOWPAYMENTS_API_KEY: env.NOWPAYMENTS_API_KEY, NOWPAYMENTS_IPN_SECRET: env.NOWPAYMENTS_IPN_SECRET,
+        NOWPAYMENTS_ENV: 'production' });
+    }
+  }
   if (service === 'api') {
     const engine = new URL(values.VP_ENGINE_GRPC_URL);
     if (engine.protocol !== 'https:' || !engine.hostname || engine.username || engine.password || engine.hash || engine.search || engine.pathname !== '/') throw new Error('Engine mTLS origin is invalid');

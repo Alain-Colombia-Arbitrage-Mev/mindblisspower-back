@@ -19,6 +19,7 @@ type Handler struct {
 	store            *Store
 	gw               *StripeGateway
 	nowMemberships   *nowPaymentsMemberships
+	nowCapture       *nowPaymentsCapture
 	log              zerolog.Logger
 	serviceToken     string
 	adminEmails      []string
