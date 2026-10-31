@@ -83,3 +83,30 @@ After traffic starts, repair forward. Do **not** drop the new financial tables,
 delete the seeded plan, restore an empty schema over production, or revert the
 identity CHECK: new verified-email bindings and financial references may already
 exist. A schema backup cannot undo those runtime writes.
+
+## Published verification, 2026-10-31
+
+- Core Worker `250a9571-58a9-401b-9e29-c7a38f610641`, 100%.
+- Portal Worker `381fe1f6-708e-4bc3-ae4d-94549d06dc73`, 100%, NOW admission enabled.
+- API Container v8 and Payments Container v10: pinned images, completed rollouts,
+  100% target version, zero reported deployment errors. Engine v1 and Withdrawals
+  v3 unchanged. Admin Worker `3165879e-cf5e-4171-a30a-113580829d10` unchanged.
+- Real private readiness returned HTTP 200, `enabled:true`, `ready:true`; the new
+  restricted login was independently checked with TLS and READ ONLY. Complete
+  runtime branch/host/port/database comparisons passed.
+- Public portal/admin login and portal JWKS: 200. Anonymous packages: 307 to
+  login; anonymous same-origin checkout: 401; unsigned IPN: 401; public internal
+  readiness path: 404. Responses remained private/no-store. One local DNS lookup
+  failed transiently; the bounded read-only login repeat returned 200.
+- Final read-only database audit: 838 Stripe sales and 121,072 affiliate rows
+  retain their exact pre-release hashes; identity bindings remain two. One active
+  plan and engine schema v1; no operational orders, PV, inflows, jobs or awards.
+- Core: 74 unit tests. Portal: 474 tests and 74 workerd smoke probes on the Linux
+  bundle. Go targeted/full-provider race suites and the restricted PostgreSQL
+  fixture with Linux `-race` passed. No test invoice, charge or email was created.
+
+These checks certify deployment, configuration and safety boundaries, **not an
+actual provider payment or financial disbursement**. The first real owner-initiated
+purchase must still verify invoice creation, signed event delivery, atomic
+activation and the owned activation popup end to end. Historical settlements
+and external withdrawals remain disabled/reviewed.
