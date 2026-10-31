@@ -36,7 +36,18 @@ func (s *Service) ValidateReady(ctx context.Context, tx pgx.Tx) error {
 	}
 	// Validate already-activated sources before accepting another charge. A
 	// corrupt/missing NOW manifest must not strand an otherwise payable invoice.
-	_, err := s.load(ctx, tx)
+	// The private readiness GET deliberately uses a PostgreSQL READ ONLY
+	// transaction. Row-lock clauses are forbidden there, even with zero sources.
+	// Actual checkout/write transactions retain their source SHARE locks.
+	var readOnly bool
+	if err := tx.QueryRow(ctx, `SELECT current_setting('transaction_read_only')::boolean`).Scan(&readOnly); err != nil {
+		return err
+	}
+	mode := sourceShareLocked
+	if readOnly {
+		mode = sourceReadOnly
+	}
+	_, err := s.load(ctx, tx, mode)
 	return err
 }
 
@@ -124,9 +135,16 @@ func (u *universe) index() {
 	}
 }
 
-func (s *Service) load(ctx context.Context, tx pgx.Tx) (universe, error) {
+type sourceLoadMode uint8
+
+const (
+	sourceShareLocked sourceLoadMode = iota
+	sourceReadOnly
+)
+
+func (s *Service) load(ctx context.Context, tx pgx.Tx, mode sourceLoadMode) (universe, error) {
 	u := universe{members: map[int64]member{}, directLeg: map[int64]string{}}
-	rows, err := tx.Query(ctx, `SELECT o.attempt_id::text,o.affiliate_id,o.affiliate_package_id,o.investment_cd_id,pv.pv,
+	query := `SELECT o.attempt_id::text,o.affiliate_id,o.affiliate_package_id,o.investment_cd_id,pv.pv,
  a.amount_usd,i.net_usd,o.roi_base_annual_rate,o.roi_qualified_annual_rate,o.activated_at,cd.start_at,cd.matures_at,
  cd.status::text,o.plan_snapshot::text,(ap.status='active' AND cs.closed_at IS NULL),ap.status::text,cs.closed_at,ap.expired_at,cd.closed_at,o.roi_tier_id
  FROM payments.nowpayments_operational_order o
@@ -144,7 +162,11 @@ func (s *Service) load(ctx context.Context, tx pgx.Tx) (universe, error) {
  AND EXISTS(SELECT 1 FROM payments.nowpayments_membership_receipt r WHERE r.attempt_id=o.attempt_id AND r.payment_id=a.payment_id AND r.finished_verified AND NOT r.multiple_payments)
  AND NOT EXISTS(SELECT 1 FROM payments.nowpayments_membership_receipt r WHERE r.attempt_id=o.attempt_id AND(r.multiple_payments OR r.api_evidence->>'payment_status' NOT IN('waiting','confirming','confirmed','sending','finished')))
  AND EXISTS(SELECT 1 FROM payments.nowpayments_webhook_capture c WHERE c.matched_attempt_id=o.attempt_id AND c.payment_id=a.payment_id AND c.environment='production' AND c.finished_verified AND NOT c.risk_detected AND c.disposition<>'quarantined')
- ORDER BY o.activated_at,o.attempt_id LIMIT 5001 FOR SHARE OF o`)
+ ORDER BY o.activated_at,o.attempt_id LIMIT 5001`
+	if mode != sourceReadOnly {
+		query += " FOR SHARE OF o"
+	}
+	rows, err := tx.Query(ctx, query)
 	if err != nil {
 		return u, fmt.Errorf("load NOW sources: %w", err)
 	}
@@ -362,7 +384,7 @@ func (s *Service) Run(parent context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
 		return err
 	}
-	u, err := s.load(ctx, tx)
+	u, err := s.load(ctx, tx, sourceShareLocked)
 	if err != nil {
 		return err
 	}

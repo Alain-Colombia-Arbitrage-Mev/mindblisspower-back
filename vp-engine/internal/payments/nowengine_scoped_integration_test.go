@@ -50,7 +50,39 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
  INSERT INTO payments.stripe_sale VALUES('pi_legacy_frozen');`); err != nil {
 		t.Fatal(err)
 	}
-	service := nowengine.New(pool, root)
+	writer := nowEngineRestrictedWriter(t, ctx, pool)
+	defer writer.Close()
+	service := nowengine.New(writer, root)
+	assertReadOnlyReady := func(stage string) {
+		t.Helper()
+		tx, err := writer.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		if err != nil {
+			t.Fatal(stage, err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE now_engine_synthetic`); err != nil {
+			t.Fatal("restricted read-only role", err)
+		}
+		const snapshotSQL = `SELECT jsonb_build_object('orders',(SELECT count(*) FROM payments.nowpayments_operational_order),
+ 'periods',(SELECT count(*) FROM payments.nowpayments_engine_period),'roi',(SELECT count(*) FROM payments.nowpayments_engine_roi_state),
+ 'rate_days',(SELECT count(*) FROM payments.nowpayments_engine_roi_rate_day),'obligations',(SELECT count(*) FROM payments.nowpayments_engine_obligation),
+ 'payments',(SELECT count(*) FROM payments.nowpayments_engine_payment),'wallets',(SELECT count(*) FROM mlm.wallet),
+ 'last_run',(SELECT last_run_at FROM payments.nowpayments_engine_control WHERE singleton))::text`
+		var before, after string
+		if err := tx.QueryRow(ctx, snapshotSQL).Scan(&before); err != nil {
+			t.Fatal(stage, err)
+		}
+		if err := service.ValidateReady(ctx, tx); err != nil {
+			t.Fatal("read-only readiness "+stage, err)
+		}
+		if err := tx.QueryRow(ctx, snapshotSQL).Scan(&after); err != nil || after != before {
+			t.Fatal("readiness mutated state "+stage, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal("read-only readiness commit "+stage, err)
+		}
+	}
+	assertReadOnlyReady("zero sources")
 	store := NewNOWPaymentsOperationalStore(pool)
 	store.SetNOWOperationalReadiness(service.ValidateReady)
 	capture := NewNOWPaymentsCaptureStore(pool)
@@ -117,37 +149,7 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
  UPDATE mlm.affiliate SET left_pv_lifetime=100000000,right_pv_lifetime=100000000 WHERE id IN(SELECT affiliate_id FROM payments.nowpayments_operational_order);`); err != nil {
 		t.Fatal("backdate isolated fixture", err)
 	}
-	if _, err := pool.Exec(ctx, `CREATE ROLE now_engine_synthetic LOGIN NOINHERIT PASSWORD 'synthetic-isolated-only'`); err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := os.ReadFile(filepath.Join(findRepoRoot(t), "_meta", "roles", "nowpayments_operational_runtime.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	grantTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := grantTx.Exec(ctx, `SELECT set_config('mindbliss.nowpayments_operations_role','now_engine_synthetic',true)`); err != nil {
-		grantTx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	if _, err := grantTx.Exec(ctx, string(manifest)); err != nil {
-		grantTx.Rollback(ctx)
-		t.Fatal("exact production runtime manifest", err)
-	}
-	if err := grantTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	cfg := pool.Config()
-	cfg.ConnConfig.User = "now_engine_synthetic"
-	cfg.ConnConfig.Password = "synthetic-isolated-only"
-	writer, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writer.Close()
-	service = nowengine.New(writer, root)
+	assertReadOnlyReady("activated sources")
 	if err := service.Run(ctx); err != nil {
 		t.Fatal("first bounded backlog batch", err)
 	}
@@ -219,4 +221,37 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
 	if err := service.ValidateReady(ctx, tx); err == nil {
 		t.Fatal("risk invoice readiness accepted")
 	}
+}
+
+func nowEngineRestrictedWriter(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *pgxpool.Pool {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `CREATE ROLE now_engine_synthetic LOGIN NOINHERIT PASSWORD 'synthetic-isolated-only'`); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(findRepoRoot(t), "_meta", "roles", "nowpayments_operational_runtime.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grantTx.Rollback(ctx)
+	if _, err := grantTx.Exec(ctx, `SELECT set_config('mindbliss.nowpayments_operations_role','now_engine_synthetic',true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grantTx.Exec(ctx, string(manifest)); err != nil {
+		t.Fatal("exact production runtime manifest", err)
+	}
+	if err := grantTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cfg := pool.Config()
+	cfg.ConnConfig.User = "now_engine_synthetic"
+	cfg.ConnConfig.Password = "synthetic-isolated-only"
+	writer, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writer
 }
