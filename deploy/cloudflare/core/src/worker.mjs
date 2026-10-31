@@ -5,7 +5,7 @@ import { containerEnvironment } from './runtime-env.mjs';
 import { privateReadiness } from './private-probe.mjs';
 import { captureConfiguration } from './capture-configuration.mjs';
 import { runNOWPaymentsScheduled } from './nowpayments-scheduled.mjs';
-import { privateNOWPaymentsReadiness } from './nowpayments-readiness.mjs';
+import { privateNOWPaymentsReadiness, privateNOWPaymentsDiagnostics } from './nowpayments-readiness.mjs';
 import { relayWebSocketToSocket } from '../../../../app/src/clients/opaque-tcp-relay.mjs';
 export { ContainerProxy };
 
@@ -77,6 +77,10 @@ const resolveFor = env => (service, instance) => getContainer(env[BINDINGS[servi
 // Named service-binding RPC only. No HTTP fetch handler, arbitrary target,
 // request forwarding or public route is added to the default Worker.
 export class PrivateCoreProbe extends WorkerEntrypoint {
+  nowpaymentsDiagnostics() {
+    if (arguments.length !== 0) throw new Error('NOWPayments diagnosis accepts no arguments');
+    return privateNOWPaymentsDiagnostics(this.env, resolveFor(this.env));
+  }
   nowpaymentsReadiness() {
     if (arguments.length !== 0) throw new Error('NOWPayments readiness accepts no arguments');
     return privateNOWPaymentsReadiness(this.env, resolveFor(this.env));
