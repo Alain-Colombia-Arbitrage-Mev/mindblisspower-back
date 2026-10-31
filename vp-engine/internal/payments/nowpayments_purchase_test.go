@@ -7,7 +7,34 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestNOWPurchaseReservationRetriesOnlyRolledBackLocalConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		code, constraint  string
+		operational, want bool
+	}{
+		{"40001", "", true, true},
+		{"40001", "", false, true},
+		{"23505", "nowpayments_purchase_request_pkey", true, true},
+		{"23505", "nowpayments_operational_order_capacity_slot_key", true, true},
+		{"23505", "nowpayments_purchase_request_pkey", false, false},
+		{"23505", "nowpayments_membership_attempt_environment_invoice_id_key", true, false},
+		{"23505", "unrelated_unique", true, false},
+		{"40P01", "", true, false},
+		{"42501", "", true, false},
+	} {
+		err := &pgconn.PgError{Code: tc.code, ConstraintName: tc.constraint}
+		if got := retryNOWPurchaseReservation(err, tc.operational); got != tc.want {
+			t.Fatalf("unsafe local retry classification: %s/%s got %v", tc.code, tc.constraint, got)
+		}
+	}
+	if retryNOWPurchaseReservation(nil, true) || retryNOWPurchaseReservation(errors.New("provider outcome unknown"), true) {
+		t.Fatal("success or external provider uncertainty must never be retried")
+	}
+}
 
 func TestNOWPurchaseProjectionFailsClosedOnEvidenceAndUnknownCreation(t *testing.T) {
 	stamp := "2026-10-31T10:00:00Z"

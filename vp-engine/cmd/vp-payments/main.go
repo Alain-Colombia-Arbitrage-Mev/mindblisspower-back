@@ -146,6 +146,9 @@ func run() error {
 				return err
 			}
 			defer tx.Rollback(ctx)
+			if err := operationalStore.ValidateNOWPurchasePolicy(ctx, tx); err != nil {
+				return err
+			}
 			if err := engine.ValidateReady(ctx, tx); err != nil {
 				return err
 			}

@@ -139,8 +139,8 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Preserve Stripe/review eligibility. NOW operational purchases use their own
-	// durable request key and one-open-SKU constraint; multiple active CDs are
-	// allowed only there, never by weakening the legacy collection guard.
+	// durable request key; distinct explicit requests may remain pending or
+	// active for the same SKU without weakening the legacy collection guard.
 	if !nowOperational {
 		if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
 			h.log.Error().Msg("membership eligibility unavailable")

@@ -180,8 +180,8 @@ func nowPurchaseInvoiceURL(environment, invoiceID string) (string, error) {
 	return "https://" + host + "/payment/?iid=" + invoiceID, nil
 }
 
-// One request may be mapped to the same already-open SKU, but its immutable
-// mapping remains valid after activation/abandonment so retries never buy again.
+// Only the exact owner/environment/request key identifies a retry. A different
+// explicit request may buy the same SKU independently, including while pending.
 func bindNOWPurchaseRequest(ctx context.Context, tx pgx.Tx, in NOWPaymentsMembershipInput, attemptID string) error {
 	_, err := tx.Exec(ctx, `INSERT INTO payments.nowpayments_purchase_request(auth_subject,environment,purchase_request_id,attempt_id)
  VALUES($1,$2,$3::uuid,$4::uuid)`, in.Subject, in.Environment, in.PurchaseRequestID, attemptID)
@@ -192,10 +192,6 @@ func lookupNOWPurchaseRequest(ctx context.Context, tx pgx.Tx, in NOWPaymentsMemb
 	var attemptID string
 	err := tx.QueryRow(ctx, `SELECT attempt_id::text FROM payments.nowpayments_purchase_request
  WHERE auth_subject=$1 AND environment=$2 AND purchase_request_id=$3::uuid`, in.Subject, in.Environment, in.PurchaseRequestID).Scan(&attemptID)
-	mapped := err == nil
-	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `SELECT id::text FROM payments.nowpayments_membership_attempt WHERE person_id=$1 AND package_id=$2 AND environment=$3 AND checkout_open AND state<>'closed_reviewed'`, person, in.PackageID, in.Environment).Scan(&attemptID)
-	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NOWPaymentsMembershipAttempt{}, false, nil
 	}
@@ -217,13 +213,33 @@ func lookupNOWPurchaseRequest(ctx context.Context, tx pgx.Tx, in NOWPaymentsMemb
 	if snapshot.operationalState == "activated" || snapshot.CancelledAt != nil || !snapshot.open {
 		return attempt, true, ErrNOWPurchaseProcessed
 	}
-	if !mapped {
-		if err := bindNOWPurchaseRequest(ctx, tx, in, attemptID); err != nil {
-			return attempt, true, err
-		}
-	}
 	attempt.Reused, attempt.Reusable = true, snapshot.CanResume
 	return attempt, true, nil
+}
+
+// ValidateNOWPurchasePolicy proves that the reviewed independent-intent schema
+// is installed. Catalog reads need no new runtime grants. This gate belongs to
+// new checkout/readiness only, never to capture or already-issued payment jobs.
+func (s *Store) ValidateNOWPurchasePolicy(ctx context.Context, tx pgx.Tx) error {
+	if !s.nowOperational {
+		return ErrNOWOperationalPlan
+	}
+	var ready bool
+	err := tx.QueryRow(ctx, `SELECT to_regclass('payments.nowpayments_membership_outstanding_unique') IS NULL
+ AND EXISTS(SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('payments.nowpayments_membership_open_lookup_idx')
+ AND i.indrelid=to_regclass('payments.nowpayments_membership_attempt') AND i.indisvalid AND i.indisready
+ AND NOT i.indisunique AND i.indexprs IS NULL AND i.indnkeyatts=3 AND i.indnatts=3
+ AND pg_get_expr(i.indpred,i.indrelid)='((state <> ''closed_reviewed''::text) AND checkout_open)'
+ AND pg_get_indexdef(i.indexrelid,1,true)='person_id' AND pg_get_indexdef(i.indexrelid,2,true)='package_id'
+ AND pg_get_indexdef(i.indexrelid,3,true)='environment')
+ AND EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('payments.nowpayments_purchase_request')
+ AND c.contype='p' AND c.convalidated AND c.conkey=ARRAY[1,2,3]::smallint[]
+ AND pg_get_constraintdef(c.oid)='PRIMARY KEY (auth_subject, environment, purchase_request_id)'
+ AND EXISTS(SELECT 1 FROM pg_index p WHERE p.indexrelid=c.conindid AND p.indisunique AND p.indisvalid AND p.indisready))`).Scan(&ready)
+	if err != nil || !ready {
+		return ErrNOWOperationalPlan
+	}
+	return nil
 }
 
 func (s *Store) ListNOWPurchases(ctx context.Context, environment, subject, email string) (NOWPurchaseHistory, error) {

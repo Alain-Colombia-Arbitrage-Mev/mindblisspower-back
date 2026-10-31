@@ -174,7 +174,40 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 	}
 	assertPendingPreserved()
 
-	t.Run("simultaneous retries create only one provider invoice", func(t *testing.T) {
+	t.Run("policy85 checks the full index definition using the actual restricted role", func(t *testing.T) {
+		check := func(wantReady bool) {
+			t.Helper()
+			tx, err := writer.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			err = store.ValidateNOWPurchasePolicy(ctx, tx)
+			if (err == nil) != wantReady {
+				t.Fatal("incorrect independent purchase policy readiness", wantReady, err)
+			}
+		}
+		check(true)
+		var correctDefinition string
+		if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef('payments.nowpayments_membership_open_lookup_idx'::regclass)`).Scan(&correctDefinition); err != nil {
+			t.Fatal(err)
+		}
+		for _, incorrect := range []string{
+			`CREATE INDEX nowpayments_membership_open_lookup_idx ON payments.nowpayments_membership_attempt(person_id,package_id,environment) WHERE checkout_open`,
+			`CREATE INDEX nowpayments_membership_open_lookup_idx ON payments.nowpayments_membership_attempt(package_id,person_id,environment) WHERE state<>'closed_reviewed' AND checkout_open`,
+		} {
+			if _, err := pool.Exec(ctx, `DROP INDEX payments.nowpayments_membership_open_lookup_idx;`+incorrect); err != nil {
+				t.Fatal(err)
+			}
+			check(false)
+			if _, err := pool.Exec(ctx, `DROP INDEX payments.nowpayments_membership_open_lookup_idx;`+correctDefinition); err != nil {
+				t.Fatal(err)
+			}
+		}
+		check(true)
+	})
+
+	t.Run("same request retries once while distinct requests buy independently", func(t *testing.T) {
 		for _, sameKey := range []bool{true, false} {
 			pkg := 8402
 			if !sameKey {
@@ -209,23 +242,97 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 				}
 			}
 			var attempts, opened int
-			if err := pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE checkout_open) FROM payments.nowpayments_membership_attempt WHERE package_id=$1`, pkg).Scan(&attempts, &opened); err != nil || attempts != 1 || opened != 1 || ok < 1 || providerCalls.Load()-before != 1 {
-				t.Fatal("double click reserved or invoiced more than one purchase", sameKey, attempts, opened, ok, providerCalls.Load()-before, err)
+			want := 1
+			if !sameKey {
+				want = 2
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE checkout_open) FROM payments.nowpayments_membership_attempt WHERE package_id=$1`, pkg).Scan(&attempts, &opened); err != nil || attempts != want || opened != want || ok < want || providerCalls.Load()-before != int64(want) {
+				t.Fatal("request idempotency or independent purchase count violated", sameKey, attempts, opened, ok, providerCalls.Load()-before, err)
 			}
 			status, replay, _ := checkout(first)
-			if status != http.StatusOK || !replay.Reused || replay.URL == "" || providerCalls.Load()-before != 1 {
+			if status != http.StatusOK || !replay.Reused || replay.URL == "" || providerCalls.Load()-before != int64(want) {
 				t.Fatal("retry did not reuse the persisted invoice", status, replay.Reused)
 			}
 		}
 	})
 
+	t.Run("a concurrent request key cannot change its immutable SKU", func(t *testing.T) {
+		first, second := owner.input(8420), owner.input(8421)
+		second.PurchaseRequestID = first.PurchaseRequestID
+		before := providerCalls.Load()
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		results := make(chan int, 2)
+		for _, input := range []NOWPaymentsMembershipInput{first, second} {
+			wg.Go(func() {
+				<-start
+				status, _, body := checkout(input)
+				if status == http.StatusConflict && !strings.Contains(body, "purchase_request_conflict") {
+					t.Error("SKU collision did not retain an immutable conflict", body)
+				}
+				results <- status
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		var successes, conflicts int
+		for status := range results {
+			if status == http.StatusOK {
+				successes++
+			} else if status == http.StatusConflict {
+				conflicts++
+			} else {
+				t.Fatal("unexpected SKU race result", status)
+			}
+		}
+		var attempts, mappings int
+		if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM payments.nowpayments_membership_attempt WHERE package_id IN(8420,8421)),
+ (SELECT count(*) FROM payments.nowpayments_purchase_request WHERE auth_subject=$1 AND environment='production' AND purchase_request_id=$2::uuid)`, owner.subject, first.PurchaseRequestID).Scan(&attempts, &mappings); err != nil || attempts != 1 || mappings != 1 || successes != 1 || conflicts != 1 || providerCalls.Load()-before != 1 {
+			t.Fatal("same key generated two SKUs or invoices", attempts, mappings, successes, conflicts, err)
+		}
+	})
+
+	t.Run("an observed waiting payment never consumes a separate explicit purchase", func(t *testing.T) {
+		in := owner.input(8422)
+		status, first, _ := checkout(in)
+		if status != http.StatusOK {
+			t.Fatal("first pending purchase", status)
+		}
+		// Invoice identity comes from the stored attempt, not an invented client reference.
+		stored, err := store.LookupNOWPaymentsMembership(ctx, first.OrderID, "production")
+		if err != nil {
+			t.Fatal(err)
+		}
+		waiting := syntheticNOWPayment(first.OrderID, stored.InvoiceID, "8422001", "waiting")
+		waiting.PriceAmount, waiting.PayAmount, waiting.ActuallyPaid = "100.00", "100", "0"
+		record(waiting, strings.Repeat("a", 64))
+		var snapshot string
+		const snapshotSQL = `SELECT jsonb_build_object('attempt',to_jsonb(a),'order',to_jsonb(o),'capture',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM payments.nowpayments_webhook_capture c WHERE c.matched_attempt_id=a.id))::text FROM payments.nowpayments_membership_attempt a JOIN payments.nowpayments_operational_order o ON o.attempt_id=a.id WHERE a.id=$1::uuid`
+		if err := pool.QueryRow(ctx, snapshotSQL, first.OrderID).Scan(&snapshot); err != nil {
+			t.Fatal(err)
+		}
+		before := providerCalls.Load()
+		if status, _, _ := checkout(in); status == http.StatusOK || providerCalls.Load() != before {
+			t.Fatal("waiting retry must not hand out another invoice", status)
+		}
+		status, second, _ := checkout(owner.input(8422))
+		if status != http.StatusOK || second.Reused || second.OrderID == first.OrderID || providerCalls.Load()-before != 1 {
+			t.Fatal("explicit independent purchase failed", status, second.Reused)
+		}
+		var after string
+		if err := pool.QueryRow(ctx, snapshotSQL, first.OrderID).Scan(&after); err != nil || snapshot != after {
+			t.Fatal("new purchase changed the old waiting invoice or its proof", err)
+		}
+	})
+
 	t.Run("same SKU memberships retain independent CDs and request identity", func(t *testing.T) {
 		in, first := create(8404)
+		_, second := create(8404)
 		activate(first, strings.Repeat("1", 64))
 		if _, err := store.CreateNOWPaymentsMembership(ctx, in); !errors.Is(err, ErrNOWPurchaseProcessed) {
 			t.Fatal("old request key opened a fresh purchase after activation", err)
 		}
-		_, second := create(8404)
 		activate(second, strings.Repeat("2", 64))
 		if first.ID == second.ID {
 			t.Fatal("explicit new purchase reused an activated membership")
@@ -312,8 +419,8 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 			t.Fatal("unknown request retried provider creation", status)
 		}
 		reused, err := store.CreateNOWPaymentsMembership(ctx, owner.input(8406))
-		if err != nil || reused.ID != order.ID || !reused.Reused || reused.Reusable {
-			t.Fatal("new key bypassed an uncertain invoice instead of retaining its review", err)
+		if err != nil || reused.ID == order.ID || reused.Reused || reused.Reusable {
+			t.Fatal("explicit new request must remain independent from the uncertain invoice", err)
 		}
 	})
 
@@ -666,5 +773,33 @@ func applyNOWPurchaseLifecycleMigration(t *testing.T, ctx context.Context, pool 
 	}
 	if _, err := pool.Exec(ctx, string(data)); err != nil {
 		t.Fatal("lifecycle migration84", err)
+	}
+	store := NewNOWPaymentsOperationalStore(pool)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ValidateNOWPurchasePolicy(ctx, tx); !errors.Is(err, ErrNOWOperationalPlan) {
+		t.Fatal("old one-open schema must not admit independent purchase requests", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(filepath.Join(findRepoRoot(t), "_meta", "migration", "85_nowpayments_independent_purchase_requests.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, string(data)); err != nil {
+		t.Fatal("independent-intent migration85", err)
+	}
+	tx, err = pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ValidateNOWPurchasePolicy(ctx, tx); err != nil {
+		t.Fatal("new purchase policy readiness", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

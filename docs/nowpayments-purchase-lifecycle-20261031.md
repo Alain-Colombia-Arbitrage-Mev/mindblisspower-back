@@ -9,10 +9,11 @@ the same catalog package. Stripe initiation and external payouts remain disabled
 - Each explicit checkout intention has a nonzero canonical UUID
   `purchase_request_id`. Its subject/environment/attempt mapping is append-only.
   Replaying an activated or cancelled intention cannot create a new invoice.
-- One outstanding checkout per person/package/environment is retained, including
-  unknown provider outcomes. Reusing a known, unpaid invoice never calls the
-  provider. A new explicit intention can purchase the same package after a prior
-  purchase is activated or safely abandoned locally.
+- Migration 85 supersedes the one-outstanding-checkout-per-SKU rule from 84.
+  Distinct explicit request UUIDs can have independent pending purchases of the
+  same package. Existing invoices and review evidence are retained. Replaying an
+  exact request never calls the provider again; its immutable mapping remains
+  authoritative even after cancellation, activation or an unknown outcome.
 - Every activated purchase has its own affiliate package, principal and 365-day
   investment CD. The existing catalog price, included 1% provider cost, net 99%
   commission base, calendar-month commission hold and scoped NOW engine remain
@@ -50,6 +51,13 @@ same transaction. Attempt -> operational order lock ordering is shared with
 fulfillment; cancellation never locks the person first. A deferred constraint
 requires cancellation audit, terminal blocked order and closed checkout to commit
 together. Closed checkout slots and audit mappings cannot be reopened/rewritten.
+
+Migration 85 replaces only the open-checkout unique index with an equivalent
+nonunique lookup index; the exact subject/environment/request primary key stays
+intact. New-checkout readiness validates this reviewed index and request key.
+Existing webhook capture and fulfillment do not depend on the new checkout gate.
+The 5000-order capacity guard is unchanged. Do not recreate the old unique index
+after independent pending purchases exist or delete orders to force a rollback.
 
 Do not run a destructive down migration once new request or cancellation evidence
 exists. Do not replay historical unmatched webhook captures, create synthetic paid

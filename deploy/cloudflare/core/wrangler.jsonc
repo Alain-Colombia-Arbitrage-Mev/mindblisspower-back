@@ -90,7 +90,7 @@
       "containers": [
         { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-verified-link-20261031@sha256:7e14a9faae32428eda7b932bcea12d5de4f2b2ebe6f949ad8027db59ecf38f97", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
-        { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-payment-speed-20261031@sha256:211d3e14ca1b995aa7133adb613f09deff44ee023ca0e9e60446c0cc97f210c7", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
+        { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-independent-purchases-20261031@sha256:adcb12b65f666e30fc8c2e02389c3cfdcbd8da658b80af6d6f158d1dec5846ba", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }
       ]
     }

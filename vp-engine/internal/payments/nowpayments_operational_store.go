@@ -65,7 +65,7 @@ func (s *Store) prepareNOWOperationalOrder(ctx context.Context, tx pgx.Tx, order
 	if err := tx.QueryRow(ctx, `INSERT INTO payments.nowpayments_operational_order(attempt_id,plan_config_id,roi_tier_id,cd_lock_days,lifetime_cap_factor,plan_snapshot,roi_base_annual_rate,roi_qualified_annual_rate,capacity_slot)
  SELECT $1::uuid,$2,$3,$4,$5,$6::jsonb,$7,$8,slot FROM generate_series(1,5000) slot
  WHERE NOT EXISTS(SELECT 1 FROM payments.nowpayments_operational_order WHERE capacity_slot=slot) ORDER BY slot LIMIT 1 RETURNING attempt_id::text`, order.ID, planID, tierID, lockDays, capFactor, planSnapshot, baseRate, qualifiedRate).Scan(&reserved); err != nil {
-		return ErrNOWOperationalPlan
+		return fmt.Errorf("%w: reserve NOW capacity: %w", ErrNOWOperationalPlan, err)
 	}
 	return nil
 }

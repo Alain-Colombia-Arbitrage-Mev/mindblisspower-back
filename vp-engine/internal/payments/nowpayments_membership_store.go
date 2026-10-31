@@ -98,12 +98,24 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 	// invoice is requested only after this function commits a genuinely new order.
 	for range 3 {
 		out, err := s.createNOWPaymentsMembership(ctx, in)
-		var conflict *pgconn.PgError
-		if !errors.As(err, &conflict) || conflict.Code != "40001" {
+		if !retryNOWPurchaseReservation(err, s.nowOperational) {
 			return out, err
 		}
 	}
 	return NOWPaymentsMembershipAttempt{}, ErrNOWPaymentsOutstanding
+}
+
+// Only rolled-back local reservations can retry. No provider call occurs until
+// a new attempt and its immutable request mapping commit. Under REPEATABLE READ
+// concurrent transactions can race on either the request PK or capacity slot.
+func retryNOWPurchaseReservation(err error, operational bool) bool {
+	var conflict *pgconn.PgError
+	if !errors.As(err, &conflict) {
+		return false
+	}
+	return conflict.Code == "40001" || (operational && conflict.Code == "23505" &&
+		(conflict.ConstraintName == "nowpayments_purchase_request_pkey" ||
+			conflict.ConstraintName == "nowpayments_operational_order_capacity_slot_key"))
 }
 
 func (s *Store) createNOWPaymentsMembership(ctx context.Context, in NOWPaymentsMembershipInput) (NOWPaymentsMembershipAttempt, error) {
@@ -129,6 +141,11 @@ func (s *Store) createNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 		return NOWPaymentsMembershipAttempt{}, fmt.Errorf("begin NOWPayments order: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+	if s.nowOperational {
+		if err := s.ValidateNOWPurchasePolicy(ctx, tx); err != nil {
+			return NOWPaymentsMembershipAttempt{}, err
+		}
+	}
 	var subject, publicID string
 	var personID int64
 	var affiliateID, existingSponsor *int64
