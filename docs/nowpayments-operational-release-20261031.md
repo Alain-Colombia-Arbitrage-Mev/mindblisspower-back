@@ -18,7 +18,7 @@ This release does not enable external withdrawals or provider payouts.
 ## Release artifacts
 
 - API: `mindbliss/api-verified-link-20261031@sha256:7e14a9faae32428eda7b932bcea12d5de4f2b2ebe6f949ad8027db59ecf38f97`.
-- Payments: `mindbliss/payments-now-operational-20261031@sha256:c0c105b188aef63a50b51f0e3510d8c11709c47d477f6b368c97013e60d4de19`.
+- Payments: `mindbliss/payments-now-readiness-20261031@sha256:26819997f46a4a8b6a12cd16d35b99e6643c96582887fce98e4fe20ea9ae5777` (includes the READ ONLY readiness regression fix, commit `f711034`).
 - Registry: `registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/`.
 - Core Engine and Withdrawals images stay at their previously published digests.
 - Migrations 33, 77, 78, 79, 80 and the exact explicit runtime ACL manifest are
