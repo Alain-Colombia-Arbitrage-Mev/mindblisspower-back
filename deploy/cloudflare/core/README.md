@@ -23,6 +23,43 @@ Financial mutations and jobs have additional guards. Publishing a Container is
 not confirmation that checkout, payouts, compensation or historical settlements work.
 Do not remove the canonical Stripe evidence to bypass an operational guard.
 
+## Isolated NOWPayments operational capability
+
+`NOWPAYMENTS_OPERATIONAL_ENABLED`, `NOWPAYMENTS_ENGINE_ENABLED` and
+`NOWPAYMENTS_MEMBERSHIPS_ENABLED` fail closed unless all are exactly `true`. The reviewed production release enables them only with
+the existing verified email/data gates and signed webhook capture. This does not
+enable `CORE_SERVICES_ENABLED`, `CORE_NETWORK_VERIFIED`, Stripe, withdrawals,
+global Engine RPC, legacy compensation schedulers or general financial/admin writes.
+
+The production-only five-minute Cron invokes a fixed private NOW job directly;
+it never starts a Container while any NOW gate is closed. Signed evidence is
+persisted before acknowledgement and a bounded leased outbox retries delivery.
+The isolated executor reads NOW-only PV, net inflows and immutable plan/ROI
+snapshots. It never closes global periods or uses recovered Stripe volume.
+`PrivateCoreProbe.nowpaymentsReadiness()` is a zero-argument, status-only RPC:
+it checks the real private runtime and schema without creating invoices or
+accruals. All `/api/payments/internal/*` fetch requests are denied at the generic
+gateway; no portal/public route exposes jobs or readiness.
+
+The exception forwards only an exact HTTPS `POST /api/payments/checkout` to
+`payments.core.internal`, with the NOWPayments provider, service token and a JWT
+envelope. Payments independently verifies the JWT, verified email and approved
+stable identity binding before creating the immutable order. Unknown webhook
+orders retain their quarantine policy; signed capture is not a way to claim one.
+
+The Payments report login remains unchanged and `SERVICE_READ_ONLY=true` stays
+fixed. `NOWPAYMENTS_OPERATIONAL_DATABASE_URL` must use a third restricted login,
+distinct from the report and capture roles, on the same verified-TLS database.
+Its reviewed SQL manifest grants only the NOW order/settlement workflow. There
+are no shared/global/default grants and no automatic application migrations.
+
+Provider egress adds only the exact HTTPS `POST /v1/invoice` contract: bounded
+JSON, positive USD price, server UUID, fixed merchant description/portal return
+URLs, fixed IPN callback and `is_fee_paid_by_user=false`. Redirects, retries,
+payouts, caller-selected destinations and alternate methods/paths remain denied.
+The existing exact GET for independently verifying payment evidence is unchanged.
+The provider API key and writer DSN are never forwarded to other Containers.
+
 ## Stripe checkout disabled
 
 `STRIPE_CHECKOUT_ENABLED=false` is explicit in both environments. Missing,
@@ -40,8 +77,9 @@ that were already issued: cancelling those sessions is a separate operation.
 
 Database authentication has a dedicated restricted writer; business reads use a
 different restricted role. Canonical public identifiers preserve existing network
-positions. Legacy accounts require approved identity linking after email verification;
-an email match alone never claims an existing person or tree node.
+positions. After email verification, a unique eligible nonprivileged legacy account
+may be linked automatically under migration 78. Ambiguous, blocked or privileged
+accounts still require review; an unverified email match never claims a tree node.
 
 Secrets are provisioned outside Git and are mapped explicitly per Container.
 Never deploy an administrative/shared database credential. Production mTLS uses

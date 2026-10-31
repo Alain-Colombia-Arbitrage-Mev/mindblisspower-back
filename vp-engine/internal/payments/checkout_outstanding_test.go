@@ -54,7 +54,7 @@ func TestCheckoutCrossProviderOutstandingIntegration(t *testing.T) {
 			TotalCents: 10100, Currency: "usd", ReferralCode: "synthetic-referral"}
 	}
 	nowInput := func(packageID int) NOWPaymentsMembershipInput {
-		return NOWPaymentsMembershipInput{Email: "cross-provider@example.test", Environment: "production", PackageID: packageID}
+		return NOWPaymentsMembershipInput{Subject: "synthetic-cross-provider", Email: "cross-provider@example.test", Environment: "production", PackageID: packageID}
 	}
 	// A legacy Stripe-only database must not require the prepared NOW migration.
 	if _, err := store.CreatePurchaseIntent(ctx, stripeInput(3000)); err != nil {

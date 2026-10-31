@@ -14,10 +14,15 @@ func TestReadOnlyStartupGuardsAllJobsAndStripe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var jobs, providers []*ast.BlockStmt
+	var jobs, providers, nowJobs []*ast.BlockStmt
 	wrapped := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		if statement, ok := n.(*ast.IfStmt); ok {
+			if enabled, ok := statement.Cond.(*ast.SelectorExpr); ok && enabled.Sel.Name == "Enabled" {
+				if feature, ok := enabled.X.(*ast.SelectorExpr); ok && feature.Sel.Name == "NOWPaymentsOperational" {
+					nowJobs = append(nowJobs, statement.Body)
+				}
+			}
 			ast.Inspect(statement.Cond, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -41,7 +46,7 @@ func TestReadOnlyStartupGuardsAllJobsAndStripe(t *testing.T) {
 		}
 		return true
 	})
-	if len(jobs) != 1 || !wrapped {
+	if len(jobs) != 1 || len(nowJobs) != 1 || !wrapped {
 		t.Fatal("all jobs need one explicit boundary and the router must be wrapped")
 	}
 	inside := func(pos token.Pos, blocks []*ast.BlockStmt) bool {
@@ -65,7 +70,7 @@ func TestReadOnlyStartupGuardsAllJobsAndStripe(t *testing.T) {
 		switch selector.Sel.Name {
 		case "NewTicker", "NewCommsSender", "NewSQSQueueClient", "NewCommsEventConsumer", "Loop":
 			count++
-			if !inside(call.Pos(), jobs) {
+			if !inside(call.Pos(), jobs) && !(selector.Sel.Name == "NewTicker" && inside(call.Pos(), nowJobs)) {
 				t.Errorf("background %s escaped the read-only guard", selector.Sel.Name)
 			}
 		case "NewStripeGateway", "NewKYCS3", "NewKYCOCR", "NewCognitoAdmin":

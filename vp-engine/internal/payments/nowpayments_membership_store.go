@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
 	"github.com/vicionpower/vp-engine/internal/nowpayments"
-	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 var (
@@ -32,6 +31,7 @@ var (
 // a person or claims a legacy network node by matching an unbound email.
 type NOWPaymentsMembershipInput struct {
 	Email, Environment string
+	Subject            string // Bound JWT subject provided only by the verified HTTP identity.
 	PackageID          int
 	SponsorAffiliateID *int64
 	PreferredSide      string
@@ -91,14 +91,21 @@ func (s *Store) LookupNOWPaymentsMembership(ctx context.Context, orderID, enviro
 // invoice request. A conflict never starts a second provider request, including
 // after a timeout whose actual provider outcome is unknown.
 func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsMembershipInput) (NOWPaymentsMembershipAttempt, error) {
-	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+	if err := s.requireNOWMembershipMode(ctx); err != nil {
 		return NOWPaymentsMembershipAttempt{}, err
 	}
 	if !validNOWPaymentsEnvironment(in.Environment) || in.PackageID <= 0 || strings.TrimSpace(in.Email) == "" ||
 		(in.PreferredSide != "" && normalizePreferredSide(in.PreferredSide) == "") || (in.SponsorAffiliateID != nil && *in.SponsorAffiliateID <= 0) {
 		return NOWPaymentsMembershipAttempt{}, ErrNOWPaymentsEvidence
 	}
-	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if strings.TrimSpace(in.Subject) == "" {
+		return NOWPaymentsMembershipAttempt{}, ErrCheckoutIdentityReview
+	}
+	options := pgx.TxOptions{}
+	if s.nowOperational {
+		options.IsoLevel = pgx.RepeatableRead
+	}
+	tx, err := s.db.BeginTx(ctx, options)
 	if err != nil {
 		return NOWPaymentsMembershipAttempt{}, fmt.Errorf("begin NOWPayments order: %w", err)
 	}
@@ -109,10 +116,11 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 	err = tx.QueryRow(ctx, `SELECT b.subject,p.public_id::text,p.id,a.id,a.sponsor_id
  FROM identity.auth_binding b JOIN auth.user u ON u.id=b.subject JOIN mlm.person p ON p.id=b.person_id
  LEFT JOIN mlm.affiliate a ON a.person_id=p.id
- WHERE b.provider='better_auth' AND p.user_id=b.subject AND u.email_verified=true
+ WHERE b.provider='better_auth' AND b.subject=$2 AND p.user_id=b.subject AND u.email_verified=true
    AND lower(btrim(u.email))=lower(btrim(p.email::text)) AND lower(btrim(p.email::text))=$1
+   AND NOT EXISTS(SELECT 1 FROM mlm.person other WHERE other.id<>p.id AND lower(btrim(other.email::text))=$1)
    AND p.status::text IN ('active','pending') AND NOT COALESCE(p.blacklisted,false)
-   AND (a.id IS NULL OR a.status::text='active') FOR NO KEY UPDATE OF p`, strings.ToLower(strings.TrimSpace(in.Email))).
+   AND (a.id IS NULL OR a.status::text='active') FOR NO KEY UPDATE OF p`, strings.ToLower(strings.TrimSpace(in.Email)), in.Subject).
 		Scan(&subject, &publicID, &personID, &affiliateID, &existingSponsor)
 	if err != nil || !validNOWPaymentsOrderID(publicID) {
 		return NOWPaymentsMembershipAttempt{}, ErrCheckoutIdentityReview
@@ -145,7 +153,11 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 	}
 	var pack Pack
 	var amount string
-	if err := tx.QueryRow(ctx, `SELECT id,name,amount_usd::text,pv FROM mlm.package WHERE id=$1 AND is_active FOR SHARE`, in.PackageID).
+	packQuery := `SELECT id,name,amount_usd::text,pv FROM mlm.package WHERE id=$1 AND is_active`
+	if !s.nowOperational {
+		packQuery += " FOR SHARE"
+	}
+	if err := tx.QueryRow(ctx, packQuery, in.PackageID).
 		Scan(&pack.ID, &pack.Name, &amount, &pack.PV); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return NOWPaymentsMembershipAttempt{}, ErrPackNotFound
@@ -174,14 +186,31 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 		}
 		return NOWPaymentsMembershipAttempt{}, fmt.Errorf("persist NOWPayments order: %w", err)
 	}
+	if s.nowOperational {
+		if err := s.prepareNOWOperationalOrder(ctx, tx, out); err != nil {
+			return NOWPaymentsMembershipAttempt{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return NOWPaymentsMembershipAttempt{}, fmt.Errorf("commit NOWPayments order: %w", err)
 	}
 	return out, nil
 }
 
+func (s *Store) resolveNOWBuyer(ctx context.Context, subject, email string) (Buyer, error) {
+	var buyer Buyer
+	err := s.db.QueryRow(ctx, `SELECT p.id,a.id,a.sponsor_id FROM identity.auth_binding b JOIN auth.user u ON u.id=b.subject
+ JOIN mlm.person p ON p.id=b.person_id AND p.user_id=b.subject LEFT JOIN mlm.affiliate a ON a.person_id=p.id
+ WHERE b.subject=$1 AND b.provider='better_auth' AND u.email_verified AND lower(btrim(u.email))=$2 AND lower(btrim(p.email::text))=$2
+ AND NOT EXISTS(SELECT 1 FROM mlm.person other WHERE other.id<>p.id AND lower(btrim(other.email::text))=$2)`, subject, email).Scan(&buyer.PersonID, &buyer.AffiliateID, &buyer.SponsorAffiliateID)
+	if err != nil {
+		return Buyer{}, ErrCheckoutIdentityReview
+	}
+	return buyer, nil
+}
+
 func (s *Store) AttachNOWPaymentsInvoice(ctx context.Context, orderID, environment, invoiceID string) error {
-	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+	if err := s.requireNOWMembershipMode(ctx); err != nil {
 		return err
 	}
 	if !validNOWPaymentsOrderID(orderID) || !validNOWPaymentsEnvironment(environment) || !nowPaymentsIDPattern.MatchString(invoiceID) {
@@ -199,7 +228,7 @@ func (s *Store) AttachNOWPaymentsInvoice(ctx context.Context, orderID, environme
 }
 
 func (s *Store) MarkNOWPaymentsInvoiceUnknown(ctx context.Context, orderID, environment string) error {
-	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+	if err := s.requireNOWMembershipMode(ctx); err != nil {
 		return err
 	}
 	if !validNOWPaymentsOrderID(orderID) || !validNOWPaymentsEnvironment(environment) {
@@ -244,7 +273,7 @@ func matchingNOWPaymentsEvidence(attempt NOWPaymentsMembershipAttempt, signed, a
 // It never activates a package, posts wallet/commission/PV entries, repositions
 // the tree, sends an activation email or writes Stripe-recovery relations.
 func (s *Store) RecordNOWPaymentsReceipt(ctx context.Context, environment string, signed, api nowpayments.Payment, bodySHA256 string) (NOWPaymentsReceiptResult, error) {
-	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+	if err := s.requireNOWMembershipMode(ctx); err != nil {
 		return NOWPaymentsReceiptResult{}, err
 	}
 	if !validNOWPaymentsEnvironment(environment) || !validNOWPaymentsOrderID(signed.OrderID) || !nowPaymentsSHA256Pattern.MatchString(bodySHA256) {

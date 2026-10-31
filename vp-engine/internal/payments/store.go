@@ -25,12 +25,14 @@ var (
 // EngineURL (opcional): base del motor vp-engine para el simulador canónico de
 // θ (POST /simulate). Vacío ⇒ el lock usa solo la proyección forward.
 type Store struct {
-	db        *pgxpool.Pool // PRIMARY (writes + reads si no hay réplica)
-	dbRead    *pgxpool.Pool // réplica de lectura (opcional); nil ⇒ usa db
-	EngineURL string
-	cache     *Cache         // nil ⇒ sin caché (degrada a DB)
-	treeReads *treeReadCache // display-only branches; isolated per database/Store
-	log       zerolog.Logger // best-effort (comprobantes, eventos); Nop por defecto
+	db             *pgxpool.Pool // PRIMARY (writes + reads si no hay réplica)
+	dbRead         *pgxpool.Pool // réplica de lectura (opcional); nil ⇒ usa db
+	EngineURL      string
+	cache          *Cache         // nil ⇒ sin caché (degrada a DB)
+	treeReads      *treeReadCache // display-only branches; isolated per database/Store
+	log            zerolog.Logger // best-effort (comprobantes, eventos); Nop por defecto
+	nowOperational bool           // Dedicated NOW-only writer; never used by legacy finance methods.
+	nowReadiness   func(context.Context, pgx.Tx) error
 }
 
 func NewStore(db *pgxpool.Pool) *Store {

@@ -15,6 +15,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/api/payments/resume", h.handleResume)
 	mux.HandleFunc("/api/payments/me", h.handleMe)
 	mux.HandleFunc("/api/payments/nowpayments/status", h.handleNOWPaymentsCaptureStatus)
+	mux.HandleFunc(nowJobPath, h.handleNOWOperationalJobs)
+	mux.HandleFunc(nowReadyPath, h.handleNOWOperationalReadiness)
 	mux.HandleFunc("/api/member/referral", h.handleMemberReferral)
 	mux.HandleFunc("/api/member/profile", h.handleMemberProfile)
 	mux.HandleFunc("/api/member/onboarding", h.handleMemberOnboarding)

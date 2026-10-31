@@ -191,11 +191,11 @@ test('capture missing credentials or a shared, privileged, different-target or i
   ]) assert.throws(() => containerEnvironment('payments', { ...secrets, ...change }), error => !/postgres:|synthetic/.test(error.message));
 });
 
-test('checked-in capture profile never enables memberships or general services and intercepts the provider by exact host', () => {
+test('checked-in release keeps general services closed and intercepts the provider by exact host', () => {
   const config = JSON.parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
   for (const name of ['staging', 'production']) {
     assert.equal(config.env[name].vars.NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED, String(name === 'production'));
-    assert.equal(config.env[name].vars.NOWPAYMENTS_MEMBERSHIPS_ENABLED, 'false');
+    assert.equal(config.env[name].vars.NOWPAYMENTS_MEMBERSHIPS_ENABLED, String(name === 'production'));
     assert.equal(config.env[name].vars.STRIPE_CHECKOUT_ENABLED, 'false');
     assert.equal(config.env[name].vars.CORE_SERVICES_ENABLED, 'false');
     assert.equal(config.env[name].vars.CORE_NETWORK_VERIFIED, 'false');

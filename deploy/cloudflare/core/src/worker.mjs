@@ -4,6 +4,8 @@ import { coreReady, dispatchCore, dispatchContainerOutbound, isGrpcTunnelRequest
 import { containerEnvironment } from './runtime-env.mjs';
 import { privateReadiness } from './private-probe.mjs';
 import { captureConfiguration } from './capture-configuration.mjs';
+import { runNOWPaymentsScheduled } from './nowpayments-scheduled.mjs';
+import { privateNOWPaymentsReadiness } from './nowpayments-readiness.mjs';
 import { relayWebSocketToSocket } from '../../../../app/src/clients/opaque-tcp-relay.mjs';
 export { ContainerProxy };
 
@@ -75,6 +77,10 @@ const resolveFor = env => (service, instance) => getContainer(env[BINDINGS[servi
 // Named service-binding RPC only. No HTTP fetch handler, arbitrary target,
 // request forwarding or public route is added to the default Worker.
 export class PrivateCoreProbe extends WorkerEntrypoint {
+  nowpaymentsReadiness() {
+    if (arguments.length !== 0) throw new Error('NOWPayments readiness accepts no arguments');
+    return privateNOWPaymentsReadiness(this.env, resolveFor(this.env));
+  }
   readiness() {
     if (arguments.length !== 0) throw new Error('Readiness probe accepts no arguments');
     return privateReadiness(this.env, resolveFor(this.env));
@@ -96,5 +102,9 @@ for (const [source, Class, hosts] of [
 export default {
   fetch(request, env) {
     return dispatchCore(request, env, resolveFor(env));
+  },
+  scheduled(controller, env, ctx) {
+    if (controller.cron !== '*/5 * * * *') throw new Error('Unknown scheduled operation');
+    ctx.waitUntil(runNOWPaymentsScheduled(env, resolveFor(env)));
   },
 };

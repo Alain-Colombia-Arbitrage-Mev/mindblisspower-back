@@ -1,3 +1,7 @@
+import { NOWPAYMENTS_CHECKOUT, NOWPAYMENTS_MAX_INVOICE_BODY, nowpaymentsOperationalReady,
+  operationalCheckoutRequest, parseCheckout, validOperationalInvoice } from './nowpayments-operation.mjs';
+export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
+
 export const SERVICES = Object.freeze({
   'core.internal': 'api',
   'auth.core.internal': 'api',
@@ -94,14 +98,25 @@ export async function dispatchContainerOutbound(source, request, env, resolve, i
   let url;
   try { url = new URL(request.url); } catch { return failure('not_found', 404); }
   if (url.hostname === 'api.nowpayments.io') {
-    // The capture client can only verify an existing payment. Invoices, payouts,
-    // aliases, redirects and API key-bearing requests to another origin are denied.
+    // Capture permits existing-payment verification. The separate operational
+    // capability additionally permits only our bounded merchant invoice contract.
     if (source !== 'payments' || !nowpaymentsCaptureReady(env)) return failure('core_not_ready', 503);
     if (url.protocol !== 'https:' || url.port || url.username || url.password || url.search || url.hash
-      || request.method !== 'GET' || request.headers.has('upgrade')
-      || !/^\/v1\/payment\/[1-9][0-9]{0,63}$/.test(url.pathname)) return failure('not_found', 404);
+      || request.headers.has('upgrade')) return failure('not_found', 404);
+    const paymentLookup = request.method === 'GET' && /^\/v1\/payment\/[1-9][0-9]{0,63}$/.test(url.pathname);
+    const invoice = nowpaymentsOperationalReady(env) && request.method === 'POST' && url.pathname === '/v1/invoice';
+    if (!paymentLookup && !invoice) return failure('not_found', 404);
+    let invoiceBody;
+    if (invoice) {
+      if (request.headers.has('content-encoding') || !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')
+        || typeof env.NOWPAYMENTS_API_KEY !== 'string' || !env.NOWPAYMENTS_API_KEY
+        || request.headers.get('x-api-key') !== env.NOWPAYMENTS_API_KEY) return failure('invalid_invoice_request', 400);
+      try { invoiceBody = await boundedBody(request, NOWPAYMENTS_MAX_INVOICE_BODY); }
+      catch { return failure('request_too_large', 413); }
+      if (!invoiceBody?.length || !validOperationalInvoice(invoiceBody)) return failure('invalid_invoice_request', 400);
+    }
     try {
-      const forwarded = new Request(request, { redirect: 'manual',
+      const forwarded = new Request(request, { ...(invoice ? { body: invoiceBody } : {}), redirect: 'manual',
         signal: AbortSignal.any([request.signal, AbortSignal.timeout(12000)]) });
       const response = await internetFetch(forwarded);
       if (response.status < 200 || response.status >= 300) {
@@ -167,6 +182,7 @@ export async function dispatchCore(request, env, resolve) {
   // allowlist is not sufficient. This independent provider gate never starts a
   // Container and does not change webhooks, reports or NOWPayments policy.
   let body;
+  let checkoutPayload;
   let checkoutPath = url.pathname;
   try {
     for (let index = 0; index < 8; index++) {
@@ -176,6 +192,9 @@ export async function dispatchCore(request, env, resolve) {
     }
   } catch { return failure('not_found', 404); }
   checkoutPath = checkoutPath.replace(/\/+/g, '/').replace(/\/+$/, '');
+  // Scheduled processing is generated inside this Worker only. Never forward
+  // this namespace from a portal, admin, public HTTP or private fetch caller.
+  if (checkoutPath.startsWith('/api/payments/internal')) return failure('not_found', 404);
   const capturePath = [NOWPAYMENTS_IPN_PATH, NOWPAYMENTS_STATUS_PATH].includes(checkoutPath);
   const captureRequest = capturePath && nowpaymentsCaptureReady(env) && nowpaymentsCaptureRequest(request, url);
   // Reserved capture endpoints do not fall through the broad reports/read gate,
@@ -195,14 +214,21 @@ export async function dispatchCore(request, env, resolve) {
       try { body = await boundedBody(request); }
       catch { return failure('request_too_large', 413); }
       if (!body?.length) return failure('stripe_checkout_disabled', 503);
-      let payload;
-      try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); }
-      catch { return failure('invalid_checkout_request', 400); }
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return failure('invalid_checkout_request', 400);
-      if (typeof payload.provider !== 'string' || payload.provider.trim().toLowerCase() !== 'nowpayments') {
+      checkoutPayload = parseCheckout(body);
+      if (!checkoutPayload) return failure('invalid_checkout_request', 400);
+      if (typeof checkoutPayload.provider !== 'string' || checkoutPayload.provider.trim().toLowerCase() !== 'nowpayments') {
         return failure('stripe_checkout_disabled', 503);
       }
     }
+  }
+  let operationalCheckout = false;
+  if (nowpaymentsOperationalReady(env) && checkoutPath === NOWPAYMENTS_CHECKOUT && request.method === 'POST') {
+    try { body ??= await boundedBody(request); }
+    catch { return failure('request_too_large', 413); }
+    if ((body?.length ?? 0) > NOWPAYMENTS_MAX_INVOICE_BODY) return failure('request_too_large', 413);
+    checkoutPayload ??= parseCheckout(body);
+    operationalCheckout = operationalCheckoutRequest(request, url, checkoutPayload, env);
+    if (!operationalCheckout) return failure('nowpayments_checkout_unavailable', 503);
   }
   // Exact auth routes can launch independently; this never starts Go, exposes a
   // business read, permits identity claims, or relaxes the financial write gate.
@@ -210,13 +236,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest && !operationalCheckout) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim');
-  if (!read && !authWrite && !captureRequest) return failure('financial_review_required', 503);
+  if (!read && !authWrite && !captureRequest && !operationalCheckout) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);

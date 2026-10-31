@@ -20,6 +20,8 @@
         "CORE_ENV": "staging",
         "STRIPE_CHECKOUT_ENABLED": "false",
         "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "false",
+        "NOWPAYMENTS_OPERATIONAL_ENABLED": "false",
+        "NOWPAYMENTS_ENGINE_ENABLED": "false",
         "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "false",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
@@ -55,10 +57,13 @@
       "workers_dev": false,
       "preview_urls": false,
       "routes": [],
+      "triggers": { "crons": ["*/5 * * * *"] },
       "vars": {
         "CORE_ENV": "production",
         "STRIPE_CHECKOUT_ENABLED": "false",
-        "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "false",
+        "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "true",
+        "NOWPAYMENTS_OPERATIONAL_ENABLED": "true",
+        "NOWPAYMENTS_ENGINE_ENABLED": "true",
         "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "true",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
@@ -83,10 +88,10 @@
         "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
       },
       "containers": [
-        { "name": "core-api", "image": "../../../app/Dockerfile", "image_build_context": "../../../app", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
-        { "name": "core-engine", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-engine" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
-        { "name": "core-payments", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-payments" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
-        { "name": "core-withdrawals", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-withdrawals" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" }
+        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-verified-link-20261031@sha256:7e14a9faae32428eda7b932bcea12d5de4f2b2ebe6f949ad8027db59ecf38f97", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
+        { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
+        { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-now-operational-20261031@sha256:c0c105b188aef63a50b51f0e3510d8c11709c47d477f6b368c97013e60d4de19", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
+        { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }
       ]
     }
   }

@@ -1,7 +1,10 @@
 package payments
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -33,6 +36,31 @@ func (c *Config) ReadOnlyHandler(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
+		if c.NOWPaymentsOperational.Enabled && r.Method == http.MethodGet && r.URL.Path == nowReadyPath && r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if c.NOWPaymentsOperational.Enabled && r.Method == http.MethodPost && r.URL.Path == nowJobPath && r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if c.NOWPaymentsOperational.Enabled && r.Method == http.MethodPost && r.URL.Path == "/api/payments/checkout" && r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery {
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<16))
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "invalid_checkout_request")
+				return
+			}
+			var request struct {
+				Provider string `json:"provider"`
+			}
+			if json.Unmarshal(body, &request) != nil || request.Provider != "nowpayments" {
+				writeErr(w, http.StatusServiceUnavailable, "service_read_only")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			next.ServeHTTP(w, r)
+			return
+		}
 		// This explicit exception only captures signed evidence into a separate
 		// restricted pool; it does not unlock checkout or operational finances.
 		if c.NOWPaymentsCapture.Enabled && r.URL.RawPath == "" && ((r.Method == http.MethodPost && r.URL.Path == "/api/webhooks/nowpayments" && r.URL.RawQuery == "" && !r.URL.ForceQuery) ||

@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/vicionpower/vp-engine/internal/nowengine"
 	"github.com/vicionpower/vp-engine/internal/nowpayments"
 	"github.com/vicionpower/vp-engine/internal/payments"
 	"github.com/vicionpower/vp-engine/internal/shared/db"
@@ -116,6 +118,67 @@ func run() error {
 			return err
 		}
 		logger.Info().Msg("NOWPayments membership checkout explicitly enabled; financial readiness guards still apply")
+	}
+	if cfg.NOWPaymentsOperational.Enabled {
+		settings := cfg.NOWPaymentsOperational
+		operationalPool, opErr := db.Open(rootCtx, settings.DatabaseURL, 2, cfg.DBConnLifetime)
+		if opErr != nil {
+			return errors.New("NOWPayments operational database unavailable")
+		}
+		defer operationalPool.Close()
+		var readerRole, writerRole string
+		if err := pool.QueryRow(rootCtx, `SELECT current_user`).Scan(&readerRole); err != nil {
+			return errors.New("NOWPayments reader role unavailable")
+		}
+		if err := operationalPool.QueryRow(rootCtx, `SELECT current_user`).Scan(&writerRole); err != nil || readerRole == writerRole {
+			return errors.New("NOWPayments requires a separate operational writer")
+		}
+		client, opErr := nowpayments.New(settings.Provider.ClientConfig())
+		if opErr != nil {
+			return opErr
+		}
+		operationalStore := payments.NewNOWPaymentsOperationalStore(operationalPool)
+		engine := nowengine.New(operationalPool, cfg.CompanyRootAffiliateID)
+		operationalStore.SetNOWOperationalReadiness(engine.ValidateReady)
+		handler.SetNOWOperationalReadinessRunner(func(ctx context.Context) error {
+			tx, err := operationalPool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx)
+			if err := engine.ValidateReady(ctx, tx); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		})
+		if err := handler.SetNOWPaymentsOperational(client, operationalStore, settings.Provider); err != nil {
+			return err
+		}
+		handler.SetNOWOperationalJobRunner(func(ctx context.Context) (int, error) {
+			jobsCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			processed, deliveryErr := operationalStore.RunNOWOperationalJobs(jobsCtx, 5)
+			cancel()
+			// A held/retrying delivery must not starve already active members.
+			return processed, errors.Join(deliveryErr, engine.Run(ctx))
+		})
+		// One bounded worker, not one goroutine per notification. Database jobs
+		// and leases survive restarts; the private scheduled wake-up catches up
+		// while the container was asleep. A shared mutex coalesces concurrent runs.
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				if _, err := handler.RunNOWOperationalJobs(rootCtx); err != nil && rootCtx.Err() == nil {
+					logger.Warn().Msg("NOWPayments durable processing requires retry")
+				}
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		logger.Info().Msg("NOWPayments isolated operational membership flow configured; non-NOW finance remains read-only")
 	}
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
@@ -232,7 +295,7 @@ func run() error {
 		Handler:           cfg.ReadOnlyHandler(handler.Routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 

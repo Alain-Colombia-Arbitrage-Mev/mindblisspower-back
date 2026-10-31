@@ -391,6 +391,14 @@ Este es un mensaje automático; por favor no respondas a este correo.`,
 // preferencia conserva la regla legacy weak-leg. Race-safe vía
 // pg_advisory_xact_lock(sponsor) + unique(parent_id, position) y reintento.
 func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, requestedSide string) (int64, error) {
+	return autoPlaceAffiliateWithEnrollment(ctx, tx, personID, sponsorID, requestedSide, true)
+}
+
+func autoPlaceNOWAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, side string) (int64, error) {
+	return autoPlaceAffiliateWithEnrollment(ctx, tx, personID, sponsorID, side, false)
+}
+
+func autoPlaceAffiliateWithEnrollment(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, requestedSide string, globalEnrollment bool) (int64, error) {
 	// Clase 2 = colocación (el cierre binario usa clase 1; evita colisión de
 	// keyspace con el period id — el afiliado 1 = la empresa chocaba el lunes).
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2, $1::int)`, sponsorID); err != nil {
@@ -467,12 +475,27 @@ func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int6
 		if err != nil {
 			return 0, fmt.Errorf("insert affiliate: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
+		if globalEnrollment {
+			if _, err := tx.Exec(ctx, `
 			INSERT INTO mlm.tree_event (external_ref, kind, affiliate_id, occurred_at)
 			VALUES ($1, 'enrollment', $2, now())
 			ON CONFLICT (external_ref) DO NOTHING
 		`, fmt.Sprintf("enroll:%d", newID), newID); err != nil {
-			return 0, fmt.Errorf("enrollment event: %w", err)
+				return 0, fmt.Errorf("enrollment event: %w", err)
+			}
+		} else {
+			// NOW volumes live in its immutable sidecar, not global tree_event.
+			// Count the new descendant without even acquiring UPDATE permission
+			// on historical/global PV columns via the legacy enrollment trigger.
+			if _, err := tx.Exec(ctx, `WITH ancestors AS(
+ SELECT a.id,a.depth FROM mlm.affiliate a JOIN mlm.affiliate_closure c ON c.ancestor_id=a.id
+ WHERE c.descendant_id=$1 AND c.distance>0 ORDER BY a.depth FOR UPDATE OF a), legs AS(
+ SELECT a.id,l.position FROM ancestors a JOIN mlm.affiliate l ON l.parent_id=a.id
+ JOIN mlm.affiliate_closure c ON c.ancestor_id=l.id AND c.descendant_id=$1)
+ UPDATE mlm.affiliate a SET left_count=a.left_count+CASE WHEN l.position='L' THEN 1 ELSE 0 END,
+ right_count=a.right_count+CASE WHEN l.position='R' THEN 1 ELSE 0 END,updated_at=now() FROM legs l WHERE a.id=l.id`, newID); err != nil {
+				return 0, fmt.Errorf("NOW placement counters: %w", err)
+			}
 		}
 		return newID, nil
 	}

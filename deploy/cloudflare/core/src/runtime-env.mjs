@@ -1,3 +1,5 @@
+import { NOWPAYMENTS_CALLBACK, nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
+
 const MAP = Object.freeze({
   api: {
     API_DATABASE_URL: 'DATABASE_URL', API_AUTH_DATABASE_URL: 'AUTH_DATABASE_URL',
@@ -62,6 +64,8 @@ export function containerEnvironment(service, env) {
     // Capture has a separate, append-only database role. The report connection
     // remains a reader; no provider can create invoices or fulfil memberships.
     values.NOWPAYMENTS_MEMBERSHIPS_ENABLED = 'false';
+    values.NOWPAYMENTS_OPERATIONAL_ENABLED = 'false';
+    values.NOWPAYMENTS_ENGINE_ENABLED = 'false';
     const captureEnabled = env.NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED === 'true';
     values.NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED = String(captureEnabled);
     if (captureEnabled) {
@@ -75,6 +79,21 @@ export function containerEnvironment(service, env) {
       Object.assign(values, { NOWPAYMENTS_WEBHOOK_DATABASE_URL: env.NOWPAYMENTS_WEBHOOK_DATABASE_URL,
         NOWPAYMENTS_API_KEY: env.NOWPAYMENTS_API_KEY, NOWPAYMENTS_IPN_SECRET: env.NOWPAYMENTS_IPN_SECRET,
         NOWPAYMENTS_ENV: 'production' });
+    }
+    if (nowpaymentsOperationalReady(env)) {
+      if (typeof env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL !== 'string'
+        || env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL.length > 8192 || /[\r\n]/.test(env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL)) {
+        throw new Error('NOWPayments operational configuration is incomplete');
+      }
+      const writer = postgresTarget(env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL);
+      const capture = postgresTarget(env.NOWPAYMENTS_WEBHOOK_DATABASE_URL);
+      if (writer.host !== target.host || writer.port !== target.port || writer.database !== target.database
+        || writer.user === target.user || writer.user === capture.user) {
+        throw new Error('NOWPayments operational database isolation is not configured');
+      }
+      Object.assign(values, { NOWPAYMENTS_MEMBERSHIPS_ENABLED: 'true', NOWPAYMENTS_OPERATIONAL_ENABLED: 'true', NOWPAYMENTS_ENGINE_ENABLED: 'true',
+        NOWPAYMENTS_OPERATIONAL_DATABASE_URL: env.NOWPAYMENTS_OPERATIONAL_DATABASE_URL,
+        NOWPAYMENTS_IPN_URL: NOWPAYMENTS_CALLBACK });
     }
   }
   if (service === 'api') {

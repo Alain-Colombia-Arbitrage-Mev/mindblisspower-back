@@ -1,6 +1,7 @@
 package payments
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,8 @@ type Handler struct {
 	gw               *StripeGateway
 	nowMemberships   *nowPaymentsMemberships
 	nowCapture       *nowPaymentsCapture
+	nowJobs          *nowOperationalJobRunner
+	nowReady         func(context.Context) error
 	log              zerolog.Logger
 	serviceToken     string
 	adminEmails      []string

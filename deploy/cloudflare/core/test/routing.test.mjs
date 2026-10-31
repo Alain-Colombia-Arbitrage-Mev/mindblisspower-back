@@ -310,7 +310,7 @@ test('auth isolation, verified TLS and complete secret sets fail closed without 
   }
 });
 
-test('the versioned environments contain no public ingress, scheduler, secrets or Chatwoot resources', () => {
+test('versioned environments have no public ingress, broad financial scheduler, secrets or Chatwoot resources', () => {
   const config = JSON.parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
   assert.equal(config.workers_dev, false); assert.equal(config.preview_urls, false);
   for (const name of ['staging', 'production']) {
@@ -328,7 +328,15 @@ test('the versioned environments contain no public ingress, scheduler, secrets o
     assert.equal(env.vars.AUTH_SMS_OPT_IN_SCHEMA_READY, undefined);
     assert.equal(env.containers.length, 4);
     assert.ok(env.containers.every(container => container.max_instances === 1 && container.instance_type === 'basic' && container.scheduling_policy === 'default'));
-    assert.equal(env.triggers, undefined);
+    if (name === 'production') assert.deepEqual(env.triggers, { crons: ['*/5 * * * *'] });
+    else assert.equal(env.triggers, undefined);
+    for (const flag of ['NOWPAYMENTS_MEMBERSHIPS_ENABLED', 'NOWPAYMENTS_OPERATIONAL_ENABLED', 'NOWPAYMENTS_ENGINE_ENABLED']) {
+      assert.equal(env.vars[flag], name === 'production' ? 'true' : 'false');
+    }
+    if (name === 'production') {
+      assert.ok(env.containers.every(container => /^registry\.cloudflare\.com\/[a-f0-9]{32}\/[a-z0-9/_-]+@sha256:[a-f0-9]{64}$/.test(container.image)));
+      assert.deepEqual(env.containers.filter(container => container.rollout_kind !== 'none').map(container => container.name), ['core-api', 'core-payments']);
+    }
     assert.ok(Object.keys(env.vars).every(key => !/SECRET|TOKEN|PASSWORD|DATABASE_URL/.test(key)));
   }
   assert.doesNotMatch(JSON.stringify(config.containers || []), /chatwoot|sidekiq|rails/i);

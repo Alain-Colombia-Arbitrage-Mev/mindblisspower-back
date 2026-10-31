@@ -40,12 +40,13 @@ type Config struct {
 	// reads and signed webhooks remain available when checkout is disabled.
 	StripeCheckoutEnabled bool
 
-	StripeSecretKey     string
-	StripeWebhookSecret string
-	StripeProductID     string                     // Producto Stripe "PACK MINDBLISS" (prod_…)
-	StripePMConfig      string                     // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
-	NOWPayments         NOWPaymentsSettings        `json:"-"` // Server-only; not a financial activation gate.
-	NOWPaymentsCapture  NOWPaymentsCaptureSettings `json:"-"` // Isolated append-only notification capture.
+	StripeSecretKey        string
+	StripeWebhookSecret    string
+	StripeProductID        string                         // Producto Stripe "PACK MINDBLISS" (prod_…)
+	StripePMConfig         string                         // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
+	NOWPayments            NOWPaymentsSettings            `json:"-"` // Server-only; not a financial activation gate.
+	NOWPaymentsCapture     NOWPaymentsCaptureSettings     `json:"-"` // Isolated append-only notification capture.
+	NOWPaymentsOperational NOWPaymentsOperationalSettings `json:"-"` // Explicit NOW-only writer; reader remains read-only.
 
 	// ServiceToken: secreto compartido que el BFF Next debe enviar en
 	// X-VP-Service-Token para crear sesiones de checkout.
@@ -272,6 +273,10 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 	c.NOWPaymentsCapture, err = loadNOWPaymentsCaptureSettings(c.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	c.NOWPaymentsOperational, err = loadNOWPaymentsOperationalSettings(c.DatabaseURL, c.NOWPaymentsCapture.DatabaseURL)
 	if err != nil {
 		return nil, err
 	}

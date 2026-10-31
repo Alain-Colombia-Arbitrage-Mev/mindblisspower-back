@@ -71,7 +71,7 @@ func TestNOWPaymentsIncludedPricingMigrationIntegration(t *testing.T) {
 	}
 
 	current, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{
-		Email: "included-price@example.test", Environment: "production", PackageID: 6002,
+		Subject: "synthetic-included-price", Email: "included-price@example.test", Environment: "production", PackageID: 6002,
 	})
 	if err != nil || current.AmountUSD != "0.50" || current.FeeUSD != "0.00" || current.TotalCents != 50 ||
 		current.PricingPolicy != nowPaymentsIncludedPricingPolicy || current.ProviderCostUSD != "0.0050" || current.CommissionBaseUSD != "0.4950" {
@@ -121,6 +121,22 @@ func TestNOWPaymentsIncludedPricingMigrationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE payments.nowpayments_membership_attempt
  SET pricing_policy=$2,provider_cost_usd=1,commission_base_usd=99 WHERE id=$1::uuid`, legacyID, nowPaymentsIncludedPricingPolicy); err == nil {
 		t.Fatal("legacy order can be retrospectively relabelled with new policy")
+	}
+	// Legacy citext uniqueness permits trailing-space variants. Two verified
+	// bindings that normalize to the same email must never select each other's
+	// business person, sponsor or invoice ownership; both require review.
+	if _, err := pool.Exec(ctx, `INSERT INTO auth.user(id,email,email_verified) VALUES('synthetic-email-collision','INCLUDED-PRICE@EXAMPLE.TEST ',true);
+ INSERT INTO mlm.person(first_name,last_name,email,phone_number,status,user_id) VALUES('Synthetic','Collision','included-price@example.test ','0','active','synthetic-email-collision');
+ INSERT INTO identity.auth_binding(subject,person_id,link_method) SELECT 'synthetic-email-collision',id,'new_registration' FROM mlm.person WHERE user_id='synthetic-email-collision'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, subject := range []string{"synthetic-included-price", "synthetic-email-collision"} {
+		if _, err := store.CreateNOWPaymentsMembership(ctx, NOWPaymentsMembershipInput{Subject: subject, Email: "included-price@example.test", Environment: "production", PackageID: 6002}); !errors.Is(err, ErrCheckoutIdentityReview) {
+			t.Fatal("normalized email collision selected another principal", subject, err)
+		}
+		if _, err := store.resolveNOWBuyer(ctx, subject, "included-price@example.test"); !errors.Is(err, ErrCheckoutIdentityReview) {
+			t.Fatal("ambiguous buyer/sponsor lookup was not rejected", subject, err)
+		}
 	}
 	var artifacts int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM payments.purchase_intent)+(SELECT count(*) FROM payments.stripe_event)

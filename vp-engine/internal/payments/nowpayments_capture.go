@@ -135,6 +135,18 @@ func (h *Handler) handleNOWPaymentsCapture(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusServiceUnavailable, "payment_capture_unavailable")
 		return
 	}
+	if h.nowMemberships != nil && h.nowMemberships.operational {
+		store, ok := h.nowMemberships.store.(*Store)
+		if !ok {
+			writeErr(w, http.StatusServiceUnavailable, "membership_activation_unavailable")
+			return
+		}
+		_, err := store.enqueueNOWOperationalPayment(ctx, flow.environment, signed.OrderID, string(signed.PaymentID), hex.EncodeToString(hash[:]))
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "membership_activation_unavailable")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"received": true, "mode": "capture_only", "state": "captured", "fulfillment_status": "not_activated"})
 }
 
@@ -176,6 +188,22 @@ func (h *Handler) handleNOWPaymentsCaptureStatus(w http.ResponseWriter, r *http.
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	status, err := flow.store.OwnedStatus(ctx, flow.environment, order, subject, email)
+	if err == nil && h.nowMemberships != nil && h.nowMemberships.operational {
+		if store, ok := h.nowMemberships.store.(*Store); ok {
+			if state, opErr := store.ownedNOWOperationalState(ctx, flow.environment, order, subject, email); opErr != nil {
+				err = opErr
+			} else if state != "" {
+				status.FulfillmentStatus = state
+				if state == "activated" && status.PaymentConfirmed {
+					status.State = "completed"
+				}
+				if state == "risk_review" || state == "security_blocked" {
+					status.PaymentConfirmed = false
+					status.State = "under_review"
+				}
+			}
+		}
+	}
 	if errors.Is(err, errNOWCaptureOrderNotFound) {
 		writeErr(w, http.StatusNotFound, "payment_not_found")
 		return

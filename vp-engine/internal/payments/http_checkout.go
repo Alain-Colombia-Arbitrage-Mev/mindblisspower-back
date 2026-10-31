@@ -13,6 +13,7 @@ import (
 // ── Checkout ────────────────────────────────────────────────────────────────
 
 type checkoutRequest struct {
+	authSubject   string // Verified server identity; never decoded from browser JSON.
 	Email         string `json:"email"`
 	PackageID     int    `json:"package_id"`
 	Ref           string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
@@ -75,11 +76,32 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Email = identity
+	var boundNOWBuyer *Buyer
 	if provider == "nowpayments" && (h.nowMemberships == nil || !h.requireVerified || strings.TrimSpace(r.Header.Get(idTokenHeader)) == "") {
 		writeErr(w, http.StatusServiceUnavailable, "nowpayments-unavailable")
 		return
 	}
-	if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil {
+	if provider == "nowpayments" {
+		verifier, ok := h.verifier.(nowSubjectVerifier)
+		if !ok || r.Header.Get(actAsHeader) != "" {
+			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
+			return
+		}
+		subject, email, err := verifier.VerifySubject(r.Context(), strings.TrimSpace(r.Header.Get(idTokenHeader)))
+		if err != nil || strings.TrimSpace(subject) == "" || email != identity {
+			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
+			return
+		}
+		req.authSubject = subject
+		buyer, err := h.store.resolveNOWBuyer(r.Context(), subject, email)
+		if err != nil {
+			writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+			return
+		}
+		boundNOWBuyer = &buyer
+	}
+	nowOperational := provider == "nowpayments" && h.nowMemberships != nil && h.nowMemberships.operational
+	if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil && !nowOperational {
 		if errors.Is(err, ErrRecoveryFinancialReview) {
 			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
 		} else {
@@ -131,7 +153,12 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	buyer, err := h.store.ResolveBuyer(ctx, req.Email)
+	var buyer Buyer
+	if boundNOWBuyer != nil {
+		buyer = *boundNOWBuyer
+	} else {
+		buyer, err = h.store.ResolveBuyer(ctx, req.Email)
+	}
 	if errors.Is(err, ErrBuyerNotFound) {
 		writeErr(w, http.StatusNotFound, "buyer_not_found")
 		return

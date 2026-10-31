@@ -103,7 +103,12 @@ func TestNOWPaymentsMembershipStoreIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewStore(pool)
-	in := NOWPaymentsMembershipInput{Email: "now-member@example.test", Environment: "production", PackageID: 1001}
+	in := NOWPaymentsMembershipInput{Subject: "synthetic-now-member", Email: "now-member@example.test", Environment: "production", PackageID: 1001}
+	wrongSubject := in
+	wrongSubject.Subject = "not-the-bound-subject"
+	if _, err := store.CreateNOWPaymentsMembership(ctx, wrongSubject); !errors.Is(err, ErrCheckoutIdentityReview) {
+		t.Fatal("JWT subject mismatch may select another email owner", err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE auth.user SET email_verified=false WHERE id='synthetic-now-member'`); err != nil {
 		t.Fatal(err)
 	}

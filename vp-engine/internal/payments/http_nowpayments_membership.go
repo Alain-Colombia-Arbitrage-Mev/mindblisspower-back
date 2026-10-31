@@ -47,6 +47,7 @@ type nowPaymentsMemberships struct {
 	client                                          nowMembershipClient
 	store                                           nowMembershipPersistence
 	environment, callbackURL, successURL, cancelURL string
+	operational                                     bool
 }
 
 // SetNOWPayments configures an explicitly opted-in membership REVIEW flow, not
@@ -66,6 +67,18 @@ func (h *Handler) SetNOWPayments(client *nowpayments.Client, environment, callba
 	return nil
 }
 
+func (h *Handler) SetNOWPaymentsOperational(client *nowpayments.Client, store *Store, settings NOWPaymentsSettings) error {
+	if store == nil || !store.nowOperational || !settings.MembershipsEnabled {
+		return nowpayments.ErrConfiguration
+	}
+	if err := h.SetNOWPayments(client, settings.Environment, settings.CallbackURL, settings.SuccessURL, settings.CancelURL); err != nil {
+		return err
+	}
+	h.nowMemberships.store = store
+	h.nowMemberships.operational = true
+	return nil
+}
+
 func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Request, req checkoutRequest, sponsor *int64, side string) {
 	flow := h.nowMemberships
 	if flow == nil {
@@ -73,7 +86,7 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 		return
 	}
 	attempt, err := flow.store.CreateNOWPaymentsMembership(r.Context(), NOWPaymentsMembershipInput{
-		Email: req.Email, Environment: flow.environment, PackageID: req.PackageID,
+		Email: req.Email, Subject: req.authSubject, Environment: flow.environment, PackageID: req.PackageID,
 		SponsorAffiliateID: sponsor, PreferredSide: side,
 	})
 	if err != nil {
@@ -84,6 +97,8 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 			writeErr(w, http.StatusConflict, "membership_already_active")
 		case errors.Is(err, ErrCheckoutIdentityReview):
 			writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+		case errors.Is(err, ErrNOWOperationalPlan):
+			writeErr(w, http.StatusServiceUnavailable, "nowpayments_financial_configuration_unavailable")
 		case errors.Is(err, ErrPackNotFound):
 			writeErr(w, http.StatusNotFound, "package_not_found")
 		default:
@@ -102,8 +117,12 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusServiceUnavailable, "membership_payment_pending_review")
 		return
 	}
+	fulfillment := "review_required"
+	if flow.operational {
+		fulfillment = "awaiting_payment"
+	}
 	writeJSON(w, http.StatusOK, checkoutResponse{URL: invoice.URL, Provider: "nowpayments",
-		TotalUSD: total, FeeUSD: attempt.FeeUSD, FulfillmentStatus: "review_required"})
+		TotalUSD: total, FeeUSD: attempt.FeeUSD, FulfillmentStatus: fulfillment})
 }
 
 func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt NOWPaymentsMembershipAttempt) (nowpayments.Invoice, error) {
