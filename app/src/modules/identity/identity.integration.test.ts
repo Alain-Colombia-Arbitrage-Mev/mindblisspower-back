@@ -2,6 +2,7 @@ import { beforeAll, afterAll, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { sql } from 'drizzle-orm';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createLocalJWKSet, jwtVerify } from 'jose';
@@ -49,7 +50,7 @@ beforeAll(async () => {
       kyc_status mlm.kyc_status NOT NULL DEFAULT 'not_started',is_admin boolean NOT NULL DEFAULT false,blacklisted boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE mlm.rank(id smallint PRIMARY KEY,code text NOT NULL UNIQUE);
     CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,person_id bigint NOT NULL UNIQUE REFERENCES mlm.person(id),parent_id bigint REFERENCES mlm.affiliate(id),sponsor_id bigint REFERENCES mlm.affiliate(id),path ltree NOT NULL,current_rank_id smallint REFERENCES mlm.rank(id));
-    INSERT INTO mlm.person(first_name,last_name,email,phone_number,status) VALUES('Legacy','Member','legacy@example.test','0','active');
+    INSERT INTO mlm.person(first_name,last_name,email,phone_number,status,is_admin) VALUES('Legacy','Operator','legacy@example.test','0','active',true);
     INSERT INTO mlm.rank VALUES(3,'SYNTHETIC'); INSERT INTO mlm.affiliate VALUES(71,1,NULL,NULL,'n71',3);`);
   fingerprint = JSON.stringify(await connection`SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id`);
   // A pre-existing duplicate provider subject must abort ALL additive changes,
@@ -80,6 +81,14 @@ beforeAll(async () => {
   try { await smsConnection.unsafe(smsMigration); }
   catch (error) { await smsConnection.unsafe('ROLLBACK'); throw error; }
   finally { smsConnection.release(); }
+  const verifiedEmailMigration = (await readFile(new URL('../../../../_meta/migration/78_verified_email_identity_binding.sql', import.meta.url), 'utf8'))
+    .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
+  const verifiedEmailConnection = await connection.reserve();
+  try {
+    await verifiedEmailConnection.unsafe(verifiedEmailMigration);
+    await verifiedEmailConnection.unsafe(verifiedEmailMigration);
+  } catch (error) { await verifiedEmailConnection.unsafe('ROLLBACK'); throw error; }
+  finally { verifiedEmailConnection.release(); }
   legacyPublicId = (await connection`SELECT public_id::text FROM mlm.person WHERE id=1`)[0]!.public_id;
   for (const [id, email, verified] of [['legacy-user', 'legacy@example.test', true], ['new-user', 'new@example.test', true], ['unverified-user', 'unverified@example.test', false], ['admin-user', 'operator@example.test', true], ['other-user', 'other@example.test', true]] as const) {
     await connection`INSERT INTO auth.user(id,email,email_verified,name) VALUES(${id},${email},${verified},'Synthetic Member')`;
@@ -102,7 +111,7 @@ integration('migration is repeatable, adds stable UUIDs and never rewrites netwo
   expect((await connection`SELECT has_table_privilege('app_write','identity.legacy_claim_grant','INSERT') AS allowed`)[0]!.allowed).toBe(false);
 });
 
-integration('verified signup is idempotent but an equal legacy email never claims or overwrites its person', async () => {
+integration('verified signup is idempotent but legacy administrative privileges still require reviewed linking', async () => {
   expect((await provisionAuthPerson(database, { userId: 'unverified-user' })).status).toBe('verification_required');
   const created = await provisionAuthPerson(database, { userId: 'new-user' });
   expect(created.status).toBe('created');
@@ -113,6 +122,60 @@ integration('verified signup is idempotent but an equal legacy email never claim
   expect((await connection`SELECT count(*)::int AS n FROM identity.link_conflict WHERE subject='legacy-user'`)[0]!.n).toBe(1);
   await provisionAuthPerson(database, { userId: 'legacy-user' });
   expect((await connection`SELECT count(*)::int AS n FROM identity.link_conflict WHERE subject='legacy-user'`)[0]!.n).toBe(1);
+});
+
+integration('verified normalized email links exactly one eligible legacy person, preserving every network and financial field', async () => {
+  await connection`INSERT INTO auth.user(id,email,email_verified,name) VALUES('normalized-user','normalized@example.test',false,'Untrusted Display Name')`;
+  const [person] = await connection`INSERT INTO mlm.person(first_name,last_name,email,phone_number,status)
+    VALUES('Original','Legacy','  NORMALIZED@example.test  ','+12025550199','active') RETURNING id::text,public_id::text`;
+  const before = JSON.stringify(await connection`SELECT to_jsonb(p)-'user_id' AS row FROM mlm.person p WHERE id=${person!.id}`);
+  expect((await provisionAuthPerson(database, { userId: 'normalized-user' })).status).toBe('verification_required');
+  expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject='normalized-user'`)[0]!.n).toBe(0);
+  await connection`UPDATE auth.user SET email_verified=true WHERE id='normalized-user'`;
+  const linked = await provisionAuthPerson(database, { userId: 'normalized-user' });
+  expect(linked).toMatchObject({ status: 'existing', personId: person!.id, publicId: person!.public_id });
+  expect(await provisionAuthPerson(database, { userId: 'normalized-user' })).toEqual(linked);
+  expect((await connection`SELECT link_method FROM identity.auth_binding WHERE subject='normalized-user'`)[0]!.link_method).toBe('verified_email');
+  expect(JSON.stringify(await connection`SELECT to_jsonb(p)-'user_id' AS row FROM mlm.person p WHERE id=${person!.id}`)).toBe(before);
+  expect(JSON.stringify(await connection`SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id`)).toBe(fingerprint);
+});
+
+integration('normalized email ambiguity, unavailable people and competing subjects never overwrite a legacy identity', async () => {
+  await connection`INSERT INTO auth.user(id,email,email_verified) VALUES('ambiguous-user','ambiguous@example.test',true),
+    ('blocked-auto-user','blocked-auto@example.test',true),('competing-one','competing@example.test',true),('competing-two','COMPETING@example.test',true)`;
+  await connection`INSERT INTO mlm.person(first_name,last_name,email,phone_number,status,blacklisted) VALUES
+    ('Ambiguous','One','ambiguous@example.test','0','active',false),('Ambiguous','Two',' ambiguous@example.test ','0','active',false),
+    ('Blocked','Legacy','blocked-auto@example.test','0','active',true),('Competing','Legacy','competing@example.test','0','pending',false)`;
+  expect((await provisionAuthPerson(database, { userId: 'ambiguous-user' })).status).toBe('quarantined');
+  expect((await provisionAuthPerson(database, { userId: 'blocked-auto-user' })).status).toBe('quarantined');
+  expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject IN ('ambiguous-user','blocked-auto-user')`)[0]!.n).toBe(0);
+  const results = await Promise.all(['competing-one','competing-two'].map(userId => provisionAuthPerson(database, { userId })));
+  expect(results.filter(result => result.status === 'existing')).toHaveLength(1);
+  expect(results.filter(result => result.status === 'quarantined')).toHaveLength(1);
+  expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject IN ('competing-one','competing-two')`)[0]!.n).toBe(1);
+  expect((await connection`SELECT count(*)::int AS n FROM mlm.person WHERE lower(btrim(email::text))='competing@example.test'`)[0]!.n).toBe(1);
+  expect(JSON.stringify(await connection`SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id`)).toBe(fingerprint);
+});
+
+integration('verified email linking works without binding UPDATE, admin mutation or financial privileges', async () => {
+  await connection`INSERT INTO auth.user(id,email,email_verified) VALUES('restricted-user','restricted@example.test',true)`;
+  await connection`INSERT INTO mlm.person(first_name,last_name,email,phone_number,status) VALUES('Restricted','Legacy','restricted@example.test','0','active')`;
+  await connection.unsafe(`CREATE ROLE verified_email_restricted NOLOGIN;
+    GRANT USAGE ON SCHEMA auth,mlm,identity TO verified_email_restricted;
+    GRANT SELECT(id,email,email_verified,name,contact_phone_e164),UPDATE(email_verified) ON auth.user TO verified_email_restricted;
+    GRANT SELECT(id,public_id,user_id,email,status,blacklisted,is_admin),UPDATE(user_id) ON mlm.person TO verified_email_restricted;
+    GRANT SELECT,INSERT ON identity.auth_binding TO verified_email_restricted;
+    GRANT SELECT,INSERT(subject,candidate_person_id,reason),UPDATE(last_seen_at,resolved_at) ON identity.link_conflict TO verified_email_restricted;
+    GRANT USAGE ON SEQUENCE identity.link_conflict_id_seq TO verified_email_restricted;`);
+  const restricted = { transaction: (callback: (tx: unknown) => unknown) => database.transaction(async tx => {
+    await tx.execute(sql`SET LOCAL ROLE verified_email_restricted`);
+    return callback(tx);
+  }) } as unknown as IdentityDatabase;
+  expect((await provisionAuthPerson(restricted, { userId: 'restricted-user' })).status).toBe('existing');
+  expect((await connection`SELECT link_method FROM identity.auth_binding WHERE subject='restricted-user'`)[0]!.link_method).toBe('verified_email');
+  expect((await connection`SELECT has_table_privilege('verified_email_restricted','identity.auth_binding','UPDATE') AS allowed`)[0]!.allowed).toBe(false);
+  expect((await connection`SELECT has_column_privilege('verified_email_restricted','mlm.person','is_admin','UPDATE') AS allowed`)[0]!.allowed).toBe(false);
+  expect((await connection`SELECT has_table_privilege('verified_email_restricted','mlm.affiliate','INSERT,UPDATE,DELETE') AS allowed`)[0]!.allowed).toBe(false);
 });
 
 integration('concurrent provisioning uses one person and never turns a case-variant auth email into a second claim', async () => {

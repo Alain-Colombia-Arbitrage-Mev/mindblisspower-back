@@ -19,9 +19,9 @@ const env: AuthEnvironment = {
   CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
 };
 const email = 'pending-member@example.test';
-type Legacy = { id: string; email: string; user_id: null; status: string; blacklisted: boolean; is_admin: boolean };
+type Legacy = { id: string; email: string; user_id: string | null; status: string; blacklisted: boolean; is_admin: boolean };
 
-function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique',
+function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' | 'privileged' = 'unique',
   canonicalFault?: 'unverified' | 'other-subject' | 'other-email' | 'missing' | 'unavailable') {
   const userId = 'synthetic-precreated-access';
   const store: MemoryDB = {
@@ -29,12 +29,13 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique',
       createdAt: new Date(), updatedAt: new Date() }],
     account: [], session: [], verification: [], rateLimit: [], jwks: [],
   };
-  const legacy: Legacy[] = [{ id: '71', email, user_id: null, status: 'active', blacklisted: kind === 'blacklisted', is_admin: false }];
+  const legacy: Legacy[] = [{ id: '71', email, user_id: null, status: 'active', blacklisted: kind === 'blacklisted', is_admin: kind === 'privileged' }];
   if (kind === 'duplicate') legacy.push({ ...legacy[0]!, id: '72', email: email.toUpperCase() });
   const affiliates = legacy.map(row => ({ id: row.id, person_id: row.id, parent_id: null,
     sponsor_id: null, position: null, rank: 'PRESERVED', points_left: '110', points_right: '220' }));
   const fingerprint = JSON.stringify({ legacy, affiliates });
   const conflicts: { subject: string; candidate: string; reason: string }[] = [];
+  const bindings: { subject: string; person: string; method: string }[] = [];
   const statements: string[] = [];
   const dialect = new PgDialect();
   const synthetic = {
@@ -43,13 +44,29 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique',
       const text = compiled.sql.replace(/\s+/g, ' ').trim();
       statements.push(text);
       if (text.startsWith('SELECT id,contact_phone_e164 FROM auth.user')) return [{ id: userId, contact_phone_e164: null }];
-      if (text.includes('FROM auth.user u LEFT JOIN identity.auth_binding')) return [{
+      if (text.includes('FROM auth.user u LEFT JOIN identity.auth_binding')) {
+        const binding = bindings.find(row => row.subject === userId);
+        const person = binding && legacy.find(row => row.id === binding.person);
+        return [{
         subject: userId, auth_email: email, email_verified: store.user![0]!.emailVerified,
-        name: store.user![0]!.name, person_id: null, public_id: null, person_email: null,
-        person_status: null, blacklisted: null, user_id: null, is_admin: null,
-      }];
+        name: store.user![0]!.name, person_id: person?.id ?? null,
+        public_id: person ? '51f8d415-0f6c-40b9-9544-f553f8c247c6' : null, person_email: person?.email ?? null,
+        person_status: person?.status ?? null, blacklisted: person?.blacklisted ?? null,
+        user_id: person?.user_id ?? null, is_admin: person?.is_admin ?? null,
+      }]; }
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return [];
-      if (text.includes('FROM mlm.person WHERE email=')) return legacy.filter(row => row.email.toLowerCase() === String(compiled.params[0]).toLowerCase());
+      if (text.includes('FROM mlm.person WHERE lower(btrim(email::text))=')) return legacy.filter(row => row.email.trim().toLowerCase() === String(compiled.params[0]));
+      if (text.includes('FROM identity.auth_binding WHERE person_id=')) return bindings.filter(row => row.person === compiled.params[0]);
+      if (text.startsWith('UPDATE mlm.person SET user_id=')) {
+        const person = legacy.find(row => row.id === compiled.params[1] && row.user_id === null);
+        if (person) person.user_id = String(compiled.params[0]);
+        return [];
+      }
+      if (text.startsWith('INSERT INTO identity.auth_binding')) {
+        bindings.push({ subject: String(compiled.params[0]), person: String(compiled.params[1]), method: String(compiled.params[2]) });
+        return [];
+      }
+      if (text.startsWith('UPDATE identity.link_conflict SET resolved_at=')) return [];
       if (text.startsWith('INSERT INTO identity.link_conflict')) {
         const conflict = { subject: String(compiled.params[0]), candidate: String(compiled.params[1]), reason: String(compiled.params[2]) };
         if (!conflicts.some(row => JSON.stringify(row) === JSON.stringify(conflict))) conflicts.push(conflict);
@@ -57,8 +74,8 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique',
       }
       if (text.startsWith('SELECT 1 FROM identity.link_conflict')) return conflicts.filter(row =>
         row.subject === compiled.params[0] && ['identity_collision', 'person_unavailable'].includes(row.reason)).map(() => ({ one: 1 }));
-      // A person insert, a binding, a grant, a role change or any other query
-      // would fail this test rather than be silently accepted by a broad mock.
+      // A person insert, a grant, a role change or any unrelated query fails
+      // rather than being silently accepted by a broad storage mock.
       throw new Error('Unexpected identity query in synthetic pending-access fixture');
     },
     async transaction<T>(callback: (tx: unknown) => Promise<T>): Promise<T> { return callback(synthetic); },
@@ -103,21 +120,32 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique',
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
   const code = () => /\b(\d{6})\b/.exec(emails.at(-1)!.text)![1]!;
-  function unchanged() {
-    expect(JSON.stringify({ legacy, affiliates })).toBe(fingerprint);
+  function unchanged(allowedBinding = false) {
+    expect(JSON.stringify({ legacy: legacy.map(row => ({ ...row, user_id: null })), affiliates })).toBe(fingerprint);
     expect(store.user).toHaveLength(1);
     expect(store.user![0]!.id).toBe(userId);
     expect(store.user![0]!.name).toBe('Acceso pendiente');
     expect(store.user![0]!.role).toBeUndefined();
     expect(store.account).toHaveLength(0);
-    expect(statements.some(text => /^(?:UPDATE|INSERT INTO) (?:mlm\.|identity\.auth_binding|identity\.legacy_claim_grant)/.test(text))).toBe(false);
+    const businessWrites = statements.filter(text => /^(?:UPDATE|INSERT INTO) (?:mlm\.|identity\.auth_binding|identity\.legacy_claim_grant)/.test(text));
+    if (allowedBinding) {
+      expect(bindings).toEqual([{ subject: userId, person: '71', method: 'verified_email' }]);
+      expect(legacy[0]!.user_id).toBe(userId);
+      expect(businessWrites).toHaveLength(2);
+      expect(businessWrites[0]).toMatch(/^UPDATE mlm.person SET user_id=/);
+      expect(businessWrites[1]).toMatch(/^INSERT INTO identity.auth_binding/);
+    } else {
+      expect(bindings).toHaveLength(0);
+      expect(legacy.every(row => row.user_id === null)).toBe(true);
+      expect(businessWrites).toHaveLength(0);
+    }
   }
   return { store, emails, database, request, code, unchanged, provisioned, conflicts, canonicalReads: () => canonicalReads };
 }
 const cookies = (response: Response) => response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
 
-for (const kind of ['unique', 'duplicate', 'blacklisted'] as const) {
-  test(`precreated unverified ${kind} legacy access receives OTP but email proof never auto-links network or grants a JWT`, async () => {
+for (const kind of ['unique', 'duplicate', 'blacklisted', 'privileged'] as const) {
+  test(`precreated ${kind} legacy access requires email proof and only a unique eligible non-admin can bind`, async () => {
     const app = fixture(kind);
     expect((await getAuthPersonBinding(app.database, { userId: 'synthetic-precreated-access' })).status).toBe('verification_required');
     const sent = await app.request('/email-otp/send-verification-otp', { email, type: 'sign-in' });
@@ -140,10 +168,11 @@ for (const kind of ['unique', 'duplicate', 'blacklisted'] as const) {
     expect(app.store.verification).toHaveLength(0);
     expect(signedIn.headers.has('set-auth-jwt')).toBe(false);
     expect(app.canonicalReads()).toBe(1);
-    expect(app.provisioned).toEqual([kind === 'blacklisted' ? 'quarantined' : 'claim_required']);
-    expect(app.conflicts.map(row => row.reason)).toEqual([kind === 'blacklisted' ? 'person_unavailable' : 'legacy_claim_required']);
+    const resultStatus = kind === 'unique' ? 'existing' : kind === 'privileged' ? 'claim_required' : 'quarantined';
+    expect(app.provisioned).toEqual([resultStatus]);
+    expect(app.conflicts.map(row => row.reason)).toEqual(kind === 'unique' ? [] : [kind === 'blacklisted' ? 'person_unavailable' : kind === 'duplicate' ? 'identity_collision' : 'legacy_claim_required']);
     const binding = await getAuthPersonBinding(app.database, { userId: 'synthetic-precreated-access' });
-    expect(binding).toEqual({ status: kind === 'blacklisted' ? 'quarantined' : 'claim_required' });
+    expect(binding.status).toBe(resultStatus);
     const cookie = cookies(signedIn);
     expect(cookie).toContain('better-auth.session_token=');
     const session = await app.request('/get-session', undefined, cookie);
@@ -151,11 +180,11 @@ for (const kind of ['unique', 'duplicate', 'blacklisted'] as const) {
     expect((await session.json() as { user: { email: string; emailVerified: boolean } }).user)
       .toMatchObject({ email, emailVerified: true });
     const token = await app.request('/token', undefined, cookie);
-    expect(token.status).toBe(403);
-    expect(await token.text()).not.toContain('person_public_id');
+    expect(token.status).toBe(kind === 'unique' ? 200 : 403);
+    if (kind !== 'unique') expect(await token.text()).not.toContain('person_public_id');
     expect((await app.request('/sign-in/email-otp', { email, otp: code })).status).toBe(400);
     expect(app.emails).toHaveLength(1);
-    app.unchanged();
+    app.unchanged(kind === 'unique');
   });
 }
 
@@ -181,7 +210,7 @@ test('already verified OTP login keeps its native response without an extra cano
   expect((await response.clone().json() as { user: { emailVerified: boolean } }).user.emailVerified).toBe(true);
   expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
   expect(app.canonicalReads()).toBe(0);
-  app.unchanged();
+  app.unchanged(true);
 });
 
 for (const fault of ['unverified', 'other-subject', 'other-email', 'missing', 'unavailable'] as const) {
@@ -202,7 +231,7 @@ for (const fault of ['unverified', 'other-subject', 'other-email', 'missing', 'u
     // Do not undo native email proof or retry/redeem the consumed challenge.
     expect(app.store.user![0]!.emailVerified).toBe(true);
     expect(app.store.verification).toHaveLength(0);
-    app.unchanged();
+    app.unchanged(true);
   });
 }
 

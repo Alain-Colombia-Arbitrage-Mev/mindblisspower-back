@@ -195,8 +195,9 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
       session: { create: { before: async (session, ctx) => {
         const user = await ctx?.context.internalAdapter.findUserById(session.userId);
         if (!user || user.emailVerified !== true) return false;
-        // claim_required/quarantined may have a limited auth session. No JWT is
-        // issued until the separate, approved identity-binding policy succeeds.
+        // A verified email links only one eligible, unprivileged legacy person.
+        // Ambiguous, blocked or privileged claims retain a limited session;
+        // JWT issuance still requires a canonical persisted subject binding.
         await identity.provision(user.id);
       } } },
     },
