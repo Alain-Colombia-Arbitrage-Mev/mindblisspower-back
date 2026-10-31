@@ -547,6 +547,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	h.attachNOWMemberPolicy(r, &summary, email)
 	writeJSON(w, http.StatusOK, summary)
 }
 

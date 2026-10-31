@@ -2,13 +2,16 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"github.com/vicionpower/vp-engine/internal/nowengine"
@@ -22,7 +25,7 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
 	ctx := context.Background()
-	for _, name := range []string{"70_stable_identity_bindings.sql", "74_nowpayments_membership_review.sql", "75_nowpayments_webhook_capture.sql", "77_nowpayments_included_pricing.sql", "79_nowpayments_operational_orders.sql", "80_nowpayments_scoped_engine.sql"} {
+	for _, name := range []string{"70_stable_identity_bindings.sql", "74_nowpayments_membership_review.sql", "75_nowpayments_webhook_capture.sql", "77_nowpayments_included_pricing.sql", "79_nowpayments_operational_orders.sql", "80_nowpayments_scoped_engine.sql", "82_nowpayments_calendar_maturity.sql"} {
 		data, err := os.ReadFile(filepath.Join(findRepoRoot(t), "_meta", "migration", name))
 		if err != nil {
 			t.Fatal(err)
@@ -183,6 +186,20 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
 	if !referrals.Equal(decimal.NewFromInt(99)) || !binary.Equal(decimal.RequireFromString("19.80")) || !royalty.Equal(decimal.NewFromInt(99)) {
 		t.Fatal("wrong net/legacy-PV compensation", referrals, binary, royalty)
 	}
+	var maturityUnchanged, calendarHold, commissionEvidence, legacyDateConservative bool
+	if err := pool.QueryRow(ctx, `SELECT
+ NOT EXISTS(SELECT 1 FROM payments.nowpayments_engine_obligation e JOIN payments.nowpayments_operational_order o ON o.attempt_id=e.source_attempt_id
+ JOIN mlm.investment_cd cd ON cd.id=o.investment_cd_id WHERE e.kind='roi' AND e.available_at<>cd.matures_at),
+ NOT EXISTS(SELECT 1 FROM payments.nowpayments_engine_obligation WHERE kind<>'roi' AND
+ (available_at<>((created_at AT TIME ZONE 'America/Bogota')+interval '1 month') AT TIME ZONE 'America/Bogota' OR available_at<=created_at)),
+ EXISTS(SELECT 1 FROM payments.nowpayments_engine_obligation e JOIN payments.nowpayments_engine_payment p ON p.obligation_id=e.id
+ WHERE e.kind<>'roi' AND p.posted_at<e.created_at-interval '7 days' AND e.available_at>now()),
+ NOT EXISTS(SELECT 1 FROM mlm.wallet_movement wm JOIN mlm.transaction t ON t.id=wm.transaction_id
+ JOIN payments.nowpayments_engine_payment p ON p.transaction_ref=t.external_ref JOIN payments.nowpayments_engine_obligation e ON e.id=p.obligation_id
+ WHERE wm.available_at IS NULL OR (wm.available_at::timestamp AT TIME ZONE 'UTC')<e.available_at)`).Scan(&maturityUnchanged, &calendarHold, &commissionEvidence, &legacyDateConservative); err != nil || !maturityUnchanged || !calendarHold || !commissionEvidence || !legacyDateConservative {
+		t.Fatal("calendar/ROI maturity or UTC DATE projection violated", maturityUnchanged, calendarHold, commissionEvidence, legacyDateConservative, err)
+	}
+	assertNOWCalendarMonthPostgres(t, ctx, pool)
 	var capUsage, limitedPaid decimal.Decimal
 	if err := pool.QueryRow(ctx, `SELECT (SELECT COALESCE(sum(paid_total),0) FROM mlm.package_cap_state),
  (SELECT COALESCE(sum(p.amount_usd),0) FROM payments.nowpayments_engine_payment p JOIN payments.nowpayments_engine_obligation e ON e.id=p.obligation_id WHERE e.kind IN('roi','binary_bonus'))`).Scan(&capUsage, &limitedPaid); err != nil || !capUsage.Equal(limitedPaid) {
@@ -220,6 +237,67 @@ func TestNOWScopedEnginePostgresRestrictedRole(t *testing.T) {
 	defer tx.Rollback(ctx)
 	if err := service.ValidateReady(ctx, tx); err == nil {
 		t.Fatal("risk invoice readiness accepted")
+	}
+}
+
+// The disposable database checks PostgreSQL's actual calendar arithmetic and
+// the production constraint, not a second, subtly different Go month helper.
+func assertNOWCalendarMonthPostgres(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, timezone := range []string{"UTC", "Pacific/Auckland"} {
+		for _, tc := range []struct{ name, created, available string }{
+			{"ordinary", "2026-01-15T15:30:12.123456-05:00", "2026-02-15T15:30:12.123456-05:00"},
+			{"nonleap_clamp", "2026-01-31T15:30:12.123456-05:00", "2026-02-28T15:30:12.123456-05:00"},
+			{"leap_clamp", "2028-01-31T23:59:59.999999-05:00", "2028-02-29T23:59:59.999999-05:00"},
+			{"leap_day", "2028-02-29T00:00:00-05:00", "2028-03-29T00:00:00-05:00"},
+			{"not_end_of_following_month", "2026-04-30T08:45:10-05:00", "2026-05-30T08:45:10-05:00"},
+			{"year_rollover", "2026-12-31T23:59:59-05:00", "2027-01-31T23:59:59-05:00"},
+			{"utc_is_next_civil_day", "2026-03-01T02:30:00Z", "2026-03-29T02:30:00Z"},
+		} {
+			t.Run("calendar_month/"+timezone+"/"+tc.name, func(t *testing.T) {
+				tx, err := pool.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback(ctx)
+				if _, err := tx.Exec(ctx, `SELECT set_config('TimeZone',$1,true)`, timezone); err != nil {
+					t.Fatal(err)
+				}
+				created, err := time.Parse(time.RFC3339Nano, tc.created)
+				if err != nil {
+					t.Fatal(err)
+				}
+				available, err := time.Parse(time.RFC3339Nano, tc.available)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var actual time.Time
+				if err := tx.QueryRow(ctx, `SELECT (($1::timestamptz AT TIME ZONE 'America/Bogota')+interval '1 month') AT TIME ZONE 'America/Bogota'`, created).Scan(&actual); err != nil || !actual.Equal(available) {
+					t.Fatal("calendar wall-clock calculation", actual, available, err)
+				}
+				for _, kind := range []string{"direct_bonus", "royalty", "binary_bonus"} {
+					const insert = `INSERT INTO payments.nowpayments_engine_obligation(external_ref,source_attempt_id,period_id,affiliate_id,affiliate_package_id,kind,
+ entitlement_usd,commission_factor,available_at,created_at)
+ SELECT $1,source_attempt_id,period_id,affiliate_id,affiliate_package_id,$2,1,.99,$3,$4
+ FROM payments.nowpayments_engine_obligation WHERE kind<>'roi' ORDER BY id LIMIT 1 RETURNING available_at`
+					if err := tx.QueryRow(ctx, insert, "now:calendar-test:"+kind, kind, available, created).Scan(&actual); err != nil || !actual.Equal(available) {
+						t.Fatal("constraint rejected calendar month", kind, actual, err)
+					}
+					for _, invalid := range []time.Time{created, available.Add(-time.Microsecond), available.Add(time.Microsecond)} {
+						sp, err := tx.Begin(ctx)
+						if err != nil {
+							t.Fatal(err)
+						}
+						err = sp.QueryRow(ctx, insert, "now:calendar-invalid:"+kind, kind, invalid, created).Scan(&actual)
+						_ = sp.Rollback(ctx)
+						var pgErr *pgconn.PgError
+						if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+							t.Fatal("constraint accepted a shifted calendar maturity", kind, err)
+						}
+					}
+				}
+			})
+		}
 	}
 }
 

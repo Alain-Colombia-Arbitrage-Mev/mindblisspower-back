@@ -117,17 +117,6 @@ func sortedKeys[T any](values map[int64]T) []int64 {
 	return keys
 }
 
-func bonusAvailable(at time.Time, loc *time.Location) time.Time {
-	local := at.In(loc)
-	last := time.Date(local.Year(), local.Month()+1, 0, 0, 0, 0, 0, loc)
-	nextLast := time.Date(last.Year(), last.Month()+2, 0, 0, 0, 0, 0, loc)
-	day := last.Day()
-	if day > nextLast.Day() {
-		day = nextLast.Day()
-	}
-	return time.Date(nextLast.Year(), nextLast.Month(), day, 0, 0, 0, 0, loc).AddDate(0, 0, 1)
-}
-
 func dailyCutoff(at time.Time, loc *time.Location) time.Time {
 	local := at.In(loc)
 	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)

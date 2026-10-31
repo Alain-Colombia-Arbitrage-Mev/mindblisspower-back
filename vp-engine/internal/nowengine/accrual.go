@@ -87,7 +87,7 @@ func (s *Service) accrueROI(ctx context.Context, tx pgx.Tx, u universe, now time
 			}
 			id := int64(0)
 			if amount.IsPositive() {
-				id, err = s.createObligation(ctx, tx, o, nil, "roi", fmt.Sprintf("now:roi:%d:%s", o.cd, next.Format("2006-01-02")), amount, excluded, decimal.Zero, decimal.NewFromInt(1), o.matures)
+				id, err = s.createObligation(ctx, tx, o, nil, "roi", fmt.Sprintf("now:roi:%d:%s", o.cd, next.Format("2006-01-02")), amount, excluded, decimal.Zero, decimal.NewFromInt(1), &o.matures)
 				if err != nil {
 					return false, err
 				}
@@ -256,7 +256,7 @@ func (s *Service) referrals(ctx context.Context, tx pgx.Tx, u universe, periodID
 			}
 			amount := sale.net.Mul(rate).RoundDown(2)
 			if amount.IsPositive() {
-				if _, err := s.createObligation(ctx, tx, own, &periodID, "direct_bonus", fmt.Sprintf("now:ref:%d:%s", periodID, sale.id), amount, decimal.Zero, rate, commissionFactor, bonusAvailable(end, s.loc)); err != nil {
+				if _, err := s.createObligation(ctx, tx, own, &periodID, "direct_bonus", fmt.Sprintf("now:ref:%d:%s", periodID, sale.id), amount, decimal.Zero, rate, commissionFactor, nil); err != nil {
 					return err
 				}
 			}
@@ -268,7 +268,7 @@ func (s *Service) referrals(ctx context.Context, tx pgx.Tx, u universe, periodID
 		if own := u.ownFor(g2.id, end, false); own != nil {
 			amount := sale.net.Mul(sale.plan.Royalty).RoundDown(2)
 			if amount.IsPositive() {
-				if _, err := s.createObligation(ctx, tx, own, &periodID, "royalty", fmt.Sprintf("now:roy:%d:%s", periodID, sale.id), amount, decimal.Zero, sale.plan.Royalty, commissionFactor, bonusAvailable(end, s.loc)); err != nil {
+				if _, err := s.createObligation(ctx, tx, own, &periodID, "royalty", fmt.Sprintf("now:roy:%d:%s", periodID, sale.id), amount, decimal.Zero, sale.plan.Royalty, commissionFactor, nil); err != nil {
 					return err
 				}
 			}
@@ -345,7 +345,7 @@ func (s *Service) binary(ctx context.Context, tx pgx.Tx, u universe, periodID in
 		}
 		excluded := amount.Sub(allowed)
 		if amount.IsPositive() {
-			if _, err := s.createObligation(ctx, tx, own, &periodID, "binary_bonus", fmt.Sprintf("now:binary:%d:%d", periodID, affiliate), amount, excluded, own.plan.Unit, commissionFactor, bonusAvailable(end, s.loc)); err != nil {
+			if _, err := s.createObligation(ctx, tx, own, &periodID, "binary_bonus", fmt.Sprintf("now:binary:%d:%d", periodID, affiliate), amount, excluded, own.plan.Unit, commissionFactor, nil); err != nil {
 				return err
 			}
 		}

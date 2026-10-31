@@ -44,7 +44,7 @@ func PostNOWScopedAccrual(ctx context.Context, tx pgx.Tx, obligationID int64, am
 			return "", err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO mlm.wallet_movement(transaction_id,wallet_id,affiliate_id,concept_id,amount,posted_at,available_at)
- VALUES($1,$2,$3,1006,$4,$5,$6::date)`, transactionID, wallet, route.affiliateID, amount, postedAt, nowROIAvailableDate(availableAt)); err != nil {
+ VALUES($1,$2,$3,1006,$4,$5,$6::date)`, transactionID, wallet, route.affiliateID, amount, postedAt, nowAccrualAvailableDate(availableAt)); err != nil {
 			return "", err
 		}
 		return externalRef, nil
@@ -81,15 +81,18 @@ func PostNOWScopedAccrual(ctx context.Context, tx pgx.Tx, obligationID int64, am
 		return "", err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO mlm.wallet_movement(transaction_id,wallet_id,affiliate_id,concept_id,amount,posted_at,available_at)
- VALUES($1,$2,$3,$4,$5,$6,$7::date)`, transactionID, wallet, route.affiliateID, concept, withdrawable, postedAt, availableAt.In(time.FixedZone("Bogota", -5*3600)).Format("2006-01-02"))
+ VALUES($1,$2,$3,$4,$5,$6,$7::date)`, transactionID, wallet, route.affiliateID, concept, withdrawable, postedAt, nowAccrualAvailableDate(availableAt))
 	return externalRef, err
 }
 
-func nowROIAvailableDate(available time.Time) string {
-	business := available.In(time.FixedZone("Bogota", -5*3600))
-	date := time.Date(business.Year(), business.Month(), business.Day(), 0, 0, 0, 0, business.Location())
-	// The existing ledger stores DATE. Never unlock hours before maturity.
-	if business.After(date) {
+func nowAccrualAvailableDate(available time.Time) string {
+	utc := available.UTC()
+	date := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+	// The existing ledger stores DATE. Preserve exact maturity on the NOW
+	// obligation, but conservatively ceil this projection for the legacy UTC
+	// CURRENT_DATE reader. This DATE never authorizes a NOW withdrawal: that
+	// requires the authoritative timestamp and risk/funding checks.
+	if utc.After(date) {
 		date = date.AddDate(0, 0, 1)
 	}
 	return date.Format("2006-01-02")

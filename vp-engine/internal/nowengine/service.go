@@ -427,10 +427,16 @@ func (s *Service) remaining(ctx context.Context, tx pgx.Tx, pkg int64) (decimal.
 	return result, nil
 }
 
-func (s *Service) createObligation(ctx context.Context, tx pgx.Tx, o *order, period *int64, kind, ref string, amount, excluded, unit, factor decimal.Decimal, available time.Time) (int64, error) {
+func (s *Service) createObligation(ctx context.Context, tx pgx.Tx, o *order, period *int64, kind, ref string, amount, excluded, unit, factor decimal.Decimal, roiAvailableAt *time.Time) (int64, error) {
 	var id int64
+	// now() is also the immutable created_at default in this transaction. A late
+	// weekly catch-up must not backdate the commission's calendar-month hold.
+	// PostgreSQL clamps month ends and preserves the Bogota wall-clock time.
 	err := tx.QueryRow(ctx, `INSERT INTO payments.nowpayments_engine_obligation(external_ref,source_attempt_id,period_id,affiliate_id,affiliate_package_id,kind,entitlement_usd,cap_excluded_usd,unit_gross_usd,commission_factor,available_at)
- VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(external_ref) DO NOTHING RETURNING id`, ref, o.id, period, o.affiliate, o.pkg, kind, amount, excluded, unit, factor, available).Scan(&id)
+ VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,
+ CASE WHEN $6='roi' THEN $11::timestamptz
+ ELSE ((now() AT TIME ZONE 'America/Bogota')+interval '1 month') AT TIME ZONE 'America/Bogota' END)
+ ON CONFLICT(external_ref) DO NOTHING RETURNING id`, ref, o.id, period, o.affiliate, o.pkg, kind, amount, excluded, unit, factor, roiAvailableAt).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}

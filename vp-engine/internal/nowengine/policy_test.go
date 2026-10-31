@@ -82,7 +82,7 @@ func TestNOWFundingRetentionHasNoNegativeOrInventedBudget(t *testing.T) {
 	}
 }
 
-func TestNOWBusinessCadenceAndAvailability(t *testing.T) {
+func TestNOWBusinessCadenceAndFixed365DayMaturity(t *testing.T) {
 	loc, err := time.LoadLocation(businessTimezone)
 	if err != nil {
 		t.Fatal(err)
@@ -96,12 +96,6 @@ func TestNOWBusinessCadenceAndAvailability(t *testing.T) {
 	}
 	if got := dailyCutoff(monday.Add(30*time.Minute), loc); !got.Equal(monday) {
 		t.Fatal(got)
-	}
-	for _, tc := range []struct{ from, want string }{{"2026-01-15", "2026-03-01"}, {"2026-04-15", "2026-05-31"}, {"2028-01-15", "2028-03-01"}} {
-		from, _ := time.ParseInLocation("2006-01-02", tc.from, loc)
-		if got := bonusAvailable(from, loc).Format("2006-01-02"); got != tc.want {
-			t.Fatal(tc, got)
-		}
 	}
 	start := time.Date(2027, 3, 1, 12, 0, 0, 0, loc)
 	if got := start.AddDate(0, 0, 365).Sub(start).Hours() / 24; got != 365 {
