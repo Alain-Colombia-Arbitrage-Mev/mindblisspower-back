@@ -31,12 +31,10 @@ func (s *Store) enqueueNOWOperationalPayment(ctx context.Context, environment, o
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() > 0 {
-		return true, nil
-	}
-	var exists bool
-	err = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payments.nowpayments_operational_job WHERE attempt_id=$1::uuid)`, orderID).Scan(&exists)
-	return exists, err
+	// Report a durable change, not merely an existing job. Identical callback
+	// replay needs no extra SELECT or in-memory wake-up; the persisted lease and
+	// periodic runner remain authoritative after a restart or lost notification.
+	return tag.RowsAffected() > 0, nil
 }
 
 // RunNOWOperationalJobs claims at most five durable jobs. Leases permit recovery
@@ -120,12 +118,35 @@ func (s *Store) RunNOWOperationalJobs(ctx context.Context, limit int) (int, erro
 }
 
 type nowOperationalJobRunner struct {
-	mu  sync.Mutex
-	run func(context.Context) (int, error)
+	mu   sync.Mutex
+	run  func(context.Context) (int, error)
+	wake chan struct{}
 }
 
 func (h *Handler) SetNOWOperationalJobRunner(run func(context.Context) (int, error)) {
-	h.nowJobs = &nowOperationalJobRunner{run: run}
+	h.nowJobs = &nowOperationalJobRunner{run: run, wake: make(chan struct{}, 1)}
+}
+
+// NOWOperationalJobWakeups is only an in-process hint to the existing bounded
+// worker. It carries no payment data and is never a replacement for SQL jobs.
+func (h *Handler) NOWOperationalJobWakeups() <-chan struct{} {
+	if h.nowJobs == nil {
+		return nil
+	}
+	return h.nowJobs.wake
+}
+
+func (h *Handler) notifyNOWOperationalCapture(queued bool, signed, api nowpayments.Payment) {
+	if !queued || h.nowJobs == nil || h.nowJobs.wake == nil ||
+		(api.Status != "finished" && ordinaryNOWCaptureState(api.Status) && ordinaryNOWCaptureState(signed.Status)) {
+		return
+	}
+	// Only new finished/risk evidence accelerates delivery. Ordinary waiting or
+	// confirming callbacks must not run the financial engine an extra time.
+	select {
+	case h.nowJobs.wake <- struct{}{}:
+	default: // One pending pulse coalesces a burst; no sender ever blocks the ACK.
+	}
 }
 
 func (h *Handler) RunNOWOperationalJobs(ctx context.Context) (int, error) {

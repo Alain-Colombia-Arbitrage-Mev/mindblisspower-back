@@ -141,11 +141,14 @@ func (h *Handler) handleNOWPaymentsCapture(w http.ResponseWriter, r *http.Reques
 			writeErr(w, http.StatusServiceUnavailable, "membership_activation_unavailable")
 			return
 		}
-		_, err := store.enqueueNOWOperationalPayment(ctx, flow.environment, signed.OrderID, string(signed.PaymentID), hex.EncodeToString(hash[:]))
+		queued, err := store.enqueueNOWOperationalPayment(ctx, flow.environment, signed.OrderID, string(signed.PaymentID), hex.EncodeToString(hash[:]))
 		if err != nil {
 			writeErr(w, http.StatusServiceUnavailable, "membership_activation_unavailable")
 			return
 		}
+		// Both evidence and job have committed before this non-blocking hint.
+		// The ACK never waits for activation or launches a goroutine per IPN.
+		h.notifyNOWOperationalCapture(queued, signed, api)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"received": true, "mode": "capture_only", "state": "captured", "fulfillment_status": "not_activated"})
 }

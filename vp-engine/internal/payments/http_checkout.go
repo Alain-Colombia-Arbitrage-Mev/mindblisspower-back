@@ -108,14 +108,16 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_purchase_request_id")
 		return
 	}
-	if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil && !nowOperational {
-		if errors.Is(err, ErrRecoveryFinancialReview) {
-			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
-		} else {
-			h.log.Error().Err(err).Msg("checkout financial mode unavailable")
-			writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
+	if !nowOperational {
+		if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil {
+			if errors.Is(err, ErrRecoveryFinancialReview) {
+				writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+			} else {
+				h.log.Error().Err(err).Msg("checkout financial mode unavailable")
+				writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
+			}
+			return
 		}
-		return
 	}
 
 	ctx := r.Context()

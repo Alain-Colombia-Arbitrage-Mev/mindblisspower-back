@@ -175,6 +175,7 @@ func run() error {
 				case <-rootCtx.Done():
 					return
 				case <-ticker.C:
+				case <-handler.NOWOperationalJobWakeups():
 				}
 			}
 		}()

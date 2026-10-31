@@ -325,9 +325,9 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 		}
 		hash := strings.Repeat("3", 64)
 		record(payment, hash)
-		for range 2 {
-			if queued, err := store.enqueueNOWOperationalPayment(ctx, "production", order.ID, string(payment.PaymentID), hash); err != nil || !queued {
-				t.Fatal("late capture was dropped instead of retained", queued, err)
+		for replay := range 2 {
+			if queued, err := store.enqueueNOWOperationalPayment(ctx, "production", order.ID, string(payment.PaymentID), hash); err != nil || queued != (replay == 0) {
+				t.Fatal("only a new durable capture may signal more work", queued, replay, err)
 			}
 			if _, err := store.RunNOWOperationalJobs(ctx, 5); err != nil {
 				t.Fatal("late cancelled payment worker", err)
@@ -341,6 +341,79 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
  AND(SELECT count(*) FROM payments.nowpayments_operational_job WHERE attempt_id=a.id AND state='held')=1
  FROM payments.nowpayments_operational_order o JOIN payments.nowpayments_membership_attempt a ON a.id=o.attempt_id WHERE a.id=$1::uuid`, order.ID, string(payment.PaymentID)).Scan(&safe); err != nil || !safe {
 			t.Fatal("late payment activated, lost evidence, or duplicated work", err)
+		}
+		newHash := strings.Repeat("4", 64)
+		record(payment, newHash)
+		if queued, err := store.enqueueNOWOperationalPayment(ctx, "production", order.ID, string(payment.PaymentID), newHash); err != nil || !queued {
+			t.Fatal("new evidence on a held job was not retained", queued, err)
+		}
+		if processed, err := store.RunNOWOperationalJobs(ctx, 5); err != nil || processed != 0 {
+			t.Fatal("new evidence silently released a held cancelled payment", processed, err)
+		}
+	})
+
+	t.Run("webhook wakes only after committed evidence and changed durable job", func(t *testing.T) {
+		_, order := create(8430)
+		payment := paymentFor(order)
+		provider := &fakeNOWMembershipClient{signed: payment, authoritative: payment}
+		wakeup := NewHandler(readStore, nil, "synthetic-wakeup", nil, 0, zerolog.Nop())
+		wakeup.nowCapture = &nowPaymentsCapture{client: provider, store: capture, environment: "production"}
+		wakeup.nowMemberships = &nowPaymentsMemberships{store: store, environment: "production", operational: true}
+		inlineRuns := 0
+		wakeup.SetNOWOperationalJobRunner(func(context.Context) (int, error) { inlineRuns++; return 0, nil })
+		invoke := func() int {
+			r := httptest.NewRequest(http.MethodPost, "/api/webhooks/nowpayments", strings.NewReader(`{"synthetic":"wakeup"}`)).WithContext(ctx)
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("x-nowpayments-sig", strings.Repeat("a", 128))
+			w := httptest.NewRecorder()
+			wakeup.handleNOWPaymentsCapture(w, r)
+			return w.Code
+		}
+		if status := invoke(); status != http.StatusOK {
+			t.Fatal("durable capture ACK", status)
+		}
+		select {
+		case <-wakeup.NOWOperationalJobWakeups():
+		default:
+			t.Fatal("new finished capture did not wake existing worker")
+		}
+		var committed bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payments.nowpayments_webhook_capture WHERE matched_attempt_id=$1::uuid)
+ AND EXISTS(SELECT 1 FROM payments.nowpayments_operational_job WHERE attempt_id=$1::uuid AND state='queued')
+ AND NOT EXISTS(SELECT 1 FROM payments.nowpayments_operational_order WHERE attempt_id=$1::uuid AND investment_cd_id IS NOT NULL)`, order.ID).Scan(&committed); err != nil || !committed || inlineRuns != 0 {
+			t.Fatal("wakeup preceded SQL commit or activated inline", committed, inlineRuns, err)
+		}
+		if status := invoke(); status != http.StatusOK {
+			t.Fatal("idempotent callback ACK", status)
+		}
+		select {
+		case <-wakeup.NOWOperationalJobWakeups():
+			t.Fatal("identical provider callback woke worker again")
+		default:
+		}
+		// The capture commits, but failure to queue must never signal success or
+		// an in-memory wakeup. Only this disposable role/fixture is altered.
+		_, failedOrder := create(8431)
+		failedPayment := paymentFor(failedOrder)
+		provider.signed, provider.authoritative = failedPayment, failedPayment
+		if _, err := pool.Exec(ctx, `REVOKE INSERT ON payments.nowpayments_operational_job FROM now_engine_synthetic`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if _, err := pool.Exec(ctx, `GRANT INSERT ON payments.nowpayments_operational_job TO now_engine_synthetic`); err != nil {
+				t.Error("restore synthetic role grant", err)
+			}
+		})
+		if status := invoke(); status != http.StatusServiceUnavailable {
+			t.Fatal("failed queue acknowledged successful work", status)
+		}
+		select {
+		case <-wakeup.NOWOperationalJobWakeups():
+			t.Fatal("failed durable queue woke financial worker")
+		default:
+		}
+		if provider.creates != 0 || inlineRuns != 0 {
+			t.Fatal("capture woke work by creating a payment or running inline")
 		}
 	})
 
