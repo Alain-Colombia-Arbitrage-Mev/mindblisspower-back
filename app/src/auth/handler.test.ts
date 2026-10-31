@@ -237,7 +237,9 @@ test('new email code invalidates its older code and unknown email OTP cannot aut
   expect((await app.request('/sign-in/email-otp', { email, otp: lastCode })).status).toBe(200);
   expect(app.store.verification).toHaveLength(0);
   const count = app.messages.length;
-  expect((await app.request('/email-otp/send-verification-otp', { email: 'unknown@example.test', type: 'sign-in' })).status).toBe(200);
+  const missing = await app.request('/email-otp/send-verification-otp', { email: 'unknown@example.test', type: 'sign-in' });
+  expect(missing.status).toBe(400);
+  expect(await missing.json()).toMatchObject({ code: 'REGISTRATION_REQUIRED' });
   expect(app.messages).toHaveLength(count);
   expect(app.store.user).toHaveLength(1);
 });

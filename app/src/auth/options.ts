@@ -9,6 +9,7 @@ import { smsOptInPlugin } from './phone-opt-in';
 import { registrationCandidate, type RegistrationCandidate } from './registration';
 import { contactPhoneField, registrationContacts } from './registration-contacts';
 import { verifiedOtpSignInResponse } from './otp-sign-in-response';
+import { requireRegisteredEmailForSignIn } from './sign-in-registration';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
@@ -87,7 +88,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
       if (error instanceof APIError && error.statusCode === 503
-        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE'].includes(error.body?.code || '')) return;
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
@@ -115,6 +116,12 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     disabledPaths: ['/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
       '/registration/phone/send', '/registration/phone/verify'],
     hooks: { before: createAuthMiddleware(async ctx => {
+      if (emailEnabled && ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'sign-in') {
+        await requireRegisteredEmailForSignIn(secret, ctx);
+      }
+      if (ctx.path === '/sign-in/email' && typeof ctx.body?.password === 'string' && ctx.body.password.length > 0) {
+        await requireRegisteredEmailForSignIn(secret, ctx, 'password');
+      }
       if (ctx.path === '/sign-up/email') {
         if (ctx.body?.phoneNumber !== undefined || ctx.body?.phoneNumberVerified !== undefined) {
           throw new APIError('BAD_REQUEST', { message: 'Invalid registration details' });
@@ -151,8 +158,9 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
           throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
         }
       }
-      // Signup already discloses account creation to its caller. Login/reset
-      // remain generic even after rejection so delivery cannot enumerate users.
+      // Unknown login addresses explicitly require registration; provider send
+      // failures remain generic and never reveal provider rejection details.
+      // Password resets retain the native generic account-existence behavior.
       // Better Auth swallows send callbacks; this state is isolated per request
       // (including the signup plugin's nested callback), never shared globally.
       if (ctx.path === '/sign-up/email' && await emailRejected.get()) throw new APIError('SERVICE_UNAVAILABLE', {

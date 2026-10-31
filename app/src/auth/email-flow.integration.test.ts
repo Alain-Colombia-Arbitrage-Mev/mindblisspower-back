@@ -182,10 +182,11 @@ test('an expired Cloudflare-delivered OTP cannot create a session', async () => 
   await expectNoDeliverySecrets(expired, app.code());
 });
 
-test('unknown email stays generic without Cloudflare send or automatic account creation', async () => {
+test('unknown email requires registration without Cloudflare send or automatic account creation', async () => {
   const app = fixture();
   const response = await requestCode(app, 'unknown-email-flow@example.test');
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(400);
+  expect(await response.clone().json()).toEqual({ code: 'REGISTRATION_REQUIRED', message: 'Registration required' });
   expect(app.calls).toHaveLength(0);
   expect(app.store.user).toHaveLength(1);
   expect(app.store.session).toHaveLength(0);
@@ -211,7 +212,8 @@ test('login delivery eligibility depends only on an access account, not verified
   // A business/legacy binding callback is deliberately not a source of auth
   // users. Do not consult it or mint an access account to make delivery happen.
   const response = await requestCode(legacyOnly);
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ code: 'REGISTRATION_REQUIRED' });
   expect(legacyOnly.calls).toHaveLength(0);
   expect(legacyOnly.store.user).toHaveLength(0);
   expect(legacyOnly.store.verification).toHaveLength(0);
@@ -240,8 +242,8 @@ test('Cloudflare rejection stays generic, never retries or falls back, and never
   for (const status of [401, 429, 500]) {
     const app = fixture(status);
     const response = await requestCode(app);
-    // Login deliberately remains generic for known/unknown addresses. This is
-    // a request acknowledgement, not delivery confirmation or a session.
+    // Known-login provider failures remain generic. This is a request
+    // acknowledgement, not delivery confirmation or a session.
     expect(response.status).toBe(200);
     expect(response.headers.has('set-cookie')).toBe(false);
     expect(app.calls).toHaveLength(1);
@@ -252,7 +254,7 @@ test('Cloudflare rejection stays generic, never retries or falls back, and never
   }
 });
 
-test('a confirmed Cloudflare rejection invalidates only its code while keeping the recipient cooldown and anti-enumeration', async () => {
+test('a confirmed Cloudflare rejection invalidates only its code while keeping the recipient cooldown and explicit registration contract', async () => {
   for (const status of [400, 401, 403, 404, 429]) {
     const app = fixture(status);
     app.store.verification!.push({ id: 'unrelated-generation', identifier: 'email-verification-otp-another@example.test',
@@ -264,7 +266,7 @@ test('a confirmed Cloudflare rejection invalidates only its code while keeping t
     expect(app.store.verification!.map(row => row.id)).toEqual(['unrelated-generation']);
     expect((await requestCode(app)).status).toBe(429);
     expect(app.calls).toHaveLength(1);
-    expect((await requestCode(app, 'unknown-email-flow@example.test')).status).toBe(200);
+    expect((await requestCode(app, 'unknown-email-flow@example.test')).status).toBe(400);
     expect(app.calls).toHaveLength(1);
     expect(app.store.session).toHaveLength(0);
   }
@@ -282,7 +284,7 @@ test('registration reports a confirmed delivery rejection without granting acces
   expect(app.store.verification).toHaveLength(0);
   expect((await app.request('/email-otp/verify-email', { email, otp: app.code() })).status).toBe(400);
   expect(app.store.session).toHaveLength(0);
-  expect((await requestCode(app, 'unknown-email-flow@example.test')).status).toBe(200);
+  expect((await requestCode(app, 'unknown-email-flow@example.test')).status).toBe(400);
 });
 
 test('an ambiguous Cloudflare timeout or 5xx keeps a possibly delivered OTP usable without automatic retries', async () => {
