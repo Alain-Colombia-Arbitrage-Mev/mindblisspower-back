@@ -52,7 +52,13 @@ func TestActivatePaidPurchase_Integration(t *testing.T) {
 	store := NewStore(pool)
 
 	// --- Activación ---
-	res, err := store.ActivatePaidPurchase(ctx, "cs_test_1", "pi_test_1")
+	evidence := checkoutEvidence{sessionID: "cs_test_1", paymentIntentID: "pi_test_1", currency: "usd", totalCents: 101000}
+	badAmount := evidence
+	badAmount.totalCents++
+	if _, err := store.activateVerifiedCheckout(ctx, badAmount); !errors.Is(err, ErrCheckoutEvidence) {
+		t.Fatalf("amount mismatch must not activate: %v", err)
+	}
+	res, err := store.activateVerifiedCheckout(ctx, evidence)
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -148,7 +154,7 @@ func TestActivatePaidPurchase_Integration(t *testing.T) {
 	}
 
 	// --- Idempotencia: reintento de Stripe no duplica ---
-	res2, err := store.ActivatePaidPurchase(ctx, "cs_test_1", "pi_test_1")
+	res2, err := store.activateVerifiedCheckout(ctx, evidence)
 	if err != nil {
 		t.Fatalf("activate replay: %v", err)
 	}
@@ -160,6 +166,17 @@ func TestActivatePaidPurchase_Integration(t *testing.T) {
 	_ = pool.QueryRow(ctx, `SELECT count(*) FROM mlm.affiliate WHERE person_id=2`).Scan(&affCount)
 	if pkgCount != 1 || affCount != 1 {
 		t.Fatalf("duplication on replay: packages=%d affiliates=%d", pkgCount, affCount)
+	}
+	for _, state := range []string{"refunded", "disputed", "chargeback", "security_blocked", "failed", "expired"} {
+		if _, err := pool.Exec(ctx, `UPDATE payments.purchase_intent SET status=$1 WHERE stripe_session_id='cs_test_1'`, state); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.activateVerifiedCheckout(ctx, evidence); !errors.Is(err, ErrActivationState) {
+			t.Fatalf("terminal replay %s accepted: %v", state, err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT status FROM payments.purchase_intent WHERE stripe_session_id='cs_test_1'`).Scan(&st); err != nil || st != state {
+			t.Fatalf("terminal state was changed: %s %v", st, err)
+		}
 	}
 }
 

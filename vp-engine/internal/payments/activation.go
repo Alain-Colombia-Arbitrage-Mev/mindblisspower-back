@@ -16,26 +16,21 @@ type ActivationResult struct {
 	AffiliateID int64
 }
 
-// ActivatePaidPurchase marca la compra como pagada y la ACTIVA de forma atómica
-// e idempotente, todo en una transacción:
+// activateVerifiedCheckout valida un Checkout y activa la compra de forma
+// atómica e idempotente, todo en una transacción:
 //  1. resuelve el afiliado del comprador (lo auto-coloca bajo su sponsor si aún
 //     no está en el árbol — regla weak-leg),
 //  2. liga el paquete (mlm.affiliate_package status='active') — esto es lo que
 //     hace que el motor vea el principal/PV,
 //  3. acredita PV (mlm.tree_event pv_credit) para que el binario lo propague.
 //
-// NO escribe el ledger (wallet_movement): el asiento contable capital+1% se
-// concilia aparte. Idempotente: re-ejecutar (reintento de Stripe) no duplica
-// — dedupe por status='activated' y por transaction_hash/external_ref.
-func (s *Store) ActivatePaidPurchase(ctx context.Context, sessionID, paymentIntentID string) (ActivationResult, error) {
-	return s.ActivatePaidPurchaseForIntent(ctx, sessionID, paymentIntentID, "")
+// Conserva el inflow contable del pack (no saldo retirable). Los reintentos
+// no duplican paquetes/PV/ledger y jamás reabren estados terminales de riesgo.
+func (s *Store) activateVerifiedCheckout(ctx context.Context, evidence checkoutEvidence) (ActivationResult, error) {
+	return s.activatePaidPurchase(ctx, evidence.sessionID, evidence.paymentIntentID, evidence.purchaseIntentID, &evidence)
 }
 
-// ActivatePaidPurchaseForIntent permite activar usando el id interno del
-// purchase_intent que viaja en metadata de Stripe. Es el fallback para una sesión
-// creada correctamente en Stripe cuyo stripe_session_id no alcanzó a guardarse
-// en RDS por un fallo transitorio después de CreateCheckout.
-func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, paymentIntentID, purchaseIntentID string) (ActivationResult, error) {
+func (s *Store) activatePaidPurchase(ctx context.Context, sessionID, paymentIntentID, purchaseIntentID string, evidence *checkoutEvidence) (ActivationResult, error) {
 	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
 		return ActivationResult{}, err
 	}
@@ -55,31 +50,47 @@ func (s *Store) ActivatePaidPurchaseForIntent(ctx context.Context, sessionID, pa
 		pv            int
 		status        string
 		preferredSide string
+		storedSession string
+		storedPayment string
+		currency      string
+		totalCents    int64
 	)
 	const lockIntentBySession = `
 		SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status,
-		       COALESCE(preferred_side, '')
+		       COALESCE(preferred_side, ''), COALESCE(stripe_session_id, ''),
+		       COALESCE(stripe_payment_intent_id, ''), currency, total_cents
 		  FROM payments.purchase_intent
 		 WHERE stripe_session_id = $1
 		 FOR UPDATE
 	`
 	err = tx.QueryRow(ctx, lockIntentBySession, sessionID).Scan(
 		&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide,
+		&storedSession, &storedPayment, &currency, &totalCents,
 	)
 	if errors.Is(err, pgx.ErrNoRows) && strings.TrimSpace(purchaseIntentID) != "" {
 		err = tx.QueryRow(ctx, `
 			SELECT id::text, user_id, person_id, affiliate_id, sponsor_affiliate_id, package_id, pv, status,
-			       COALESCE(preferred_side, '')
+			       COALESCE(preferred_side, ''), COALESCE(stripe_session_id, ''),
+			       COALESCE(stripe_payment_intent_id, ''), currency, total_cents
 			  FROM payments.purchase_intent
 			 WHERE id = $1::uuid
 			 FOR UPDATE
-		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide)
+		`, purchaseIntentID).Scan(&intentID, &userID, &personID, &affiliateID, &sponsorID, &packageID, &pv, &status, &preferredSide,
+			&storedSession, &storedPayment, &currency, &totalCents)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActivationResult{}, ErrIntentNotFound
 	}
 	if err != nil {
 		return ActivationResult{}, fmt.Errorf("lock intent: %w", err)
+	}
+	if evidence != nil {
+		if err := evidence.matchesIntent(intentID, storedSession, storedPayment, currency, totalCents); err != nil {
+			return ActivationResult{}, err
+		}
+	}
+	if err := activationStateAllowed(status); err != nil {
+		return ActivationResult{}, err
 	}
 
 	if status == "activated" {
@@ -380,6 +391,14 @@ Este es un mensaje automático; por favor no respondas a este correo.`,
 // preferencia conserva la regla legacy weak-leg. Race-safe vía
 // pg_advisory_xact_lock(sponsor) + unique(parent_id, position) y reintento.
 func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, requestedSide string) (int64, error) {
+	return autoPlaceAffiliateWithEnrollment(ctx, tx, personID, sponsorID, requestedSide, true)
+}
+
+func autoPlaceNOWAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, side string) (int64, error) {
+	return autoPlaceAffiliateWithEnrollment(ctx, tx, personID, sponsorID, side, false)
+}
+
+func autoPlaceAffiliateWithEnrollment(ctx context.Context, tx pgx.Tx, personID, sponsorID int64, requestedSide string, globalEnrollment bool) (int64, error) {
 	// Clase 2 = colocación (el cierre binario usa clase 1; evita colisión de
 	// keyspace con el period id — el afiliado 1 = la empresa chocaba el lunes).
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2, $1::int)`, sponsorID); err != nil {
@@ -456,12 +475,27 @@ func autoPlaceAffiliate(ctx context.Context, tx pgx.Tx, personID, sponsorID int6
 		if err != nil {
 			return 0, fmt.Errorf("insert affiliate: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
+		if globalEnrollment {
+			if _, err := tx.Exec(ctx, `
 			INSERT INTO mlm.tree_event (external_ref, kind, affiliate_id, occurred_at)
 			VALUES ($1, 'enrollment', $2, now())
 			ON CONFLICT (external_ref) DO NOTHING
 		`, fmt.Sprintf("enroll:%d", newID), newID); err != nil {
-			return 0, fmt.Errorf("enrollment event: %w", err)
+				return 0, fmt.Errorf("enrollment event: %w", err)
+			}
+		} else {
+			// NOW volumes live in its immutable sidecar, not global tree_event.
+			// Count the new descendant without even acquiring UPDATE permission
+			// on historical/global PV columns via the legacy enrollment trigger.
+			if _, err := tx.Exec(ctx, `WITH ancestors AS(
+ SELECT a.id,a.depth FROM mlm.affiliate a JOIN mlm.affiliate_closure c ON c.ancestor_id=a.id
+ WHERE c.descendant_id=$1 AND c.distance>0 ORDER BY a.depth FOR UPDATE OF a), legs AS(
+ SELECT a.id,l.position FROM ancestors a JOIN mlm.affiliate l ON l.parent_id=a.id
+ JOIN mlm.affiliate_closure c ON c.ancestor_id=l.id AND c.descendant_id=$1)
+ UPDATE mlm.affiliate a SET left_count=a.left_count+CASE WHEN l.position='L' THEN 1 ELSE 0 END,
+ right_count=a.right_count+CASE WHEN l.position='R' THEN 1 ELSE 0 END,updated_at=now() FROM legs l WHERE a.id=l.id`, newID); err != nil {
+				return 0, fmt.Errorf("NOW placement counters: %w", err)
+			}
 		}
 		return newID, nil
 	}

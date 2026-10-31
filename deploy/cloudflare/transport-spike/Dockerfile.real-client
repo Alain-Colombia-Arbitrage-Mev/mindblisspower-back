@@ -1,0 +1,7 @@
+FROM mindbliss/cf-core-go-test:20261025 AS go-tools
+FROM mindbliss/api:auth-identity-20261025
+WORKDIR /app
+COPY --from=go-tools /go-jwks-probe /go-jwks-probe
+COPY app/src/clients/engine-transport.ts app/src/clients/engine-tunnel.ts app/src/clients/opaque-tcp-relay.mjs ./src/clients/
+COPY deploy/cloudflare/transport-spike/core-real-client.ts ./scripts/core-real-client.ts
+ENTRYPOINT ["bun", "scripts/core-real-client.ts"]

@@ -91,6 +91,7 @@ func TestRecoveryFinancialMutationDomainsIntegration(t *testing.T) {
 		t.Fatal("rejected operations left financial artifacts", artifacts, err)
 	}
 	h := NewHandler(store, &StripeGateway{}, "synthetic-service-token", []string{"admin@example.test"}, 0, zerolog.Nop())
+	h.SetStripeCheckoutEnabled(true)
 	h.SetSuperAdmins([]string{"admin@example.test"})
 	h.SetIdentityVerifier(fakeVerifier{email: "member@example.test"}, true)
 	r := httptest.NewRequest(http.MethodPost, "/api/payments/checkout", strings.NewReader(`{"email":"member@example.test","package_id":1}`))

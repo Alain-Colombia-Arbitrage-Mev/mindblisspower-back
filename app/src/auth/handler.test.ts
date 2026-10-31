@@ -12,6 +12,7 @@ const env: AuthEnvironment = {
   BETTER_AUTH_SECRET: 'synthetic-auth-secret-with-at-least-32-characters', BETTER_AUTH_URL: 'https://auth.example.test',
   BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
   BETTER_AUTH_PHONE_OTP_ENABLED: 'true', BETTER_AUTH_JWT_ENABLED: 'true', BETTER_AUTH_JWT_ISSUER: 'https://auth.example.test',
+  BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY: 'true',
   BETTER_AUTH_JWT_AUDIENCE: 'synthetic-members', CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-not-a-real-key',
   CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
   SENTDM_API_KEY: 'synthetic-not-a-real-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000000', SENTDM_OTP_CHANNEL: 'sms',
@@ -20,7 +21,7 @@ const env: AuthEnvironment = {
 function fixture(emailVerified = true) {
   const store: MemoryDB = { user: [{ id: 'synthetic-user', email, emailVerified, name: 'Synthetic User',
     phoneNumber: phone, phoneNumberVerified: false, createdAt: new Date(), updatedAt: new Date() }],
-  session: [], account: [], verification: [], rateLimit: [], jwks: [] };
+  session: [], account: [], verification: [], rateLimit: [], jwks: [], smsOptIn: [] };
   const messages: EmailMessage[] = [];
   const phoneCodes: string[] = [];
   const delivery: AuthDelivery = { email: async message => { messages.push(message); }, phone: async (_phone, code) => { phoneCodes.push(code); } };
@@ -28,6 +29,7 @@ function fixture(emailVerified = true) {
   let bindingEmail = email;
   let bindingFailed = false;
   const identity: AuthIdentity = {
+    registrationAllowed: async () => true,
     provision: async () => ({ status: emailVerified ? bindingStatus : 'verification_required' }),
     binding: async () => {
       if (bindingFailed) throw new Error('synthetic-sensitive-sql-and-token');
@@ -36,28 +38,43 @@ function fixture(emailVerified = true) {
   };
   const create = () => betterAuth(createAuthOptions(env, memoryAdapter(store), identity, delivery));
   let auth = create();
+  let defaultCookie = '';
   const request = (path: string, body?: unknown, cookie?: string) => auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
     method: body === undefined ? 'GET' : 'POST', headers: { origin: 'https://portal.example.test',
-      'content-type': 'application/json', 'x-forwarded-for': '192.0.2.10', ...(cookie ? { cookie } : {}) },
+      'content-type': 'application/json', 'x-forwarded-for': '192.0.2.10', ...((cookie || defaultCookie) ? { cookie: cookie || defaultCookie } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
-  return { store, messages, phoneCodes, request, restart: () => { auth = create(); },
+  const login = async () => {
+    expect((await request('/email-otp/send-verification-otp', { email, type: 'sign-in' })).status).toBe(200);
+    const otp = /\b(\d{6})\b/.exec(messages.at(-1)!.text)![1]!;
+    const response = await request('/sign-in/email-otp', { email, otp });
+    expect(response.status).toBe(200);
+    defaultCookie = cookies(response);
+    return defaultCookie;
+  };
+  return { store, messages, phoneCodes, request, login, restart: () => { auth = create(); },
     quarantine: () => { bindingStatus = 'quarantined'; }, changeEmail: () => { bindingEmail = 'other@example.test'; },
     breakBinding: () => { bindingFailed = true; } };
 }
 const cookies = (response: Response) => response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
+const consentBody = { phoneNumber: phone, consent: true, consentVersion: 'sms-auth-v1' };
+const proof = (code: string) => ({ phoneNumber: phone, code, updatePhoneNumber: true, disableSession: true });
 
-test('real phone handler persists only HMAC, consumes once, and JWT has bound verified claims', async () => {
+test('real authenticated SMS opt-in persists HMAC, consumes once, and cannot replace the email session or JWT identity', async () => {
   const app = fixture();
-  expect((await app.request('/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+  const sessionCookie = await app.login();
+  expect((await app.request('/phone-number/send-otp', consentBody)).status).toBe(200);
   const code = app.phoneCodes[0]!;
   expect(app.store.verification![0]!.value).toMatch(/^h1_[a-f0-9]{64}:0$/);
   expect(JSON.stringify(app.store.verification)).not.toContain(code);
-  const verified = await app.request('/phone-number/verify', { phoneNumber: phone, code, disableSession: false });
+  const verified = await app.request('/phone-number/verify', proof(code));
   expect(verified.status).toBe(200);
+  expect(await verified.json()).toEqual({ ok: true, phoneNumberVerified: true, optedIn: true });
+  expect(verified.headers.has('set-cookie')).toBe(false);
+  expect(app.store.session).toHaveLength(1);
   expect(app.store.verification).toHaveLength(0);
-  expect((await app.request('/phone-number/verify', { phoneNumber: phone, code })).status).toBe(400);
-  const tokenResponse = await app.request('/token', undefined, cookies(verified));
+  expect((await app.request('/phone-number/verify', proof(code))).status).toBe(400);
+  const tokenResponse = await app.request('/token', undefined, sessionCookie);
   expect(tokenResponse.status).toBe(200);
   expect(verified.headers.has('set-auth-jwt')).toBe(false);
   const { token } = await tokenResponse.json() as { token: string };
@@ -71,9 +88,9 @@ test('real phone handler persists only HMAC, consumes once, and JWT has bound ve
   expect(payload.person_public_id).toBe('00000000-0000-4000-8000-000000000001');
   expect(payload.exp! - payload.iat!).toBe(300);
   app.changeEmail();
-  expect((await app.request('/token', undefined, cookies(verified))).status).toBe(403);
+  expect((await app.request('/token', undefined, sessionCookie)).status).toBe(403);
   app.breakBinding();
-  const failed = await app.request('/token', undefined, cookies(verified));
+  const failed = await app.request('/token', undefined, sessionCookie);
   expect(failed.status).toBe(500);
   expect(await failed.text()).not.toContain('synthetic-sensitive');
   expect(JSON.stringify(jwks)).not.toContain('privateKey');
@@ -81,14 +98,15 @@ test('real phone handler persists only HMAC, consumes once, and JWT has bound ve
 
 test('phone OTP attempt budget persists across handler restart and locks the correct code', async () => {
   const app = fixture();
-  await app.request('/phone-number/send-otp', { phoneNumber: phone });
+  await app.login();
+  await app.request('/phone-number/send-otp', consentBody);
   const code = app.phoneCodes[0]!;
   const wrong = code === '000000' ? '111111' : '000000';
-  expect((await app.request('/phone-number/verify', { phoneNumber: phone, code: wrong })).status).toBe(400);
+  expect((await app.request('/phone-number/verify', proof(wrong))).status).toBe(400);
   expect(app.store.verification![0]!.value).toMatch(/:1$/);
   app.restart();
-  for (let attempt = 0; attempt < 2; attempt++) expect((await app.request('/phone-number/verify', { phoneNumber: phone, code: wrong })).status).toBe(400);
-  expect((await app.request('/phone-number/verify', { phoneNumber: phone, code })).status).toBe(400);
+  for (let attempt = 0; attempt < 2; attempt++) expect((await app.request('/phone-number/verify', proof(wrong))).status).toBe(400);
+  expect((await app.request('/phone-number/verify', proof(code))).status).toBe(400);
   expect(app.store.verification).toHaveLength(0);
 });
 
@@ -132,22 +150,24 @@ test('three concurrent phone failures spend all attempts of the same generation'
 
 test('expired phone OTP and parallel replay are rejected by the real handler', async () => {
   const expired = fixture();
-  await expired.request('/phone-number/send-otp', { phoneNumber: phone });
+  await expired.login();
+  await expired.request('/phone-number/send-otp', consentBody);
   expired.store.verification![0]!.expiresAt = new Date(Date.now() - 1000);
-  expect((await expired.request('/phone-number/verify', { phoneNumber: phone, code: expired.phoneCodes[0] })).status).toBe(400);
+  expect((await expired.request('/phone-number/verify', proof(expired.phoneCodes[0]!))).status).toBe(400);
   const app = fixture();
-  await app.request('/phone-number/send-otp', { phoneNumber: phone });
-  const responses = await Promise.all([1, 2].map(() => app.request('/phone-number/verify', { phoneNumber: phone, code: app.phoneCodes[0], disableSession: true })));
+  await app.login();
+  await app.request('/phone-number/send-otp', consentBody);
+  const responses = await Promise.all([1, 2].map(() => app.request('/phone-number/verify', proof(app.phoneCodes[0]!))));
   expect(responses.filter(response => response.status === 200)).toHaveLength(1);
   expect(responses.filter(response => response.status === 400)).toHaveLength(1);
 });
 
 test('SMS proof never verifies an email, and unsafe phone-reset routes are not exposed', async () => {
   const app = fixture(false);
-  await app.request('/phone-number/send-otp', { phoneNumber: phone });
-  expect((await app.request('/phone-number/verify', { phoneNumber: phone, code: app.phoneCodes[0], disableSession: true })).status).toBe(200);
+  expect((await app.request('/phone-number/send-otp', consentBody)).status).toBe(401);
+  expect((await app.request('/phone-number/verify', proof('123456'))).status).toBe(401);
   expect(app.store.user![0]!.emailVerified).toBe(false);
-  expect(app.store.user![0]!.phoneNumberVerified).toBe(true);
+  expect(app.store.user![0]!.phoneNumberVerified).toBe(false);
   expect(app.store.session).toHaveLength(0);
   expect((await app.request('/phone-number/request-password-reset', { phoneNumber: phone })).status).toBe(404);
   expect((await app.request('/phone-number/reset-password', { phoneNumber: phone, otp: '000000', newPassword: 'Synthetic-Password-123' })).status).toBe(404);
@@ -155,10 +175,11 @@ test('SMS proof never verifies an email, and unsafe phone-reset routes are not e
 
 test('recipient cooldown survives handler restart and rejects resend before replacing OTP', async () => {
   const app = fixture();
-  await app.request('/phone-number/send-otp', { phoneNumber: phone });
+  await app.login();
+  await app.request('/phone-number/send-otp', consentBody);
   const initial = app.store.verification![0]!.value;
   app.restart();
-  expect((await app.request('/phone-number/send-otp', { phoneNumber: phone })).status).toBe(429);
+  expect((await app.request('/phone-number/send-otp', consentBody)).status).toBe(429);
   expect(app.phoneCodes).toHaveLength(1);
   expect(app.store.verification![0]!.value).toBe(initial);
   expect(JSON.stringify(app.store.rateLimit)).not.toContain(phone);
@@ -166,14 +187,15 @@ test('recipient cooldown survives handler restart and rejects resend before repl
 
 test('allowed phone resend invalidates all old codes instead of exposing an older row after consumption', async () => {
   const app = fixture();
+  await app.login();
   for (let attempt = 0; attempt < 3; attempt++) {
     for (const row of app.store.rateLimit!) row.lastRequest = Date.now() - 120_000;
-    expect((await app.request('/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+    expect((await app.request('/phone-number/send-otp', consentBody)).status).toBe(200);
     expect(app.store.verification).toHaveLength(1);
   }
-  expect((await app.request('/phone-number/verify', { phoneNumber: phone, code: app.phoneCodes.at(-1), disableSession: true })).status).toBe(200);
+  expect((await app.request('/phone-number/verify', proof(app.phoneCodes.at(-1)!))).status).toBe(200);
   expect(app.store.verification).toHaveLength(0);
-  expect((await app.request('/phone-number/verify', { phoneNumber: phone, code: app.phoneCodes[0], disableSession: true })).status).toBe(400);
+  expect((await app.request('/phone-number/verify', proof(app.phoneCodes[0]!))).status).toBe(400);
 });
 
 test('email OTP handler stores HMAC, rejects replay and cannot mint JWT for quarantined binding', async () => {
@@ -215,7 +237,9 @@ test('new email code invalidates its older code and unknown email OTP cannot aut
   expect((await app.request('/sign-in/email-otp', { email, otp: lastCode })).status).toBe(200);
   expect(app.store.verification).toHaveLength(0);
   const count = app.messages.length;
-  expect((await app.request('/email-otp/send-verification-otp', { email: 'unknown@example.test', type: 'sign-in' })).status).toBe(200);
+  const missing = await app.request('/email-otp/send-verification-otp', { email: 'unknown@example.test', type: 'sign-in' });
+  expect(missing.status).toBe(400);
+  expect(await missing.json()).toMatchObject({ code: 'REGISTRATION_REQUIRED' });
   expect(app.messages).toHaveLength(count);
   expect(app.store.user).toHaveLength(1);
 });
@@ -252,7 +276,7 @@ test('email wrong attempts cannot request a concurrent new generation before exp
 
 test('password login cannot send an OTP before checking a password', async () => {
   const app = fixture();
-  expect((await app.request('/sign-in/phone-number', { phoneNumber: phone, password: 'incorrect-synthetic-password' })).status).toBe(403);
+  expect((await app.request('/sign-in/phone-number', { phoneNumber: phone, password: 'incorrect-synthetic-password' })).status).toBe(404);
   expect(app.phoneCodes).toHaveLength(0);
   expect(app.store.verification).toHaveLength(0);
 });

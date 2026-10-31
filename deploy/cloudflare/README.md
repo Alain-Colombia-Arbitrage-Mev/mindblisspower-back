@@ -1,5 +1,19 @@
 # Mindbliss: Cloudflare + PlanetScale
 
+## Preparación vigente del núcleo
+
+El 25 de octubre de 2026 se autorizó preparar portales, API y servicios Go en
+Workers y Containers, con revisión de costo antes de activarlos. Chatwoot queda
+fuera de esta etapa. Consultar el [plan y presupuesto del núcleo](CORE-DEPLOYMENT-PLAN.md)
+para la topología, escenarios locales y condiciones pendientes. No se ha
+activado un despliegue ni se autoriza reanudar operaciones financieras.
+
+Las secciones siguientes conservan el registro de la importación histórica y
+la propuesta inicial. No son un inventario actual de la base curada ni una
+instrucción para volver a restaurar o reemplazar datos.
+
+## Registro de la propuesta inicial
+
 Decision del usuario: 2026-10-24. Destino objetivo: Cloudflare para aplicaciones
 y PlanetScale para PostgreSQL. Sustituye la propuesta DigitalOcean; no implica
 que Cloudflare ya este desplegado.

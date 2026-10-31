@@ -1,0 +1,16 @@
+{
+  "name": "mindbliss-cloudflare-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "types:staging": "wrangler types --env staging",
+    "check:staging": "wrangler deploy --env staging --dry-run",
+    "check:production": "wrangler deploy --env production --dry-run"
+  },
+  "dependencies": { "@cloudflare/containers": "0.3.7" },
+  "devDependencies": { "wrangler": "4.152.0" },
+  "overrides": { "undici": "7.30.1" }
+}

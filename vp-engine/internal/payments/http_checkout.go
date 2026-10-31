@@ -13,24 +13,32 @@ import (
 // ── Checkout ────────────────────────────────────────────────────────────────
 
 type checkoutRequest struct {
-	Email         string `json:"email"`
-	PackageID     int    `json:"package_id"`
-	Ref           string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
-	PreferredSide string `json:"preferred_side"` // L/R del enlace; se persiste hasta el webhook de pago
-	Name          string `json:"name"`           // nombre del token (para auto-provisión de mlm.person)
-	Phone         string `json:"phone"`          // teléfono del token (E.164)
+	authSubject       string // Verified server identity; never decoded from browser JSON.
+	Email             string `json:"email"`
+	PackageID         int    `json:"package_id"`
+	Ref               string `json:"ref"`            // código de referido (?ref=CODE) → sponsor para colocar
+	PreferredSide     string `json:"preferred_side"` // L/R del enlace; se persiste hasta el webhook de pago
+	Name              string `json:"name"`           // nombre del token (para auto-provisión de mlm.person)
+	Phone             string `json:"phone"`          // teléfono del token (E.164)
+	Provider          string `json:"provider"`       // stripe (default) or nowpayments; membership purchase only
+	PurchaseRequestID string `json:"purchase_request_id"`
 }
 
 type checkoutResponse struct {
-	URL       string `json:"url"`
-	SessionID string `json:"session_id"`
-	TotalUSD  string `json:"total_usd"`
-	FeeUSD    string `json:"fee_usd"`
+	URL               string `json:"url"`
+	SessionID         string `json:"session_id"`
+	TotalUSD          string `json:"total_usd"`
+	FeeUSD            string `json:"fee_usd"`
+	Provider          string `json:"provider"`
+	FulfillmentStatus string `json:"fulfillment_status,omitempty"`
+	OrderID           string `json:"order_id,omitempty"`
+	Reused            bool   `json:"reused"`
 }
 
 // handleCheckout crea una sesión de Checkout. Lo llama el BFF Next (que ya
 // validó la sesión Cognito) con el token de servicio + el user_id autenticado.
 func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
@@ -41,8 +49,25 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req checkoutRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	if err := decoder.Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	provider, err := membershipProvider(req.Provider)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_payment_provider")
+		return
+	}
+	req.Provider = provider
+	// Fail closed before identity verification, database access or provisioning.
+	// Missing provider still means Stripe, so legacy callers cannot bypass this.
+	if provider == "stripe" && !h.stripeCheckoutEnabled {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_checkout_disabled")
 		return
 	}
 	if req.Email == "" || req.PackageID <= 0 {
@@ -54,14 +79,45 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Email = identity
-	if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil {
-		if errors.Is(err, ErrRecoveryFinancialReview) {
-			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
-		} else {
-			h.log.Error().Err(err).Msg("checkout financial mode unavailable")
-			writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
-		}
+	var boundNOWBuyer *Buyer
+	if provider == "nowpayments" && (h.nowMemberships == nil || !h.requireVerified || strings.TrimSpace(r.Header.Get(idTokenHeader)) == "") {
+		writeErr(w, http.StatusServiceUnavailable, "nowpayments-unavailable")
 		return
+	}
+	if provider == "nowpayments" {
+		verifier, ok := h.verifier.(nowSubjectVerifier)
+		if !ok || r.Header.Get(actAsHeader) != "" {
+			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
+			return
+		}
+		subject, email, err := verifier.VerifySubject(r.Context(), strings.TrimSpace(r.Header.Get(idTokenHeader)))
+		if err != nil || strings.TrimSpace(subject) == "" || email != identity {
+			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
+			return
+		}
+		req.authSubject = subject
+		buyer, err := h.store.resolveNOWBuyer(r.Context(), subject, email)
+		if err != nil {
+			writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+			return
+		}
+		boundNOWBuyer = &buyer
+	}
+	nowOperational := provider == "nowpayments" && h.nowMemberships != nil && h.nowMemberships.operational
+	if nowOperational && !validNOWPaymentsOrderID(req.PurchaseRequestID) {
+		writeErr(w, http.StatusBadRequest, "invalid_purchase_request_id")
+		return
+	}
+	if !nowOperational {
+		if err := financialguard.RequireOperational(r.Context(), h.store.db); err != nil {
+			if errors.Is(err, ErrRecoveryFinancialReview) {
+				writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+			} else {
+				h.log.Error().Err(err).Msg("checkout financial mode unavailable")
+				writeErr(w, http.StatusServiceUnavailable, "financial_mutations_unavailable")
+			}
+			return
+		}
 	}
 
 	ctx := r.Context()
@@ -82,28 +138,37 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pago único: si el usuario YA tiene esta membresía activa (cupo abierto), no
-	// se permite pagarla otra vez (evita doble cobro por doble-click/reintento).
-	// Las membresías no son suscripción. Un paquete agotado sí permite recompra.
-	// Fail-open ante error de infra (no bloqueamos una compra legítima por un
-	// fallo transitorio; la activación sigue siendo idempotente por payment_intent).
-	if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
-		h.log.Error().Err(err).Str("email", req.Email).Int("package_id", req.PackageID).Msg("check active membership (fail-open)")
-	} else if active {
-		writeErr(w, http.StatusConflict, "Ya tienes esta membresía activa. Las membresías son de pago único.")
-		return
+	// Preserve Stripe/review eligibility. NOW operational purchases use their own
+	// durable request key; distinct explicit requests may remain pending or
+	// active for the same SKU without weakening the legacy collection guard.
+	if !nowOperational {
+		if active, err := h.store.HasActiveMembership(ctx, req.Email, req.PackageID); err != nil {
+			h.log.Error().Msg("membership eligibility unavailable")
+			writeErr(w, http.StatusServiceUnavailable, "membership_eligibility_unavailable")
+			return
+		} else if active {
+			writeErr(w, http.StatusConflict, "Ya tienes esta membresía activa. Las membresías son de pago único.")
+			return
+		}
 	}
 
 	// Auto-provisión: usuario nuevo de Cognito sin fila en RDS → crear mlm.person
 	// (idempotente) para que el checkout pueda proceder. La colocación en el árbol
 	// la hace la activación.
-	if _, err := h.store.EnsurePerson(ctx, req.Email, req.Name, req.Phone); err != nil {
-		h.log.Error().Err(err).Str("email", req.Email).Msg("ensure person")
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
+	if provider == "stripe" {
+		if _, err := h.store.EnsurePerson(ctx, req.Email, req.Name, req.Phone); err != nil {
+			h.log.Error().Err(err).Str("email", req.Email).Msg("ensure person")
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 
-	buyer, err := h.store.ResolveBuyer(ctx, req.Email)
+	var buyer Buyer
+	if boundNOWBuyer != nil {
+		buyer = *boundNOWBuyer
+	} else {
+		buyer, err = h.store.ResolveBuyer(ctx, req.Email)
+	}
 	if errors.Is(err, ErrBuyerNotFound) {
 		writeErr(w, http.StatusNotFound, "buyer_not_found")
 		return
@@ -146,6 +211,14 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if provider == "nowpayments" {
+		h.handleNOWMembershipCheckout(w, r, req, sponsor, preferredSideForIntent)
+		return
+	}
+	if h.gw == nil {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_unavailable")
+		return
+	}
 	intentID, err := h.store.CreatePurchaseIntent(ctx, PurchaseIntent{
 		UserID:             req.Email, // traceability: identificador externo del comprador
 		PersonID:           buyer.PersonID,
@@ -162,6 +235,10 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.log.Error().Err(err).Msg("create purchase intent")
+		if errors.Is(err, ErrNOWPaymentsOutstanding) {
+			writeErr(w, http.StatusConflict, "membership_payment_pending_review")
+			return
+		}
 		if errors.Is(err, ErrRecoveryFinancialReview) {
 			writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
 			return
@@ -191,6 +268,7 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, checkoutResponse{
 		URL: url, SessionID: sessionID,
 		TotalUSD: pack.TotalUSD().StringFixed(2), FeeUSD: pack.FeeUSD().StringFixed(2),
+		Provider: "stripe",
 	})
 }
 

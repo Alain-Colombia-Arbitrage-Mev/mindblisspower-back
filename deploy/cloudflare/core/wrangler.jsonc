@@ -1,0 +1,98 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mindbliss-core",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-10-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": { "enabled": false },
+  "limits": { "cpu_ms": 50 },
+  "dev": { "enable_containers": false },
+  "env": {
+    "staging": {
+      "name": "mindbliss-core-staging",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [],
+      "vars": {
+        "CORE_ENV": "staging",
+        "STRIPE_CHECKOUT_ENABLED": "false",
+        "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "false",
+        "NOWPAYMENTS_OPERATIONAL_ENABLED": "false",
+        "NOWPAYMENTS_ENGINE_ENABLED": "false",
+        "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "false",
+        "CORE_SERVICES_ENABLED": "false",
+        "CORE_NETWORK_VERIFIED": "false",
+        "CORE_READINESS_PROBE_ENABLED": "false",
+        "CORE_REPORTS_ENABLED": "false",
+        "CORE_DATA_ACCESS_VERIFIED": "false",
+        "AUTH_SERVICES_ENABLED": "false",
+        "AUTH_CUTOVER_VERIFIED": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "API_CONTAINER", "class_name": "CoreApi" },
+          { "name": "ENGINE_CONTAINER", "class_name": "CoreEngine" },
+          { "name": "PAYMENTS_CONTAINER", "class_name": "CorePayments" },
+          { "name": "WITHDRAWALS_CONTAINER", "class_name": "CoreWithdrawals" }
+        ]
+      },
+      "exports": {
+        "CoreApi": { "type": "durable-object", "storage": "sqlite", "container": "core-api" },
+        "CoreEngine": { "type": "durable-object", "storage": "sqlite", "container": "core-engine" },
+        "CorePayments": { "type": "durable-object", "storage": "sqlite", "container": "core-payments" },
+        "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
+      },
+      "containers": [
+        { "name": "core-api", "image": "../../../app/Dockerfile", "image_build_context": "../../../app", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-engine", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-engine" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-payments", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-payments" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" },
+        { "name": "core-withdrawals", "image": "../../../vp-engine/deployments/Dockerfile", "image_build_context": "../../../vp-engine", "image_vars": { "CMD": "vp-withdrawals" }, "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" }
+      ]
+    },
+    "production": {
+      "name": "mindbliss-core-production",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [],
+      "triggers": { "crons": ["*/5 * * * *"] },
+      "vars": {
+        "CORE_ENV": "production",
+        "STRIPE_CHECKOUT_ENABLED": "false",
+        "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "true",
+        "NOWPAYMENTS_OPERATIONAL_ENABLED": "true",
+        "NOWPAYMENTS_ENGINE_ENABLED": "true",
+        "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "true",
+        "CORE_SERVICES_ENABLED": "false",
+        "CORE_NETWORK_VERIFIED": "false",
+        "CORE_READINESS_PROBE_ENABLED": "false",
+        "CORE_REPORTS_ENABLED": "true",
+        "CORE_DATA_ACCESS_VERIFIED": "true",
+        "AUTH_SERVICES_ENABLED": "true",
+        "AUTH_CUTOVER_VERIFIED": "true"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "API_CONTAINER", "class_name": "CoreApi" },
+          { "name": "ENGINE_CONTAINER", "class_name": "CoreEngine" },
+          { "name": "PAYMENTS_CONTAINER", "class_name": "CorePayments" },
+          { "name": "WITHDRAWALS_CONTAINER", "class_name": "CoreWithdrawals" }
+        ]
+      },
+      "exports": {
+        "CoreApi": { "type": "durable-object", "storage": "sqlite", "container": "core-api" },
+        "CoreEngine": { "type": "durable-object", "storage": "sqlite", "container": "core-engine" },
+        "CorePayments": { "type": "durable-object", "storage": "sqlite", "container": "core-payments" },
+        "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
+      },
+      "containers": [
+        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-verified-link-20261031@sha256:7e14a9faae32428eda7b932bcea12d5de4f2b2ebe6f949ad8027db59ecf38f97", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
+        { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
+        { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-independent-purchases-20261031@sha256:adcb12b65f666e30fc8c2e02389c3cfdcbd8da658b80af6d6f158d1dec5846ba", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
+        { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }
+      ]
+    }
+  }
+}

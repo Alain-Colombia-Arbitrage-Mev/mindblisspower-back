@@ -55,6 +55,16 @@ files, so extracting a handler cannot silently remove it from the security test.
 
 ## Recovery financial write lock
 
+New Stripe Checkout sessions and cart resumption are independently disabled by
+default. Only the exact value `STRIPE_CHECKOUT_ENABLED=true` enables those entry
+points. Inside the checkout handlers, the gate runs before identity/provider
+calls, database access or person provisioning, with a second guard in the Stripe
+gateway. Normal route authentication and rate limits remain intact. Service
+read-only mode always overrides the flag. Credentials, signed webhooks, reconciliation of money
+already received and historical reads are unchanged, as is NOWPayments. This
+switch does not cancel payable Stripe URLs issued previously; revoking existing
+provider sessions would require a separate, explicitly reviewed operation.
+
 `internal/shared/financialguard.RequireOperational` rejects financial mutations
 whenever canonical recovery evidence exists. A failed mode check also blocks the
 operation. This guard is enforced by the domains, not just by the UI or job flags:

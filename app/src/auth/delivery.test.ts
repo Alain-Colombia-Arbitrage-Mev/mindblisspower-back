@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { cloudflareEmailConfigured, createAuthDelivery } from './delivery';
+import { AuthEmailDeliveryError, cloudflareEmailConfigured, createAuthDelivery, type EmailDeliveryDiagnostic } from './delivery';
 
 const configuration = { SENTDM_API_KEY: 'synthetic-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000001', SENTDM_OTP_CHANNEL: 'whatsapp' };
 const emailConfiguration = { CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001',
@@ -72,6 +72,48 @@ test('Cloudflare errors, throttling, malformed JSON and timeouts stay generic wi
   await expect(createAuthDelivery(emailConfiguration, (async () => { throw new Error('private destination and token'); }) as unknown as typeof fetch).email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
   await expect(createAuthDelivery(emailConfiguration, (async () => { throw new DOMException('private timeout response', 'AbortError'); }) as unknown as typeof fetch).email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
 });
+
+test('delivery diagnostics contain only fixed classifications and numeric codes, never destinations, OTPs, tokens or provider messages', async () => {
+  const events: EmailDeliveryDiagnostic[] = [];
+  const report = (event: EmailDeliveryDiagnostic) => { events.push(event); };
+  const providerError = { success: false, errors: [{ code: 10102,
+    message: `private ${emailMessage.to} ${emailMessage.text} ${emailConfiguration.CLOUDFLARE_EMAIL_API_TOKEN}` }] };
+  await expect(createAuthDelivery(emailConfiguration,
+    (async () => Response.json(providerError, { status: 403 })) as unknown as typeof fetch, report).email(emailMessage))
+    .rejects.toThrow('authentication_delivery_unavailable');
+  await expect(createAuthDelivery(emailConfiguration,
+    (async () => { throw new Error(JSON.stringify(providerError)); }) as unknown as typeof fetch, report).email(emailMessage))
+    .rejects.toThrow('authentication_delivery_unavailable');
+  await createAuthDelivery(emailConfiguration,
+    (async () => Response.json(acceptedEmail)) as unknown as typeof fetch, report).email(emailMessage);
+  expect(events).toEqual([
+    { event: 'auth_email_delivery', outcome: 'rejected', httpStatus: 403, providerCode: 10102 },
+    { event: 'auth_email_delivery', outcome: 'transport' },
+    { event: 'auth_email_delivery', outcome: 'accepted', httpStatus: 200, queued: true },
+  ]);
+  const logged = JSON.stringify(events);
+  for (const value of [emailMessage.to, '123456', emailConfiguration.CLOUDFLARE_EMAIL_API_TOKEN, 'private']) expect(logged).not.toContain(value);
+  // An unavailable diagnostics sink must neither resend nor reject acceptance.
+  await createAuthDelivery(emailConfiguration, (async () => Response.json(acceptedEmail)) as unknown as typeof fetch,
+    () => { throw new Error('synthetic log failure'); }).email(emailMessage);
+});
+
+test('only explicit nonacceptance is a confirmed rejection; ambiguous acknowledgements never authorize retry or challenge removal', async () => {
+  const rejected = [400, 401, 403, 404, 429].map(status => ({ response: Response.json({ success: false }, { status }), confirmed: true }));
+  const ambiguous = [500, 503].map(status => ({ response: Response.json({ success: false }, { status }), confirmed: false }));
+  for (const group of ['permanent_bounces', 'suppressed_recipients']) rejected.push({ response: Response.json({ success: true, errors: [],
+    result: { delivered: [], queued: [], permanent_bounces: [], suppressed_recipients: [], [group]: [emailMessage.to] } }), confirmed: true });
+  ambiguous.push({ response: new Response('malformed acknowledgement'), confirmed: false });
+  ambiguous.push({ response: Response.json({ ...acceptedEmail, result: { ...acceptedEmail.result, queued: ['other@example.test'] } }), confirmed: false });
+  for (const { response, confirmed } of [...rejected, ...ambiguous]) {
+    let failure: unknown;
+    try { await createAuthDelivery(emailConfiguration, (async () => response) as unknown as typeof fetch, () => {}).email(emailMessage); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(AuthEmailDeliveryError);
+    expect((failure as AuthEmailDeliveryError).confirmedRejected).toBe(confirmed);
+    expect((failure as Error).message).toBe('authentication_delivery_unavailable');
+  }
+});
 test('Sent v3 transport pins an approved channel/template and never uses email or broadcast', async () => {
   let calls = 0;
   const delivery = createAuthDelivery(configuration, (async (url, request) => {
@@ -83,7 +125,8 @@ test('Sent v3 transport pins an approved channel/template and never uses email o
     const body = JSON.parse(request?.body as string);
     expect(body.channel).toEqual(['whatsapp']);
     expect(body.template.parameters.code).toBe('123456');
-    return Response.json({ success: true, data: { status: 'QUEUED', recipients: [{ message_id: 'synthetic-id' }] } }, { status: 202 });
+    return Response.json({ success: true, error: null, data: { status: 'QUEUED', template_id: configuration.SENTDM_OTP_TEMPLATE_ID,
+      recipients: [{ message_id: 'synthetic-id', to: '+12025550123', channel: 'whatsapp' }] } }, { status: 202 });
   }) as typeof fetch);
   await delivery.phone('+12025550123', '123456');
   expect(calls).toBe(1);
@@ -96,4 +139,22 @@ test('missing credentials and malformed provider success fail closed with no sen
   expect(calls).toBe(0);
   await expect(createAuthDelivery(configuration, fetchImpl).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
   await expect(createAuthDelivery(configuration, (async () => { throw new Error('private 123456'); }) as unknown as typeof fetch).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+});
+
+test('Sent acceptance must identify the requested recipient, pinned channel and approved template', async () => {
+  const data = { status: 'QUEUED', template_id: configuration.SENTDM_OTP_TEMPLATE_ID,
+    recipients: [{ message_id: 'synthetic-id', to: '+12025550123', channel: 'whatsapp' }] };
+  for (const result of [
+    { success: true, data: { status: 'QUEUED', recipients: [{ message_id: 'old-incomplete-ack' }] } },
+    { success: true, error: { message: 'private 123456' }, data },
+    { success: true, data: { ...data, template_id: '00000000-0000-4000-8000-000000000002' } },
+    { success: true, data: { ...data, recipients: [{ ...data.recipients[0], to: '+12025550124' }] } },
+    { success: true, data: { ...data, recipients: [{ ...data.recipients[0], channel: 'sms' }] } },
+    { success: true, data: { ...data, recipients: [...data.recipients, ...data.recipients] } },
+  ]) {
+    let calls = 0;
+    const delivery = createAuthDelivery(configuration, (async () => { calls++; return Response.json(result, { status: 202 }); }) as unknown as typeof fetch);
+    await expect(delivery.phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+    expect(calls).toBe(1);
+  }
 });

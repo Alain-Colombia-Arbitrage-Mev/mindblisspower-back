@@ -2,6 +2,7 @@ import { beforeAll, afterAll, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { sql } from 'drizzle-orm';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createLocalJWKSet, jwtVerify } from 'jose';
@@ -49,7 +50,7 @@ beforeAll(async () => {
       kyc_status mlm.kyc_status NOT NULL DEFAULT 'not_started',is_admin boolean NOT NULL DEFAULT false,blacklisted boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE mlm.rank(id smallint PRIMARY KEY,code text NOT NULL UNIQUE);
     CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,person_id bigint NOT NULL UNIQUE REFERENCES mlm.person(id),parent_id bigint REFERENCES mlm.affiliate(id),sponsor_id bigint REFERENCES mlm.affiliate(id),path ltree NOT NULL,current_rank_id smallint REFERENCES mlm.rank(id));
-    INSERT INTO mlm.person(first_name,last_name,email,phone_number,status) VALUES('Legacy','Member','legacy@example.test','0','active');
+    INSERT INTO mlm.person(first_name,last_name,email,phone_number,status,is_admin) VALUES('Legacy','Operator','legacy@example.test','0','active',true);
     INSERT INTO mlm.rank VALUES(3,'SYNTHETIC'); INSERT INTO mlm.affiliate VALUES(71,1,NULL,NULL,'n71',3);`);
   fingerprint = JSON.stringify(await connection`SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id`);
   // A pre-existing duplicate provider subject must abort ALL additive changes,
@@ -66,6 +67,28 @@ beforeAll(async () => {
   await connection`DELETE FROM auth.account WHERE id IN ('duplicate-one','duplicate-two')`;
   await connection`DELETE FROM auth.user WHERE id IN ('duplicate-one','duplicate-two')`;
   await applyMigration();
+  // Registration contact columns are additive and private to the auth writer.
+  await connection.unsafe('CREATE ROLE mindbliss_auth_core_v1 NOLOGIN');
+  const contactMigration = (await readFile(new URL('../../../../_meta/migration/76_registration_contact_details.sql', import.meta.url), 'utf8'))
+    .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
+  const contactConnection = await connection.reserve();
+  try { await contactConnection.unsafe(contactMigration); }
+  catch (error) { await contactConnection.unsafe('ROLLBACK'); throw error; }
+  finally { contactConnection.release(); }
+  const smsMigration = (await readFile(new URL('../../../../_meta/migration/75_sms_auth_opt_in.sql', import.meta.url), 'utf8'))
+    .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
+  const smsConnection = await connection.reserve();
+  try { await smsConnection.unsafe(smsMigration); }
+  catch (error) { await smsConnection.unsafe('ROLLBACK'); throw error; }
+  finally { smsConnection.release(); }
+  const verifiedEmailMigration = (await readFile(new URL('../../../../_meta/migration/78_verified_email_identity_binding.sql', import.meta.url), 'utf8'))
+    .replace('REPLACE_WITH_CURATED_DATABASE', 'identity_synthetic');
+  const verifiedEmailConnection = await connection.reserve();
+  try {
+    await verifiedEmailConnection.unsafe(verifiedEmailMigration);
+    await verifiedEmailConnection.unsafe(verifiedEmailMigration);
+  } catch (error) { await verifiedEmailConnection.unsafe('ROLLBACK'); throw error; }
+  finally { verifiedEmailConnection.release(); }
   legacyPublicId = (await connection`SELECT public_id::text FROM mlm.person WHERE id=1`)[0]!.public_id;
   for (const [id, email, verified] of [['legacy-user', 'legacy@example.test', true], ['new-user', 'new@example.test', true], ['unverified-user', 'unverified@example.test', false], ['admin-user', 'operator@example.test', true], ['other-user', 'other@example.test', true]] as const) {
     await connection`INSERT INTO auth.user(id,email,email_verified,name) VALUES(${id},${email},${verified},'Synthetic Member')`;
@@ -88,7 +111,7 @@ integration('migration is repeatable, adds stable UUIDs and never rewrites netwo
   expect((await connection`SELECT has_table_privilege('app_write','identity.legacy_claim_grant','INSERT') AS allowed`)[0]!.allowed).toBe(false);
 });
 
-integration('verified signup is idempotent but an equal legacy email never claims or overwrites its person', async () => {
+integration('verified signup is idempotent but legacy administrative privileges still require reviewed linking', async () => {
   expect((await provisionAuthPerson(database, { userId: 'unverified-user' })).status).toBe('verification_required');
   const created = await provisionAuthPerson(database, { userId: 'new-user' });
   expect(created.status).toBe('created');
@@ -99,6 +122,60 @@ integration('verified signup is idempotent but an equal legacy email never claim
   expect((await connection`SELECT count(*)::int AS n FROM identity.link_conflict WHERE subject='legacy-user'`)[0]!.n).toBe(1);
   await provisionAuthPerson(database, { userId: 'legacy-user' });
   expect((await connection`SELECT count(*)::int AS n FROM identity.link_conflict WHERE subject='legacy-user'`)[0]!.n).toBe(1);
+});
+
+integration('verified normalized email links exactly one eligible legacy person, preserving every network and financial field', async () => {
+  await connection`INSERT INTO auth.user(id,email,email_verified,name) VALUES('normalized-user','normalized@example.test',false,'Untrusted Display Name')`;
+  const [person] = await connection`INSERT INTO mlm.person(first_name,last_name,email,phone_number,status)
+    VALUES('Original','Legacy','  NORMALIZED@example.test  ','+12025550199','active') RETURNING id::text,public_id::text`;
+  const before = JSON.stringify(await connection`SELECT to_jsonb(p)-'user_id' AS row FROM mlm.person p WHERE id=${person!.id}`);
+  expect((await provisionAuthPerson(database, { userId: 'normalized-user' })).status).toBe('verification_required');
+  expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject='normalized-user'`)[0]!.n).toBe(0);
+  await connection`UPDATE auth.user SET email_verified=true WHERE id='normalized-user'`;
+  const linked = await provisionAuthPerson(database, { userId: 'normalized-user' });
+  expect(linked).toMatchObject({ status: 'existing', personId: person!.id, publicId: person!.public_id });
+  expect(await provisionAuthPerson(database, { userId: 'normalized-user' })).toEqual(linked);
+  expect((await connection`SELECT link_method FROM identity.auth_binding WHERE subject='normalized-user'`)[0]!.link_method).toBe('verified_email');
+  expect(JSON.stringify(await connection`SELECT to_jsonb(p)-'user_id' AS row FROM mlm.person p WHERE id=${person!.id}`)).toBe(before);
+  expect(JSON.stringify(await connection`SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id`)).toBe(fingerprint);
+});
+
+integration('normalized email ambiguity, unavailable people and competing subjects never overwrite a legacy identity', async () => {
+  await connection`INSERT INTO auth.user(id,email,email_verified) VALUES('ambiguous-user','ambiguous@example.test',true),
+    ('blocked-auto-user','blocked-auto@example.test',true),('competing-one','competing@example.test',true),('competing-two','COMPETING@example.test',true)`;
+  await connection`INSERT INTO mlm.person(first_name,last_name,email,phone_number,status,blacklisted) VALUES
+    ('Ambiguous','One','ambiguous@example.test','0','active',false),('Ambiguous','Two',' ambiguous@example.test ','0','active',false),
+    ('Blocked','Legacy','blocked-auto@example.test','0','active',true),('Competing','Legacy','competing@example.test','0','pending',false)`;
+  expect((await provisionAuthPerson(database, { userId: 'ambiguous-user' })).status).toBe('quarantined');
+  expect((await provisionAuthPerson(database, { userId: 'blocked-auto-user' })).status).toBe('quarantined');
+  expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject IN ('ambiguous-user','blocked-auto-user')`)[0]!.n).toBe(0);
+  const results = await Promise.all(['competing-one','competing-two'].map(userId => provisionAuthPerson(database, { userId })));
+  expect(results.filter(result => result.status === 'existing')).toHaveLength(1);
+  expect(results.filter(result => result.status === 'quarantined')).toHaveLength(1);
+  expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject IN ('competing-one','competing-two')`)[0]!.n).toBe(1);
+  expect((await connection`SELECT count(*)::int AS n FROM mlm.person WHERE lower(btrim(email::text))='competing@example.test'`)[0]!.n).toBe(1);
+  expect(JSON.stringify(await connection`SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id`)).toBe(fingerprint);
+});
+
+integration('verified email linking works without binding UPDATE, admin mutation or financial privileges', async () => {
+  await connection`INSERT INTO auth.user(id,email,email_verified) VALUES('restricted-user','restricted@example.test',true)`;
+  await connection`INSERT INTO mlm.person(first_name,last_name,email,phone_number,status) VALUES('Restricted','Legacy','restricted@example.test','0','active')`;
+  await connection.unsafe(`CREATE ROLE verified_email_restricted NOLOGIN;
+    GRANT USAGE ON SCHEMA auth,mlm,identity TO verified_email_restricted;
+    GRANT SELECT(id,email,email_verified,name,contact_phone_e164),UPDATE(email_verified) ON auth.user TO verified_email_restricted;
+    GRANT SELECT(id,public_id,user_id,email,status,blacklisted,is_admin),UPDATE(user_id) ON mlm.person TO verified_email_restricted;
+    GRANT SELECT,INSERT ON identity.auth_binding TO verified_email_restricted;
+    GRANT SELECT,INSERT(subject,candidate_person_id,reason),UPDATE(last_seen_at,resolved_at) ON identity.link_conflict TO verified_email_restricted;
+    GRANT USAGE ON SEQUENCE identity.link_conflict_id_seq TO verified_email_restricted;`);
+  const restricted = { transaction: (callback: (tx: unknown) => unknown) => database.transaction(async tx => {
+    await tx.execute(sql`SET LOCAL ROLE verified_email_restricted`);
+    return callback(tx);
+  }) } as unknown as IdentityDatabase;
+  expect((await provisionAuthPerson(restricted, { userId: 'restricted-user' })).status).toBe('existing');
+  expect((await connection`SELECT link_method FROM identity.auth_binding WHERE subject='restricted-user'`)[0]!.link_method).toBe('verified_email');
+  expect((await connection`SELECT has_table_privilege('verified_email_restricted','identity.auth_binding','UPDATE') AS allowed`)[0]!.allowed).toBe(false);
+  expect((await connection`SELECT has_column_privilege('verified_email_restricted','mlm.person','is_admin','UPDATE') AS allowed`)[0]!.allowed).toBe(false);
+  expect((await connection`SELECT has_table_privilege('verified_email_restricted','mlm.affiliate','INSERT,UPDATE,DELETE') AS allowed`)[0]!.allowed).toBe(false);
 });
 
 integration('concurrent provisioning uses one person and never turns a case-variant auth email into a second claim', async () => {
@@ -182,6 +259,7 @@ integration('real Better Auth + Drizzle + PostgreSQL verifies email, binds ident
     BETTER_AUTH_SECRET: 'synthetic-postgres-auth-secret-at-least-32-characters', BETTER_AUTH_URL: 'https://auth.example.test',
     BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
     BETTER_AUTH_PHONE_OTP_ENABLED: 'true', BETTER_AUTH_JWT_ENABLED: 'true', BETTER_AUTH_JWT_ISSUER: 'https://auth.example.test',
+    BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY: 'true',
     BETTER_AUTH_JWT_AUDIENCE: 'synthetic-postgres-members', CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-not-a-real-key',
     CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
     SENTDM_API_KEY: 'synthetic-not-a-real-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000000', SENTDM_OTP_CHANNEL: 'sms',
@@ -192,6 +270,7 @@ integration('real Better Auth + Drizzle + PostgreSQL verifies email, binds ident
   const typedDatabase = drizzle(connection, { schema: authSchema });
   const auth = betterAuth(createAuthOptions(env, drizzleAdapter(typedDatabase, { provider: 'pg', schema: authSchema, usePlural: false }), {
     provision: userId => provisionAuthPerson(database, { userId }), binding: userId => getAuthPersonBinding(database, { userId }),
+    registrationAllowed: async () => true,
   }, delivery));
   const request = (path: string, body?: unknown, cookie?: string) => auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
     method: body === undefined ? 'GET' : 'POST', headers: { origin: 'https://portal.example.test',
@@ -230,15 +309,18 @@ integration('real Better Auth + Drizzle + PostgreSQL verifies email, binds ident
   expect(JSON.stringify(jwks)).not.toMatch(/private_key|privateKey/);
   const phone = '+12025550157';
   await connection`UPDATE auth.user SET phone_number=${phone} WHERE id=${userId}`;
-  expect((await request('/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+  expect((await request('/phone-number/send-otp', { phoneNumber: phone, consent: true, consentVersion: 'sms-auth-v1' }, cookie)).status).toBe(200);
   const phoneCode = phoneCodes.at(-1)!;
-  const phoneRecords = await connection`SELECT value FROM auth.verification WHERE identifier=${phone}`;
+  const phoneRecords = await connection`SELECT value FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`;
   expect(phoneRecords).toHaveLength(1); expect(phoneRecords[0]!.value).toMatch(/^h1_[a-f0-9]{64}:0$/);
   expect(phoneRecords[0]!.value).not.toContain(phoneCode);
-  const replays = await Promise.all([1, 2].map(() => request('/phone-number/verify', { phoneNumber: phone, code: phoneCode, disableSession: true })));
+  const replays = await Promise.all([1, 2].map(() => request('/phone-number/verify', { phoneNumber: phone, code: phoneCode, disableSession: true, updatePhoneNumber: true }, cookie)));
   expect(replays.filter(response => response.status === 200)).toHaveLength(1);
   expect(replays.filter(response => response.status === 400)).toHaveLength(1);
-  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier=${phone}`)[0]!.n).toBe(0);
+  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`)[0]!.n).toBe(0);
+  const consent = (await connection`SELECT consent_version,consented_at,verified_at,revoked_at FROM auth.sms_opt_in WHERE user_id=${userId}`)[0]!;
+  expect(consent.consent_version).toBe('sms-auth-v1'); expect(Number.isFinite(new Date(consent.consented_at).getTime())).toBe(true);
+  expect(Number.isFinite(new Date(consent.verified_at).getTime())).toBe(true); expect(consent.revoked_at).toBeNull();
   expect((await connection`SELECT phone_number_verified FROM auth.user WHERE id=${userId}`)[0]!.phone_number_verified).toBe(true);
   expect((await connection`SELECT count(*)::int AS n FROM auth.rate_limit`)[0]!.n).toBeGreaterThan(0);
   expect((await getAuthPersonBinding(database, { userId })).publicId).toBe(bound.publicId);
@@ -248,13 +330,16 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
   const env: AuthEnvironment = {
     BETTER_AUTH_SECRET: 'synthetic-replica-auth-secret-at-least-32-characters', BETTER_AUTH_URL: 'https://auth.example.test',
     BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_PHONE_OTP_ENABLED: 'true',
+    BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY: 'true', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
+    CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-not-a-real-key', CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
     SENTDM_API_KEY: 'synthetic-not-a-real-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000000', SENTDM_OTP_CHANNEL: 'sms',
   };
   const phone = '+12025550159';
   await connection`INSERT INTO auth.user(id,email,email_verified,name,phone_number) VALUES('replica-user','replica@example.test',true,'Replica Fixture',${phone})`;
   await provisionAuthPerson(database, { userId: 'replica-user' });
   const codes: string[] = [];
-  const delivery: AuthDelivery = { email: async () => {}, phone: async (_phone, code) => { codes.push(code); } };
+  const messages: EmailMessage[] = [];
+  const delivery: AuthDelivery = { email: async message => { messages.push(message); }, phone: async (_phone, code) => { codes.push(code); } };
   let arrived!: () => void;
   let release!: () => void;
   const paused = new Promise<void>(resolve => { arrived = resolve; });
@@ -274,17 +359,25 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
       };
     },
   });
-  const identity = { provision: (userId: string) => provisionAuthPerson(database, { userId }), binding: (userId: string) => getAuthPersonBinding(database, { userId }) };
+  const identity = { provision: (userId: string) => provisionAuthPerson(database, { userId }), binding: (userId: string) => getAuthPersonBinding(database, { userId }), registrationAllowed: async () => true };
   const replicaA = betterAuth(createAuthOptions(env, pausableFactory, identity, delivery));
   const replicaB = betterAuth(createAuthOptions(env, factory, identity, delivery));
+  let cookie = '';
   const request = (replica: typeof replicaA, path: string, body: unknown) => replica.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
     method: 'POST', headers: { origin: 'https://portal.example.test', 'content-type': 'application/json',
-      'x-forwarded-for': replica === replicaA ? '192.0.2.45' : '192.0.2.46' }, body: JSON.stringify(body),
+      'x-forwarded-for': replica === replicaA ? '192.0.2.45' : '192.0.2.46', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body),
   }));
-  expect((await request(replicaA, '/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+  expect((await request(replicaA, '/email-otp/send-verification-otp', { email: 'replica@example.test', type: 'sign-in' })).status).toBe(200);
+  const loginOtp = /\b(\d{6})\b/.exec(messages.at(-1)!.text)![1]!;
+  const login = await request(replicaA, '/sign-in/email-otp', { email: 'replica@example.test', otp: loginOtp });
+  expect(login.status).toBe(200);
+  cookie = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+  const consentBody = { phoneNumber: phone, consent: true, consentVersion: 'sms-auth-v1' };
+  const proof = (code: string) => ({ phoneNumber: phone, code, disableSession: true, updatePhoneNumber: true });
+  expect((await request(replicaA, '/phone-number/send-otp', consentBody)).status).toBe(200);
   const firstCode = codes.at(-1)!;
   const wrongCode = firstCode === '000000' ? '111111' : '000000';
-  const wrong = request(replicaA, '/phone-number/verify', { phoneNumber: phone, code: wrongCode, disableSession: true });
+  const wrong = request(replicaA, '/phone-number/verify', proof(wrongCode));
   let newCode: string;
   try {
     let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -295,15 +388,16 @@ integration('two real PostgreSQL auth replicas cannot resurrect old phone OTP A 
     // remains present while replica B rotates to B in the actual adapter hook.
     for (let attempt = 0; attempt < 3; attempt++) {
       await connection`UPDATE auth.rate_limit SET last_request=${Date.now() - 1} WHERE key=${recipientBudgetKey(env.BETTER_AUTH_SECRET!, phone)}`;
-      expect((await request(replicaB, '/phone-number/send-otp', { phoneNumber: phone })).status).toBe(200);
+      await connection`UPDATE auth.rate_limit SET last_request=${Date.now() - 1} WHERE key=${recipientBudgetKey(env.BETTER_AUTH_SECRET!, 'sms-user:replica-user')}`;
+      expect((await request(replicaB, '/phone-number/send-otp', consentBody)).status).toBe(200);
       if (codes.at(-1) !== firstCode) break;
     }
     newCode = codes.at(-1)!;
     expect(newCode).not.toBe(firstCode);
   } finally { release(); }
   expect((await wrong).status).toBe(400);
-  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier=${phone}`)[0]!.n).toBe(1);
-  expect((await request(replicaA, '/phone-number/verify', { phoneNumber: phone, code: firstCode, disableSession: true })).status).toBe(400);
-  expect((await request(replicaB, '/phone-number/verify', { phoneNumber: phone, code: newCode!, disableSession: true })).status).toBe(200);
-  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier=${phone}`)[0]!.n).toBe(0);
+  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`)[0]!.n).toBe(1);
+  expect((await request(replicaA, '/phone-number/verify', proof(firstCode))).status).toBe(400);
+  expect((await request(replicaB, '/phone-number/verify', proof(newCode!))).status).toBe(200);
+  expect((await connection`SELECT count(*)::int AS n FROM auth.verification WHERE identifier LIKE 'sms-opt-in:%'`)[0]!.n).toBe(0);
 }, 30_000);
