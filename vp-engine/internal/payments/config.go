@@ -36,6 +36,10 @@ type Config struct {
 	NATSUser     string
 	NATSPassword string
 
+	// New Stripe Checkout sessions require an explicit literal true. Historical
+	// reads and signed webhooks remain available when checkout is disabled.
+	StripeCheckoutEnabled bool
+
 	StripeSecretKey     string
 	StripeWebhookSecret string
 	StripeProductID     string              // Producto Stripe "PACK MINDBLISS" (prod_…)
@@ -193,8 +197,9 @@ func LoadConfig() (*Config, error) {
 		// Aliases aceptados (los que ya pusiste en backend/.env.local):
 		//   STRIPE_SECRET_KEY      | CLAVE_API
 		//   STRIPE_WEBHOOK_SECRET  | SECRET_FIRMA
-		StripeSecretKey:     firstEnv("STRIPE_SECRET_KEY", "CLAVE_API"),
-		StripeWebhookSecret: firstEnv("STRIPE_WEBHOOK_SECRET", "SECRET_FIRMA"),
+		StripeCheckoutEnabled: os.Getenv("STRIPE_CHECKOUT_ENABLED") == "true",
+		StripeSecretKey:       firstEnv("STRIPE_SECRET_KEY", "CLAVE_API"),
+		StripeWebhookSecret:   firstEnv("STRIPE_WEBHOOK_SECRET", "SECRET_FIRMA"),
 		// Vacío ⇒ producto inline. PAYMENTS_STRIPE_PRODUCT_ID (explícito) gana;
 		// fallback a ID_PRODUCTO_TEST para correr en test sin renombrar. En
 		// producción setear PAYMENTS_STRIPE_PRODUCT_ID al prod_… LIVE.
@@ -266,6 +271,7 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 	if c.ReadOnly {
+		c.StripeCheckoutEnabled = false
 		c.RequireVerifiedIdentity = true
 		c.AdminEmails = splitCSV(os.Getenv("PAYMENTS_ADMIN_EMAILS"))
 		c.SuperAdminEmails = splitCSV(os.Getenv("PAYMENTS_SUPER_ADMIN_EMAILS"))

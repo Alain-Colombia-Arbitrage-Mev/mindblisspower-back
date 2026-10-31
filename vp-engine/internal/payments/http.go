@@ -26,6 +26,8 @@ type Handler struct {
 	companyRoot      int64
 	httpClient       *http.Client
 
+	stripeCheckoutEnabled bool
+
 	// verifier re-verifica el id token Cognito reenviado por el BFF. nil ⇒ no hay
 	// verificación disponible (sólo el fallback por query/body, con warning).
 	verifier IdentityVerifier
@@ -85,6 +87,15 @@ type Handler struct {
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
 // banear/desbanear no deshabilita el login (solo el flag de DB).
 func (h *Handler) SetCognitoAdmin(c *CognitoAdmin) { h.cognitoAdmin = c }
+
+// SetStripeCheckoutEnabled configures new-session admission once at startup.
+// It never disables webhook verification, historical reads or NOWPayments.
+func (h *Handler) SetStripeCheckoutEnabled(enabled bool) {
+	h.stripeCheckoutEnabled = enabled
+	if h.gw != nil {
+		h.gw.checkoutEnabled = enabled
+	}
+}
 
 // SetCartConfig inyecta el origen público del link de reanudar pago y la URL de
 // éxito, usados por el flujo de recuperación de carritos abandonados.

@@ -124,6 +124,7 @@ func TestVerifiedEmailCachedIdentityCannotOverrideToken(t *testing.T) {
 
 func TestCheckoutCannotClaimAnotherVerifiedIdentity(t *testing.T) {
 	h := NewHandler(nil, nil, "synthetic-service-token", nil, 0, zerolog.Nop())
+	h.SetStripeCheckoutEnabled(true)
 	h.SetIdentityVerifier(fakeVerifier{email: "verified@example.test"}, true)
 	r := httptest.NewRequest(http.MethodPost, "/api/payments/checkout", strings.NewReader(`{"email":"other@example.test","package_id":1}`))
 	r.Header.Set("X-VP-Service-Token", "synthetic-service-token")

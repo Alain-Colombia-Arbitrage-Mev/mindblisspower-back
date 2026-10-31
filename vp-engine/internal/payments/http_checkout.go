@@ -60,6 +60,12 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Provider = provider
+	// Fail closed before identity verification, database access or provisioning.
+	// Missing provider still means Stripe, so legacy callers cannot bypass this.
+	if provider == "stripe" && !h.stripeCheckoutEnabled {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_checkout_disabled")
+		return
+	}
 	if req.Email == "" || req.PackageID <= 0 {
 		writeErr(w, http.StatusBadRequest, "missing email or package_id")
 		return

@@ -16,6 +16,8 @@ import (
 // StripeGateway envuelve la API de Stripe (Checkout hosted + verificación de
 // webhook). Tarjeta + crypto se habilitan vía PaymentMethods.
 type StripeGateway struct {
+	checkoutEnabled bool // Separate from credentials, capture evidence and webhooks.
+
 	webhookSecret  string
 	successURL     string
 	cancelURL      string
@@ -54,9 +56,16 @@ const (
 	MetadataProductVal = "true"
 )
 
+// ErrStripeCheckoutDisabled means new Stripe sessions have no explicit opt-in.
+var ErrStripeCheckoutDisabled = errors.New("stripe_checkout_disabled")
+
 // CreateCheckout crea una sesión de Checkout hosted de pago único por el total
 // (pack + 1%). Devuelve (url, sessionID).
 func (g *StripeGateway) CreateCheckout(pack Pack, intentID string, identity CheckoutIdentity) (string, string, error) {
+	// Defense in depth for future callers that do not enter an HTTP handler.
+	if g == nil || !g.checkoutEnabled {
+		return "", "", ErrStripeCheckoutDisabled
+	}
 	params, err := g.checkoutParams(pack, intentID, identity)
 	if err != nil {
 		return "", "", err

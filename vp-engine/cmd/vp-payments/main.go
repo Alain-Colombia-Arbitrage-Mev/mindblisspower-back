@@ -84,6 +84,7 @@ func run() error {
 		gw = payments.NewStripeGateway(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.SuccessURL, cfg.CancelURL, cfg.StripeProductID, cfg.StripePMConfig, cfg.PaymentMethods, os.Getenv("ENV"))
 	}
 	handler := payments.NewHandler(store, gw, cfg.ServiceToken, cfg.AdminEmails, cfg.CompanyRootAffiliateID, logger)
+	handler.SetStripeCheckoutEnabled(cfg.StripeCheckoutEnabled)
 	if cfg.ExternalProvidersEnabled() && cfg.NOWPayments.MembershipsEnabled {
 		nowClient, nowErr := nowpayments.New(cfg.NOWPayments.ClientConfig())
 		if nowErr != nil {

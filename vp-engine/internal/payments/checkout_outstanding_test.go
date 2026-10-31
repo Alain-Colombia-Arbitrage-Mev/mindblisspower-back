@@ -162,6 +162,7 @@ func TestCheckoutCrossProviderOutstandingIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		handler := NewHandler(store, nil, "synthetic-resume-token", nil, 0, zerolog.Nop())
+		handler.SetStripeCheckoutEnabled(true)
 		request := httptest.NewRequest(http.MethodGet, "/api/payments/resume?t="+handler.signResumeToken(id), nil)
 		request.Header.Set("X-VP-Service-Token", "synthetic-resume-token")
 		response := httptest.NewRecorder()

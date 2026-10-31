@@ -139,6 +139,10 @@ func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
 	if !h.svcAuth(w, r) {
 		return
 	}
+	if !h.stripeCheckoutEnabled {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_checkout_disabled")
+		return
+	}
 	intentID, ok := h.verifyResumeToken(strings.TrimSpace(r.URL.Query().Get("t")))
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid_token")
