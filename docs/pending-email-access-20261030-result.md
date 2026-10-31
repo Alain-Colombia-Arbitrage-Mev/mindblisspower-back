@@ -70,3 +70,9 @@ HTTP 200 y la existencia del desafío no prueban entrega al buzón. La confirmac
 final requiere los metadatos del proveedor o la confirmación del destinatario.
 No se envió ningún correo a la cohorte masiva y no se marcó a sus titulares
 como verificados.
+
+Cloudflare confirmó `delivered` para la dirección administrativa de prueba a
+las 01:25:20 UTC del 31 de octubre (20:25:20 del 30 de octubre en Colombia).
+Esto confirma aceptación por el servidor del destinatario, no la ubicación
+en la bandeja de entrada. El segundo destinatario seguía sin evento de entrega
+disponible en la consulta posterior; no se reintentó su envío.
