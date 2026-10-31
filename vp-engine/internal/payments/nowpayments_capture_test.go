@@ -79,6 +79,8 @@ func TestNOWCaptureFailuresNeverAcknowledgeUnpersistedEvidence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, c, s := fakeCaptureHandler()
+			inlineRuns := 0
+			h.SetNOWOperationalJobRunner(func(context.Context) (int, error) { inlineRuns++; return 0, nil })
 			tc.mutate(c, s)
 			r := httptest.NewRequest(http.MethodPost, "/api/webhooks/nowpayments", strings.NewReader(`{}`))
 			r.Header.Set("Content-Type", "application/json")
@@ -87,6 +89,14 @@ func TestNOWCaptureFailuresNeverAcknowledgeUnpersistedEvidence(t *testing.T) {
 			h.handleNOWPaymentsWebhook(w, r)
 			if w.Code != tc.code || c.creates != 0 || s.captures != tc.captures || c.gets != tc.gets || strings.Contains(w.Body.String(), "private") || strings.Contains(w.Body.String(), `"received":true`) {
 				t.Fatal("unsafe capture failure", w.Code, w.Body.String())
+			}
+			select {
+			case <-h.NOWOperationalJobWakeups():
+				t.Fatal("unverified or unpersisted capture woke financial worker")
+			default:
+			}
+			if inlineRuns != 0 {
+				t.Fatal("failed capture executed financial work inline")
 			}
 		})
 	}
