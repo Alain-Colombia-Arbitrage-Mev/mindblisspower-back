@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { betterAuth } from 'better-auth';
 import { memoryAdapter, type MemoryDB } from 'better-auth/adapters/memory';
+import type { DBAdapter } from '@better-auth/core/db/adapter';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { createAuthOptions } from './options';
@@ -20,7 +21,8 @@ const env: AuthEnvironment = {
 const email = 'pending-member@example.test';
 type Legacy = { id: string; email: string; user_id: null; status: string; blacklisted: boolean; is_admin: boolean };
 
-function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique') {
+function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique',
+  canonicalFault?: 'unverified' | 'other-subject' | 'other-email' | 'missing' | 'unavailable') {
   const userId = 'synthetic-precreated-access';
   const store: MemoryDB = {
     user: [{ id: userId, email, name: 'Acceso pendiente', emailVerified: false,
@@ -64,7 +66,28 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique') {
   const database = synthetic as unknown as IdentityDatabase;
   const emails: EmailMessage[] = [];
   const provisioned: string[] = [];
-  const auth = betterAuth(createAuthOptions(env, memoryAdapter(store), {
+  // PostgreSQL returns detached snapshots. Live memory references would hide
+  // Better Auth's stale pre-verification user in the first OTP response.
+  const memory = memoryAdapter(store);
+  let canonicalReads = 0;
+  const detached = (options: Parameters<typeof memory>[0]): DBAdapter => {
+    const adapter = memory(options);
+    return { ...adapter, findOne: async <T>(input: Parameters<DBAdapter['findOne']>[0]): Promise<T | null> => {
+      const row = structuredClone(await adapter.findOne<T>(input));
+      if (input.model === 'user' && input.where?.some(condition => condition.field === 'id') && store.session!.length > 0) {
+        canonicalReads++;
+        if (canonicalFault === 'unavailable') throw new Error('Synthetic canonical lookup unavailable');
+        if (canonicalFault === 'missing') return null;
+        if (row && typeof row === 'object') {
+          if (canonicalFault === 'unverified') Object.assign(row, { emailVerified: false });
+          if (canonicalFault === 'other-subject') Object.assign(row, { id: 'different-canonical-subject' });
+          if (canonicalFault === 'other-email') Object.assign(row, { email: 'different-canonical@example.test' });
+        }
+      }
+      return row;
+    } };
+  };
+  const auth = betterAuth(createAuthOptions(env, detached, {
     provision: async subject => {
       const result = await provisionAuthPerson(database, { userId: subject });
       provisioned.push(result.status);
@@ -89,7 +112,7 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' = 'unique') {
     expect(store.account).toHaveLength(0);
     expect(statements.some(text => /^(?:UPDATE|INSERT INTO) (?:mlm\.|identity\.auth_binding|identity\.legacy_claim_grant)/.test(text))).toBe(false);
   }
-  return { store, emails, database, request, code, unchanged, provisioned, conflicts };
+  return { store, emails, database, request, code, unchanged, provisioned, conflicts, canonicalReads: () => canonicalReads };
 }
 const cookies = (response: Response) => response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
 
@@ -110,10 +133,13 @@ for (const kind of ['unique', 'duplicate', 'blacklisted'] as const) {
 
     const signedIn = await app.request('/sign-in/email-otp', { email, otp: code });
     expect(signedIn.status).toBe(200);
+    expect((await signedIn.clone().json() as { user: { id: string; emailVerified: boolean } }).user)
+      .toMatchObject({ id: 'synthetic-precreated-access', emailVerified: true });
     expect(app.store.user![0]!.emailVerified).toBe(true);
     expect(app.store.session).toHaveLength(1);
     expect(app.store.verification).toHaveLength(0);
     expect(signedIn.headers.has('set-auth-jwt')).toBe(false);
+    expect(app.canonicalReads()).toBe(1);
     expect(app.provisioned).toEqual([kind === 'blacklisted' ? 'quarantined' : 'claim_required']);
     expect(app.conflicts.map(row => row.reason)).toEqual([kind === 'blacklisted' ? 'person_unavailable' : 'legacy_claim_required']);
     const binding = await getAuthPersonBinding(app.database, { userId: 'synthetic-precreated-access' });
@@ -145,6 +171,40 @@ test('wrong and expired codes cannot verify or provision a precreated pending ac
   expect(app.provisioned).toHaveLength(0);
   app.unchanged();
 });
+
+test('already verified OTP login keeps its native response without an extra canonical lookup', async () => {
+  const app = fixture();
+  app.store.user![0]!.emailVerified = true;
+  await app.request('/email-otp/send-verification-otp', { email, type: 'sign-in' });
+  const response = await app.request('/sign-in/email-otp', { email, otp: app.code() });
+  expect(response.status).toBe(200);
+  expect((await response.clone().json() as { user: { emailVerified: boolean } }).user.emailVerified).toBe(true);
+  expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
+  expect(app.canonicalReads()).toBe(0);
+  app.unchanged();
+});
+
+for (const fault of ['unverified', 'other-subject', 'other-email', 'missing', 'unavailable'] as const) {
+  test(`unproven canonical OTP response (${fault}) fails explicitly and installs no cookie`, async () => {
+    const app = fixture('unique', fault);
+    await app.request('/email-otp/send-verification-otp', { email, type: 'sign-in' });
+    const code = app.code();
+    const response = await app.request('/sign-in/email-otp', { email, otp: code });
+    expect(response.status).toBe(500);
+    expect(response.headers.has('set-cookie')).toBe(false);
+    expect(response.headers.has('set-auth-jwt')).toBe(false);
+    expect(app.canonicalReads()).toBe(1);
+    const body = await response.text();
+    expect(body).not.toContain(code);
+    expect(body).not.toContain(String(app.store.session![0]!.token));
+    expect(body).not.toContain('Synthetic canonical');
+    expect(body).not.toContain('person_public_id');
+    // Do not undo native email proof or retry/redeem the consumed challenge.
+    expect(app.store.user![0]!.emailVerified).toBe(true);
+    expect(app.store.verification).toHaveLength(0);
+    app.unchanged();
+  });
+}
 
 test('registration of an already precreated access remains generic and cannot install a supplied password or send a registration code', async () => {
   const app = fixture();

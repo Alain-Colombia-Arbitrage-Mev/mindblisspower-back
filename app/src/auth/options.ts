@@ -8,6 +8,7 @@ import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification } 
 import { smsOptInPlugin } from './phone-opt-in';
 import { registrationCandidate, type RegistrationCandidate } from './registration';
 import { contactPhoneField, registrationContacts } from './registration-contacts';
+import { verifiedOtpSignInResponse } from './otp-sign-in-response';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
@@ -138,6 +139,18 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         if (typeof recipient === 'string') await limitRecipient(secret, recipient, ctx, typeof ctx.body?.email === 'string' ? 300_000 : 60_000);
       }
     }), after: createAuthMiddleware(async ctx => {
+      if (ctx.path === '/sign-in/email-otp') {
+        try {
+          const response = await verifiedOtpSignInResponse(ctx.context.returned, ctx.context.newSession, ctx.body?.email,
+            userId => ctx.context.internalAdapter.findUserById(userId));
+          if (response) return ctx.json(response);
+        } catch {
+          // An unverifiable response must not install the native session cookie.
+          // Keep failure explicit; never guess verification or retry the OTP.
+          ctx.context.responseHeaders?.delete('set-cookie');
+          throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
+        }
+      }
       // Signup already discloses account creation to its caller. Login/reset
       // remain generic even after rejection so delivery cannot enumerate users.
       // Better Auth swallows send callbacks; this state is isolated per request
