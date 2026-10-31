@@ -127,6 +127,34 @@ export async function dispatchCore(request, env, resolve) {
   if (blockedPhoneAuthPath(url.pathname)) return failure('not_found', 404);
   if (!METHODS.has(request.method) || request.headers.has('upgrade')) return failure('method_not_allowed', 405);
   if (!['staging', 'production'].includes(env.CORE_ENV)) return failure('core_unconfigured', 503);
+  // A GET resume link can create a new Stripe Checkout, so the generic read
+  // allowlist is not sufficient. This independent provider gate never starts a
+  // Container and does not change webhooks, reports or NOWPayments policy.
+  let body;
+  let checkoutPath = url.pathname;
+  try {
+    for (let index = 0; index < 8; index++) {
+      const next = decodeURIComponent(checkoutPath);
+      if (next === checkoutPath) break;
+      checkoutPath = next;
+    }
+  } catch { return failure('not_found', 404); }
+  checkoutPath = checkoutPath.replace(/\/+/g, '/').replace(/\/+$/, '');
+  if (env.STRIPE_CHECKOUT_ENABLED !== 'true' && serviceHostname(url.hostname)) {
+    if (checkoutPath === '/api/payments/resume') return failure('stripe_checkout_disabled', 503);
+    if (checkoutPath === '/api/payments/checkout' && request.method === 'POST') {
+      try { body = await boundedBody(request); }
+      catch { return failure('request_too_large', 413); }
+      if (!body?.length) return failure('stripe_checkout_disabled', 503);
+      let payload;
+      try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); }
+      catch { return failure('invalid_checkout_request', 400); }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return failure('invalid_checkout_request', 400);
+      if (typeof payload.provider !== 'string' || payload.provider.trim().toLowerCase() !== 'nowpayments') {
+        return failure('stripe_checkout_disabled', 503);
+      }
+    }
+  }
   // Exact auth routes can launch independently; this never starts Go, exposes a
   // business read, permits identity claims, or relaxes the financial write gate.
   const authOnly = !coreReady(env) && authReady(env) && authOnlyRequest(request, url);
@@ -142,7 +170,7 @@ export async function dispatchCore(request, env, resolve) {
   if (!read && !authWrite) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
-    const body = read ? undefined : await boundedBody(request);
+    body = read ? undefined : body ?? await boundedBody(request);
     const headers = new Headers(request.headers);
     headers.delete('host');
     headers.delete('content-length');
@@ -159,4 +187,8 @@ export async function dispatchCore(request, env, resolve) {
   } catch (error) {
     return failure(error?.message === 'body_limit' ? 'request_too_large' : 'upstream_unavailable', error?.message === 'body_limit' ? 413 : 503);
   }
+}
+
+function serviceHostname(hostname) {
+  return ['payments.core.internal', 'core.internal'].includes(hostname);
 }

@@ -57,6 +57,7 @@ export function containerEnvironment(service, env) {
     values[target] = env[source];
   }
   const target = postgresTarget(values.DATABASE_URL);
+  if (service === 'payments') values.STRIPE_CHECKOUT_ENABLED = String(env.STRIPE_CHECKOUT_ENABLED === 'true');
   if (service === 'api') {
     const engine = new URL(values.VP_ENGINE_GRPC_URL);
     if (engine.protocol !== 'https:' || !engine.hostname || engine.username || engine.password || engine.hash || engine.search || engine.pathname !== '/') throw new Error('Engine mTLS origin is invalid');

@@ -23,6 +23,21 @@ Financial mutations and jobs have additional guards. Publishing a Container is
 not confirmation that checkout, payouts, compensation or historical settlements work.
 Do not remove the canonical Stripe evidence to bypass an operational guard.
 
+## Stripe checkout disabled
+
+`STRIPE_CHECKOUT_ENABLED=false` is explicit in both environments. Missing,
+malformed and non-string values also deny new Stripe Checkout requests. The
+provider-specific gate rejects Stripe initiation and GET resume links before
+resolving a Container, independently of broader infrastructure readiness. The
+payments Container receives the same default-closed flag; database read-only
+mode and the existing financial review barriers remain unchanged.
+
+NOWPayments requests retain their existing guards; this switch does not enable
+them, publish IPN credentials or grant financial write access. Stripe reports,
+canonical evidence, signatures, webhook policy and historical balances are not
+deleted or changed. Disabling initiation does not expire hosted Stripe URLs
+that were already issued: cancelling those sessions is a separate operation.
+
 Database authentication has a dedicated restricted writer; business reads use a
 different restricted role. Canonical public identifiers preserve existing network
 positions. Legacy accounts require approved identity linking after email verification;

@@ -151,7 +151,7 @@ test('phone removal never forwards provider secrets to Go or alters read-only fi
   }
   for (const host of ['payments.core.internal', 'withdrawals.core.internal']) {
     const response = await dispatchCore(new Request(`https://${host}/api/payments/checkout`, { method: 'POST' }),
-      { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' }, () => assert.fail('financial mutation forwarded'));
+      { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true', STRIPE_CHECKOUT_ENABLED: 'true' }, () => assert.fail('financial mutation forwarded'));
     assert.equal(response.status, 503); assert.equal((await response.json()).error, 'financial_review_required');
   }
 });

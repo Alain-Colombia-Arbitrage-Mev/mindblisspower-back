@@ -18,6 +18,7 @@
       "routes": [],
       "vars": {
         "CORE_ENV": "staging",
+        "STRIPE_CHECKOUT_ENABLED": "false",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
@@ -54,6 +55,7 @@
       "routes": [],
       "vars": {
         "CORE_ENV": "production",
+        "STRIPE_CHECKOUT_ENABLED": "false",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
