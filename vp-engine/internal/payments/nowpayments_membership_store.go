@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"regexp"
 	"strings"
 
@@ -39,13 +38,14 @@ type NOWPaymentsMembershipInput struct {
 }
 
 type NOWPaymentsMembershipAttempt struct {
-	ID, Environment, AuthSubject, PersonPublicID string
-	PersonID                                     int64
-	AffiliateID, SponsorAffiliateID              *int64
-	PackageID, PV                                int
-	PackageName, AmountUSD, FeeUSD               string
-	TotalCents                                   int64
-	PreferredSide, State, InvoiceID, PaymentID   string
+	ID, Environment, AuthSubject, PersonPublicID      string
+	PersonID                                          int64
+	AffiliateID, SponsorAffiliateID                   *int64
+	PackageID, PV                                     int
+	PackageName, AmountUSD, FeeUSD                    string
+	PricingPolicy, ProviderCostUSD, CommissionBaseUSD string
+	TotalCents                                        int64
+	PreferredSide, State, InvoiceID, PaymentID        string
 }
 
 type NOWPaymentsReceiptResult struct {
@@ -64,13 +64,15 @@ func validNOWPaymentsOrderID(value string) bool {
 
 const nowPaymentsAttemptColumns = `id::text,environment,auth_subject,person_public_id::text,person_id,
  affiliate_id,sponsor_affiliate_id,package_id,pv,package_name,amount_usd::text,fee_usd::text,
- total_cents,COALESCE(preferred_side,''),state,COALESCE(invoice_id,''),COALESCE(payment_id,'')`
+ total_cents,COALESCE(preferred_side,''),state,COALESCE(invoice_id,''),COALESCE(payment_id,''),
+ COALESCE(pricing_policy,''),COALESCE(provider_cost_usd::text,''),COALESCE(commission_base_usd::text,'')`
 
 func scanNOWPaymentsAttempt(row pgx.Row) (NOWPaymentsMembershipAttempt, error) {
 	var out NOWPaymentsMembershipAttempt
 	err := row.Scan(&out.ID, &out.Environment, &out.AuthSubject, &out.PersonPublicID, &out.PersonID,
 		&out.AffiliateID, &out.SponsorAffiliateID, &out.PackageID, &out.PV, &out.PackageName, &out.AmountUSD,
-		&out.FeeUSD, &out.TotalCents, &out.PreferredSide, &out.State, &out.InvoiceID, &out.PaymentID)
+		&out.FeeUSD, &out.TotalCents, &out.PreferredSide, &out.State, &out.InvoiceID, &out.PaymentID,
+		&out.PricingPolicy, &out.ProviderCostUSD, &out.CommissionBaseUSD)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, ErrNOWPaymentsAttemptNotFound
 	}
@@ -151,17 +153,20 @@ func (s *Store) CreateNOWPaymentsMembership(ctx context.Context, in NOWPaymentsM
 		return NOWPaymentsMembershipAttempt{}, fmt.Errorf("snapshot NOWPayments package: %w", err)
 	}
 	pack.AmountUSD, err = decimal.NewFromString(amount)
-	if err != nil || !pack.AmountUSD.IsPositive() || !pack.AmountUSD.Equal(pack.AmountUSD.Round(2)) ||
-		pack.TotalUSD().Mul(decimal.NewFromInt(100)).GreaterThan(decimal.NewFromInt(math.MaxInt64)) ||
-		pack.PV < 0 || len(pack.Name) == 0 || len(pack.Name) > 256 {
+	if err != nil || pack.PV < 0 || len(pack.Name) == 0 || len(pack.Name) > 256 {
 		return NOWPaymentsMembershipAttempt{}, ErrNOWPaymentsEvidence
+	}
+	pricing, err := nowPaymentsPrice(pack.AmountUSD)
+	if err != nil {
+		return NOWPaymentsMembershipAttempt{}, err
 	}
 	out, err := scanNOWPaymentsAttempt(tx.QueryRow(ctx, `INSERT INTO payments.nowpayments_membership_attempt
  (environment,auth_subject,person_id,person_public_id,affiliate_id,sponsor_affiliate_id,preferred_side,
- package_id,package_name,pv,amount_usd,fee_usd,total_cents)
- VALUES($1,$2,$3,$4::uuid,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13) RETURNING `+nowPaymentsAttemptColumns,
+ package_id,package_name,pv,amount_usd,fee_usd,total_cents,pricing_policy,provider_cost_usd,commission_base_usd)
+ VALUES($1,$2,$3,$4::uuid,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING `+nowPaymentsAttemptColumns,
 		in.Environment, subject, personID, publicID, affiliateID, in.SponsorAffiliateID, normalizePreferredSide(in.PreferredSide),
-		pack.ID, pack.Name, pack.PV, pack.AmountUSD.StringFixed(2), pack.FeeUSD().StringFixed(2), pack.TotalCents()))
+		pack.ID, pack.Name, pack.PV, pricing.AmountUSD, pricing.FeeUSD, pricing.TotalCents,
+		pricing.Policy, pricing.ProviderCostUSD, pricing.CommissionBaseUSD))
 	if err != nil {
 		var conflict *pgconn.PgError
 		if errors.As(err, &conflict) && conflict.Code == "23505" {

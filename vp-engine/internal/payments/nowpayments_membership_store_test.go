@@ -83,7 +83,7 @@ func TestNOWPaymentsMembershipStoreIntegration(t *testing.T) {
 	pool, cleanup := pgContainer(t)
 	defer cleanup()
 	ctx := context.Background()
-	for _, file := range []string{"70_stable_identity_bindings.sql", "74_nowpayments_membership_review.sql"} {
+	for _, file := range []string{"70_stable_identity_bindings.sql", "74_nowpayments_membership_review.sql", "77_nowpayments_included_pricing.sql"} {
 		migration, err := os.ReadFile(filepath.Join(findRepoRoot(t), "_meta", "migration", file))
 		if err != nil {
 			t.Fatal(err)
@@ -118,7 +118,8 @@ func TestNOWPaymentsMembershipStoreIntegration(t *testing.T) {
 		t.Fatal("create immutable order", err)
 	}
 	if attempt.AuthSubject != "synthetic-now-member" || attempt.PersonID <= 0 || !validNOWPaymentsOrderID(attempt.PersonPublicID) ||
-		attempt.AmountUSD != "100.00" || attempt.FeeUSD != "1.00" || attempt.TotalCents != 10100 || attempt.PV != 50 || attempt.State != "creating_invoice" {
+		attempt.AmountUSD != "100.00" || attempt.FeeUSD != "0.00" || attempt.TotalCents != 10000 || attempt.PV != 50 || attempt.State != "creating_invoice" ||
+		attempt.PricingPolicy != nowPaymentsIncludedPricingPolicy || attempt.ProviderCostUSD != "1.0000" || attempt.CommissionBaseUSD != "99.0000" {
 		t.Fatal("incorrect server snapshot", attempt)
 	}
 	if _, err := store.CreateNOWPaymentsMembership(ctx, in); !errors.Is(err, ErrNOWPaymentsOutstanding) {
@@ -134,6 +135,7 @@ func TestNOWPaymentsMembershipStoreIntegration(t *testing.T) {
 		t.Fatal("invoice must not be replaced", err)
 	}
 	payment := syntheticNOWPayment(attempt.ID, "7001", "9001", "finished")
+	payment.PriceAmount, payment.PayAmount, payment.ActuallyPaid = "100.00", "100", "100"
 	badAmount := payment
 	badAmount.PriceAmount = "1"
 	if _, err := store.RecordNOWPaymentsReceipt(ctx, "production", payment, badAmount, strings.Repeat("0", 64)); !errors.Is(err, ErrNOWPaymentsEvidence) {
@@ -196,6 +198,7 @@ func TestNOWPaymentsMembershipStoreIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stolen := syntheticNOWPayment(secondOrder.ID, "7002", "9001", "finished")
+	stolen.PriceAmount, stolen.PayAmount, stolen.ActuallyPaid = "100.00", "100", "100"
 	if _, err := store.RecordNOWPaymentsReceipt(ctx, "production", stolen, stolen, strings.Repeat("5", 64)); !errors.Is(err, ErrNOWPaymentsEvidence) {
 		t.Fatal("payment credited to two orders", err)
 	}
@@ -259,6 +262,8 @@ func TestNOWPaymentsMembershipStoreIntegration(t *testing.T) {
 	}
 	for _, query := range []string{
 		`UPDATE payments.nowpayments_membership_attempt SET total_cents=1`,
+		`UPDATE payments.nowpayments_membership_attempt SET pricing_policy=NULL,provider_cost_usd=NULL,commission_base_usd=NULL`,
+		`UPDATE payments.nowpayments_membership_attempt SET provider_cost_usd=2,commission_base_usd=98`,
 		`UPDATE payments.nowpayments_membership_attempt SET invoice_id='7999' WHERE invoice_id IS NOT NULL`,
 		`UPDATE payments.nowpayments_membership_receipt SET finished_verified=false`,
 		`DELETE FROM payments.nowpayments_membership_receipt`,

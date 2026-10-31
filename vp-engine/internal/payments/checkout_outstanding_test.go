@@ -72,6 +72,7 @@ func TestCheckoutCrossProviderOutstandingIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	apply("74_nowpayments_membership_review.sql")
+	apply("77_nowpayments_included_pricing.sql")
 
 	t.Run("NOW reservations and uncertainty block Stripe", func(t *testing.T) {
 		attempt, err := store.CreateNOWPaymentsMembership(ctx, nowInput(3002))

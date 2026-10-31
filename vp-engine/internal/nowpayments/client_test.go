@@ -56,6 +56,10 @@ func TestInvoiceUsesExactCentsAndSafeHostedURL(t *testing.T) {
 		if !strings.Contains(string(body), `"price_amount":1353.01`) || !strings.Contains(string(body), `"price_currency":"usd"`) {
 			t.Fatalf("cents not exact: %s", body)
 		}
+		var request map[string]json.RawMessage
+		if err := json.Unmarshal(body, &request); err != nil || string(request["is_fee_paid_by_user"]) != "false" {
+			t.Fatal("invoice must explicitly keep provider fees on the merchant, without omitting false")
+		}
 		if _, ok := r.Context().Deadline(); !ok {
 			t.Fatal("missing bounded request deadline")
 		}

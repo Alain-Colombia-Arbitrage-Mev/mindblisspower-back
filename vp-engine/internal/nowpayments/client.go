@@ -139,14 +139,22 @@ func (c *Client) CreateInvoice(ctx context.Context, in InvoiceRequest) (Invoice,
 		return Invoice{}, ErrInvalidInput
 	}
 	request := struct {
-		Amount      json.Number `json:"price_amount"`
-		Currency    string      `json:"price_currency"`
-		OrderID     string      `json:"order_id"`
-		Description string      `json:"order_description,omitempty"`
-		Callback    string      `json:"ipn_callback_url"`
-		Success     string      `json:"success_url"`
-		Cancel      string      `json:"cancel_url"`
-	}{json.Number(fmt.Sprintf("%d.%02d", in.AmountUSDMinor/100, in.AmountUSDMinor%100)), "usd", in.OrderID, in.Description, in.CallbackURL, in.SuccessURL, in.CancelURL}
+		Amount        json.Number `json:"price_amount"`
+		Currency      string      `json:"price_currency"`
+		OrderID       string      `json:"order_id"`
+		Description   string      `json:"order_description,omitempty"`
+		Callback      string      `json:"ipn_callback_url"`
+		Success       string      `json:"success_url"`
+		Cancel        string      `json:"cancel_url"`
+		FeePaidByUser bool        `json:"is_fee_paid_by_user"`
+	}{
+		Amount:   json.Number(fmt.Sprintf("%d.%02d", in.AmountUSDMinor/100, in.AmountUSDMinor%100)),
+		Currency: "usd", OrderID: in.OrderID, Description: in.Description,
+		Callback: in.CallbackURL, Success: in.SuccessURL, Cancel: in.CancelURL,
+		// A fixed merchant policy, not caller input. Do not omit false or rely on
+		// account-level defaults that could add provider fees to the buyer total.
+		FeePaidByUser: false,
+	}
 	body, err := json.Marshal(request)
 	if err != nil {
 		return Invoice{}, ErrInvalidInput
