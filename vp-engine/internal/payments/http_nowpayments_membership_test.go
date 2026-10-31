@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -183,6 +184,74 @@ func TestNOWMembershipInvoiceUsesOnlyPersistedSnapshot(t *testing.T) {
 	}
 	if strings.Contains(client.request.Description, "@") {
 		t.Fatal("email must not be sent in the invoice")
+	}
+	returned, err := url.Parse(client.request.SuccessURL)
+	if err != nil || returned.Scheme != "https" || returned.Host != "mindblisspower.com" || returned.Path != "/dashboard/packages" ||
+		len(returned.Query()) != 3 || returned.Query().Get("order_id") != store.attempt.ID ||
+		returned.Query().Get("payment_provider") != "nowpayments" || returned.Query().Get("status") != "review" {
+		t.Fatal("return URL must carry only the persisted order, provider and review state")
+	}
+	if client.request.CancelURL != h.nowMemberships.cancelURL || strings.Contains(client.request.CancelURL, "order_id") ||
+		client.request.CallbackURL != h.nowMemberships.callbackURL {
+		t.Fatal("order return must not alter cancellation or webhook targets")
+	}
+}
+
+func TestNOWMembershipReturnURLFailsClosedBeforeProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*nowPaymentsMemberships, *NOWPaymentsMembershipAttempt)
+	}{
+		{"caller-controlled-id", func(_ *nowPaymentsMemberships, a *NOWPaymentsMembershipAttempt) { a.ID = "client-id&status=paid" }},
+		{"foreign-origin", func(f *nowPaymentsMemberships, _ *NOWPaymentsMembershipAttempt) {
+			f.successURL = "https://evil.example/dashboard/packages?payment_provider=nowpayments&status=review"
+		}},
+		{"spoofed-success", func(f *nowPaymentsMemberships, _ *NOWPaymentsMembershipAttempt) {
+			f.successURL = "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=paid"
+		}},
+		{"preloaded-id", func(f *nowPaymentsMemberships, _ *NOWPaymentsMembershipAttempt) {
+			f.successURL += "&order_id=" + syntheticNOWOrder
+		}},
+		{"foreign-cancel", func(f *nowPaymentsMemberships, _ *NOWPaymentsMembershipAttempt) {
+			f.cancelURL = "https://evil.example/cancel"
+		}},
+		{"callback-alias", func(f *nowPaymentsMemberships, _ *NOWPaymentsMembershipAttempt) {
+			f.callbackURL = "https://mindblisspower.com/api/webhooks/nowpayments?redirect=evil"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c, s := fakeNOWMembershipHandler()
+			tc.change(h.nowMemberships, &s.attempt)
+			if _, err := h.nowMemberships.createInvoice(context.Background(), s.attempt); err == nil {
+				t.Fatal("unsafe return accepted")
+			}
+			if c.creates != 0 || s.attaches != 0 || s.unknowns != 0 {
+				t.Fatal("invalid return reached provider or persistence")
+			}
+		})
+	}
+}
+
+func TestNOWMembershipReturnURLUsesTrustedSandboxAndEachServerOrder(t *testing.T) {
+	h, c, s := fakeNOWMembershipHandler()
+	f := h.nowMemberships
+	f.environment = "sandbox"
+	f.callbackURL = "https://payments-sandbox.example.com/api/webhooks/nowpayments"
+	f.successURL = "https://payments-sandbox.example.com/dashboard/packages?payment_provider=nowpayments&status=review"
+	f.cancelURL = "https://payments-sandbox.example.com/dashboard/packages?payment_provider=nowpayments&status=cancelled"
+	s.attempt.Environment = "sandbox"
+	for _, id := range []string{syntheticNOWOrder, "2e6e5304-a6df-451f-8799-d0a5bbbe902a"} {
+		s.attempt.ID = id
+		if _, err := f.createInvoice(context.Background(), s.attempt); err != nil {
+			t.Fatal(err)
+		}
+		u, err := url.Parse(c.request.SuccessURL)
+		if err != nil || u.Host != "payments-sandbox.example.com" || u.Query().Get("order_id") != id || len(u.Query()["order_id"]) != 1 {
+			t.Fatal("server order was reused or sandbox origin changed")
+		}
+		if c.request.OrderID != id || c.request.CancelURL != f.cancelURL {
+			t.Fatal("invoice identity or cancellation changed")
+		}
 	}
 }
 

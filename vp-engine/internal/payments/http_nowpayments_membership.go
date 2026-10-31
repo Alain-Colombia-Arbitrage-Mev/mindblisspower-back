@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -110,11 +111,15 @@ func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt N
 		attempt.State != "creating_invoice" || attempt.TotalCents <= 0 {
 		return nowpayments.Invoice{}, nowpayments.ErrEvidence
 	}
+	successURL, err := flow.successURLForOrder(attempt.ID)
+	if err != nil {
+		return nowpayments.Invoice{}, err
+	}
 	// Creation is never retried automatically. The API does not promise an
 	// idempotency key: even a timeout may have created a payable invoice remotely.
 	invoice, err := flow.client.CreateInvoice(ctx, nowpayments.InvoiceRequest{
 		OrderID: attempt.ID, AmountUSDMinor: attempt.TotalCents, Description: "Mindbliss Power membership",
-		CallbackURL: flow.callbackURL, SuccessURL: flow.successURL, CancelURL: flow.cancelURL,
+		CallbackURL: flow.callbackURL, SuccessURL: successURL, CancelURL: flow.cancelURL,
 	})
 	if err == nil {
 		err = flow.store.AttachNOWPaymentsInvoice(ctx, attempt.ID, flow.environment, invoice.ID)
@@ -128,6 +133,28 @@ func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt N
 		return nowpayments.Invoice{}, nowpayments.ErrProvider
 	}
 	return invoice, nil
+}
+
+// The return URL carries only the server-persisted order's opaque identifier.
+// A browser redirect is never evidence of payment or ownership; the portal must
+// still obtain the authenticated, persisted status before showing confirmation.
+func (flow *nowPaymentsMemberships) successURLForOrder(orderID string) (string, error) {
+	if !validNOWPaymentsOrderID(orderID) || !validNOWPaymentsCallbackURL(flow.callbackURL, flow.environment) {
+		return "", nowpayments.ErrEvidence
+	}
+	origin := strings.TrimSuffix(flow.callbackURL, "/api/webhooks/nowpayments")
+	if flow.successURL != origin+"/dashboard/packages?payment_provider=nowpayments&status=review" ||
+		flow.cancelURL != origin+"/dashboard/packages?payment_provider=nowpayments&status=cancelled" {
+		return "", nowpayments.ErrConfiguration
+	}
+	result, err := url.Parse(flow.successURL)
+	if err != nil {
+		return "", nowpayments.ErrConfiguration
+	}
+	query := result.Query()
+	query.Set("order_id", orderID)
+	result.RawQuery = query.Encode()
+	return result.String(), nil
 }
 
 // A signed callback is evidence for manual membership review only. It must not
