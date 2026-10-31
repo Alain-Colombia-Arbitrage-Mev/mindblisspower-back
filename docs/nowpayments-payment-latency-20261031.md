@@ -68,3 +68,31 @@ https://nowpayments.zendesk.com/hc/en-us/articles/21395546303389-IPN-and-how-to-
 
 Security and concurrency review informed the bounded wake-up signal and preserved
 financial validation, rather than caching a paid result or trusting client state.
+
+## Published verification
+
+- Backend runtime source `a0d8b7c111c488f0897905bb65d6266e709cdb2a`;
+  image pin and additional rejection assertions `3e4bf67`.
+  Portal source `302e79d0549953c2ecbb2615cf900edbd446df60`. Both repositories pushed.
+- Payments container v13 at 100%, rollout completed, one healthy instance,
+  zero errors/failed/starting. Registry digest:
+  `sha256:211d3e14ca1b995aa7133adb613f09deff44ee023ca0e9e60446c0cc97f210c7`.
+  Core Worker `9e493b56-f34d-470b-bc2e-c653c32cc842`; portal Worker
+  `8f6e7758-3e5b-4d99-9120-f6d8c95ca964`, both at 100% on 06:22:57 UTC.
+  Admin/API/Engine/Withdrawals versions were not changed.
+- Portal: 499 tests, TypeScript, scoped ESLint, Linux Next/OpenNext build,
+  staging/production dry-runs, 80 network-disabled workerd probes passed.
+  Core: 83 tests passed. Targeted Linux CGO1 race suites and 11 real PostgreSQL
+  restricted-role lifecycle cases passed. Ten runs of 100 simultaneous wake-up
+  notifications passed; failure-signature/provider/persistence assertions passed.
+  This does not claim the unrelated all-repository Go integration suite passed.
+- Private readiness and deployment pin/flag checks passed. Eleven production
+  anonymous auth/origin/signature guards passed, without creating invoices,
+  sending messages, generating signed events or making real test payments.
+- Read-only audit retained the historical Stripe/affiliate fingerprints,
+  two NOW orders, zero NOW confirmed inflows/engine obligations/payments and
+  both identity bindings. No migrations, role grants or historical data changes.
+
+End-to-end post-improvement settlement latency is still unmeasured: no completed
+production payment was synthesized to benchmark it. A real buyer payment can
+later supply that evidence without treating the `waiting` state as paid.
