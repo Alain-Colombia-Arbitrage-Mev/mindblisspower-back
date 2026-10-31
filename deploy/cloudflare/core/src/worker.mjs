@@ -3,6 +3,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import { coreReady, dispatchCore, dispatchContainerOutbound, isGrpcTunnelRequest, TUNNEL_PROTOCOL } from './routing.mjs';
 import { containerEnvironment } from './runtime-env.mjs';
 import { privateReadiness } from './private-probe.mjs';
+import { captureConfiguration } from './capture-configuration.mjs';
 import { relayWebSocketToSocket } from '../../../../app/src/clients/opaque-tcp-relay.mjs';
 export { ContainerProxy };
 
@@ -77,6 +78,10 @@ export class PrivateCoreProbe extends WorkerEntrypoint {
   readiness() {
     if (arguments.length !== 0) throw new Error('Readiness probe accepts no arguments');
     return privateReadiness(this.env, resolveFor(this.env));
+  }
+  captureConfiguration() {
+    if (arguments.length !== 0) throw new Error('Capture configuration probe accepts no arguments');
+    return captureConfiguration(this.env);
   }
 }
 for (const [source, Class, hosts] of [
