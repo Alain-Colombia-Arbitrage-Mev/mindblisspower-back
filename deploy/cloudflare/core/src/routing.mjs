@@ -14,6 +14,8 @@ const MAX_BODY = 256 * 1024;
 const MAX_NOWPAYMENTS_IPN_BODY = 128 * 1024;
 const NOWPAYMENTS_IPN_PATH = '/api/webhooks/nowpayments';
 const NOWPAYMENTS_STATUS_PATH = '/api/payments/nowpayments/status';
+const NOW_CHECKOUT_ERRORS = new Set(['nowpayments-unavailable', 'nowpayments_financial_configuration_unavailable',
+  'membership_eligibility_unavailable', 'membership_payment_pending_review']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const GRPC_TUNNEL_HOST = 'engine-grpc.core.internal';
 export const GRPC_TUNNEL_PATH = '/v1/engine-tunnel';
@@ -167,6 +169,44 @@ async function boundedBody(request, limit = MAX_BODY) {
   return body;
 }
 
+// Preserve only reviewed NOW checkout error enums. A failure can follow invoice
+// creation, so this never asserts that no external charge/invoice exists.
+async function nowCheckoutFailure(response) {
+  let reader, timer;
+  try {
+    if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')
+      || response.headers.has('content-encoding')) return failure('upstream_unavailable', 503);
+    const length = response.headers.get('content-length');
+    if (length !== null && (!/^\d+$/.test(length) || Number(length) > 1024)) return failure('upstream_unavailable', 503);
+    reader = response.body?.getReader();
+    if (!reader) return failure('upstream_unavailable', 503);
+    const read = async () => {
+      const chunks = [];
+      let size = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 1024) return null;
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      return typeof value?.error === 'string' && NOW_CHECKOUT_ERRORS.has(value.error) ? value.error : null;
+    };
+    const code = await Promise.race([read(), new Promise(resolve => { timer = setTimeout(() => resolve(null), 2000); })]);
+    return failure(code ?? 'upstream_unavailable', 503);
+  } catch { return failure('upstream_unavailable', 503); }
+  finally {
+    clearTimeout(timer);
+    // A malicious/broken stream cannot extend the response deadline via cancel.
+    if (reader) { void reader.cancel().catch(() => {}); reader.releaseLock(); }
+    else { void response.body?.cancel().catch(() => {}); }
+  }
+}
+
 /** Private service-binding dispatcher; never trusts a client-selected origin/header. */
 export async function dispatchCore(request, env, resolve) {
   let url;
@@ -255,7 +295,7 @@ export async function dispatchCore(request, env, resolve) {
       method: request.method, headers, body, redirect: 'manual', signal: request.signal,
     });
     const response = await resolve(service, 'singleton').fetch(forwarded);
-    if (response.status >= 500) return failure('upstream_unavailable', 503);
+    if (response.status >= 500) return operationalCheckout ? nowCheckoutFailure(response) : failure('upstream_unavailable', 503);
     const safeHeaders = new Headers(response.headers);
     safeHeaders.set('Cache-Control', 'private, no-store');
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: safeHeaders });

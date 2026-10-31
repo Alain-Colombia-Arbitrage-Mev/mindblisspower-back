@@ -110,3 +110,39 @@ actual provider payment or financial disbursement**. The first real owner-initia
 purchase must still verify invoice creation, signed event delivery, atomic
 activation and the owned activation popup end to end. Historical settlements
 and external withdrawals remain disabled/reviewed.
+
+## USD 100 checkout repair, 2026-10-31 05:37 UTC
+
+The first owner-reported checkout failed before a durable attempt or provider
+invoice: `payments.registration_referral` was absent (`42P01`). Operational
+readiness alone did not cover this report-reader preflight dependency. Migration
+81 adds the empty table with the complete 62/64-compatible layout and grants the
+existing Payments report login only the six SELECT columns used by the lookup.
+It does not replay old migrations, enable legacy writers, backfill referrals,
+move affiliates or change authentication/financial rows.
+
+The repair was tested against isolated real PostgreSQL with a restricted login:
+empty lookup, right-side referral and denied writes/unrelated columns all pass.
+Production effective ACLs and exact SELECT passed; the PlanetScale operator
+cannot SET ROLE to the application login, and no membership was granted to work
+around that boundary. Production prechecks for both existing bindings and the
+USD 100 plan now pass, including referral lookup and eligible root fallback.
+
+Core preserves only reviewed checkout error enums with a 1 KiB/2 second response
+bound. The portal keeps these safe enums, distinguishes unavailable preflight
+from uncertain initiation and displays an allowlisted support reference without
+raw provider/SQL details. It never retries an uncertain invoice automatically.
+The existing layout and financial formulas are unchanged.
+
+- Core Worker: `5175cd2d-d05a-4138-99a3-b89ea70cca74`, 100%.
+- Portal Worker: `d7ebba63-106b-495f-a11d-e71dc7ea55c3`, 100%.
+- Pinned Containers and admin remain at the versions listed above.
+- Core 77 tests; portal 477 tests, TypeScript/lint, Linux build/dry-run and 74
+  workerd smoke probes pass. The PostgreSQL restricted-reader regression passes.
+- Live private readiness/diagnostics: HTTP 200, enabled/ready true. Read-only
+  historical hashes remain unchanged. No attempt, invoice, financial row or
+  test email was created by these checks.
+
+These are deployment/preflight checks, not an authenticated provider invoice or
+completed-payment test. The owner must initiate the first real purchase once;
+if its result is uncertain, reconcile the saved attempt before trying again.

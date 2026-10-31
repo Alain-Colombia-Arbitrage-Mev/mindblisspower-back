@@ -70,6 +70,56 @@ test('NOW operation does not open Stripe, withdrawals, admin writes, identity cl
   assert.equal((await dispatchContainerOutbound('payments', new Request('http://engine.core.internal/health'), env, never)).status, 503);
 });
 
+test('only exact NOW checkout preserves reviewed upstream failure enums without forwarding headers or retrying', async () => {
+  for (const error of ['nowpayments-unavailable', 'nowpayments_financial_configuration_unavailable',
+    'membership_eligibility_unavailable', 'membership_payment_pending_review']) {
+    let calls = 0;
+    const response = await dispatchCore(checkout(), env, () => ({ fetch: async () => {
+      calls++;
+      return Response.json({ error, sql: 'private DSN', stack: 'private stack' }, { status: 503,
+        headers: { 'x-private': 'private secret', 'set-cookie': 'private session' } });
+    } }));
+    assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error }); assert.equal(calls, 1);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
+    assert.equal(response.headers.has('x-private'), false); assert.equal(response.headers.has('set-cookie'), false);
+  }
+  const broad = { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
+  const response = await dispatchCore(new Request('https://payments.core.internal/api/payments/me'), broad,
+    () => ({ fetch: async () => Response.json({ error: 'nowpayments-unavailable' }, { status: 503 }) }));
+  assert.deepEqual(await response.json(), { error: 'upstream_unavailable' });
+});
+
+test('unknown, malformed, encoded or oversized NOW checkout failures remain sanitized with a single upstream call', async () => {
+  for (const upstream of [
+    Response.json({ error: 'postgres://private-secret', stack: 'private-secret' }, { status: 500 }),
+    new Response('private-secret', { status: 500 }),
+    new Response('{"error":', { status: 503, headers: { 'content-type': 'application/json' } }),
+    new Response('{"error":"nowpayments-unavailable"}', { status: 503 }),
+    Response.json({ error: 'nowpayments-unavailable', extra: 'private-secret'.repeat(100) }, { status: 503 }),
+    new Response('{"error":"nowpayments-unavailable"}', { status: 503, headers: { 'content-type': 'application/json', 'content-length': '1025' } }),
+    new Response('{"error":"nowpayments-unavailable"}', { status: 503, headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' } }),
+    new Response(new ReadableStream({ start(controller) { controller.error(new Error('private-secret')); } }), { status: 503, headers: { 'content-type': 'application/json' } }),
+  ]) {
+    let calls = 0;
+    const response = await dispatchCore(checkout(), env, () => ({ fetch: async () => { calls++; return upstream; } }));
+    assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'upstream_unavailable' });
+    assert.equal(calls, 1);
+  }
+});
+
+test('a stalled NOW failure stream cannot hold checkout open or cause an automatic retry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let calls = 0, cancelled = 0;
+  const upstream = new Response(new ReadableStream({ pull() {}, cancel() { cancelled++; } }),
+    { status: 503, headers: { 'content-type': 'application/json' } });
+  const pending = dispatchCore(checkout(), env, () => ({ fetch: async () => { calls++; return upstream; } }));
+  await new Promise(setImmediate);
+  t.mock.timers.tick(2000);
+  const response = await pending;
+  assert.deepEqual(await response.json(), { error: 'upstream_unavailable' });
+  assert.equal(calls, 1); assert.equal(cancelled, 1);
+});
+
 test('operational invoice egress preserves validated bytes and never retries or follows redirects', async () => {
   let calls = 0;
   const raw = JSON.stringify(invoice()).replaceAll('&', '\\u0026');
