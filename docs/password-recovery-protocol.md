@@ -80,3 +80,27 @@ Linux/OpenNext/workerd. Production checks must not send a code or create a real
 session merely to demonstrate the deployment.
 
 Reference: [Better Auth email OTP](https://better-auth.com/docs/plugins/email-otp).
+
+## Production release evidence — 2026-11-02
+
+Source: backend `f941c94`, portal `2c1dbe8`, both pushed to their existing feature
+branches. Published Core version `4a403836-0bd8-4ba8-921c-8e32f6d228f5` and portal
+version `55c33838-bc7c-4fa6-8cbb-71f894386cf9` are at100% traffic. API container
+v9 is healthy with rollout completed, digest
+`sha256:ef81488c76031c5419ceaab8ce6f724da4d7f6a39b9b3b3a4628f0a737e364f9`.
+Paymentsv14, Enginev1, Withdrawalsv3 and Admin version
+`3165879e-cf5e-4171-a30a-113580829d10` remain unchanged. NOWPayments, Stripe and
+general network/financial flags were preserved; no payment service was deployed.
+
+Verification passed:111 installed-handler auth tests,89 Core routing tests,
+551 portal tests, typecheck/lint, Linux builds and90 network-disabled workerd
+probes. Production anonymous checks passed:11 recovery-page/asset/input guards
+and13 existing login/logout/checkout/webhook guards. Published recovery, payment
+panel and logout assets match the reviewed build by SHA256. Control-plane health,
+versions, flags and required-secret presence were checked read-only.
+
+No real recovery code, password or session was used; these checks do not prove
+mailbox delivery or completed user recovery. A separately authorized single-account
+reactivation was audited with an encrypted scoped before-image and post-state
+checks; it did not verify an email or create a password, session or binding.
+No private account evidence is stored in this document.
