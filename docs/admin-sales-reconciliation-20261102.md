@@ -73,3 +73,44 @@ Roll back display selection only by switching the reviewed active pointer;
 never delete immutable evidence or reverse real financial effects as a rollback
 for a reporting deployment. Check aggregate controls and financial/tree
 fingerprints before and after the authorized import.
+
+## Applied release and checks
+
+Applied reviewed batch `9f488abd-f4fd-421e-8bb7-3d92ca4ca199`. The operator
+transaction inserted a versioned source and active pointer, not financial sales
+events. Before/after19 financial-source fingerprints and tree/closure controls
+matched. Independent post-commit read-only checks confirmed734 active report
+rows / USD87,718.00, the four exclusions, both disputes, both discrepancies, the
+unchanged original Stripe evidence and the unchanged NOWPayments ledgers.
+An audit event records a NULL actor rather than impersonating an administrator.
+
+The role manifest was tested under a non-superuser CREATEROLE operator with
+`createrole_self_grant=''`, matching production. Ownership transfer temporarily
+permits SET only for the new narrow report owner, restores no-SET/no-INHERIT,
+and revokes temporary schema CREATE before commit. Existing runtime column-level
+permissions from earlier migrations remain unchanged; new runtime grants are
+SELECT on the three report views only. The initial permission failure rolled
+back atomically before the corrected reviewed transaction was applied.
+
+Source commits: backend `c079461`, admin `258c5e2`, both pushed to the existing
+feature branches. Production Core version `4abb7b2b-7d5c-4734-b6e2-043fe0364f7b`
+and Admin version `af2ade1c-8d6f-418a-8139-a194b2880d33` serve100% traffic.
+Paymentsv15 rollout completed healthy at21:34:56UTC, image digest
+`sha256:90c9a0a51ee763c3f1ad8a6ec2c88ee4e0baf1cb1e7bd89b0b93059a15521a27`.
+APIv9, Enginev1, Withdrawalsv3, portal version
+`55c33838-bc7c-4fa6-8cbb-71f894386cf9` and all financial/auth capability flags
+remain unchanged. Only the Payments container was replaced.
+
+Validation passed:18 import unit tests,32 disposable PostgreSQL/ACL checks,
+real PostgreSQL Go reporting integration with synthetic HTTP contracts,
+`go vet`, the broader payments short suite (final SQL fixes rechecked by focused
+integration),294 admin tests,89 Core tests, Linux builds, production dry-runs
+and31 offline workerd probes. Five Go/PostgreSQL HTTP fixture contracts pass
+the strict frontend guards without coercion. Public checks passed17 admin
+page/asset/auth guards and13 existing portal/checkout/webhook guards. Served
+sales/history/risk assets match the reviewed build by SHA256.
+
+No real email, authentication session, new invoice, payment or provider event
+was generated for these deployment checks. An authenticated production browser
+session was not available; public asset checks and synthetic private HTTP/UI
+contracts are not represented as a completed browser walkthrough.
