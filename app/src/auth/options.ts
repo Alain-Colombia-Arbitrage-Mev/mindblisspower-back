@@ -10,6 +10,7 @@ import { registrationCandidate, type RegistrationCandidate } from './registratio
 import { contactPhoneField, registrationContacts } from './registration-contacts';
 import { verifiedOtpSignInResponse } from './otp-sign-in-response';
 import { requireRegisteredEmailForSignIn } from './sign-in-registration';
+import { z } from 'zod';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
@@ -19,6 +20,11 @@ export type AuthIdentity = {
 };
 const messagePaths = new Set(['/sign-up/email', '/send-verification-email', '/request-password-reset',
   '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp']);
+const recoveryEmail = z.string().trim().toLowerCase().max(254).pipe(z.email());
+const recoveryRequest = z.strictObject({ email: recoveryEmail });
+const recoveryReset = z.strictObject({ email: recoveryEmail, otp: z.string().regex(/^[0-9]{6}$/),
+  // Passwords are opaque: never trim, normalize or silently truncate them.
+  password: z.string().min(12).max(128) });
 
 /** Pure composition: tests supply an adapter, identity policy and mock senders. */
 export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOptions['database'], identity: AuthIdentity,
@@ -93,7 +99,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
     } },
-    emailAndPassword: { enabled: true, requireEmailVerification: true, minPasswordLength: 12, autoSignIn: false,
+    emailAndPassword: { enabled: true, requireEmailVerification: true, minPasswordLength: 12, maxPasswordLength: 128, autoSignIn: false,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => delivery.email(authActionMessage(env, user.email, url, true)) },
     emailVerification: { sendOnSignUp: true, autoSignInAfterVerification: false,
@@ -116,6 +122,19 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     disabledPaths: ['/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
       '/registration/phone/send', '/registration/phone/verify'],
     hooks: { before: createAuthMiddleware(async ctx => {
+      if (emailEnabled && (ctx.path === '/email-otp/request-password-reset' || ctx.path === '/email-otp/reset-password')) {
+        const parsed = (ctx.path === '/email-otp/request-password-reset' ? recoveryRequest : recoveryReset).safeParse(ctx.body);
+        if (!parsed.success) throw new APIError('BAD_REQUEST', {
+          code: 'INVALID_PASSWORD_RECOVERY_REQUEST', message: 'Invalid password recovery details',
+        });
+        // In 1.6.22 the native reset consumes its OTP BEFORE checking password
+        // length. Validate first so a typo cannot spend a valid challenge.
+        // The native handler still owns password hashing, credential updates,
+        // email proof and session revocation; no legacy identity is reassigned.
+        // The hook receives a shallow context copy. Mutate the shared body
+        // field, not ctx.body itself, so native lookup uses the normalized email.
+        ctx.body.email = parsed.data.email;
+      }
       if (emailEnabled && ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'sign-in') {
         await requireRegisteredEmailForSignIn(secret, ctx);
       }

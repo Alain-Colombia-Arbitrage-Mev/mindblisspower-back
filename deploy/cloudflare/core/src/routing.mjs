@@ -24,7 +24,8 @@ export const TUNNEL_PROTOCOL = 'mindbliss-opaque-tcp-v1';
 const AUTH_ONLY_PATHS = Object.freeze({
   GET: new Set(['/api/auth/get-session', '/api/auth/jwks', '/api/auth/token', '/health']),
   POST: new Set(['/api/auth/email-otp/send-verification-otp', '/api/auth/sign-in/email-otp', '/api/auth/sign-out',
-    '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email']),
+    '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email',
+    '/api/auth/email-otp/request-password-reset', '/api/auth/email-otp/reset-password']),
 });
 
 function failure(error, status) {

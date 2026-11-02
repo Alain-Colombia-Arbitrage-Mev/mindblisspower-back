@@ -58,7 +58,6 @@ test('auth-only cannot start business services, claim identity, expand auth path
     ['/api/auth/email-otp/verify-email/', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email', 'PUT', 'auth.core.internal'],
     ['/api/auth/email-otp/check-verification-otp', 'POST', 'auth.core.internal'],
-    ['/api/auth/email-otp/reset-password', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email-otp/', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email-otp?target=business', 'POST', 'auth.core.internal'],
     ['/api/auth/sign-in/email-otp', 'GET', 'auth.core.internal'],
