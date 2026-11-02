@@ -23,7 +23,7 @@ const env: AuthEnvironment = {
 };
 
 function fixture(options: { missing?: boolean; verified?: boolean; deliveryRejected?: boolean;
-  deliveryAmbiguous?: boolean; revocationFails?: boolean } = {}) {
+  deliveryAmbiguous?: boolean; revocationFails?: boolean; jwtEnabled?: boolean; quarantinedBinding?: boolean } = {}) {
   const store: MemoryDB = {
     user: options.missing ? [] : [{ id: userId, email, name: 'Synthetic Existing Member',
       emailVerified: options.verified === true, createdAt: new Date(), updatedAt: new Date() }],
@@ -32,7 +32,9 @@ function fixture(options: { missing?: boolean; verified?: boolean; deliveryRejec
   const messages: EmailMessage[] = [];
   const provisioned: string[] = [];
   const bound: string[] = [];
-  const create = () => betterAuth(createAuthOptions(env, (authOptions: Parameters<ReturnType<typeof memoryAdapter>>[0]) => {
+  const configuration: AuthEnvironment = options.jwtEnabled ? { ...env, BETTER_AUTH_JWT_ENABLED: 'true',
+    BETTER_AUTH_JWT_ISSUER: env.BETTER_AUTH_URL, BETTER_AUTH_JWT_AUDIENCE: 'synthetic-recovery-members' } : env;
+  const create = () => betterAuth(createAuthOptions(configuration, (authOptions: Parameters<ReturnType<typeof memoryAdapter>>[0]) => {
     const adapter = memoryAdapter(store)(authOptions);
     const wrapped: DBAdapter = { ...adapter, deleteMany: async input => {
       if (options.revocationFails && input.model === 'session') throw new Error('Synthetic private revocation failure');
@@ -40,8 +42,8 @@ function fixture(options: { missing?: boolean; verified?: boolean; deliveryRejec
     } };
     return wrapped;
   }, {
-    provision: async subject => { provisioned.push(subject); return { status: 'existing' }; },
-    binding: async subject => { bound.push(subject); return { status: 'claim_required' }; },
+    provision: async subject => { provisioned.push(subject); return { status: options.quarantinedBinding ? 'quarantined' : 'existing' }; },
+    binding: async subject => { bound.push(subject); return { status: options.quarantinedBinding ? 'quarantined' : 'claim_required' }; },
     registrationAllowed: async () => false,
   }, {
     email: async message => {
@@ -51,9 +53,9 @@ function fixture(options: { missing?: boolean; verified?: boolean; deliveryRejec
     phone: async () => { throw new Error('Synthetic recovery must not send SMS'); },
   }));
   let auth = create();
-  const request = (path: string, body: unknown, ip = '192.0.2.71') => auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
-    method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://portal.example.test',
-      'x-forwarded-for': ip }, body: JSON.stringify(body),
+  const request = (path: string, body?: unknown, ip = '192.0.2.71', cookie = '') => auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
+    method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json', origin: 'https://portal.example.test',
+      'x-forwarded-for': ip, ...(cookie ? { cookie } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
   const send = (address = email) => request('/email-otp/request-password-reset', { email: address });
   const code = () => /\b([0-9]{6})\b/.exec(messages.at(-1)!.text)![1]!;
@@ -71,6 +73,7 @@ function fixture(options: { missing?: boolean; verified?: boolean; deliveryRejec
   return { store, messages, provisioned, bound, request, send, code, reset, seedCredential, seedSession,
     restart: () => { auth = create(); } };
 }
+const cookies = (response: Response) => response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
 
 async function expectNoSession(response: Response) {
   expect(response.headers.has('set-cookie')).toBe(false);
@@ -114,7 +117,115 @@ for (const credential of ['missing', 'existing', 'empty'] as const) {
     expect(app.bound).toHaveLength(0);
     expect((await app.reset(otp, password)).status).toBe(400);
   });
+
+  test(`password login after recovery accepts only the replacement for a ${credential} credential`, async () => {
+    const app = fixture();
+    if (credential !== 'missing') await app.seedCredential(credential === 'empty' ? null : undefined);
+    expect((await app.send()).status).toBe(200);
+    const replacement = `  ${password}  `;
+    const recovered = await app.reset(app.code(), replacement);
+    expect(recovered.status).toBe(200);
+    await expectNoSession(recovered);
+    expect(app.store.user![0]!.emailVerified).toBe(true);
+    expect(app.store.session).toHaveLength(0);
+    expect(app.provisioned).toHaveLength(0);
+
+    for (const rejected of [oldPassword, password]) {
+      const response = await app.request('/sign-in/email', { email, password: rejected });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({ code: 'INVALID_EMAIL_OR_PASSWORD' });
+      expect(response.headers.has('set-cookie')).toBe(false);
+      expect(app.store.session).toHaveLength(0);
+      expect(app.provisioned).toHaveLength(0);
+    }
+    const signedIn = await app.request('/sign-in/email', { email, password: replacement });
+    expect(signedIn.status).toBe(200);
+    expect(app.store.session).toHaveLength(1);
+    expect(app.provisioned).toEqual([userId]);
+    expect(app.bound).toHaveLength(0);
+    expect(app.store.user).toHaveLength(1);
+    expect(app.store.account).toHaveLength(1);
+    const cookie = cookies(signedIn);
+    expect(cookie).toContain('better-auth.session_token=');
+    const session = await app.request('/get-session', undefined, '192.0.2.72', cookie);
+    expect(session.status).toBe(200);
+    expect(await session.json()).toMatchObject({ user: { id: userId, email, emailVerified: true } });
+    expect(app.messages).toHaveLength(1);
+  });
 }
+
+test('successful recovery invalidates real prior native session cookies while leaving another user signed in', async () => {
+  const app = fixture({ verified: true });
+  await app.seedCredential();
+  const otherId = 'synthetic-unrelated-recovery-subject';
+  const otherEmail = 'unrelated-recovery-member@example.test';
+  app.store.user!.push({ id: otherId, email: otherEmail, name: 'Synthetic Unrelated Member', emailVerified: true,
+    createdAt: new Date(), updatedAt: new Date() });
+  app.store.account!.push({ id: 'synthetic-unrelated-credential', userId: otherId, accountId: otherId, providerId: 'credential',
+    password: await hashPassword(oldPassword), createdAt: new Date(), updatedAt: new Date() });
+  const previousCookies: string[] = [];
+  for (const ip of ['192.0.2.73', '192.0.2.74']) {
+    const response = await app.request('/sign-in/email', { email, password: oldPassword }, ip);
+    expect(response.status).toBe(200);
+    previousCookies.push(cookies(response));
+    expect(await (await app.request('/get-session', undefined, ip, previousCookies.at(-1))).json())
+      .toMatchObject({ user: { id: userId, emailVerified: true } });
+  }
+  const unrelatedLogin = await app.request('/sign-in/email', { email: otherEmail, password: oldPassword }, '192.0.2.75');
+  expect(unrelatedLogin.status).toBe(200);
+  const unrelatedCookie = cookies(unrelatedLogin);
+  expect(app.store.session).toHaveLength(3);
+  expect((await app.send()).status).toBe(200);
+  const result = await app.reset();
+  expect(result.status).toBe(200);
+  await expectNoSession(result);
+  app.restart();
+  for (const cookie of previousCookies) {
+    const session = await app.request('/get-session', undefined, '192.0.2.76', cookie);
+    expect(session.status).toBe(200);
+    expect(await session.json()).toBeNull();
+  }
+  expect(app.store.session).toHaveLength(1);
+  expect(app.store.session![0]!.userId).toBe(otherId);
+  const unrelatedSession = await app.request('/get-session', undefined, '192.0.2.77', unrelatedCookie);
+  expect(unrelatedSession.status).toBe(200);
+  expect(await unrelatedSession.json()).toMatchObject({ user: { id: otherId, email: otherEmail } });
+  expect((await app.request('/sign-in/email', { email, password: oldPassword }, '192.0.2.78')).status).toBe(401);
+  expect((await app.request('/sign-in/email', { email, password }, '192.0.2.78')).status).toBe(200);
+  expect(app.messages).toHaveLength(1);
+});
+
+test('verified recovery and native password login cannot convert a quarantined binding into a network JWT', async () => {
+  // This is the authentication/identity boundary: the canonical identity policy
+  // remains quarantined throughout, even after real OTP proof and password login.
+  // Its database-specific suspension/blacklist rules have separate identity tests.
+  const app = fixture({ jwtEnabled: true, quarantinedBinding: true });
+  expect((await app.send()).status).toBe(200);
+  const recovered = await app.reset();
+  expect(recovered.status).toBe(200);
+  await expectNoSession(recovered);
+  expect(app.store.user![0]!.emailVerified).toBe(true);
+  expect(app.provisioned).toHaveLength(0);
+  expect(app.bound).toHaveLength(0);
+  const login = await app.request('/sign-in/email', { email, password });
+  expect(login.status).toBe(200);
+  expect(app.provisioned).toEqual([userId]);
+  const cookie = cookies(login);
+  const session = await app.request('/get-session', undefined, '192.0.2.79', cookie);
+  expect(session.status).toBe(200);
+  expect(await session.json()).toMatchObject({ user: { id: userId, emailVerified: true } });
+  const denied = await app.request('/token', undefined, '192.0.2.79', cookie);
+  expect(denied.status).toBe(403);
+  expect(await denied.json()).toMatchObject({ message: 'Identity review required' });
+  expect(denied.headers.has('set-auth-jwt')).toBe(false);
+  expect(app.bound).toEqual([userId]);
+  expect(app.store.user![0]!.role).toBeUndefined();
+  expect(app.store.user![0]!.personId).toBeUndefined();
+  expect(app.store.user![0]!.email).toBe(email);
+  expect(app.store.user).toHaveLength(1);
+  expect(app.store.account).toHaveLength(1);
+  expect(app.messages).toHaveLength(1);
+});
 
 test('unknown email has the same request acknowledgement but never creates a user, credential or identity', async () => {
   const known = fixture();

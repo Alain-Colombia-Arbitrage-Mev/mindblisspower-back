@@ -104,3 +104,17 @@ mailbox delivery or completed user recovery. A separately authorized single-acco
 reactivation was audited with an encrypted scoped before-image and post-state
 checks; it did not verify an email or create a password, session or binding.
 No private account evidence is stored in this document.
+
+## Repository re-review — 2026-11-02
+
+The installed-handler authentication suite now passes116 tests with1,781
+assertions, plus typecheck, using synthetic delivery and network-disabled,
+read-only Linux execution. Additional tests cover native password login after
+recovery for existing, absent and empty credentials, exact password whitespace,
+rejection of prior passwords, invalidation of actual prior session cookies and
+preservation of an unrelated user's session. A quarantined canonical identity
+still cannot obtain a network JWT after recovery and password login.
+
+This follow-up changes backend tests and this protocol only. No runtime,
+configuration, schema, account, provider or production deployment changed. Real
+mailbox delivery and user-owned recovery were not exercised by these tests.
