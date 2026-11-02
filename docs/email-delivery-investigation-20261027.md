@@ -78,3 +78,33 @@ References checked: [Cloudflare REST send contract](https://developers.cloudflar
 [activity states](https://developers.cloudflare.com/email-service/observability/logs/),
 [analytics](https://developers.cloudflare.com/email-service/observability/metrics-analytics/),
 [Better Auth email OTP](https://better-auth.com/docs/plugins/email-otp).
+
+## Follow-up — 2026-11-02 (America/Bogota)
+
+Five reported recipients were checked in a target-pinned, read-only production
+transaction. Each has one normalized Better Auth principal and one active legacy
+affiliate, without a blacklist match; two already have verified email and a
+binding, while three remain pending. No account restriction, email ownership,
+credential, session, placement or financial record was changed.
+
+The owner authorized exactly one production sign-in code request per recipient.
+All five requests returned HTTP200, but no retained challenge was observed
+immediately afterwards, and exact-recipient provider analytics showed no new
+events. None was retried, and no code or session was read or redeemed. The
+installed native handler awaits creation/delivery; its generic acknowledgement
+does not prove provider acceptance. Confirmed sender rejection retires the code.
+
+The account owner then signed into Cloudflare. Its Email Sending overview
+explicitly showed **Daily sending quota:200/200 today — Over quota**, with an
+estimated reset in three hours. Sending remained enabled, DNS was configured,
+and reputation was healthy. This confirms an account-level daily sending limit;
+registering recipients again, bypassing OTP, changing passwords or removing
+suppression safeguards is not a remedy. No plan, quota, token or DNS was changed.
+
+Other read-only checks passed: no suppression for the five exact recipients,
+active local/snapshot email token, sending entitlement, published DNS mail-auth
+records, authentication table privileges and canonical public-JWKS identity.
+The current Worker secret value was not read. Historical telemetry and token
+policy-detail API requests returned403; no authority was expanded to obtain them.
+Support evidence, addresses and attempt receipts remain in ignored operator files,
+not Git. Existing codes are not delivery tests to reuse after the quota resets.
