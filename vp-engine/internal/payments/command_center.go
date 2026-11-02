@@ -73,6 +73,13 @@ func (h *Handler) handleCommandCenterSummary(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if fin.SalesSummary != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "sales_financial_review_required", "data_source": consolidatedSalesSource,
+			"sales_summary": fin.SalesSummary, "review_endpoint": "/api/admin/finance",
+		})
+		return
+	}
 	if fin.StripeRecovery != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"error": "stripe_recovery_financial_review_required", "data_source": recoveredStripeSource,

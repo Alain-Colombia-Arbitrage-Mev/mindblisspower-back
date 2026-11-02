@@ -23,16 +23,21 @@ const riskChargeStatusesSQL = "'failed','refunded','security_blocked','disputed'
 // SalesRow es el desglose de ventas de un paquete (tier de precio del producto
 // Stripe PACK MINDBLISS) en el período consultado.
 type SalesRow struct {
-	DataSource  string `json:"data_source,omitempty"`
-	PackageID   int64  `json:"package_id"`
-	Name        string `json:"name"`
-	AmountUSD   string `json:"amount_usd"`
-	Created     int64  `json:"created"`
-	Paid        int64  `json:"paid"`
-	Activated   int64  `json:"activated"`
-	RevenueUSD  string `json:"revenue_usd"` // suma de intents activados
-	GrossUSD    string `json:"gross_usd"`   // amount+fee cobrado exitosamente
-	RefundedUSD string `json:"refunded_usd"`
+	DataSource       string `json:"data_source,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Sales            int64  `json:"sales"`
+	ReviewSales      int64  `json:"review_sales"`
+	ProcessingFeeUSD string `json:"processing_fee_usd,omitempty"`
+	NetUSD           string `json:"net_usd,omitempty"`
+	PackageID        int64  `json:"package_id"`
+	Name             string `json:"name"`
+	AmountUSD        string `json:"amount_usd"`
+	Created          int64  `json:"created"`
+	Paid             int64  `json:"paid"`
+	Activated        int64  `json:"activated"`
+	RevenueUSD       string `json:"revenue_usd"` // suma de intents activados
+	GrossUSD         string `json:"gross_usd"`   // amount+fee cobrado exitosamente
+	RefundedUSD      string `json:"refunded_usd"`
 }
 
 // SalesCashSummary muestra la caja Stripe del período consultado. Se calcula
@@ -40,6 +45,7 @@ type SalesRow struct {
 // marcados como inexistentes en Stripe live.
 type SalesCashSummary struct {
 	DataSource               string                `json:"data_source,omitempty"`
+	SalesSummary             *AdminSalesSummary    `json:"sales_summary,omitempty"`
 	StripeRecovery           *StripeRecoveryReview `json:"stripe_recovery,omitempty"`
 	TotalStarted             int64                 `json:"total_started"`
 	SuccessfulCharges        int64                 `json:"successful_charges"`
@@ -103,6 +109,11 @@ var (
 //   - Revenue  = suma de amount_usd de lo efectivamente cobrado (paid_at not null,
 //     sin reembolsos), incluye pagos aún sin colocar (needs_placement).
 func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return nil, err
+	} else if present {
+		return s.adminSalesReport(ctx, from)
+	}
 	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
 		return nil, err
 	} else if recovered {
@@ -138,6 +149,16 @@ func (s *Store) SalesReport(ctx context.Context, from time.Time) ([]SalesRow, er
 }
 
 func (s *Store) SalesCashSummary(ctx context.Context, from time.Time) (SalesCashSummary, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return SalesCashSummary{}, err
+	} else if present {
+		summary, err := s.adminSalesSummary(ctx, from)
+		if err != nil {
+			return SalesCashSummary{}, err
+		}
+		return SalesCashSummary{DataSource: consolidatedSalesSource, SalesSummary: summary, TotalStarted: summary.Sales,
+			SuccessfulCharges: summary.PaidSales, ActivatedSales: summary.ActivatedSales, GrossChargedUSD: summary.GrossUSD, RefundedUSD: summary.RefundedUSD, RefundedCharges: summary.RefundedSales}, nil
+	}
 	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
 		return SalesCashSummary{}, err
 	} else if recovered {
@@ -599,6 +620,13 @@ type DBSalesTotal struct {
 // SalesTotalsSince agrega los intents ACTIVADOS desde `from` (cuenta + bruto en
 // centavos) para conciliar contra Stripe.
 func (s *Store) SalesTotalsSince(ctx context.Context, from time.Time) (DBSalesTotal, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return DBSalesTotal{}, err
+	} else if present {
+		out := DBSalesTotal{DataSource: consolidatedSalesSource}
+		err := s.db.QueryRow(ctx, `SELECT count(*),COALESCE(sum(gross_minor),0) FROM payments.v_admin_sales WHERE provider='stripe' AND ($1::timestamptz IS NULL OR created_at >= $1)`, salesFrom(from)).Scan(&out.Count, &out.GrossCents)
+		return out, err
+	}
 	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
 		return DBSalesTotal{}, err
 	} else if recovered {
@@ -662,11 +690,11 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 	if _, ok := h.requireAdmin(w, r); !ok {
 		return
 	}
-	days := atoiDefault(r.URL.Query().Get("days"), 30)
-	if days < 1 || days > 365 {
-		days = 30
+	r, from, days, err := adminSalesRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_sales_filter")
+		return
 	}
-	from := time.Now().UTC().AddDate(0, 0, -days)
 	report, err := h.store.SalesReport(r.Context(), from)
 	if err != nil {
 		h.log.Error().Err(err).Msg("sales report")
@@ -680,7 +708,7 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var securityCharges *SecurityPendingChargeSummary
-	if cash.StripeRecovery == nil {
+	if cash.StripeRecovery == nil && cash.SalesSummary == nil {
 		charges, err := h.store.SecurityPendingChargeSummary(r.Context(), from)
 		if err != nil {
 			h.log.Error().Err(err).Msg("security pending charges")
@@ -694,6 +722,8 @@ func (h *Handler) handleAdminSalesReport(w http.ResponseWriter, r *http.Request)
 		"days":             days,
 		"rows":             report,
 		"cash_summary":     cash,
+		"sales_summary":    cash.SalesSummary,
+		"data_source":      cash.DataSource,
 		"security_charges": securityCharges,
 		"since":            time.Now().UTC().Format(time.RFC3339),
 	})
@@ -772,30 +802,46 @@ func parseOperationalChargeOccurredAt(v string) (time.Time, error) {
 // mlm.person (identidad del pagador). Otros productos de Stripe NO aparecen aquí
 // porque nunca generan un purchase_intent.
 type SalesTransaction struct {
-	DataSource       string `json:"data_source,omitempty"`
-	ReadOnly         bool   `json:"read_only,omitempty"`
-	CommissionStatus string `json:"affiliate_commission_status,omitempty"`
-	ID               string `json:"id"`
-	CreatedAt        string `json:"created_at"`
-	Email            string `json:"email"`
-	Name             string `json:"name"`
-	Plan             string `json:"plan"`
-	AmountUSD        string `json:"amount_usd"`
-	FeeUSD           string `json:"fee_usd"`
-	TotalUSD         string `json:"total_usd"`
-	Status           string `json:"status"`
-	Reference        string `json:"reference"` // stripe_payment_intent_id
-	PaidAt           string `json:"paid_at"`
-	ActivatedAt      string `json:"activated_at"`
-	AffiliateID      *int64 `json:"affiliate_id"`   // colocación en el árbol (null = sin colocar)
-	StripeVerify     *bool  `json:"stripe_present"` // verificación Stripe live (null = sin verificar)
-	RefundUSD        string `json:"refund_usd"`
-	RefundedAt       string `json:"refunded_at"`
+	DataSource               string  `json:"data_source,omitempty"`
+	Provider                 string  `json:"provider,omitempty"`
+	SourceStatus             string  `json:"source_status,omitempty"`
+	ActivationStatus         string  `json:"activation_status,omitempty"`
+	RiskStatus               string  `json:"risk_status,omitempty"`
+	ProcessingFeeUSD         string  `json:"processing_fee_usd,omitempty"`
+	VerifiedProcessingFeeUSD *string `json:"verified_processing_fee_usd"`
+	NetUSD                   string  `json:"net_usd,omitempty"`
+	ProductScope             string  `json:"product_scope,omitempty"`
+	CommissionEligible       bool    `json:"commission_eligible"`
+	ProviderVerified         bool    `json:"provider_verified"`
+	FeeReconciliationStatus  string  `json:"fee_reconciliation_status,omitempty"`
+	ReadOnly                 bool    `json:"read_only,omitempty"`
+	CommissionStatus         string  `json:"affiliate_commission_status,omitempty"`
+	ID                       string  `json:"id"`
+	CreatedAt                string  `json:"created_at"`
+	Email                    string  `json:"email"`
+	Name                     string  `json:"name"`
+	Plan                     string  `json:"plan"`
+	AmountUSD                string  `json:"amount_usd"`
+	FeeUSD                   string  `json:"fee_usd"`
+	TotalUSD                 string  `json:"total_usd"`
+	Status                   string  `json:"status"`
+	Reference                string  `json:"reference"` // stripe_payment_intent_id
+	PaidAt                   string  `json:"paid_at"`
+	ActivatedAt              string  `json:"activated_at"`
+	AffiliateID              *int64  `json:"affiliate_id"`   // colocación en el árbol (null = sin colocar)
+	StripeVerify             *bool   `json:"stripe_present"` // verificación Stripe live (null = sin verificar)
+	RefundUSD                string  `json:"refund_usd"`
+	RefundedAt               string  `json:"refunded_at"`
 }
 
 // SalesTransactions lista las ventas individuales de membresías desde `from`,
 // con filtro opcional por status y búsqueda por email (user_id). Paginado.
 func (s *Store) SalesTransactions(ctx context.Context, from time.Time, status, q string, limit, offset int) ([]SalesTransaction, int64, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return nil, 0, err
+	} else if present {
+		return s.adminSalesTransactions(ctx, from, status, q, limit, offset)
+	}
 	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
 		return nil, 0, err
 	} else if recovered {
@@ -864,9 +910,10 @@ func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Re
 		return
 	}
 	qv := r.URL.Query()
-	days := atoiDefault(qv.Get("days"), 30)
-	if days < 1 || days > 365 {
-		days = 30
+	r, from, days, err := adminSalesRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_sales_filter")
+		return
 	}
 	status := strings.TrimSpace(qv.Get("status"))
 	switch status {
@@ -877,22 +924,33 @@ func (h *Handler) handleAdminSalesTransactions(w http.ResponseWriter, r *http.Re
 	q := strings.TrimSpace(qv.Get("q"))
 	limit := atoiDefault(qv.Get("limit"), 25)
 	offset := atoiDefault(qv.Get("offset"), 0)
-	from := time.Now().UTC().AddDate(0, 0, -days)
-
 	txns, total, err := h.store.SalesTransactions(r.Context(), from, status, q, limit, offset)
 	if err != nil {
 		h.log.Error().Err(err).Msg("sales transactions")
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	var summary *AdminSalesSummary
+	if present, err := h.store.hasAdminSales(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	} else if present {
+		summary, err = h.store.adminSalesSummary(r.Context(), from)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"from":   from.Format("2006-01-02"),
-		"days":   days,
-		"rows":   txns,
-		"total":  total,
-		"limit":  limit,
-		"offset": offset,
-		"since":  time.Now().UTC().Format(time.RFC3339),
+		"from":          from.Format("2006-01-02"),
+		"days":          days,
+		"rows":          txns,
+		"total":         total,
+		"limit":         limit,
+		"offset":        offset,
+		"since":         time.Now().UTC().Format(time.RFC3339),
+		"sales_summary": summary,
+		"data_source":   salesSummarySource(summary),
 	})
 }
 

@@ -329,6 +329,13 @@ func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdmin(w, r); !ok {
 		return
 	}
+	// Payments is an all-time history by default, while sharing the validated
+	// provider selector with the sales reports. No refund/verify action is enabled.
+	r, _, _, err := adminSalesRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_sales_filter")
+		return
+	}
 	status := r.URL.Query().Get("status")
 	q := r.URL.Query().Get("q")
 	limit := atoiDefault(r.URL.Query().Get("limit"), 25)
@@ -339,7 +346,18 @@ func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"payments": items, "total": total, "limit": limit, "offset": offset})
+	var summary *AdminSalesSummary
+	if present, err := h.store.hasAdminSales(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	} else if present {
+		summary, err = h.store.adminSalesSummary(r.Context(), time.Time{})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payments": items, "total": total, "limit": limit, "offset": offset, "sales_summary": summary, "data_source": salesSummarySource(summary)})
 }
 
 // svcAuth valida el token de servicio (compartido con el BFF). Devuelve false

@@ -142,7 +142,7 @@ func (s *Store) BuildNetworkMetrics(ctx context.Context, companyRootOpt ...int64
 	if err != nil {
 		return m, RankExposure{}, fmt.Errorf("admin finance: %w", err)
 	}
-	if fin.StripeRecovery != nil {
+	if fin.StripeRecovery != nil || fin.SalesSummary != nil {
 		return m, RankExposure{}, ErrRecoveryFinancialReview
 	}
 	sol, err := s.GetSolvency(ctx)

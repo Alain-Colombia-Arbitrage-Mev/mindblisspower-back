@@ -71,7 +71,11 @@ func (s *Store) ExportUsers(ctx context.Context, q, status string) ([]AdminUserE
 		return nil, fmt.Errorf("invalid status filter")
 	}
 
-	rows, err := s.reader().Query(ctx, `
+	consolidated, err := s.hasAdminSales(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cte := `
 		WITH own_purchases AS (
 			SELECT lower(pi.user_id) AS email,
 			       COALESCE(SUM(pi.amount_usd + pi.fee_usd), 0)::text AS total_usd
@@ -90,7 +94,27 @@ func (s *Store) ExportUsers(ctx context.Context, q, status string) ([]AdminUserE
 			   AND pi.status NOT IN ('refunded','security_blocked','disputed','chargeback')
 			   AND pi.stripe_present IS DISTINCT FROM false
 			 GROUP BY pi.sponsor_affiliate_id
-		)
+		)`
+	ownJoin := `op.email = lower(p.email::text)`
+	if consolidated {
+		// Identity comes exclusively from the reviewed source binding. Current
+		// sponsors are used only as the explicitly current network attribution;
+		// neither a CSV email nor metadata guesses can select a different person.
+		cte = `WITH own_purchases AS (
+		 SELECT person_id,(sum(gross_minor)::numeric/100)::numeric(24,2)::text AS total_usd
+		 FROM payments.v_admin_sales WHERE person_id IS NOT NULL GROUP BY person_id
+		), direct_sales AS (
+		 SELECT a.sponsor_id AS affiliate_id,(sum(s.gross_minor)::numeric/100)::numeric(24,2)::text AS total_usd
+		 FROM payments.v_admin_sales s JOIN mlm.affiliate a ON a.id=s.affiliate_id
+		 WHERE a.sponsor_id IS NOT NULL GROUP BY a.sponsor_id
+		)`
+		ownJoin = `op.person_id=p.id`
+	}
+	pool := s.reader()
+	if consolidated {
+		pool = s.db
+	}
+	rows, err := pool.Query(ctx, cte+`
 		SELECT p.id,
 		       COALESCE(p.first_name, ''),
 		       COALESCE(p.last_name, ''),
@@ -127,7 +151,7 @@ func (s *Store) ExportUsers(ctx context.Context, q, status string) ([]AdminUserE
 		  LEFT JOIN mlm.affiliate sa ON sa.id = a.sponsor_id
 		  LEFT JOIN mlm.person sp    ON sp.id = sa.person_id
 		  LEFT JOIN mlm.rank r       ON r.id = a.current_rank_id
-		  LEFT JOIN own_purchases op ON op.email = lower(p.email::text)
+		  LEFT JOIN own_purchases op ON `+ownJoin+`
 		  LEFT JOIN direct_sales ds  ON ds.affiliate_id = a.id
 		 WHERE ($1 = ''
 		        OR p.email ILIKE '%' || $1 || '%'
