@@ -1,13 +1,15 @@
 /**
  * Better Auth schema mirror — these tables are owned by Better Auth and live
  * in the `auth` Postgres schema. The DDL in `_meta/schema_mlm.sql` only
- * declares `auth.user` so `mlm.person.user_id` can FK to it; the rest
- * (session, account, verification) is created by `bun auth:migrate`.
+ * declares `auth.user` so `mlm.person.user_id` can FK to it. The remaining
+ * core relations were installed through reviewed operator migration 71.
  *
  * We mirror them here so Drizzle queries against sessions and OAuth accounts
- * are typed. Don't edit shapes manually — `better-auth migrate` will rewrite
- * any schema diff against the version of better-auth we're on. Plugin fields
- * below are mirrored by the reviewed additive identity migration 70. Optional
+ * are typed. This is a partial application mirror, NOT a production migration
+ * authority: never run automatic Better Auth/Drizzle schema synchronization
+ * against production. Compare the live catalog first and apply only a reviewed,
+ * targeted migration; historical migration 71 is intentionally one-shot.
+ * Plugin fields are mirrored by the reviewed additive identity migration 70. Optional
  * customer contact fields are managed by reviewed additive migration 76.
  */
 import { pgSchema, text, timestamp, boolean, integer, bigint, index, uniqueIndex } from 'drizzle-orm/pg-core';
