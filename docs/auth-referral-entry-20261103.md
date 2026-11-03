@@ -88,3 +88,32 @@ Engine and Withdrawals images and all existing flags/secrets are preserved.
 - Existing portal artifact was preserved locally before replacement. Release
   verification confirmed unchanged portal/admin binding and secret-name
   fingerprints, and unchanged Core flags and inactive-service image digests.
+
+## Referral routing and binary-placement follow-up
+
+Portal source `04c109e17d6953d9f770346cd382776f6adb3a18` is published as Worker
+`ce5eb476-501c-44fc-9088-923de54286a4`. Legacy root `/?ref=...&side=...` links now
+temporarily redirect to registration, carrying only the public code and branch.
+Both auth navigation tabs preserve those hints. Public GET checks verified both
+branches and login/registration destinations with no-store headers. Verification:
+727 portal tests, 110 compiled workerd probes, matching runtime source hashes.
+
+Payments source `fc4e336eca79849c5ee2f30daf431b58dfe3f2e5` changes only the NOW
+ancestor-counter lock to FOR NO KEY UPDATE, retaining depth order, formulas,
+advisory locks, FK/unique-slot protection, placement strategy and isolation.
+The deterministic new PostgreSQL regression first reproduced SQLSTATE 40P01
+with the prior implementation. The corrected regression plus activation and
+membership lifecycle passed 3 primary tests and 18 subtests with the race
+detector, zero failures/skips. All data was synthetic in disposable PostgreSQL.
+
+Core Worker `3a0a5c56-26e2-4cec-9492-76191dfbb47b` targets Payments v17 with
+image digest `ea54fcafc9000eb0991b1ed0562340fdf3b11eba15b7895b67da1851916e67ac`.
+API, Engine, Withdrawals, admin, flags, credentials, database schema and existing
+positions are unchanged by this follow-up. No real payment or account was used
+as a test.
+
+Placement still occurs after the first verified membership payment. Explicit
+L/R links spill down that same leg; absent a preference the existing weak-leg
+rule applies. No unpaid registration or existing member is repositioned. The
+separate reader Store may retain its tree snapshot until its 15-second TTL;
+this release does not claim instantaneous visual refresh across Store caches.
