@@ -103,12 +103,39 @@ func adminSalesRequest(r *http.Request) (*http.Request, time.Time, int, error) {
 }
 
 func (s *Store) hasAdminSales(ctx context.Context) (bool, error) {
-	var present bool
-	err := s.db.QueryRow(ctx, `SELECT to_regclass('payments.v_admin_sales') IS NOT NULL`).Scan(&present)
-	if err != nil {
+	// Once any reviewed reporting object exists, a damaged/empty installation
+	// must not silently revive the superseded canonical or checkout totals.
+	// Relation detection reads metadata only; runtime needs no raw import grant.
+	var installed int
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM (VALUES
+ (to_regclass('payments.sales_import_batch')),
+ (to_regclass('payments.sales_import_row')),
+ (to_regclass('payments.admin_sales_source')),
+ (to_regclass('payments.v_admin_sales')),
+ (to_regclass('payments.v_admin_sales_source')),
+ (to_regclass('payments.v_admin_sales_import_batch'))
+ ) AS reporting(relation) WHERE relation IS NOT NULL`).Scan(&installed); err != nil {
 		return false, fmt.Errorf("detect consolidated sales: %w", err)
 	}
-	return present, nil
+	if installed == 0 {
+		return false, nil
+	}
+	if installed != 6 {
+		return false, fmt.Errorf("consolidated sales reporting installation incomplete")
+	}
+	// Validate through the existing narrow views, not their underlying tables.
+	// Both counts use one statement snapshot, including pointer/batch changes.
+	var sources, reviewed int
+	if err := s.db.QueryRow(ctx, `SELECT count(*),count(*) FILTER(
+ WHERE source.provider='stripe' AND batch.status='reviewed')
+ FROM payments.v_admin_sales_source source
+ LEFT JOIN payments.v_admin_sales_import_batch batch ON batch.id=source.active_batch_id`).Scan(&sources, &reviewed); err != nil {
+		return false, fmt.Errorf("validate consolidated sales source: %w", err)
+	}
+	if sources != 1 || reviewed != 1 {
+		return false, fmt.Errorf("consolidated sales reviewed source unavailable")
+	}
+	return true, nil
 }
 
 const adminSalesWhere = ` WHERE ($1::timestamptz IS NULL OR created_at >= $1) AND ($2='' OR provider=$2)`
