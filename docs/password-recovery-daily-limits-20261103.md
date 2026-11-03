@@ -61,3 +61,23 @@ Documentación contrastada con [Email OTP de Better Auth](https://better-auth.co
 y [sus límites de peticiones](https://better-auth.com/docs/concepts/rate-limit),
 además del código instalado de la versión 1.6.22. El cupo por destinatario es
 una protección propia, adicional a los límites nativos por IP y por OTP.
+
+## Publicación verificada
+
+- Backend `c28f9b6`; Core Worker
+  `ade13b2d-3658-45af-aa28-6ef46e978cb8`, 100 %; API v14, 100 %, saludable,
+  cero errores y rollout terminado. Imagen `mindbliss/api-recovery-daily-20261103`,
+  digest `sha256:2c90a1d5ec801bf7d5d07ee6a50addc7b452dff3cb8bfaa4dd3f79783b7ca282`.
+- Portal `390224a`; Worker `33e01bb0-8c3b-4bee-9122-774265324c93`, 100 %.
+  La página pública muestra la política y los diez chunks comprobados coinciden
+  por hash con el artefacto probado; mantienen su caché inmutable.
+- Administrador `eca0250c-1d12-47ab-8c8c-b35c708821ba` sin nuevo despliegue;
+  las API de recuperación que utilice comparten el backend actualizado.
+- Smoke del portal compilado: 100 comprobaciones, 54 llamadas privadas
+  sintéticas, cero mensajes/consultas reales y red externa desactivada.
+- Los 50 bindings de Core conservan su fingerprint completo. El portal conserva
+  variables, bindings y sus seis nombres de secretos. Motor v1, pagos v15 y
+  retiros v3 permanecen intactos; no se modificaron reglas financieras.
+- La validación pública sólo hizo GET y comprobó metadatos. No solicitó ni
+  canjeó códigos reales. El límite comienza a contar con las peticiones nuevas;
+  no se inventaron intentos históricos ni se alteraron contraseñas existentes.
