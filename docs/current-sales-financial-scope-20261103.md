@@ -53,6 +53,10 @@ La importación 87 es sólo de reporte: sus restricciones fijan
 - La declaración antigua de fondos de Stripe se refiere a los 838 pagos y a
   USD 13.000 reportados como entregados a la empresa. No es pago a afiliados ni
   puede repartirse proporcionalmente entre las nuevas 733 ventas.
+- De las 733 ventas Stripe del reporte, 732 tienen propietario coincidente e
+  identidad canónica verificada. Una por USD 101,00 no tiene propietario en el
+  reporte y carece de identidad canónica verificada: permanece en el total
+  administrativo, pero no se atribuye a un miembro ni se vincula automáticamente.
 
 ## Estado operativo observado, no un saldo reconstruido
 
@@ -112,3 +116,16 @@ partir de una importación de reporte. Se mantienen estas protecciones:
 
 La corrección de consultas no debe describirse como esa reconstrucción ni como
 habilitación de retiros de los USD 87.718.
+
+## Verificación de la corrección
+
+- Go 1.26.10 con `-race` y PostgreSQL 17.11: 6 pruebas principales y 22 subcasos,
+  sin fallos ni omisiones. Cubren el guard de fuente, reporte consolidado,
+  aislamiento del miembro y ausencia de mutaciones.
+- Worker core: 134 pruebas correctas; no se modifican las capacidades habilitadas,
+  el proveedor de correo ni las credenciales.
+- La consulta equivalente del historial se contrastó en producción mediante
+  SELECT agregado: 732 ventas atribuibles por USD 87.567,00, más la venta de
+  USD 101,00 conservada sin atribución en el total administrativo Stripe.
+- Se tomaron huellas agregadas de geometría, rangos y evidencia canónica antes
+  del despliegue para comprobar que no se alteran.
