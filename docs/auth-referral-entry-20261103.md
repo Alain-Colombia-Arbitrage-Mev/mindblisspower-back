@@ -117,3 +117,53 @@ L/R links spill down that same leg; absent a preference the existing weak-leg
 rule applies. No unpaid registration or existing member is repositioned. The
 separate reader Store may retain its tree snapshot until its 15-second TTL;
 this release does not claim instantaneous visual refresh across Store caches.
+
+## Automatic regression-repair follow-up
+
+The scoped sweep repaired reproducible failures without changing business rules:
+
+- Portal referral synchronization now reconciles the background save once,
+  retains an explicit choice when a visit marker expires, and rejects a stale
+  checkout GET that predates a completed save. Session HTTP errors cannot start
+  an attribution read. No automatic replay of old browser hints was added.
+- Native Better Auth 1.6.22 delayed consumed-row cleanup and expired-row cleanup
+  are request-scoped to the observed OTP generation. Neither can delete a newer
+  resend; expiration and single-use consumption remain authoritative.
+- Checkout rejects duplicate, unknown, case-aliased, null or invalid UTF-8 JSON
+  fields before identity/database/provider work, retaining canonical clients.
+- A fresh stored referral whose sponsor becomes ineligible fails closed rather
+  than silently falling back to PARTNER. Missing, expired and consumed hints
+  retain their previous fallback; positioned members retain their sponsor.
+- A successful operational NOW activation now invalidates its explicit reader
+  Store as well as its own local display cache, only after commit. Separate
+  pools, database roles and cached entries remain separate. Other processes or
+  direct SQL writes still use the existing 15-second tree-cache TTL.
+
+Evidence: 737 portal tests and 110 compiled, offline workerd probes passed.
+Clean API build/typecheck and 276 Bun 1.4.4 tests passed, with 36 expected fixture
+skips; the dedicated restricted PostgreSQL recovery runner passed 32 tests and
+502 assertions, including both two-replica resend races. All 121 API source
+files match committed source after CRLF-only normalization; the pre-existing,
+uncommitted auth schema edit was excluded from its isolated build context.
+Payments/NOW suites passed with Go 1.26.10 and the race detector. Dedicated
+PostgreSQL lifecycle/activation, overlapping-placement, restricted referral
+reader, verified capability and link-contract tests also passed. Regressions
+were reproduced before their fixes. No real messages, invoices or payments were
+used as tests, and no production schema, roles, users or positions were modified.
+
+Portal commit `d3a497d` is published as Worker
+`934134ed-08f2-4b13-98f9-056d7b1f9452`, 100%. Public routing, private no-store
+responses and affected immutable asset hashes passed live verification.
+Auth source is `8121a5f`; Payments source is `5baea08`. Core Worker
+`60be6f14-5caf-4237-b3a3-d3886d500880` is published at 100%. Final read-only
+control-plane verification showed API v16 and Payments v18 at 100%, both
+healthy with zero rollout errors and the expected immutable image digests:
+
+- API: `842cff188ab3c167fd5aeea12ef426ae4c63e951cda9bc45a6444314016d7250`.
+- Payments: `31acd130754a00c1c126f4fdc0513ee352ea8fe13031c66502098c41227e85b4`.
+
+The public anonymous session route returned 200/private no-store with no
+authenticated user. The generic native get-session GET is intentionally 404;
+only JWKS is exposed through the generic public auth GET route.
+Existing user edits, admin, Engine, Withdrawals, flags and credentials are
+preserved; only the API and Payments runtime images are replaced.
