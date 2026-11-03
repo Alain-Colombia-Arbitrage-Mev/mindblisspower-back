@@ -14,7 +14,7 @@ export const authBinding = identitySchema.table('auth_binding', {
   linkMethod: text('link_method').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [check('auth_binding_provider_check', sql`${table.provider} = 'better_auth'`),
-  check('auth_binding_link_method_check', sql`${table.linkMethod} IN ('new_registration','legacy_user_id','approved_claim','single_use_invite')`)]);
+  check('auth_binding_link_method_check', sql`${table.linkMethod} IN ('new_registration','legacy_user_id','approved_claim','single_use_invite','verified_email')`)]);
 
 export const legacyClaimGrant = identitySchema.table('legacy_claim_grant', {
   id: uuid('id').primaryKey().defaultRandom(),

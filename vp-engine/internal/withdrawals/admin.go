@@ -47,13 +47,15 @@ func (s *Store) IsAdmin(ctx context.Context, email string) (bool, error) {
 // Los campos se AGREGAN; ninguno reemplaza a los previos. Ver también el
 // contrato congelado de las claves de la RESPUESTA en handleAdminWithdrawals.
 type AdminWithdrawal struct {
-	ID        int64  `json:"id"`
-	Member    string `json:"member"`
-	Email     string `json:"email"`
-	AmountUSD string `json:"amount_usd"`
-	Status    string `json:"status"`
-	BankInfo  string `json:"bank_info"`
-	CreatedAt string `json:"created_at"`
+	ReadModelStatus string   `json:"read_model_status,omitempty"`
+	MissingFields   []string `json:"missing_fields,omitempty"`
+	ID              int64    `json:"id"`
+	Member          string   `json:"member"`
+	Email           string   `json:"email"`
+	AmountUSD       string   `json:"amount_usd"`
+	Status          string   `json:"status"`
+	BankInfo        string   `json:"bank_info"`
+	CreatedAt       string   `json:"created_at"`
 
 	// Aritmética del retiro: amount_usd (bruto) = fee_usd + net_usd.
 	FeeUSD string `json:"fee_usd"`
@@ -71,6 +73,22 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
+	if offset < 0 {
+		offset = 0
+	}
+	var columns []string
+	var recovered bool
+	if err := s.db.QueryRow(ctx, withdrawalListColumnsSQL).Scan(&columns, &recovered); err != nil {
+		return nil, 0, fmt.Errorf("inspect withdrawal read schema: %w", err)
+	}
+	projection, missing, err := withdrawalListReadProjection(columns, recovered)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(missing) != 0 {
+		s.log.Warn().Strs("missing_columns", missing).
+			Msg("historical withdrawal read schema incomplete; unavailable fields remain unknown")
+	}
 	var total int64
 	if err := s.db.QueryRow(ctx, `
 		SELECT count(*) FROM mlm.withdrawal_request wr
@@ -81,10 +99,8 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 	rows, err := s.db.Query(ctx, `
 		SELECT wr.id, trim(p.first_name||' '||p.last_name) AS member, p.email,
 		       wr.amount_usd::text, wr.status::text, COALESCE(wr.comments,''),
-		       to_char(wr.created_at,'YYYY-MM-DD"T"HH24:MI:SSZ'),
-		       COALESCE(wr.fee_usd::text,''), COALESCE(wr.net_usd::text,''),
-		       COALESCE(wr.bmp_status,''), COALESCE(wr.bmp_email_used,''),
-		       COALESCE(to_char(wr.bmp_verified_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
+		       to_char(wr.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		       `+projection+`
 		  FROM mlm.withdrawal_request wr
 		  JOIN mlm.affiliate a ON a.id=wr.affiliate_id
 		  JOIN mlm.person p    ON p.id=a.person_id
@@ -99,6 +115,10 @@ func (s *Store) ListWithdrawals(ctx context.Context, status string, limit, offse
 	out := []AdminWithdrawal{}
 	for rows.Next() {
 		var w AdminWithdrawal
+		if len(missing) != 0 {
+			w.ReadModelStatus = "historical_schema_incomplete"
+			w.MissingFields = append([]string(nil), missing...)
+		}
 		if err := rows.Scan(&w.ID, &w.Member, &w.Email, &w.AmountUSD, &w.Status, &w.BankInfo, &w.CreatedAt,
 			&w.FeeUSD, &w.NetUSD, &w.BMPStatus, &w.BMPEmailUsed, &w.BMPVerifiedAt); err != nil {
 			return nil, 0, err

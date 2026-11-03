@@ -98,6 +98,7 @@ type AdminUserMovement struct {
 
 // AdminUserBranch: resumen de la rama del primer afiliado colocado.
 type AdminUserBranch struct {
+	DataSource     string `json:"data_source,omitempty"`
 	AffiliateID    int64  `json:"affiliate_id"`
 	DownlineTotal  int64  `json:"downline_total"`
 	DownlineLeft   int64  `json:"downline_left"`
@@ -260,6 +261,14 @@ func (s *Store) PersonPackageCounts(ctx context.Context, personID int64) (active
 // bono (binary_bonus, leadership_bonus, direct_bonus — los kinds de bono que
 // existen en mlm.concept_kind) de los DESCENDIENTES (distance>0) del afiliado.
 func (s *Store) BranchMoney(ctx context.Context, affiliateID int64) (salesUSD, commissionsUSD string, err error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return "", "", err
+	} else if present {
+		err := s.db.QueryRow(ctx, `SELECT (COALESCE(sum(s.gross_minor),0)::numeric/100)::numeric(24,2)::text
+		 FROM payments.v_admin_sales s JOIN mlm.affiliate_closure cl ON cl.descendant_id=s.affiliate_id
+		 WHERE cl.ancestor_id=$1 AND cl.distance>0`, affiliateID).Scan(&salesUSD)
+		return salesUSD, "", err // sales evidence does not establish commission liability.
+	}
 	err = s.reader().QueryRow(ctx, `
 		SELECT COALESCE(SUM(ABS(wm.amount)) FILTER (WHERE c.kind = 'package_purchase'), 0)::text,
 		       COALESCE(SUM(ABS(wm.amount)) FILTER (WHERE c.kind IN ('binary_bonus','leadership_bonus','direct_bonus')), 0)::text
@@ -508,6 +517,12 @@ func (h *Handler) handleAdminUserGet(w http.ResponseWriter, r *http.Request) {
 			SalesUSD:       "0",
 			CommissionsUSD: "0",
 		}
+		if present, err := h.store.hasAdminSales(ctx); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		} else if present {
+			b.DataSource = consolidatedSalesSource
+		}
 		if b.DownlineTotal > maxBranchAggDownline {
 			b.AggSkipped = true // rama enorme: no barremos el ledger completo online
 		} else {
@@ -531,6 +546,18 @@ func (h *Handler) handleAdminUserGet(w http.ResponseWriter, r *http.Request) {
 		"packages":         map[string]int{"active": active, "total": total},
 		"branch":           branch,
 	})
+}
+
+func (b AdminUserBranch) MarshalJSON() ([]byte, error) {
+	type wire AdminUserBranch
+	if b.DataSource != consolidatedSalesSource {
+		return json.Marshal(wire(b))
+	}
+	fields := []string{"branch_commissions_usd"}
+	if b.AggSkipped {
+		fields = append(fields, "branch_sales_usd")
+	}
+	return recoveryNullFields(wire(b), fields...)
 }
 
 type adminUserUpdateReq struct {

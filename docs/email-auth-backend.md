@@ -44,10 +44,24 @@ Que una persona figure en `mlm.person` no crea por sí solo una cuenta de acceso
 El vínculo con personas heredadas exige el procedimiento aprobado de identidad;
 iniciar sesión no mueve nodos, cambia rangos ni habilita pagos.
 
-La respuesta genérica de solicitud no prueba que exista una cuenta ni que el
-correo se haya entregado. Better Auth puede conservar esa respuesta incluso si
-el proveedor falla. Los errores de transporte no crean sesiones y no disparan
-reintentos o fallback. No se registran códigos ni cuerpos de error del proveedor.
+La respuesta genérica de solicitud de acceso no prueba que exista una cuenta ni
+que el correo se haya entregado. Se conserva para no enumerar cuentas. Los
+rechazos confirmados del proveedor retiran únicamente el reto de ese destinatario,
+propósito y HMAC; no reinician el presupuesto de cinco minutos. Una confirmación
+ambigua, timeout o 5xx no retira un código que podría haberse entregado.
+
+Si el envío del registro recién creado fue rechazado, devuelve
+`503/AUTH_EMAIL_DELIVERY_UNAVAILABLE`: la cuenta sigue pendiente, sin sesión ni
+correo verificado. El BFF permite continuar a verificación y pedir un código
+manualmente después del plazo, sin crear una segunda cuenta. No anuncia entrega
+confirmada. Los errores no disparan reintentos o fallback. Los diagnósticos sólo
+contienen clasificación, estado HTTP y código numérico; nunca correo, OTP,
+credenciales ni texto/cuerpo del proveedor.
+
+Las esperas están ordenadas: proveedor 8 s, BFF 20 s para envíos y navegador 30 s.
+El canje conserva límites más cortos (BFF 8 s / navegador 12 s). La cancelación del
+cliente sigue siendo efectiva y no hay reenvíos automáticos. `Retry-After` se
+calcula desde el plazo persistente, sin ampliarlo ni reducir controles de intentos.
 El checker opcional que valida sin consumir el OTP está deshabilitado por HTTP;
 los helpers de lectura/creación son server-only en la versión instalada.
 

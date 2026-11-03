@@ -201,17 +201,17 @@ func (h *Handler) handlePaid(ctx context.Context, event stripe.Event) error {
 		return nil
 	}
 
-	piID := ""
-	if cs.PaymentIntent != nil {
-		piID = cs.PaymentIntent.ID
+	if h.gw == nil || (h.gw.requireLive && !event.Livemode) || event.Livemode != cs.Livemode {
+		return ErrCheckoutEvidence
 	}
-	if piID == "" {
-		piID = "sess:" + cs.ID // fallback de idempotencia si no llegó el payment_intent
+	evidence, err := evidenceFromCheckout(&cs, h.gw.requireLive)
+	if err != nil {
+		return err
 	}
-	intentID := strings.TrimSpace(cs.Metadata["purchase_intent_id"])
+	piID := evidence.paymentIntentID
 
 	// Activación atómica e idempotente (marca pagado + coloca + liga paquete + PV).
-	res, err := h.store.ActivatePaidPurchaseForIntent(ctx, cs.ID, piID, intentID)
+	res, err := h.store.activateVerifiedCheckout(ctx, evidence)
 	if errors.Is(err, ErrIntentNotFound) {
 		// Sesión desconocida (creada fuera de este servicio). No reintentar.
 		h.log.Warn().Str("session", cs.ID).Msg("paid session has no purchase_intent; skipping")

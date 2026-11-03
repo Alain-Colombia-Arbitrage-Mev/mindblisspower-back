@@ -19,6 +19,7 @@ import (
 // Las sesiones Better Auth viven en el runtime de autenticación, no en Go.
 // El BFF envía además un token de servicio; Stripe usa firma de webhook.
 type Config struct {
+	ReadOnly       bool // Explicit SERVICE_READ_ONLY: no providers, writes or background jobs.
 	Env            string
 	LogLevel       string
 	HTTPListenAddr string
@@ -35,10 +36,17 @@ type Config struct {
 	NATSUser     string
 	NATSPassword string
 
-	StripeSecretKey     string
-	StripeWebhookSecret string
-	StripeProductID     string // Producto Stripe "PACK MINDBLISS" (prod_…)
-	StripePMConfig      string // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
+	// New Stripe Checkout sessions require an explicit literal true. Historical
+	// reads and signed webhooks remain available when checkout is disabled.
+	StripeCheckoutEnabled bool
+
+	StripeSecretKey        string
+	StripeWebhookSecret    string
+	StripeProductID        string                         // Producto Stripe "PACK MINDBLISS" (prod_…)
+	StripePMConfig         string                         // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
+	NOWPayments            NOWPaymentsSettings            `json:"-"` // Server-only; not a financial activation gate.
+	NOWPaymentsCapture     NOWPaymentsCaptureSettings     `json:"-"` // Isolated append-only notification capture.
+	NOWPaymentsOperational NOWPaymentsOperationalSettings `json:"-"` // Explicit NOW-only writer; reader remains read-only.
 
 	// ServiceToken: secreto compartido que el BFF Next debe enviar en
 	// X-VP-Service-Token para crear sesiones de checkout.
@@ -164,7 +172,17 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("load env file %s: %w", p, err)
 		}
 	}
+	readOnly, err := loadServiceReadOnly()
+	if err != nil {
+		return nil, err
+	}
+	nowPayments, err := loadNOWPaymentsSettings(readOnly)
+	if err != nil {
+		return nil, err
+	}
 	c := &Config{
+		ReadOnly:       readOnly,
+		NOWPayments:    nowPayments,
 		Env:            env("ENV", "development"),
 		LogLevel:       env("LOG_LEVEL", "info"),
 		HTTPListenAddr: env("PAYMENTS_HTTP_ADDR", "0.0.0.0:9095"),
@@ -181,8 +199,9 @@ func LoadConfig() (*Config, error) {
 		// Aliases aceptados (los que ya pusiste en backend/.env.local):
 		//   STRIPE_SECRET_KEY      | CLAVE_API
 		//   STRIPE_WEBHOOK_SECRET  | SECRET_FIRMA
-		StripeSecretKey:     firstEnv("STRIPE_SECRET_KEY", "CLAVE_API"),
-		StripeWebhookSecret: firstEnv("STRIPE_WEBHOOK_SECRET", "SECRET_FIRMA"),
+		StripeCheckoutEnabled: os.Getenv("STRIPE_CHECKOUT_ENABLED") == "true",
+		StripeSecretKey:       firstEnv("STRIPE_SECRET_KEY", "CLAVE_API"),
+		StripeWebhookSecret:   firstEnv("STRIPE_WEBHOOK_SECRET", "SECRET_FIRMA"),
 		// Vacío ⇒ producto inline. PAYMENTS_STRIPE_PRODUCT_ID (explícito) gana;
 		// fallback a ID_PRODUCTO_TEST para correr en test sin renombrar. En
 		// producción setear PAYMENTS_STRIPE_PRODUCT_ID al prod_… LIVE.
@@ -253,10 +272,35 @@ func LoadConfig() (*Config, error) {
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
-	if c.StripeSecretKey == "" {
+	c.NOWPaymentsCapture, err = loadNOWPaymentsCaptureSettings(c.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	c.NOWPaymentsOperational, err = loadNOWPaymentsOperationalSettings(c.DatabaseURL, c.NOWPaymentsCapture.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if c.ReadOnly {
+		c.StripeCheckoutEnabled = false
+		c.RequireVerifiedIdentity = true
+		c.AdminEmails = splitCSV(os.Getenv("PAYMENTS_ADMIN_EMAILS"))
+		c.SuperAdminEmails = splitCSV(os.Getenv("PAYMENTS_SUPER_ADMIN_EMAILS"))
+		// Provider material is intentionally discarded, even if accidentally set.
+		// Read-only startup must not require or initialize financial integrations.
+		c.StripeSecretKey, c.StripeWebhookSecret, c.StripeProductID, c.StripePMConfig = "", "", "", ""
+		c.NATSURL, c.NATSUser, c.NATSPassword = "", "", ""
+		c.RedisAddr, c.RedisPassword = "", ""
+		c.ReconcileInterval, c.CartReminderInterval = 0, 0
+		c.CartReminderEnabled, c.CommsEnabled = false, false
+		c.SupportAIAutoDraft, c.SupportAIAutoReply = false, false
+		c.SupportAIServiceToken, c.TwilioWebhookAuthToken = "", ""
+		c.KYCBucket, c.KYCOCRAPIKey = "", ""
+		c.CommsUnsubscribeSecret, c.CommsSQSQueueURL = "", ""
+	}
+	if !c.ReadOnly && c.StripeSecretKey == "" {
 		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required")
 	}
-	if c.StripeWebhookSecret == "" {
+	if !c.ReadOnly && c.StripeWebhookSecret == "" {
 		return nil, fmt.Errorf("STRIPE_WEBHOOK_SECRET is required")
 	}
 	if c.ServiceToken == "" {

@@ -1,0 +1,10 @@
+# Local Linux test runner, never a production image. Stage the Linux Docker CLI
+# and buildx plugin into ignored runtime/ first; no package download is needed.
+FROM mindbliss/portal-worker-test:20261025
+USER root
+COPY runtime/docker-cli-local /usr/local/bin/docker
+COPY runtime/docker-buildx-local /usr/local/lib/docker/cli-plugins/docker-buildx
+COPY --from=mindbliss/engine:auth-identity-20261025 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN chmod 755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-buildx
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["node"]

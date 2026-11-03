@@ -83,9 +83,16 @@ type boundBetterAuthVerifier struct {
 }
 
 func (v *boundBetterAuthVerifier) VerifyEmail(ctx context.Context, raw string) (string, error) {
+	_, email, err := v.VerifySubject(ctx, raw)
+	return email, err
+}
+
+// VerifySubject preserves the signed subject for owner-scoped payment reads.
+// Unlike parsing a JWT after VerifyEmail, this never infers ownership by email.
+func (v *boundBetterAuthVerifier) VerifySubject(ctx context.Context, raw string) (string, string, error) {
 	identity, err := v.verifier.verifyIdentity(ctx, raw)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var email, publicID string
 	if err := v.db.QueryRow(ctx, `SELECT p.email::text,p.public_id::text
@@ -94,13 +101,13 @@ func (v *boundBetterAuthVerifier) VerifyEmail(ctx context.Context, raw string) (
 		WHERE b.provider='better_auth' AND b.subject=$1 AND p.user_id=b.subject
 		  AND u.email_verified=true AND lower(btrim(u.email))=lower(btrim(p.email::text))
 		  AND p.status::text IN ('pending','active') AND NOT COALESCE(p.blacklisted,false)`, identity.subject).Scan(&email, &publicID); err != nil {
-		return "", errors.New("Better Auth subject has no available verified MLM binding")
+		return "", "", errors.New("Better Auth subject has no available verified MLM binding")
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" || publicID == "" || email != identity.email {
-		return "", errors.New("Better Auth binding requires identity review")
+		return "", "", errors.New("Better Auth binding requires identity review")
 	}
-	return email, nil
+	return identity.subject, email, nil
 }
 
 // ConfiguredBetterAuthVerifier is opt-in. The unchanged Cognito configuration

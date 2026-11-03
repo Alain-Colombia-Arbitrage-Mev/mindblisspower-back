@@ -1,6 +1,7 @@
 package payments
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,14 +17,21 @@ import (
 
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
-	store            *Store
-	gw               *StripeGateway
-	log              zerolog.Logger
-	serviceToken     string
-	adminEmails      []string
-	superAdminEmails []string // subconjunto con rol "super_admin" (acceso total)
-	companyRoot      int64
-	httpClient       *http.Client
+	store               *Store
+	referralPersistence verifiedReferralPersistence // Defaults to store; no financial writer or provider.
+	gw                  *StripeGateway
+	nowMemberships      *nowPaymentsMemberships
+	nowCapture          *nowPaymentsCapture
+	nowJobs             *nowOperationalJobRunner
+	nowReady            func(context.Context) error
+	log                 zerolog.Logger
+	serviceToken        string
+	adminEmails         []string
+	superAdminEmails    []string // subconjunto con rol "super_admin" (acceso total)
+	companyRoot         int64
+	httpClient          *http.Client
+
+	stripeCheckoutEnabled bool
 
 	// verifier re-verifica el id token Cognito reenviado por el BFF. nil ⇒ no hay
 	// verificación disponible (sólo el fallback por query/body, con warning).
@@ -84,6 +92,15 @@ type Handler struct {
 // SetCognitoAdmin inyecta el cliente de administración de Cognito. nil ⇒ el
 // banear/desbanear no deshabilita el login (solo el flag de DB).
 func (h *Handler) SetCognitoAdmin(c *CognitoAdmin) { h.cognitoAdmin = c }
+
+// SetStripeCheckoutEnabled configures new-session admission once at startup.
+// It never disables webhook verification, historical reads or NOWPayments.
+func (h *Handler) SetStripeCheckoutEnabled(enabled bool) {
+	h.stripeCheckoutEnabled = enabled
+	if h.gw != nil {
+		h.gw.checkoutEnabled = enabled
+	}
+}
 
 // SetCartConfig inyecta el origen público del link de reanudar pago y la URL de
 // éxito, usados por el flujo de recuperación de carritos abandonados.
@@ -313,6 +330,13 @@ func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdmin(w, r); !ok {
 		return
 	}
+	// Payments is an all-time history by default, while sharing the validated
+	// provider selector with the sales reports. No refund/verify action is enabled.
+	r, _, _, err := adminSalesRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_sales_filter")
+		return
+	}
 	status := r.URL.Query().Get("status")
 	q := r.URL.Query().Get("q")
 	limit := atoiDefault(r.URL.Query().Get("limit"), 25)
@@ -323,7 +347,18 @@ func (h *Handler) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"payments": items, "total": total, "limit": limit, "offset": offset})
+	var summary *AdminSalesSummary
+	if present, err := h.store.hasAdminSales(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	} else if present {
+		summary, err = h.store.adminSalesSummary(r.Context(), time.Time{})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payments": items, "total": total, "limit": limit, "offset": offset, "sales_summary": summary, "data_source": salesSummarySource(summary)})
 }
 
 // svcAuth valida el token de servicio (compartido con el BFF). Devuelve false
@@ -531,6 +566,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	h.attachNOWMemberPolicy(r, &summary, email)
 	writeJSON(w, http.StatusOK, summary)
 }
 

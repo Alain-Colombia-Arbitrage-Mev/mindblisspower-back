@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { engineTransportOptions } from './engine-transport';
+import type { SecureClientSessionOptions } from 'node:http2';
 
 describe('portable engine transport', () => {
   test('keeps the existing local transport when mTLS is not enabled', () => {
@@ -31,5 +32,15 @@ describe('portable engine transport', () => {
     expect(engineTransportOptions(inline).nodeOptions).toEqual({ ca: Buffer.from('ca'), cert: Buffer.from('cert'), key: Buffer.from('key'), rejectUnauthorized: true });
     expect(() => engineTransportOptions({ ...inline, VP_ENGINE_TLS_CA: '/ca' })).toThrow('not both');
     expect(() => engineTransportOptions({ ...inline, VP_ENGINE_TLS_KEY_PEM: '' })).toThrow('mTLS requires');
+  });
+  test('private tunnel keeps the original TLS authority and requires a loopback socket', () => {
+    const values = { ...env, ENGINE_MTLS_REQUIRED: 'true', VP_ENGINE_TUNNEL_ENABLED: 'true', VP_ENGINE_GRPC_URL: 'https://engine.original.invalid:50051' };
+    expect(() => engineTransportOptions(values, p => Buffer.from(p))).toThrow('loopback');
+    const options = engineTransportOptions(values, p => Buffer.from(p), { host: '127.0.0.1', port: 55555 });
+    expect(options.baseUrl).toBe(values.VP_ENGINE_GRPC_URL);
+    expect(options.nodeOptions?.createConnection).toBeFunction();
+    expect((options.nodeOptions as SecureClientSessionOptions).rejectUnauthorized).toBe(true);
+    expect(() => engineTransportOptions({ ...values, VP_ENGINE_GRPC_URL: 'http://engine.original.invalid:50051' }, p => Buffer.from(p), { host: '127.0.0.1', port: 55555 })).toThrow('HTTPS');
+    expect(() => engineTransportOptions({ ...values, VP_ENGINE_GRPC_URL: 'https://engine.original.invalid/path' }, p => Buffer.from(p), { host: '127.0.0.1', port: 55555 })).toThrow('origin');
   });
 });

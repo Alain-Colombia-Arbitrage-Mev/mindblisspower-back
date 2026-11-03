@@ -41,6 +41,7 @@ type MemberWithdrawal struct {
 
 // MemberSummary: lo que ve el miembro — sus pagos + posición + comisiones.
 type MemberSummary struct {
+	NOWPayments            *NOWMemberPolicy   `json:"nowpayments,omitempty"`
 	DataSource             string             `json:"data_source,omitempty"`
 	FinancialStatus        string             `json:"financial_status,omitempty"`
 	PayoutLocked           bool               `json:"payout_locked,omitempty"`
@@ -264,6 +265,16 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 	// son asientos de la compra, no dinero retirable del comprador.
 	// Scoped al wallet USD (JOIN wallet+asset symbol='USD') para excluir la wallet
 	// USD-RET de jubilación y evitar que el saldo 401k se muestre como retirable.
+	// Scoped NOW credits use exact TIMESTAMPTZ eligibility in the separate read
+	// model. Never re-open them through this legacy DATE-based calculation.
+	nowLedgerExclusion := ""
+	var scopedNOWLedger bool
+	if err := reader.QueryRow(ctx, `SELECT to_regclass('payments.nowpayments_engine_payment') IS NOT NULL`).Scan(&scopedNOWLedger); err != nil {
+		return MemberSummary{}, fmt.Errorf("NOW ledger scope unavailable: %w", err)
+	}
+	if scopedNOWLedger {
+		nowLedgerExclusion = ` AND NOT EXISTS(SELECT 1 FROM mlm.transaction nt JOIN payments.nowpayments_engine_payment np ON np.transaction_ref=nt.external_ref WHERE nt.id=wm.transaction_id)`
+	}
 	err = reader.QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (
@@ -278,7 +289,7 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 		  JOIN mlm.wallet  w ON w.id = wm.wallet_id
 		  JOIN mlm.asset   s ON s.id = w.asset_id AND s.symbol = 'USD'
 		 WHERE wm.affiliate_id = $1
-		   AND `+withdrawals.ExcludedKindsPredicate+`
+		   AND `+withdrawals.ExcludedKindsPredicate+nowLedgerExclusion+`
 	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing, &out.WalletBalanceUSD)
 	if err != nil {
 		return MemberSummary{}, fmt.Errorf("commissions: %w", err)

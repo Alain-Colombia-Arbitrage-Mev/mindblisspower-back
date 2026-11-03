@@ -1,0 +1,47 @@
+[
+  {
+    "purpose": "sign-in",
+    "name": "login-verification-code",
+    "from": "otp@mindblisspower.com",
+    "subject": "Tu código de acceso | Mindbliss Power",
+    "htmlFile": "inicio-sesion.html",
+    "textFile": "inicio-sesion.txt",
+    "variables": [
+      {
+        "key": "OTP",
+        "type": "string"
+      }
+    ],
+    "expiresInSeconds": 300
+  },
+  {
+    "purpose": "email-verification",
+    "name": "account-verification",
+    "from": "otp@mindblisspower.com",
+    "subject": "Verifica tu correo | Mindbliss Power",
+    "htmlFile": "verificar-correo.html",
+    "textFile": "verificar-correo.txt",
+    "variables": [
+      {
+        "key": "OTP",
+        "type": "string"
+      }
+    ],
+    "expiresInSeconds": 300
+  },
+  {
+    "purpose": "forget-password",
+    "name": "password-reset",
+    "from": "otp@mindblisspower.com",
+    "subject": "Código para restablecer tu contraseña | Mindbliss Power",
+    "htmlFile": "recuperar-contrasena.html",
+    "textFile": "recuperar-contrasena.txt",
+    "variables": [
+      {
+        "key": "OTP",
+        "type": "string"
+      }
+    ],
+    "expiresInSeconds": 300
+  }
+]

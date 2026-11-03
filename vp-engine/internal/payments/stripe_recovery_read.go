@@ -166,7 +166,7 @@ func recoveryNullFields(value any, fields ...string) ([]byte, error) {
 
 func (f AdminFinance) MarshalJSON() ([]byte, error) {
 	type wire AdminFinance
-	if f.StripeRecovery == nil {
+	if f.StripeRecovery == nil && f.SalesSummary == nil {
 		return json.Marshal(wire(f))
 	}
 	return recoveryNullFields(wire(f), "fees_usd", "stripe_fee_usd", "stripe_reserve_usd", "stripe_receivable_usd",
@@ -179,6 +179,10 @@ func (f AdminFinance) MarshalJSON() ([]byte, error) {
 
 func (c SalesCashSummary) MarshalJSON() ([]byte, error) {
 	type wire SalesCashSummary
+	if c.SalesSummary != nil {
+		return recoveryNullFields(wire(c), "total_started", "package_sales_usd", "activation_fees_usd", "stripe_fee_usd",
+			"stripe_security_reserve_usd", "stripe_receivable_usd", "stripe_receivable_eta", "pending_stripe_payout_usd", "available_after_stripe_usd")
+	}
 	if c.StripeRecovery == nil {
 		return json.Marshal(wire(c))
 	}
@@ -192,6 +196,13 @@ func (c SalesCashSummary) MarshalJSON() ([]byte, error) {
 
 func (r SalesRow) MarshalJSON() ([]byte, error) {
 	type wire SalesRow
+	if r.DataSource == consolidatedSalesSource {
+		fields := []string{"created"}
+		if r.AmountUSD == "" {
+			fields = append(fields, "amount_usd", "revenue_usd")
+		}
+		return recoveryNullFields(wire(r), fields...)
+	}
 	if r.DataSource != recoveredStripeSource {
 		return json.Marshal(wire(r))
 	}
@@ -295,6 +306,13 @@ func (s *Store) recoveredSalesTransactions(ctx context.Context, from time.Time, 
 
 func (r SalesTransaction) MarshalJSON() ([]byte, error) {
 	type wire SalesTransaction
+	if r.DataSource == consolidatedSalesSource {
+		fields := []string{"activated_at", "refunded_at"}
+		if r.AmountUSD == "" {
+			fields = append(fields, "amount_usd", "fee_usd")
+		}
+		return recoveryNullFields(wire(r), fields...)
+	}
 	if r.DataSource != recoveredStripeSource {
 		return json.Marshal(wire(r))
 	}
@@ -307,7 +325,7 @@ func (r SalesTransaction) MarshalJSON() ([]byte, error) {
 
 func (s AdminSummary) MarshalJSON() ([]byte, error) {
 	type wire AdminSummary
-	if s.StripeRecovery == nil {
+	if s.StripeRecovery == nil && s.SalesSummary == nil {
 		return json.Marshal(wire(s))
 	}
 	return recoveryNullFields(wire(s), "security_pending_charges", "security_pending_charges_usd")
@@ -315,7 +333,7 @@ func (s AdminSummary) MarshalJSON() ([]byte, error) {
 
 func (p ProductSales) MarshalJSON() ([]byte, error) {
 	type wire ProductSales
-	if p.DataSource == recoveredStripeSource && p.AmountUSD == "" {
+	if (p.DataSource == recoveredStripeSource || p.DataSource == consolidatedSalesSource) && p.AmountUSD == "" {
 		return recoveryNullFields(wire(p), "amount_usd")
 	}
 	return json.Marshal(wire(p))

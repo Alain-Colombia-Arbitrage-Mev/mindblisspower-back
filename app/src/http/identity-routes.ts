@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { db } from '../db/client';
+import { authDb } from '../db/auth-client';
 import { claimLegacyPerson, getAuthPersonBinding } from '../modules/identity';
 import type { ApiApplication } from './types';
 
@@ -22,7 +23,7 @@ export function registerIdentityRoutes(app: ApiApplication) {
       .filter(Boolean).map(value => new URL(value!.trim()).origin);
     if (!allowed.includes(context.req.header('origin') || '')) return context.json({ error: 'invalid_origin' }, 403);
     const { token } = claimInput.parse(await context.req.json());
-    const result = await claimLegacyPerson(db, { userId, token });
+    const result = await claimLegacyPerson(authDb, { userId, token });
     return context.json(result, result.status === 'existing' ? 200 : 409);
   });
 }

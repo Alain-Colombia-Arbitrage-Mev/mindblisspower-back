@@ -1,18 +1,34 @@
 import type { BetterAuthOptions, BetterAuthPlugin } from 'better-auth';
+import { defineRequestState, getCurrentAdapter, getCurrentAuthContext } from '@better-auth/core/context';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { emailOTP } from 'better-auth/plugins/email-otp';
-import { phoneNumber } from 'better-auth/plugins/phone-number';
+import { revokeUnprovenAccountAccess } from 'better-auth/db';
 import { jwt } from 'better-auth/plugins/jwt';
-import { authActionMessage, cloudflareEmailConfigured, createAuthDelivery, validPhone, type AuthDelivery, type AuthEnvironment } from './delivery';
-import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification, securePhoneVerifyEndpoint } from './phone-otp';
+import { AuthEmailDeliveryError, authActionMessage, authEmailConfigured, createAuthDelivery, smsDeliveryConfigured, type AuthDelivery, type AuthEnvironment } from './delivery';
+import { AUTH_OTP_EXPIRES_IN_SECONDS, AUTH_OTP_LENGTH, authOtpMessage } from './email-templates';
+import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification } from './phone-otp';
+import { smsOptInPlugin } from './phone-opt-in';
+import { registrationCandidate, type RegistrationCandidate } from './registration';
+import { contactPhoneField, registrationContacts } from './registration-contacts';
+import { verifiedOtpSignInResponse } from './otp-sign-in-response';
+import { requireRegisteredEmailForSignIn } from './sign-in-registration';
+import { requireNewEmailForRegistration } from './registration-existing';
+import { z } from 'zod';
+import { checkRecoveryBudget, consumeRecoveryBudget } from './recovery-daily-budget';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
   provision: (userId: string) => Promise<BoundIdentity>;
   binding: (userId: string) => Promise<BoundIdentity>;
+  registrationAllowed?: (candidate: RegistrationCandidate) => Promise<boolean>;
 };
 const messagePaths = new Set(['/sign-up/email', '/send-verification-email', '/request-password-reset',
-  '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp', '/phone-number/send-otp']);
+  '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp']);
+const recoveryEmail = z.string().trim().toLowerCase().max(254).pipe(z.email());
+const recoveryRequest = z.strictObject({ email: recoveryEmail });
+const recoveryReset = z.strictObject({ email: recoveryEmail, otp: z.string().regex(/^[0-9]{6}$/),
+  // Passwords are opaque: never trim, normalize or silently truncate them.
+  password: z.string().min(12).max(128) });
 
 /** Pure composition: tests supply an adapter, identity policy and mock senders. */
 export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOptions['database'], identity: AuthIdentity,
@@ -30,23 +46,36 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) throw new Error('Authentication URLs must use HTTPS');
     }
   }
-  if (phoneEnabled && (!env.SENTDM_API_KEY || !env.SENTDM_OTP_TEMPLATE_ID || !env.SENTDM_OTP_CHANNEL)) throw new Error('Phone authentication delivery is not configured');
-  if (phoneEnabled && !['sms', 'whatsapp'].includes(env.SENTDM_OTP_CHANNEL!)) throw new Error('Select one configured phone authentication channel');
-  if (emailEnabled && !cloudflareEmailConfigured(env)) throw new Error('Cloudflare email authentication delivery is not configured');
+  if (emailEnabled && !authEmailConfigured(env)) throw new Error('Email authentication delivery is not configured');
   if (jwtEnabled && (!env.BETTER_AUTH_JWT_ISSUER || !env.BETTER_AUTH_JWT_AUDIENCE)) throw new Error('JWT issuer and audience must be explicit');
   const plugins: BetterAuthPlugin[] = [];
-  if (emailEnabled) plugins.push(emailOTP({ otpLength: 6, expiresIn: 300, allowedAttempts: 3,
+  const emailRejected = defineRequestState(() => false);
+  if (emailEnabled) plugins.push(emailOTP({ otpLength: AUTH_OTP_LENGTH, expiresIn: AUTH_OTP_EXPIRES_IN_SECONDS, allowedAttempts: 3,
     disableSignUp: true, storeOTP: { hash: async code => otpHash(secret, 'email-otp', code) },
     overrideDefaultEmailVerification: true, resendStrategy: 'rotate', rateLimit: { window: 60, max: 5 },
-    sendVerificationOTP: async ({ email, otp, type }) => delivery.email({ to: email,
-      subject: type === 'forget-password' ? 'Código para restablecer tu contraseña' : 'Código de acceso de Mindbliss Power',
-      text: `Tu código es ${otp}. Vence en 5 minutos. No compartas este código.` }) }));
-  if (phoneEnabled) {
-    const phone = phoneNumber({ otpLength: 6, expiresIn: 300, allowedAttempts: 3,
-      requireVerification: true, phoneNumberValidator: validPhone,
-      sendOTP: async ({ phoneNumber: destination, code }) => delivery.phone(destination, code) });
-    plugins.push({ ...phone, endpoints: { ...phone.endpoints, verifyPhoneNumber: securePhoneVerifyEndpoint(secret) } });
-  }
+    sendVerificationOTP: async ({ email, otp, type }) => {
+      try { await delivery.email(authOtpMessage(email, otp, type)); }
+      catch (error) {
+        // A rejected send must not leave a redeemable challenge. Delete only
+        // this code's HMAC generation, never another recipient/purpose/resend.
+        // Timeouts/5xx/malformed acknowledgements are ambiguous: a user may
+        // actually receive the code, so keep it valid and never auto-resend.
+        if (error instanceof AuthEmailDeliveryError && error.confirmedRejected) {
+          await emailRejected.set(true);
+          const adapter = await getCurrentAdapter((await getCurrentAuthContext()).context.adapter);
+          await adapter.deleteMany({ model: 'verification', where: [
+            { field: 'identifier', value: `${type}-otp-${email.toLowerCase()}` },
+            { field: 'value', operator: 'in', value: [0, 1, 2, 3].map(attempt => `${otpHash(secret, 'email-otp', otp)}:${attempt}`) },
+          ] });
+        }
+        throw error;
+      }
+    } }));
+  // SMS is authenticated profile opt-in, never an anonymous login or signup
+  // alternative. Incomplete SMS setup disables SMS only, not working email.
+  plugins.push(smsOptInPlugin(secret, delivery, {
+    enabled: phoneEnabled && smsDeliveryConfigured(env), schemaReady: env.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY === 'true',
+  }));
   if (jwtEnabled) plugins.push(jwt({ disableSettingJwtHeader: true,
     jwks: { keyPairConfig: { alg: 'RS256', modulusLength: 2048 }, rotationInterval: 86400 * 30 },
     jwt: { issuer: env.BETTER_AUTH_JWT_ISSUER!, audience: env.BETTER_AUTH_JWT_AUDIENCE!, expirationTime: '5m',
@@ -66,36 +95,130 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // Replace unexpected DB/provider errors before that outer fallback sees
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
+      if (error instanceof APIError && error.statusCode === 503
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', 'AUTH_SIGN_OUT_UNAVAILABLE', 'PASSWORD_RECOVERY_BUDGET_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
     } },
-    emailAndPassword: { enabled: true, requireEmailVerification: true, minPasswordLength: 12, autoSignIn: false,
+    emailAndPassword: { enabled: true, requireEmailVerification: true, minPasswordLength: 12, maxPasswordLength: 128, autoSignIn: false,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => delivery.email(authActionMessage(env, user.email, url, true)) },
-    emailVerification: { sendOnSignUp: true, autoSignInAfterVerification: false,
+    emailVerification: { sendOnSignUp: true, autoSignInAfterVerification: emailEnabled,
       // Do not shadow the emailOTP plugin's override during Better Auth init.
-      ...(emailEnabled ? {} : { sendVerificationEmail: async ({ user, url }: { user: { email: string }; url: string }) => delivery.email(authActionMessage(env, user.email, url, false)) }) },
+      ...(emailEnabled ? { beforeEmailVerification: async user => {
+        if (user.emailVerified !== false) return;
+        // The installed native handler calls this ONLY after consuming valid
+        // email proof, before flipping emailVerified or creating its session.
+        // Reuse the public native helper used by OTP sign-in: an unverified
+        // password/session may have been planted by somebody else beforehand.
+        const current = await getCurrentAuthContext();
+        await revokeUnprovenAccountAccess(current as Parameters<typeof revokeUnprovenAccountAccess>[0], user.id);
+      } } : { sendVerificationEmail: async ({ user, url }: { user: { email: string }; url: string }) => delivery.email(authActionMessage(env, user.email, url, false)) }) },
     socialProviders: env.GOOGLE_CLIENT_ID ? { google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET! } } : undefined,
     account: { accountLinking: { enabled: false } },
+    // Self-declared contact details, never authentication/possession claims.
+    // Non-unique fields cannot reserve somebody else's phone or link MLM nodes.
+    // They are deliberately excluded from signup/session/user API responses.
+    user: { additionalFields: {
+      contactPhone: contactPhoneField(),
+      contactWhatsapp: contactPhoneField(),
+    } },
     session: { expiresIn: 86400 * 7, updateAge: 86400, cookieCache: { enabled: false } },
     verification: { storeInDatabase: true },
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 30 },
     // Sign-in must atomically consume the code. Do not expose the optional
     // non-consuming checker as a second public verification oracle.
-    disabledPaths: ['/email-otp/check-verification-otp', '/phone-number/request-password-reset', '/phone-number/reset-password'],
+    disabledPaths: [...(emailEnabled ? ['/request-password-reset', '/reset-password', '/forget-password/email-otp'] : []),
+      '/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
+      '/registration/phone/send', '/registration/phone/verify'],
     hooks: { before: createAuthMiddleware(async ctx => {
-      if (ctx.path === '/sign-in/phone-number' && typeof ctx.body?.phoneNumber === 'string') {
-        const user = await ctx.context.adapter.findOne<{ phoneNumberVerified: boolean }>({ model: 'user',
-          where: [{ field: 'phoneNumber', value: ctx.body.phoneNumber }] });
-        // The stock plugin sends before checking the password. Verification is
-        // an explicit, rate-limited send flow instead of a login side effect.
-        if (user && user.phoneNumberVerified !== true) throw new APIError('FORBIDDEN', { message: 'Phone verification required' });
+      if (emailEnabled && ctx.path === '/reset-password/:token') throw new APIError('NOT_FOUND', { message: 'Not found' });
+      const recoveryRequestPath = emailEnabled && (ctx.path === '/email-otp/request-password-reset'
+        || (ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'forget-password'));
+      if (ctx.path === '/sign-out') {
+        // Native 1.6.22 swallows deletion/lookup errors then reports success.
+        // Revoke directly BEFORE its cookie clearing and outside that catch.
+        // Use the native signed-cookie verifier, never a client-supplied token
+        // or a stale session cache. Zero rows is an idempotent logged-out state.
+        try {
+          const token = await ctx.getSignedCookie(ctx.context.authCookies.sessionToken.name, ctx.context.secret);
+          if (token) await (await getCurrentAdapter(ctx.context.adapter)).deleteMany({
+            model: 'session', where: [{ field: 'token', value: token }],
+          });
+        } catch {
+          throw new APIError('SERVICE_UNAVAILABLE', { code: 'AUTH_SIGN_OUT_UNAVAILABLE', message: 'Sign out temporarily unavailable' });
+        }
+      }
+      if (emailEnabled && (recoveryRequestPath || ctx.path === '/email-otp/reset-password')) {
+        const genericRecovery = ctx.path === '/email-otp/send-verification-otp';
+        const parsed = (genericRecovery ? recoveryEmail : recoveryRequestPath ? recoveryRequest : recoveryReset)
+          .safeParse(genericRecovery ? ctx.body?.email : ctx.body);
+        if (!parsed.success) throw new APIError('BAD_REQUEST', {
+          code: 'INVALID_PASSWORD_RECOVERY_REQUEST', message: 'Invalid password recovery details',
+        });
+        // In 1.6.22 the native reset consumes its OTP BEFORE checking password
+        // length. Validate first so a typo cannot spend a valid challenge.
+        // The native handler still owns password hashing, credential updates,
+        // email proof and session revocation; no legacy identity is reassigned.
+        // The hook receives a shallow context copy. Mutate the shared body
+        // field, not ctx.body itself, so native lookup uses the normalized email.
+        ctx.body.email = typeof parsed.data === 'string' ? parsed.data : parsed.data.email;
+        if (ctx.path === '/email-otp/reset-password') await consumeRecoveryBudget(secret, ctx.body.email, 'validation', ctx);
+        else await checkRecoveryBudget(secret, ctx.body.email, 'request', ctx);
+      }
+      if (emailEnabled && ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'sign-in') {
+        await requireRegisteredEmailForSignIn(secret, ctx);
+      }
+      if (ctx.path === '/sign-in/email' && typeof ctx.body?.password === 'string' && ctx.body.password.length > 0) {
+        await requireRegisteredEmailForSignIn(secret, ctx, 'password');
+      }
+      if (ctx.path === '/sign-up/email') {
+        if (ctx.body?.phoneNumber !== undefined || ctx.body?.phoneNumberVerified !== undefined) {
+          throw new APIError('BAD_REQUEST', { message: 'Invalid registration details' });
+        }
+        const contacts = registrationContacts.safeParse(ctx.body);
+        if (!contacts.success) throw new APIError('BAD_REQUEST', { message: 'Invalid registration details' });
+        const candidate = registrationCandidate.safeParse({ email: ctx.body?.email, name: ctx.body?.name,
+          ...(contacts.data.contactPhone === undefined ? {} : { phone: contacts.data.contactPhone }),
+          ...(ctx.body?.birthDate === undefined ? {} : { birthDate: ctx.body.birthDate }) });
+        if (!candidate.success) throw new APIError('BAD_REQUEST', { message: 'Invalid registration details' });
+        if (!identity.registrationAllowed) throw new APIError('SERVICE_UNAVAILABLE', {
+          code: 'REGISTRATION_PRECHECK_UNAVAILABLE', message: 'Registration temporarily unavailable' });
+        let allowed: boolean;
+        try { allowed = await identity.registrationAllowed(candidate.data); }
+        catch { throw new APIError('SERVICE_UNAVAILABLE', {
+          code: 'REGISTRATION_PRECHECK_UNAVAILABLE', message: 'Registration temporarily unavailable' }); }
+        if (allowed !== true) throw new APIError('FORBIDDEN', {
+          code: 'REGISTRATION_NOT_ALLOWED', message: 'Registration not allowed' });
+        await requireNewEmailForRegistration(secret, candidate.data.email, ctx);
       }
       if (messagePaths.has(ctx.path)) {
         const recipient = ctx.body?.email || ctx.body?.phoneNumber;
         if (typeof recipient === 'string') await limitRecipient(secret, recipient, ctx, typeof ctx.body?.email === 'string' ? 300_000 : 60_000);
+        if (recoveryRequestPath) await consumeRecoveryBudget(secret, ctx.body.email, 'request', ctx);
       }
+    }), after: createAuthMiddleware(async ctx => {
+      if (ctx.path === '/sign-in/email-otp') {
+        try {
+          const response = await verifiedOtpSignInResponse(ctx.context.returned, ctx.context.newSession, ctx.body?.email,
+            userId => ctx.context.internalAdapter.findUserById(userId));
+          if (response) return ctx.json(response);
+        } catch {
+          // An unverifiable response must not install the native session cookie.
+          // Keep failure explicit; never guess verification or retry the OTP.
+          ctx.context.responseHeaders?.delete('set-cookie');
+          throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
+        }
+      }
+      // Unknown login addresses explicitly require registration; provider send
+      // failures remain generic and never reveal provider rejection details.
+      // Password resets retain the native generic account-existence behavior.
+      // Better Auth swallows send callbacks; this state is isolated per request
+      // (including the signup plugin's nested callback), never shared globally.
+      if (ctx.path === '/sign-up/email' && await emailRejected.get()) throw new APIError('SERVICE_UNAVAILABLE', {
+        code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', message: 'Email verification is temporarily unavailable. Request a new code later.',
+      });
     }) },
     databaseHooks: {
       verification: { create: { before: async (value, ctx) => {
@@ -119,12 +242,15 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         }
         return { data: secured };
       } } },
-      user: { create: { after: async user => { await identity.provision(user.id); } } },
+      user: { create: {
+        after: async user => { await identity.provision(user.id); },
+      } },
       session: { create: { before: async (session, ctx) => {
         const user = await ctx?.context.internalAdapter.findUserById(session.userId);
         if (!user || user.emailVerified !== true) return false;
-        // claim_required/quarantined may have a limited auth session. No JWT is
-        // issued until the separate, approved identity-binding policy succeeds.
+        // A verified email links only one eligible, unprivileged legacy person.
+        // Ambiguous, blocked or privileged claims retain a limited session;
+        // JWT issuance still requires a canonical persisted subject binding.
         await identity.provision(user.id);
       } } },
     },

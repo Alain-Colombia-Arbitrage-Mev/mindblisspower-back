@@ -34,3 +34,7 @@ es opt-in y requiere migración y corte coordinados antes de activarse.
 El [contrato de códigos por email](docs/email-auth-backend.md) usa la librería
 gratuita dentro de la API existente y Cloudflare para entregar los correos;
 no requiere otro servicio de autenticación de pago.
+
+La preparación [Cloudflare del núcleo y su presupuesto](deploy/cloudflare/CORE-DEPLOYMENT-PLAN.md)
+incluye Workers y Containers, pero requiere revisión de costo y pruebas antes
+de activar recursos. Chatwoot no forma parte de esta etapa.

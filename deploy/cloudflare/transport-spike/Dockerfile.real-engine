@@ -1,0 +1,1 @@
+FROM mindbliss/cf-core-go-test:20261025

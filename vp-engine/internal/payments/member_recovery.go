@@ -48,6 +48,15 @@ func (s *Store) recoveredMemberSummary(ctx context.Context, email string) (Membe
 		return MemberSummary{}, fmt.Errorf("recovered member identity: %w", err)
 	}
 	out.Positioned = out.AffiliateID != nil
+	if reporting, err := s.hasAdminSales(ctx); err != nil {
+		return MemberSummary{}, err
+	} else if reporting {
+		out.StripeSales, err = s.recoveredMemberCSVSales(ctx, personID)
+		if err != nil {
+			return MemberSummary{}, err
+		}
+		return out, nil
+	}
 	rows, err := s.db.Query(ctx, `SELECT s.payment_intent_id,
 		(s.captured_minor::numeric/100)::numeric(24,2)::text,
 		(s.refunded_minor::numeric/100)::numeric(24,2)::text,
@@ -71,6 +80,59 @@ func (s *Store) recoveredMemberSummary(ctx context.Context, email string) (Membe
 	}
 	if err := rows.Err(); err != nil {
 		return MemberSummary{}, fmt.Errorf("iterate recovered member Stripe evidence: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) recoveredMemberCSVSales(ctx context.Context, personID int64) ([]MemberStripeSale, error) {
+	// Validate the source pointer and read its rows in one read-only snapshot.
+	// A concurrent batch switch cannot mix the validation and visible sales.
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("begin member sales scope: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var valid bool
+	var batch string
+	if err := tx.QueryRow(ctx, `SELECT count(*)=1 AND COALESCE(bool_and(b.status='reviewed'),false),
+ COALESCE(min(source.active_batch_id::text),'')
+ FROM payments.v_admin_sales_source source
+ LEFT JOIN payments.v_admin_sales_import_batch b ON b.id=source.active_batch_id
+ WHERE source.provider='stripe'`).Scan(&valid, &batch); err != nil {
+		return nil, fmt.Errorf("verify member sales scope: %w", err)
+	}
+	if !valid || batch == "" {
+		return nil, errors.New("reviewed member sales scope unavailable")
+	}
+	rows, err := tx.Query(ctx, `SELECT s.external_id,
+ (s.gross_minor::numeric/100)::numeric(24,2)::text,
+ (s.refunded_minor::numeric/100)::numeric(24,2)::text,
+ CASE WHEN s.refunded_minor>0 THEN 'refunded' WHEN s.risk_status='disputed' THEN 'disputed'
+      WHEN s.display_status='under_review' OR s.risk_status<>'none' THEN 'under_review' ELSE 'paid' END,
+ to_char(s.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),false
+ FROM payments.v_admin_sales s
+ JOIN recovery.stripe_sale_identity i ON i.payment_intent_id=s.external_id
+ WHERE s.provider='stripe' AND s.source_batch_id=$2 AND s.person_id=$1
+ AND i.identity_verified AND i.person_id=$1
+ ORDER BY s.created_at DESC,s.external_id LIMIT 100`, personID, batch)
+	if err != nil {
+		return nil, fmt.Errorf("read member scoped Stripe evidence: %w", err)
+	}
+	defer rows.Close()
+	out := []MemberStripeSale{}
+	for rows.Next() {
+		var sale MemberStripeSale
+		if err := rows.Scan(&sale.PaymentIntentID, &sale.TotalUSD, &sale.RefundedUSD, &sale.Status, &sale.ChargedAt, &sale.SourceEligible); err != nil {
+			return nil, fmt.Errorf("scan member scoped Stripe evidence: %w", err)
+		}
+		out = append(out, sale)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate member scoped Stripe evidence: %w", err)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("complete member sales scope: %w", err)
 	}
 	return out, nil
 }

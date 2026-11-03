@@ -27,6 +27,7 @@ type MoneyflowRow struct {
 // AdminFinance es el tablero financiero de la red: todo el dinero en un vistazo.
 type AdminFinance struct {
 	DataSource     string                `json:"data_source,omitempty"`
+	SalesSummary   *AdminSalesSummary    `json:"sales_summary,omitempty"`
 	StripeRecovery *StripeRecoveryReview `json:"stripe_recovery,omitempty"`
 	// Entrante (caja real vía nuestro checkout Stripe).
 	InflowsUSD       string `json:"inflows_usd"`       // Σ(amount+fee) de compras paid|activated (BRUTO cobrado vía Stripe)
@@ -86,6 +87,11 @@ type AdminFinance struct {
 
 // GetAdminFinance arma el tablero financiero agregando ledger + compras + rangos.
 func (s *Store) GetAdminFinance(ctx context.Context) (AdminFinance, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return AdminFinance{}, err
+	} else if present {
+		return s.adminSalesFinance(ctx)
+	}
 	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
 		return AdminFinance{}, err
 	} else if recovered {

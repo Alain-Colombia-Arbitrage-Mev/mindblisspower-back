@@ -66,7 +66,7 @@ func run() error {
 	// Verificación BMP. Sin credenciales el servicio sigue arriba: la solicitud
 	// se registra marcada 'unavailable' (fail-open) y el candado al pagar la
 	// re-verifica. Se avisa fuerte porque en producción es una mala config.
-	if cfg.BMPClientID != "" && cfg.BMPClientSecret != "" {
+	if cfg.ExternalProvidersEnabled() && cfg.BMPClientID != "" && cfg.BMPClientSecret != "" {
 		handler.SetBMPClient(withdrawals.NewBMPClient(cfg.BMPBaseURL, cfg.BMPClientID, cfg.BMPClientSecret))
 		logger.Info().Str("bmp_base_url", cfg.BMPBaseURL).Msg("BMP verification enabled")
 	} else {
@@ -105,7 +105,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
-		Handler:           handler.Routes(),
+		Handler:           cfg.ReadOnlyHandler(handler.Routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
