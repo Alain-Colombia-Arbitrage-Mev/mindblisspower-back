@@ -6,6 +6,9 @@ import type { authDb } from '../db/auth-client';
 import * as schema from '../db/schema/auth';
 
 type Kind = 'string' | 'number' | 'date';
+// A real PgTransaction has the same builders but no pool/client. Keeping the
+// adapter transaction-bound is essential for the scoped password-reset guard.
+export type AuthAdapterDatabase = Pick<typeof authDb, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 type GuardedModel = {
   table: typeof schema.verification | typeof schema.rateLimit;
   fields: Record<string, { column: AnyPgColumn; kind: Kind }>;
@@ -51,7 +54,7 @@ function predicate(record: GuardedModel, where: Where): SQL {
  * acquiring the row lock. Identifiers come only from this fixed schema, all
  * values are Drizzle parameters, and a unique id/key anchor limits it to one row.
  */
-export function postgresAuthAdapter(database: typeof authDb) {
+export function postgresAuthAdapter(database: AuthAdapterDatabase) {
   const factory = drizzleAdapter(database, { provider: 'pg', schema, usePlural: false, transaction: false });
   return (options: Parameters<typeof factory>[0]): DBAdapter => {
     const base = factory(options);
@@ -77,10 +80,10 @@ export function postgresAuthAdapter(database: typeof authDb) {
         const result = await database.update(record.table).set(assignments).where(and(...input.where.map(condition => predicate(record, condition)))).returning();
         return (result[0] ?? null) as T | null;
       },
-      // The existing adapter explicitly has transaction:false. Preserve its
-      // sequential semantics, but give callbacks the guarded adapter rather
-      // than the original factory's unguarded instance. Do NOT enable a global
-      // transaction: identity hooks use a separately bounded authDb connection.
+      // Keep native callbacks on this guarded adapter. For OTP reset the DB is
+      // already a real outer transaction; for other flows it remains the pool.
+      // Do NOT enable global transactions: identity provisioning uses another
+      // bounded auth connection and must not wait on its own uncommitted rows.
       transaction: async callback => callback(wrapped),
     };
     return wrapped;

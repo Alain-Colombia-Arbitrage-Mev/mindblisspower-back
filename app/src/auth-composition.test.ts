@@ -77,6 +77,63 @@ describe('Bun authentication writer composition', () => {
     expect(result.stderr).toContain('AUTH_DATABASE_URL required for production authentication');
     expect(result.stderr).not.toContain('business_reader:synthetic');
   });
+  test('the exported production HTTP handler binds only OTP reset to the writer transaction and awaits COMMIT', () => {
+    const result = execute(`
+      import assert from 'node:assert/strict';
+      import { mock } from 'bun:test';
+      let releaseCommit, reachedCommit;
+      const gate = new Promise(resolve => { releaseCommit = resolve; });
+      const reached = new Promise(resolve => { reachedCommit = resolve; });
+      const stages = [];
+      const transaction = { async execute() { stages.push('setting'); } };
+      const writer = { async transaction(work) {
+        stages.push('begin');
+        const response = await work(transaction);
+        stages.push('ready'); reachedCommit(); await gate;
+        stages.push('commit'); return response;
+      } };
+      mock.module('./src/db/auth-client.ts', () => ({ authDb: writer }));
+      mock.module('./src/db/client.ts', () => ({ db: { synthetic: 'business-reader' } }));
+      mock.module('./src/auth/postgres-auth-adapter.ts', () => ({ postgresAuthAdapter(database) {
+        assert.ok(database === writer || database === transaction); return { database };
+      } }));
+      mock.module('./src/modules/identity/index.ts', () => ({
+        provisionAuthPerson() { assert.fail('reset must not provision identity'); },
+        getAuthPersonBinding() { assert.fail('reset must not bind identity'); },
+      }));
+      mock.module('./src/auth/registration.ts', () => ({ registrationAllowed() { assert.fail('reset must not register'); } }));
+      mock.module('./src/auth/options.ts', () => ({ createAuthOptions(_env, adapter) {
+        return { database: adapter, emailAndPassword: { enabled: true, revokeSessionsOnPasswordReset: true },
+          session: { cookieCache: { enabled: false } } };
+      } }));
+      mock.module('better-auth', () => ({ betterAuth(options) {
+        const scoped = options.database.database === transaction;
+        return { options, api: { synthetic: true }, async handler(request) {
+          if (!scoped) return Response.json({ original: true });
+          stages.push('native-scoped');
+          assert.equal(options.database.database, transaction);
+          await options.emailAndPassword.onPasswordReset({ user: { id: 'synthetic' } }, request);
+          return Response.json({ success: true });
+        } };
+      } }));
+      const { auth } = await import('./src/auth.ts');
+      assert.equal(auth.api.synthetic, true);
+      const base = 'https://auth.example.test/api/auth';
+      const before = await auth.handler(new Request(base+'/sign-in/email', { method: 'POST' }));
+      assert.deepEqual(await before.json(), { original: true }); assert.deepEqual(stages, []);
+      let returned = false;
+      const pending = auth.handler(new Request(base+'/email-otp/reset-password', { method: 'POST' }))
+        .then(response => { returned = true; return response; });
+      await reached;
+      assert.equal(returned, false);
+      assert.deepEqual(stages, ['begin','setting','setting','setting','native-scoped','ready']);
+      releaseCommit();
+      assert.deepEqual(await (await pending).json(), { success: true });
+      assert.equal(stages.at(-1), 'commit');
+    `);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
   test('identity claim uses the writer, but its lookup and financial compatibility paths never gain that writer', () => {
     const result = execute(`
       import assert from 'node:assert/strict';

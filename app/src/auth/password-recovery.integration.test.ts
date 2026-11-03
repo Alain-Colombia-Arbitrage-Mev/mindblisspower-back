@@ -350,7 +350,7 @@ test('provider rejection or ambiguity uses the generic acknowledgement without c
   }
 });
 
-test('installed native reset failure boundaries are explicit: session failure is not claimed to roll back credential updates', async () => {
+test('raw dependency reset remains sequential without the application atomic wrapper (regression baseline)', async () => {
   const app = fixture({ revocationFails: true, verified: true });
   await app.seedCredential();
   app.seedSession();
@@ -360,9 +360,10 @@ test('installed native reset failure boundaries are explicit: session failure is
   expect(await response.text()).not.toContain('Synthetic private');
   expect(response.headers.has('set-cookie')).toBe(false);
   expect(app.store.verification).toHaveLength(0);
-  // Better Auth 1.6.22's reset is sequential, and our adapter deliberately
-  // remains transaction:false. This test documents rather than hides that
-  // dependency boundary; the UI must not claim a successful reset on error.
+  // This fixture intentionally calls the raw library, not the application's
+  // atomic-password-reset handler. Keep the dependency regression explicit;
+  // separate real PostgreSQL tests must prove the production wrapper rolls it
+  // back without enabling global transactions for other identity flows.
   expect(await verifyPassword({ hash: String(app.store.account![0]!.password), password })).toBe(true);
   expect(app.store.session).toHaveLength(1);
   expect(app.provisioned).toHaveLength(0);
