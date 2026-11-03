@@ -116,10 +116,19 @@ export function containerEnvironment(service, env) {
     values.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY = 'false';
     values.BETTER_AUTH_REGISTRATION_SMS_REQUIRED = 'false';
     if (emailEnabled) {
-      for (const key of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'AUTH_EMAIL_FROM', 'AUTH_JWT_ISSUER', 'AUTH_JWT_AUDIENCE']) {
-        if (typeof env[key] !== 'string' || !env[key].trim()) throw new Error('Email authentication secrets are incomplete');
+      const provider = env.AUTH_EMAIL_PROVIDER === undefined ? 'cloudflare' : env.AUTH_EMAIL_PROVIDER;
+      if (!['cloudflare', 'resend'].includes(provider)) throw new Error('Invalid email provider configuration');
+      const providerKeys = provider === 'resend' ? ['RESEND_API_KEY'] : ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN'];
+      for (const key of [...providerKeys, 'AUTH_EMAIL_FROM', 'AUTH_JWT_ISSUER', 'AUTH_JWT_AUDIENCE']) {
+        if (typeof env[key] !== 'string' || !env[key].trim() || env[key].length > 4096 || /[\r\n]/.test(env[key])) {
+          throw new Error('Email authentication secrets are incomplete');
+        }
       }
-      Object.assign(values, { CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN: env.CLOUDFLARE_EMAIL_API_TOKEN,
+      if (providerKeys.some(key => /\s/.test(env[key]))) throw new Error('Email authentication secrets are incomplete');
+      // Read and forward only the selected sender's credentials, never the
+      // inactive provider's key. Sending is not retried through a fallback.
+      for (const key of providerKeys) values[key] = env[key];
+      Object.assign(values, { AUTH_EMAIL_PROVIDER: provider,
         AUTH_EMAIL_FROM: env.AUTH_EMAIL_FROM, BETTER_AUTH_JWT_ISSUER: env.AUTH_JWT_ISSUER, BETTER_AUTH_JWT_AUDIENCE: env.AUTH_JWT_AUDIENCE });
     }
   }

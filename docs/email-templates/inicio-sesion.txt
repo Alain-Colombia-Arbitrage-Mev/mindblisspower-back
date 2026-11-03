@@ -1,0 +1,15 @@
+Mindbliss Power
+
+Tu código de acceso
+
+Recibimos una solicitud para iniciar sesión en Mindbliss Power.
+
+Tu código de un solo uso: {{{OTP}}}
+
+Este código vence en 5 minutos y sólo puede usarse una vez.
+
+Regresa a la pantalla donde solicitaste el código e introdúcelo para iniciar sesión.
+
+Nunca compartas este código. El equipo de Mindbliss Power nunca te lo pedirá.
+
+Si no solicitaste este código, ignora este mensaje. No necesitas realizar ninguna acción.

@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { AuthEmailDeliveryError, cloudflareEmailConfigured, createAuthDelivery, type EmailDeliveryDiagnostic } from './delivery';
+import { AUTH_OTP_PURPOSES, authOtpMessage } from './email-templates';
 
 const configuration = { SENTDM_API_KEY: 'synthetic-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000001', SENTDM_OTP_CHANNEL: 'whatsapp' };
 const emailConfiguration = { CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001',
@@ -41,6 +42,25 @@ test('Cloudflare configuration fails closed before transport and never falls bac
   }
   await expect(createAuthDelivery(emailConfiguration, fetchImpl).email({ ...emailMessage, to: 'invalid' })).rejects.toThrow('authentication_delivery_unavailable');
   expect(calls).toBe(0);
+});
+
+test('Cloudflare native OTP keeps reviewed HTML and text without reading or forwarding hosted-template metadata', async () => {
+  let calls = 0;
+  for (const purpose of AUTH_OTP_PURPOSES) {
+    const message = authOtpMessage(emailMessage.to, '012345', purpose);
+    const expected = { from: emailConfiguration.AUTH_EMAIL_FROM, to: [message.to], subject: message.subject,
+      text: message.text, html: message.html };
+    Object.defineProperty(message, 'template', { get() { throw new Error('Inactive hosted-template metadata was accessed'); } });
+    await createAuthDelivery(emailConfiguration, (async (url, request) => {
+      calls++;
+      expect(String(url)).toContain('https://api.cloudflare.com/client/v4/accounts/');
+      const body = JSON.parse(request?.body as string);
+      expect(body).toEqual(expected);
+      expect(body).not.toHaveProperty('template');
+      return Response.json(acceptedEmail);
+    }) as typeof fetch, () => {}).email(message);
+  }
+  expect(calls).toBe(3);
 });
 
 test('Cloudflare HTTP success is not enough: reject malformed, bounced, suppressed or mismatched email results', async () => {

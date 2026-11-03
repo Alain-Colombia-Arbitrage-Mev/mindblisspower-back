@@ -3,7 +3,8 @@ import { defineRequestState, getCurrentAdapter, getCurrentAuthContext } from '@b
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { emailOTP } from 'better-auth/plugins/email-otp';
 import { jwt } from 'better-auth/plugins/jwt';
-import { AuthEmailDeliveryError, authActionMessage, cloudflareEmailConfigured, createAuthDelivery, smsDeliveryConfigured, type AuthDelivery, type AuthEnvironment } from './delivery';
+import { AuthEmailDeliveryError, authActionMessage, authEmailConfigured, createAuthDelivery, smsDeliveryConfigured, type AuthDelivery, type AuthEnvironment } from './delivery';
+import { AUTH_OTP_EXPIRES_IN_SECONDS, AUTH_OTP_LENGTH, authOtpMessage } from './email-templates';
 import { limitRecipient, otpHash, recipientBudgetKey, securePhoneVerification } from './phone-otp';
 import { smsOptInPlugin } from './phone-opt-in';
 import { registrationCandidate, type RegistrationCandidate } from './registration';
@@ -42,17 +43,15 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) throw new Error('Authentication URLs must use HTTPS');
     }
   }
-  if (emailEnabled && !cloudflareEmailConfigured(env)) throw new Error('Cloudflare email authentication delivery is not configured');
+  if (emailEnabled && !authEmailConfigured(env)) throw new Error('Email authentication delivery is not configured');
   if (jwtEnabled && (!env.BETTER_AUTH_JWT_ISSUER || !env.BETTER_AUTH_JWT_AUDIENCE)) throw new Error('JWT issuer and audience must be explicit');
   const plugins: BetterAuthPlugin[] = [];
   const emailRejected = defineRequestState(() => false);
-  if (emailEnabled) plugins.push(emailOTP({ otpLength: 6, expiresIn: 300, allowedAttempts: 3,
+  if (emailEnabled) plugins.push(emailOTP({ otpLength: AUTH_OTP_LENGTH, expiresIn: AUTH_OTP_EXPIRES_IN_SECONDS, allowedAttempts: 3,
     disableSignUp: true, storeOTP: { hash: async code => otpHash(secret, 'email-otp', code) },
     overrideDefaultEmailVerification: true, resendStrategy: 'rotate', rateLimit: { window: 60, max: 5 },
     sendVerificationOTP: async ({ email, otp, type }) => {
-      try { await delivery.email({ to: email,
-      subject: type === 'forget-password' ? 'Código para restablecer tu contraseña' : 'Código de acceso de Mindbliss Power',
-      text: `Tu código es ${otp}. Vence en 5 minutos. No compartas este código.` }); }
+      try { await delivery.email(authOtpMessage(email, otp, type)); }
       catch (error) {
         // A rejected send must not leave a redeemable challenge. Delete only
         // this code's HMAC generation, never another recipient/purpose/resend.

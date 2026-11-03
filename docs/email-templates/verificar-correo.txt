@@ -1,0 +1,15 @@
+Mindbliss Power
+
+Verifica tu correo
+
+Recibimos una solicitud para verificar tu correo en Mindbliss Power.
+
+Tu código de un solo uso: {{{OTP}}}
+
+Este código vence en 5 minutos y sólo puede usarse una vez.
+
+Regresa a la pantalla donde solicitaste el código e introdúcelo para completar la verificación.
+
+Nunca compartas este código. El equipo de Mindbliss Power nunca te lo pedirá.
+
+Si no solicitaste este código, ignora este mensaje. No necesitas realizar ninguna acción.

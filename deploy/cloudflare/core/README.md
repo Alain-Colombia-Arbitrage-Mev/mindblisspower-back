@@ -88,6 +88,17 @@ services. Rotate the90-day leaves before their expiry.
 
 ## Email-only registration and login
 
+The API supports an explicit `AUTH_EMAIL_PROVIDER=cloudflare|resend` transport.
+An omitted setting retains Cloudflare for existing deployments; an empty,
+misspelled or unsupported setting fails closed. `resend` requires
+`RESEND_API_KEY` and the common `AUTH_EMAIL_FROM` sender. Only the selected
+provider's credentials reach the API, and no email credentials reach Go.
+Changing providers does not enable SMS, migrate accounts, verify emails,
+relax rate limits or reset pending OTPs. There is no automatic fallback.
+See [the Resend cutover runbook](../../../docs/resend-email-cutover.md) for the
+account/domain/quota prerequisites and release checks. Support in source is not
+confirmation that Resend is configured or active in production.
+
 Registration requires email verification; login uses email. Telephone and
 WhatsApp are optional, unverified customer contact data, never authentication
 factors, identity-linking evidence, or permission to send marketing messages.

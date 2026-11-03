@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { AUTH_OTP_LENGTH, AUTH_OTP_RESEND_ALIASES, type AuthOtpHostedTemplate } from './email-templates';
 
 export type AuthEnvironment = Record<string, string | undefined>;
-export type EmailMessage = { to: string; subject: string; text: string; html?: string };
+export type EmailMessage = { to: string; subject: string; text: string; html?: string; template?: AuthOtpHostedTemplate };
 export type AuthDelivery = { email: (message: EmailMessage) => Promise<void>; phone: (phone: string, code: string) => Promise<void> };
 export type EmailDeliveryDiagnostic = { event: 'auth_email_delivery'; outcome: 'configuration' | 'rejected' | 'transport' | 'invalid_response' | 'recipient_rejected' | 'accepted'; httpStatus?: number; providerCode?: number; queued?: boolean };
+export type AuthEmailProvider = 'cloudflare' | 'resend';
 type EmailDeliveryReporter = (diagnostic: EmailDeliveryDiagnostic) => void;
 export class AuthEmailDeliveryError extends Error {
   constructor(readonly confirmedRejected: boolean) { super('authentication_delivery_unavailable'); this.name = 'AuthEmailDeliveryError'; }
@@ -12,9 +14,19 @@ export class AuthEmailDeliveryError extends Error {
 export const validPhone = (phone: string) => /^\+[1-9][0-9]{7,14}$/.test(phone);
 const uuid = z.uuid();
 const unavailable = () => new Error('authentication_delivery_unavailable');
-export const cloudflareEmailConfigured = (env: AuthEnvironment) => Boolean(env.CLOUDFLARE_EMAIL_API_TOKEN?.trim()
-  && !/\s/.test(env.CLOUDFLARE_EMAIL_API_TOKEN) && /^[a-f0-9]{32}$/i.test(env.CLOUDFLARE_ACCOUNT_ID || '')
+const secretConfigured = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/\s/.test(value);
+export const authEmailProvider = (env: AuthEnvironment): AuthEmailProvider | null => env.AUTH_EMAIL_PROVIDER === undefined ? 'cloudflare'
+  : env.AUTH_EMAIL_PROVIDER === 'cloudflare' || env.AUTH_EMAIL_PROVIDER === 'resend' ? env.AUTH_EMAIL_PROVIDER : null;
+export const cloudflareEmailConfigured = (env: AuthEnvironment) => Boolean(secretConfigured(env.CLOUDFLARE_EMAIL_API_TOKEN)
+  && /^[a-f0-9]{32}$/i.test(env.CLOUDFLARE_ACCOUNT_ID || '')
   && z.email().safeParse(env.AUTH_EMAIL_FROM).success);
+export const resendEmailConfigured = (env: AuthEnvironment) => Boolean(secretConfigured(env.RESEND_API_KEY)
+  && z.email().safeParse(env.AUTH_EMAIL_FROM).success);
+/** Only the explicitly selected provider may read its credential configuration. */
+export const authEmailConfigured = (env: AuthEnvironment) => {
+  const provider = authEmailProvider(env);
+  return provider === 'cloudflare' ? cloudflareEmailConfigured(env) : provider === 'resend' ? resendEmailConfigured(env) : false;
+};
 export const smsDeliveryConfigured = (env: AuthEnvironment) => Boolean(env.SENTDM_API_KEY?.trim()
   && !/\s/.test(env.SENTDM_API_KEY) && uuid.safeParse(env.SENTDM_OTP_TEMPLATE_ID).success
   && env.SENTDM_OTP_CHANNEL === 'sms' && (!env.SENTDM_PROFILE_ID || uuid.safeParse(env.SENTDM_PROFILE_ID).success)
@@ -23,6 +35,14 @@ const emailResult = z.object({ success: z.literal(true), errors: z.array(z.unkno
   delivered: z.array(z.email()), queued: z.array(z.email()), permanent_bounces: z.array(z.email()).length(0),
   suppressed_recipients: z.array(z.email()).length(0).optional(),
 }) });
+const resendResult = z.strictObject({ id: z.uuid() });
+const resendOtpTemplate = z.strictObject({
+  id: z.enum(AUTH_OTP_RESEND_ALIASES),
+  variables: z.strictObject({ OTP: z.string().length(AUTH_OTP_LENGTH).regex(/^[0-9]+$/) }),
+});
+// 409 may mean another idempotent request is still in progress; 408/5xx and
+// transport/ACK failures can follow acceptance. Never call a second provider.
+const resendConfirmedRejection = (status: number) => [400, 401, 403, 404, 405, 422, 429].includes(status);
 
 // Fixed HTTPS destinations: never accept an upstream URL or retry a send from
 // request input. Provider bodies/errors may contain OTPs and must not escape.
@@ -47,8 +67,46 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
       const diagnostic = (value: Omit<EmailDeliveryDiagnostic, 'event'>) => {
         try { report({ event: 'auth_email_delivery', ...value }); } catch { /* A log sink must not change delivery. */ }
       };
-      if (!cloudflareEmailConfigured(env) || !z.email().safeParse(message.to).success) {
+      if (!authEmailConfigured(env) || !z.email().safeParse(message.to).success) {
         diagnostic({ outcome: 'configuration' }); throw new AuthEmailDeliveryError(true);
+      }
+      if (authEmailProvider(env) === 'resend') {
+        let template: AuthOtpHostedTemplate | undefined;
+        try {
+          if (message.template !== undefined) {
+            const parsed = resendOtpTemplate.safeParse(message.template);
+            if (!parsed.success) throw unavailable();
+            template = parsed.data;
+          }
+        } catch { diagnostic({ outcome: 'configuration' }); throw new AuthEmailDeliveryError(true); }
+        let response: Response;
+        try {
+          response = await fetchImpl('https://api.resend.com/emails', {
+            method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', authorization: `Bearer ${env.RESEND_API_KEY}` },
+            // Published template aliases are server-owned native OTP metadata.
+            // Resend forbids html/text alongside template; never fall back to
+            // those bodies if the selected template is rejected or unavailable.
+            body: JSON.stringify({ from: env.AUTH_EMAIL_FROM, to: [message.to], subject: message.subject,
+              ...(template ? { template } : { text: message.text, ...(message.html ? { html: message.html } : {}) }) }),
+            signal: AbortSignal.timeout(8000),
+          });
+        } catch { diagnostic({ outcome: 'transport' }); throw new AuthEmailDeliveryError(false); }
+        let data: unknown;
+        try { data = await response.json(); }
+        catch { diagnostic({ outcome: response.ok ? 'invalid_response' : 'rejected', httpStatus: response.status });
+          throw new AuthEmailDeliveryError(resendConfirmedRejection(response.status)); }
+        if (!response.ok) {
+          diagnostic({ outcome: 'rejected', httpStatus: response.status });
+          throw new AuthEmailDeliveryError(resendConfirmedRejection(response.status));
+        }
+        // REST ACK is exactly {id:UUID}; it means accepted, never inbox delivery.
+        // Do not reflect/log provider bodies, IDs, messages or arbitrary fields.
+        if (response.status !== 200 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')
+          || !resendResult.safeParse(data).success) {
+          diagnostic({ outcome: 'invalid_response', httpStatus: response.status }); throw new AuthEmailDeliveryError(false);
+        }
+        diagnostic({ outcome: 'accepted', httpStatus: response.status, queued: true });
+        return;
       }
       let response: Response;
       try {
