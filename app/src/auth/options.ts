@@ -95,7 +95,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
       if (error instanceof APIError && error.statusCode === 503
-        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE'].includes(error.body?.code || '')) return;
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', 'AUTH_SIGN_OUT_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
@@ -131,6 +131,20 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     disabledPaths: ['/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
       '/registration/phone/send', '/registration/phone/verify'],
     hooks: { before: createAuthMiddleware(async ctx => {
+      if (ctx.path === '/sign-out') {
+        // Native 1.6.22 swallows deletion/lookup errors then reports success.
+        // Revoke directly BEFORE its cookie clearing and outside that catch.
+        // Use the native signed-cookie verifier, never a client-supplied token
+        // or a stale session cache. Zero rows is an idempotent logged-out state.
+        try {
+          const token = await ctx.getSignedCookie(ctx.context.authCookies.sessionToken.name, ctx.context.secret);
+          if (token) await (await getCurrentAdapter(ctx.context.adapter)).deleteMany({
+            model: 'session', where: [{ field: 'token', value: token }],
+          });
+        } catch {
+          throw new APIError('SERVICE_UNAVAILABLE', { code: 'AUTH_SIGN_OUT_UNAVAILABLE', message: 'Sign out temporarily unavailable' });
+        }
+      }
       if (emailEnabled && (ctx.path === '/email-otp/request-password-reset' || ctx.path === '/email-otp/reset-password')) {
         const parsed = (ctx.path === '/email-otp/request-password-reset' ? recoveryRequest : recoveryReset).safeParse(ctx.body);
         if (!parsed.success) throw new APIError('BAD_REQUEST', {

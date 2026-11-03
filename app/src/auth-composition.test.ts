@@ -77,7 +77,7 @@ describe('Bun authentication writer composition', () => {
     expect(result.stderr).toContain('AUTH_DATABASE_URL required for production authentication');
     expect(result.stderr).not.toContain('business_reader:synthetic');
   });
-  test('the exported production HTTP handler binds only OTP reset to the writer transaction and awaits COMMIT', () => {
+  test('the exported production HTTP handler binds OTP reset to the writer transaction and leaves session reads outside it', () => {
     const result = execute(`
       import assert from 'node:assert/strict';
       import { mock } from 'bun:test';
@@ -119,7 +119,7 @@ describe('Bun authentication writer composition', () => {
       const { auth } = await import('./src/auth.ts');
       assert.equal(auth.api.synthetic, true);
       const base = 'https://auth.example.test/api/auth';
-      const before = await auth.handler(new Request(base+'/sign-in/email', { method: 'POST' }));
+      const before = await auth.handler(new Request(base+'/get-session'));
       assert.deepEqual(await before.json(), { original: true }); assert.deepEqual(stages, []);
       let returned = false;
       const pending = auth.handler(new Request(base+'/email-otp/reset-password', { method: 'POST' }))

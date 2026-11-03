@@ -15,7 +15,9 @@ esta petición se construye una instancia nativa con el adaptador enlazado a la
 transacción. No basta envolver la instancia original: su handler sustituye el
 contexto de adaptador al procesar la petición.
 
-Las demás rutas siguen con la instancia normal. No se activó `transaction:true`
+Las demás rutas siguen fuera de la transacción de recuperación. El login con
+contraseña usa ahora su propia instancia y una transacción corta al insertar
+la sesión (véase el refuerzo de sesiones del 3 de noviembre). No se activó `transaction:true`
 global, porque los hooks de identidad usan otra conexión y podrían esperar a
 sus propias filas sin confirmar. Se conservaron los predicados CAS del
 adaptador de PostgreSQL y los límites de conexiones.
@@ -38,10 +40,12 @@ El alcance es el endpoint HTTP publicado. No hay consumidores productivos del
 método interno nativo `auth.api.resetPasswordEmailOTP`; no debe incorporarse un
 consumidor que omita este límite transaccional.
 
-La corrección revoca las sesiones confirmadas que elimina la transacción. No
-afirma serialización completa de un inicio de sesión que hubiese leído la
-contraseña antigua antes del reset y termine después: eso requiere un mecanismo
-adicional de versión/bloqueo compartido, no implementado en este cambio.
+El refuerzo posterior `secure-session-handler.ts` cierra también el login que
+hubiese comprobado la contraseña anterior antes de la recuperación. Al guardar
+su sesión, bloquea la credencial coincidente con `FOR SHARE` e inserta dentro
+de esa misma transacción. Si gana el reset, ese hash ya no coincide y el login
+se rechaza; si gana el login, el reset espera y elimina esa sesión. No se cambia
+el correo, el hash nativo ni la vinculación de identidad.
 
 ## Pruebas
 

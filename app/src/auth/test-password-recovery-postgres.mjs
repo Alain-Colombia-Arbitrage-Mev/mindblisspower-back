@@ -67,6 +67,22 @@ try {
     CREATE TRIGGER recovery_email_proof BEFORE UPDATE OF email_verified ON auth."user" FOR EACH ROW EXECUTE FUNCTION auth.recovery_test_reject();
     CREATE CONSTRAINT TRIGGER recovery_commit AFTER INSERT OR UPDATE ON auth.account DEFERRABLE INITIALLY DEFERRED
       FOR EACH ROW EXECUTE FUNCTION auth.recovery_test_reject();
+    CREATE FUNCTION auth.session_test_reject() RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE fault_mode text;
+    BEGIN
+      SELECT mode INTO fault_mode FROM auth.recovery_test_fault WHERE user_id=NEW.user_id;
+      IF TG_WHEN='BEFORE' AND fault_mode='session_insert' THEN
+        RAISE EXCEPTION 'Synthetic private session insert failure';
+      ELSIF TG_WHEN='AFTER' AND fault_mode='session_commit' THEN
+        RAISE EXCEPTION 'Synthetic private session deferred commit failure';
+      ELSIF TG_WHEN='BEFORE' AND fault_mode='session_hold' THEN
+        PERFORM pg_advisory_xact_lock(704431,1);
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER recovery_session_insert BEFORE INSERT ON auth.session FOR EACH ROW EXECUTE FUNCTION auth.session_test_reject();
+    CREATE CONSTRAINT TRIGGER recovery_session_commit AFTER INSERT ON auth.session DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW EXECUTE FUNCTION auth.session_test_reject();
     GRANT USAGE ON SCHEMA auth TO recovery_auth_fixture;
     GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.account,auth.session,auth.verification,auth.rate_limit,auth.jwks TO recovery_auth_fixture;
     GRANT SELECT ON auth.recovery_test_fault TO recovery_auth_fixture;

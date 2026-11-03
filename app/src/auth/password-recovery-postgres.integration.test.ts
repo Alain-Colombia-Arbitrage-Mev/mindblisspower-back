@@ -6,6 +6,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { atomicPasswordResetHandler, atomicPasswordResetOptions } from './atomic-password-reset';
 import { postgresAuthAdapter } from './postgres-auth-adapter';
+import { secureSessionHandler } from './secure-session-handler';
 import { createAuthOptions } from './options';
 import type { AuthEnvironment, EmailMessage } from './delivery';
 
@@ -59,11 +60,13 @@ if (!ownerURL && !authURL) {
       [`${id}-credential`, id, 'credential', mode === 'empty' ? null : await hashPassword(oldPassword)]);
     const messages: EmailMessage[] = [];
     const provisioned: string[] = [];
+    let provisionGate: (() => Promise<void>) | undefined;
     const identity = {
       provision: async (userId: string) => {
         // This is deliberately the same max:1 writer used by production hooks.
         // A global auth transaction would deadlock here during sign-in/signup.
         await writer.unsafe('SELECT id FROM auth."user" WHERE id=$1', [userId]);
+        await provisionGate?.();
         provisioned.push(userId); return { status: 'existing' };
       }, binding: async () => ({ status: 'claim_required' }), registrationAllowed: async () => true,
     };
@@ -79,10 +82,11 @@ if (!ownerURL && !authURL) {
     };
     function create(selectedDatabase = database, afterHash?: () => Promise<void>) {
       const raw = betterAuth(options(selectedDatabase, afterHash));
-      return atomicPasswordResetHandler(raw.handler, (state, work) => selectedDatabase.transaction(async tx => {
+      const resetHandler = atomicPasswordResetHandler(raw.handler, (state, work) => selectedDatabase.transaction(async tx => {
         const transactional = betterAuth(atomicPasswordResetOptions(options(tx, afterHash), state));
         return work(transactional.handler);
       }));
+      return secureSessionHandler(resetHandler, db => options(db, afterHash), selectedDatabase);
     }
     let handler = create();
     const requestUsing = async (selectedHandler: typeof handler, path: string, body?: unknown, cookie = '') => selectedHandler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
@@ -109,6 +113,9 @@ if (!ownerURL && !authURL) {
       return (otp = code(), password = newPassword) => requestUsing(selectedHandler, '/email-otp/reset-password', { email, otp, password });
     };
     return { id, email, request, send, reset, resetUsing, code, messages, provisioned, fault, clearFault, seedSession, snapshot,
+      setProvisionGate: (gate?: () => Promise<void>) => { provisionGate = gate; },
+      requestWithDatabase: (selectedDatabase: typeof database, path: string, body?: unknown, cookie = '') =>
+        requestUsing(create(selectedDatabase), path, body, cookie),
       restart: () => { handler = create(); } };
   }
   const cookies = (response: Response) => response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
@@ -116,6 +123,14 @@ if (!ownerURL && !authURL) {
     expect(response.headers.has('set-cookie')).toBe(false);
     expect(response.headers.has('set-auth-jwt')).toBe(false);
     expect(await response.clone().json()).toEqual({ success: true });
+  }
+  async function waitForLock(applicationName: string) {
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const activity = await owner.unsafe("SELECT wait_event_type FROM pg_stat_activity WHERE application_name=$1 AND state='active'", [applicationName]);
+      if (activity.some(row => row.wait_event_type === 'Lock')) return;
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+    throw new Error('Synthetic session race did not overlap on a PostgreSQL lock');
   }
 
   for (const mode of ['missing', 'existing', 'empty'] as const) {
@@ -276,6 +291,125 @@ if (!ownerURL && !authURL) {
     expect((await login(app.email)).status).toBe(401);
     const replacementLogin = await app.request('/sign-in/email', { email: app.email, password: newPassword });
     expect(replacementLogin.status).toBe(200); expect(app.provisioned).toContain(app.id);
+  });
+
+  test('logout never acknowledges a failed database revocation or clears its cookie, and the same request can be retried', async () => {
+    const app = await fixture('existing', true); const other = await fixture('existing', true);
+    const login = await app.request('/sign-in/email', { email: app.email, password: oldPassword });
+    const otherLogin = await other.request('/sign-in/email', { email: other.email, password: oldPassword });
+    expect(login.status).toBe(200); expect(otherLogin.status).toBe(200);
+    const cookie = cookies(login); expect(cookie).toContain('session_token=');
+    const before = await app.snapshot(); const unrelatedBefore = await other.snapshot();
+    await app.fault('session_delete');
+    const failed = await app.request('/sign-out', {}, cookie);
+    expect(failed.status).toBe(503); expect(failed.headers.has('set-cookie')).toBe(false);
+    expect(failed.headers.has('set-auth-jwt')).toBe(false);
+    expect(await failed.text()).not.toContain('Synthetic private');
+    expect(await app.snapshot()).toEqual(before);
+    const stillSignedIn = await app.request('/get-session', undefined, cookie);
+    expect(await stillSignedIn.json()).toMatchObject({ user: { id: app.id, email: app.email } });
+    await app.clearFault(); app.restart();
+    const retried = await app.request('/sign-out', {}, cookie);
+    expect(retried.status).toBe(200); expect(await retried.json()).toEqual({ success: true });
+    expect(retried.headers.getSetCookie().some(value => value.includes('session_token=') && /max-age=0/i.test(value))).toBe(true);
+    expect((await app.snapshot()).session).toHaveLength(0);
+    const revoked = await app.request('/get-session', undefined, cookie);
+    expect(await revoked.json()).toBeNull();
+    expect(await other.snapshot()).toEqual(unrelatedBefore);
+    const unrelated = await app.request('/get-session', undefined, cookies(otherLogin));
+    expect(await unrelated.json()).toMatchObject({ user: { id: other.id } });
+  });
+
+  for (const failure of ['session_insert', 'session_commit']) {
+    test(`${failure} failure cannot return a usable login cookie or leave a committed session`, async () => {
+      const app = await fixture('existing', true); const before = await app.snapshot();
+      await app.fault(failure);
+      const failed = await app.request('/sign-in/email', { email: app.email, password: oldPassword });
+      expect(failed.status).toBe(500); expect(failed.headers.has('set-cookie')).toBe(false);
+      expect(failed.headers.has('set-auth-jwt')).toBe(false);
+      expect(await failed.text()).not.toContain('Synthetic private');
+      expect(await app.snapshot()).toEqual(before);
+      await app.clearFault(); app.restart();
+      const retried = await app.request('/sign-in/email', { email: app.email, password: oldPassword });
+      expect(retried.status).toBe(200); expect((await app.snapshot()).session).toHaveLength(1);
+      const session = await app.request('/get-session', undefined, cookies(retried));
+      expect(await session.json()).toMatchObject({ user: { id: app.id } });
+    });
+  }
+
+  test('an old-password login paused after verification cannot create a session after reset commits on another writer pool', async () => {
+    const connection = { statement_timeout: 8000, lock_timeout: 6000, idle_in_transaction_session_timeout: 10000 };
+    const loginWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {},
+      connection: { ...connection, application_name: 'synthetic-login-after-reset' } });
+    const resetWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {},
+      connection: { ...connection, application_name: 'synthetic-reset-before-login' } });
+    let releaseProvision!: () => void; let reachedProvision!: () => void;
+    const heldProvision = new Promise<void>(resolve => { releaseProvision = resolve; });
+    const provisionReached = new Promise<void>(resolve => { reachedProvision = resolve; });
+    let loginResponse: Promise<Response> | undefined;
+    try {
+      const app = await fixture('existing', true); expect((await app.send()).status).toBe(200);
+      app.setProvisionGate(async () => { reachedProvision(); await heldProvision; });
+      loginResponse = app.requestWithDatabase(drizzle(loginWriter), '/sign-in/email', { email: app.email, password: oldPassword });
+      await Promise.race([provisionReached, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Synthetic login did not reach its verified identity gate')), 3000))]);
+      // A real second max:1 pool completes the reset while the old-password
+      // request is held after its native password check, not before it starts.
+      const reset = await app.resetUsing(drizzle(resetWriter))();
+      expect(reset.status).toBe(200); await noResetSession(reset);
+      const afterReset = await app.snapshot(); expect(afterReset.session).toHaveLength(0);
+      expect(await verifyPassword({ hash: String(afterReset.credential[0]!.password), password: newPassword })).toBe(true);
+      releaseProvision();
+      const staleLogin = await loginResponse;
+      expect(staleLogin.status).toBe(401); expect(staleLogin.headers.has('set-cookie')).toBe(false);
+      expect(staleLogin.headers.has('set-auth-jwt')).toBe(false);
+      expect((await app.snapshot()).session).toHaveLength(0);
+      app.setProvisionGate();
+      expect((await app.request('/sign-in/email', { email: app.email, password: oldPassword })).status).toBe(401);
+      const replacement = await app.request('/sign-in/email', { email: app.email, password: newPassword });
+      expect(replacement.status).toBe(200);
+      const session = await app.request('/get-session', undefined, cookies(replacement));
+      expect(await session.json()).toMatchObject({ user: { id: app.id } });
+    } finally {
+      releaseProvision();
+      if (loginResponse) await Promise.allSettled([loginResponse]);
+      await Promise.all([loginWriter.end({ timeout: 2 }), resetWriter.end({ timeout: 2 })]);
+    }
+  });
+
+  test('a login inserted first commits before a concurrent reset and that reset removes its newly issued native session', async () => {
+    const connection = { statement_timeout: 8000, lock_timeout: 6000, idle_in_transaction_session_timeout: 10000 };
+    const loginWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {},
+      connection: { ...connection, application_name: 'synthetic-login-before-reset' } });
+    const resetWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {},
+      connection: { ...connection, application_name: 'synthetic-reset-after-login' } });
+    const lockOwner = await owner.reserve();
+    let held = false; let loginResponse: Promise<Response> | undefined; let resetResponse: Promise<Response> | undefined;
+    try {
+      const app = await fixture('existing', true); expect((await app.send()).status).toBe(200);
+      const before = await app.snapshot();
+      await lockOwner.unsafe('SELECT pg_advisory_lock(704431,1)'); held = true;
+      await app.fault('session_hold');
+      loginResponse = app.requestWithDatabase(drizzle(loginWriter), '/sign-in/email', { email: app.email, password: oldPassword });
+      // The fixture trigger holds only the final INSERT. Native verification
+      // and the max:1 identity hook have completed before this database wait.
+      await waitForLock('synthetic-login-before-reset');
+      resetResponse = app.resetUsing(drizzle(resetWriter))();
+      await waitForLock('synthetic-reset-after-login');
+      expect(await app.snapshot()).toEqual(before);
+      await lockOwner.unsafe('SELECT pg_advisory_unlock(704431,1)'); held = false;
+      const [login, reset] = await Promise.all([loginResponse, resetResponse]);
+      expect(login.status).toBe(200); expect(cookies(login)).toContain('session_token=');
+      expect(reset.status).toBe(200); await noResetSession(reset);
+      const after = await app.snapshot(); expect(after.session).toHaveLength(0); expect(after.challenge).toHaveLength(0);
+      expect(await verifyPassword({ hash: String(after.credential[0]!.password), password: newPassword })).toBe(true);
+      const revoked = await app.request('/get-session', undefined, cookies(login));
+      expect(await revoked.json()).toBeNull();
+    } finally {
+      if (held) await lockOwner.unsafe('SELECT pg_advisory_unlock(704431,1)');
+      lockOwner.release();
+      await Promise.allSettled([loginResponse, resetResponse].filter((response): response is Promise<Response> => response !== undefined));
+      await Promise.all([loginWriter.end({ timeout: 2 }), resetWriter.end({ timeout: 2 })]);
+    }
   });
 
   test('ordinary signup and email OTP proof remain outside the reset transaction and preserve max:1 identity hooks', async () => {
