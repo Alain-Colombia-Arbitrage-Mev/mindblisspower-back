@@ -76,6 +76,10 @@ func (h *Handler) SetNOWPaymentsOperational(client *nowpayments.Client, store *S
 	}
 	h.nowMemberships.store = store
 	h.nowMemberships.operational = true
+	// The restricted operational writer and reader keep separate pools/caches.
+	// A committed activation must evict both display snapshots, not only the
+	// writer's unused tree cache. Never share cached data or database authority.
+	store.memberCacheReader = h.store
 	return nil
 }
 

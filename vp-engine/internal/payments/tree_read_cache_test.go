@@ -12,7 +12,45 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vicionpower/vp-engine/internal/nowpayments"
 )
+
+func TestNOWOperationalActivationInvalidatesConfiguredReaderOnly(t *testing.T) {
+	reader, writer, unrelated := NewStore(nil), NewNOWPaymentsOperationalStore(nil), NewStore(nil)
+	client, err := nowpayments.New(nowpayments.Config{APIKey: "synthetic-unused", IPNSecret: "synthetic-unused", Environment: "production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(reader, nil, "synthetic-service", nil, 0, zerolog.Nop())
+	settings := NOWPaymentsSettings{MembershipsEnabled: true, Environment: "production",
+		CallbackURL: "https://mindblisspower.com/api/webhooks/nowpayments",
+		SuccessURL:  "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=review",
+		CancelURL:   "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=cancelled"}
+	if err := h.SetNOWPaymentsOperational(client, writer, settings); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	loadOld := func(context.Context) ([]AdminTreeNode, error) { return []AdminTreeNode{{ID: "before-activation"}}, nil }
+	for _, store := range []*Store{reader, writer, unrelated} {
+		if _, err := store.treeReads.read(ctx, "roots:1", time.Minute, loadOld); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This is the post-commit invalidation used by activateNOWOperationalOrder.
+	// Reader and writer deliberately do not share pools, cache entries or roles.
+	writer.invalidateMemberCaches(ctx, "synthetic@example.test")
+	loadNew := func(context.Context) ([]AdminTreeNode, error) { return []AdminTreeNode{{ID: "after-activation"}}, nil }
+	for _, store := range []*Store{reader, writer} {
+		nodes, err := store.treeReads.read(ctx, "roots:1", time.Minute, loadNew)
+		if err != nil || len(nodes) != 1 || nodes[0].ID != "after-activation" {
+			t.Fatal("successful operational activation left its reader cache stale", nodes, err)
+		}
+	}
+	nodes, err := unrelated.treeReads.read(ctx, "roots:1", time.Minute, loadNew)
+	if err != nil || nodes[0].ID != "before-activation" {
+		t.Fatal("invalidation escaped its explicitly configured reader", nodes, err)
+	}
+}
 
 func TestTreeReadCacheHitExpiryAndIndependentValues(t *testing.T) {
 	c := newTreeReadCache()

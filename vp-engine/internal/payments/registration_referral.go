@@ -56,23 +56,35 @@ func (s *Store) RecordRegistrationReferral(ctx context.Context, email, code stri
 }
 
 func (s *Store) LookupRegistrationReferral(ctx context.Context, email string) (*RegistrationReferral, error) {
+	return s.lookupRegistrationReferral(ctx, email, false)
+}
+
+// Checkout must not confuse a fresh but ineligible attribution with no hint:
+// falling back in that case would silently assign a different sponsor. Other
+// readers retain the historical contract of hiding unusable referrals.
+func (s *Store) lookupCheckoutRegistrationReferral(ctx context.Context, email string) (*RegistrationReferral, error) {
+	return s.lookupRegistrationReferral(ctx, email, true)
+}
+
+func (s *Store) lookupRegistrationReferral(ctx context.Context, email string, rejectIneligible bool) (*RegistrationReferral, error) {
 	emailNorm := normalizeRegistrationReferralEmail(email)
 	if emailNorm == "" {
 		return nil, nil
 	}
 
 	var out RegistrationReferral
+	var eligible bool
 	err := s.db.QueryRow(ctx, `
-		SELECT rr.referral_code, rr.sponsor_affiliate_id, COALESCE(rr.preferred_side, '')
+		SELECT rr.referral_code, rr.sponsor_affiliate_id, COALESCE(rr.preferred_side, ''),
+		       COALESCE((`+placementSponsorEligibilitySQL+`), false)
 		  FROM payments.registration_referral rr
-		  JOIN mlm.affiliate a ON a.id = rr.sponsor_affiliate_id
-		  JOIN mlm.person p ON p.id = a.person_id
+		  LEFT JOIN mlm.affiliate a ON a.id = rr.sponsor_affiliate_id
+		  LEFT JOIN mlm.person p ON p.id = a.person_id
 		 WHERE rr.email_norm = $1
 		   AND rr.consumed_at IS NULL
 		   AND rr.updated_at >= now() - interval '30 days'
-		   AND `+placementSponsorEligibilitySQL+`
 		 LIMIT 1
-	`, emailNorm).Scan(&out.Code, &out.SponsorAffiliateID, &out.PreferredSide)
+	`, emailNorm).Scan(&out.Code, &out.SponsorAffiliateID, &out.PreferredSide, &eligible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -81,7 +93,10 @@ func (s *Store) LookupRegistrationReferral(ctx context.Context, email string) (*
 	}
 	out.Code = strings.TrimSpace(out.Code)
 	out.PreferredSide = normalizePreferredSide(out.PreferredSide)
-	if out.Code == "" || out.SponsorAffiliateID <= 0 {
+	if !eligible || out.Code == "" || out.SponsorAffiliateID <= 0 {
+		if rejectIneligible {
+			return nil, ErrInvalidReferralCode
+		}
 		return nil, nil
 	}
 	return &out, nil

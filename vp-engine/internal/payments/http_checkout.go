@@ -2,10 +2,8 @@ package payments
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -48,13 +46,8 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req checkoutRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
-	if err := decoder.Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	req, err := decodeCheckoutRequest(w, r)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
@@ -290,7 +283,7 @@ func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, bu
 		// The verified server hint is authoritative across browsers/devices.
 		// A newly chosen link must finish its owner-checked POST before checkout;
 		// local storage must never replace a different, newer server attribution.
-		registeredReferral, err := h.store.LookupRegistrationReferral(ctx, email)
+		registeredReferral, err := h.store.lookupCheckoutRegistrationReferral(ctx, email)
 		if err != nil {
 			return nil, "", "", err
 		}

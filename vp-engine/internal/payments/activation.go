@@ -299,6 +299,15 @@ func (s *Store) activatePaidPurchase(ctx context.Context, sessionID, paymentInte
 }
 
 func (s *Store) invalidateMemberCaches(ctx context.Context, email string) {
+	s.invalidateLocalMemberCaches(ctx, email)
+	if reader := s.memberCacheReader; reader != nil && reader != s {
+		reader.invalidateLocalMemberCaches(ctx, email)
+	}
+}
+
+// Only local eviction is forwarded: unrelated Stores remain isolated and even
+// a self-reference cannot recurse. Configuration is fixed before serving.
+func (s *Store) invalidateLocalMemberCaches(ctx context.Context, email string) {
 	s.treeReads.invalidate()
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {

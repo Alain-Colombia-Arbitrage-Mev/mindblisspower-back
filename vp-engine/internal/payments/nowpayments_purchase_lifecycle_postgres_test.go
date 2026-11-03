@@ -114,9 +114,11 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := NewHandler(readStore, nil, "synthetic-service", nil, 0, zerolog.Nop())
-	handler.nowMemberships = &nowPaymentsMemberships{client: client, store: store, environment: "production", operational: true,
-		callbackURL: "https://mindblisspower.com/api/webhooks/nowpayments", successURL: "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=review",
-		cancelURL: "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=cancelled"}
+	if err := handler.SetNOWPaymentsOperational(client, store, NOWPaymentsSettings{MembershipsEnabled: true, Environment: "production",
+		CallbackURL: "https://mindblisspower.com/api/webhooks/nowpayments", SuccessURL: "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=review",
+		CancelURL: "https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=cancelled"}); err != nil {
+		t.Fatal(err)
+	}
 	checkout := func(in NOWPaymentsMembershipInput) (int, checkoutResponse, string) {
 		r := httptest.NewRequest(http.MethodPost, "/api/payments/checkout", nil).WithContext(ctx)
 		w := httptest.NewRecorder()
@@ -155,10 +157,21 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 	}
 	activate := func(order NOWPaymentsMembershipAttempt, hash string) {
 		t.Helper()
+		readStore.treeReads.invalidate()
+		if _, err := readStore.treeReads.read(ctx, "activation-regression", time.Minute, func(context.Context) ([]AdminTreeNode, error) {
+			return []AdminTreeNode{{ID: "before-activation"}}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		payment := paymentFor(order)
 		record(payment, hash)
 		if state, err := store.processNOWOperationalPayment(ctx, "production", payment, payment, hash); err != nil || state != "activated" {
 			t.Fatal("synthetic activation", state, err)
+		}
+		if nodes, err := readStore.treeReads.read(ctx, "activation-regression", time.Minute, func(context.Context) ([]AdminTreeNode, error) {
+			return []AdminTreeNode{{ID: "after-activation"}}, nil
+		}); err != nil || len(nodes) != 1 || nodes[0].ID != "after-activation" {
+			t.Fatal("committed activation did not invalidate its configured reader", nodes, err)
 		}
 	}
 	assertPendingPreserved := func() {
@@ -329,6 +342,18 @@ func TestNOWPurchaseLifecyclePostgresRestrictedRole(t *testing.T) {
 	t.Run("same SKU memberships retain independent CDs and request identity", func(t *testing.T) {
 		in, first := create(8404)
 		_, second := create(8404)
+		_, _ = readStore.treeReads.read(ctx, "rejected-activation", time.Minute, func(context.Context) ([]AdminTreeNode, error) {
+			return []AdminTreeNode{{ID: "unchanged"}}, nil
+		})
+		if _, err := store.activateNOWOperationalOrder(ctx, "production", first.ID); !errors.Is(err, ErrNOWPaymentsEvidence) {
+			t.Fatal("activation without payment evidence must fail", err)
+		}
+		if nodes, err := readStore.treeReads.read(ctx, "rejected-activation", time.Minute, func(context.Context) ([]AdminTreeNode, error) {
+			t.Fatal("rolled-back activation evicted the reader before commit")
+			return nil, nil
+		}); err != nil || len(nodes) != 1 || nodes[0].ID != "unchanged" {
+			t.Fatal(nodes, err)
+		}
 		activate(first, strings.Repeat("1", 64))
 		if _, err := store.CreateNOWPaymentsMembership(ctx, in); !errors.Is(err, ErrNOWPurchaseProcessed) {
 			t.Fatal("old request key opened a fresh purchase after activation", err)
