@@ -287,8 +287,20 @@ func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, bu
 	preferredSideForIntent := ""
 
 	if buyer.AffiliateID == nil && sponsor == nil {
-		if referralCode != "" {
-			resolvedSponsor, err := h.store.ResolveSponsorByCode(ctx, referralCode)
+		// The verified server hint is authoritative across browsers/devices.
+		// A newly chosen link must finish its owner-checked POST before checkout;
+		// local storage must never replace a different, newer server attribution.
+		registeredReferral, err := h.store.LookupRegistrationReferral(ctx, email)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if registeredReferral != nil {
+			sid := registeredReferral.SponsorAffiliateID
+			sponsor = &sid
+			referralCodeForIntent = registeredReferral.Code
+			preferredSideForIntent = registeredReferral.PreferredSide
+		} else if referralCode != "" {
+			resolvedSponsor, err := h.store.resolveVerifiedCheckoutSponsor(ctx, referralCode)
 			if err != nil {
 				return nil, "", "", err
 			}
@@ -298,27 +310,6 @@ func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, bu
 			sponsor = resolvedSponsor
 			referralCodeForIntent = referralCode
 			preferredSideForIntent = normalizePreferredSide(requestedSide)
-
-			// El registro persistido es autoritativo cuando corresponde al mismo
-			// código. Evita que un almacenamiento local viejo cambie L/R al pagar.
-			registeredReferral, lookupErr := h.store.LookupRegistrationReferral(ctx, email)
-			if lookupErr != nil {
-				return nil, "", "", lookupErr
-			}
-			if registeredReferral != nil && strings.EqualFold(registeredReferral.Code, referralCode) {
-				preferredSideForIntent = registeredReferral.PreferredSide
-			}
-		} else {
-			registeredReferral, err := h.store.LookupRegistrationReferral(ctx, email)
-			if err != nil {
-				return nil, "", "", err
-			}
-			if registeredReferral != nil {
-				sid := registeredReferral.SponsorAffiliateID
-				sponsor = &sid
-				referralCodeForIntent = registeredReferral.Code
-				preferredSideForIntent = registeredReferral.PreferredSide
-			}
 		}
 	}
 

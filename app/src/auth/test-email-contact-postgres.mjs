@@ -13,6 +13,7 @@ const source = fileURLToPath(new URL('../', import.meta.url));
 const phoneLibrary = fileURLToPath(new URL('../../node_modules/libphonenumber-js', import.meta.url));
 const migration = readFileSync(new URL('../../../_meta/migration/76_registration_contact_details.sql', import.meta.url), 'utf8');
 const identityMigration = readFileSync(new URL('../../../_meta/migration/70_stable_identity_bindings.sql', import.meta.url), 'utf8');
+const verifiedEmailMigration = readFileSync(new URL('../../../_meta/migration/78_verified_email_identity_binding.sql', import.meta.url), 'utf8');
 const env = { ...process.env, POSTGRES_PASSWORD: password,
   EMAIL_CONTACT_TEST_DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:5432/email_contact_synthetic`,
   EMAIL_CONTACT_AUTH_DATABASE_URL: `postgres://contact_auth_fixture:${password}@127.0.0.1:5432/email_contact_synthetic` };
@@ -35,17 +36,24 @@ try {
   assert.ok(ready, 'disposable PostgreSQL did not become ready');
   const sql = text => docker(['exec', '-i', name, 'psql', '-U', 'postgres', '-d', 'email_contact_synthetic', '-v', 'ON_ERROR_STOP=1'], text);
   sql(`
-    CREATE EXTENSION citext;
+    CREATE EXTENSION citext; CREATE EXTENSION unaccent;
     CREATE SCHEMA auth; CREATE SCHEMA mlm;
     CREATE TABLE auth."user" (id text PRIMARY KEY,email text NOT NULL UNIQUE,email_verified boolean NOT NULL DEFAULT false,name text,
       created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE mlm.person (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,user_id text UNIQUE REFERENCES auth."user"(id),
-      first_name text NOT NULL,last_name text NOT NULL,email citext NOT NULL UNIQUE,phone_number text NOT NULL,
+      first_name text NOT NULL,last_name text NOT NULL,email citext NOT NULL UNIQUE,phone_number text NOT NULL,birthday date,
       status text NOT NULL DEFAULT 'pending',kyc_status text NOT NULL DEFAULT 'not_started',is_admin boolean NOT NULL DEFAULT false,
       blacklisted boolean NOT NULL DEFAULT false);
-    CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,person_id bigint NOT NULL REFERENCES mlm.person(id),parent_id bigint,sponsor_id bigint,path text,current_rank_id integer);
+    CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,person_id bigint NOT NULL REFERENCES mlm.person(id),parent_id bigint,sponsor_id bigint,path text,current_rank_id integer,status text NOT NULL DEFAULT 'active');
+    CREATE TABLE mlm.blacklist(email_norm text,phone_last10 text,name_norm text,birthdate date);
+    CREATE FUNCTION mlm.norm_email(p text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT NULLIF(lower(btrim(p)),'') $$;
+    CREATE FUNCTION mlm.norm_phone10(p text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+      WITH d AS (SELECT regexp_replace(coalesce(p,''),'\\D','','g') AS digits)
+      SELECT CASE WHEN length(digits)<10 OR right(digits,10) ~ '^(.)\\1{9}$' THEN NULL ELSE right(digits,10) END FROM d $$;
+    CREATE FUNCTION mlm.norm_name(p text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+      SELECT NULLIF(regexp_replace(lower(unaccent(btrim(coalesce(p,'')))),'\\s+',' ','g'),'') $$;
     INSERT INTO mlm.person(first_name,last_name,email,phone_number,status) VALUES('Legacy','Member','legacy-contact@example.test','+573001111111','active');
-    INSERT INTO mlm.affiliate VALUES(71,1,NULL,NULL,'n71',3);
+    INSERT INTO mlm.affiliate(id,person_id,parent_id,sponsor_id,path,current_rank_id) VALUES(71,1,NULL,NULL,'n71',3);
     CREATE ROLE mindbliss_auth_core_v1 NOLOGIN;
     CREATE ROLE mindbliss_member_reader_bootstrap_v1 NOLOGIN;
     CREATE ROLE mindbliss_reader_20261025 NOLOGIN;
@@ -57,7 +65,9 @@ try {
   sql(`
     GRANT USAGE ON SCHEMA auth,mlm,identity TO mindbliss_auth_core_v1;
     GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.session,auth.account,auth.verification,auth.jwks,auth.rate_limit TO mindbliss_auth_core_v1;
-    GRANT SELECT(id,public_id,user_id,email,status,blacklisted,is_admin) ON mlm.person TO mindbliss_auth_core_v1;
+    GRANT SELECT(id,public_id,user_id,email,status,blacklisted,is_admin,first_name,last_name,phone_number,birthday) ON mlm.person TO mindbliss_auth_core_v1;
+    GRANT SELECT(person_id,status) ON mlm.affiliate TO mindbliss_auth_core_v1;
+    GRANT SELECT(email_norm,phone_last10,name_norm,birthdate) ON mlm.blacklist TO mindbliss_auth_core_v1;
     GRANT INSERT(user_id,first_name,last_name,email,phone_number,status,kyc_status),UPDATE(user_id) ON mlm.person TO mindbliss_auth_core_v1;
     GRANT SELECT,INSERT ON identity.auth_binding TO mindbliss_auth_core_v1;
     GRANT SELECT ON identity.link_conflict TO mindbliss_auth_core_v1;
@@ -76,6 +86,7 @@ try {
   assert.match(sql("SELECT count(*) FROM information_schema.columns WHERE table_schema='auth' AND table_name='user' AND column_name LIKE 'contact_%'"), /\n\s*0\s*\n/);
   sql('REVOKE SELECT ON auth."user" FROM mindbliss_member_reader_bootstrap_v1');
   sql(reviewed);
+  sql(verifiedEmailMigration.replace('REPLACE_WITH_CURATED_DATABASE', 'email_contact_synthetic'));
   const result = docker(['run', '--pull=never', '--rm', '-i', '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp',
     '--mount', `type=bind,source=${source},target=/app/src,readonly`,
     '--mount', `type=bind,source=${phoneLibrary},target=/app/node_modules/libphonenumber-js,readonly`,
@@ -135,19 +146,20 @@ try {
       equal((await owner.unsafe('SELECT count(*)::int AS n FROM mlm.person WHERE user_id=$1',[rows[0].id]))[0].n,0,'unverified email never creates business identity');
       equal((await owner.unsafe('SELECT count(*)::int AS n FROM auth.session'))[0].n,0);
       equal((await request('/sign-in/email',{email,password:'Synthetic-contact-password-123'})).status,403);
-      equal((await request('/email-otp/verify-email',{email,otp:emailCode()})).status,200);
-      equal((await owner.unsafe('SELECT count(*)::int AS n FROM auth.session'))[0].n,0,'verification itself does not create session');
-      const login=await request('/sign-in/email',{email,password:'Synthetic-contact-password-123'});equal(login.status,200);
+      const login=await request('/email-otp/verify-email',{email,otp:emailCode()});equal(login.status,200);
+      equal((await owner.unsafe('SELECT count(*)::int AS n FROM auth.session'))[0].n,1,'only verified email proof creates the native session');
+      equal((await request('/sign-in/email',{email,password:'Synthetic-contact-password-123'})).status,401,'a password planted before mailbox proof was revoked');
       const person=(await owner.unsafe('SELECT phone_number FROM mlm.person WHERE user_id=$1',[rows[0].id]))[0];equal(person.phone_number,phone,'only new person receives its own subject contact');
       const session=await request('/get-session',undefined,cookie(login));equal(session.status,200);
       const current=await session.json();equal(current.user.emailVerified,true);equal(current.user.contactPhone,undefined);equal(current.user.contactWhatsapp,undefined);
       const originalPhone=(await owner.unsafe("SELECT phone_number FROM mlm.person WHERE email='legacy-contact@example.test'"))[0].phone_number;
       equal((await signup('legacy-contact@example.test',{contactPhone:phone,contactWhatsapp:whatsapp})).status,200,'shared contact is not reserved or unique');
-      equal((await request('/email-otp/verify-email',{email:'legacy-contact@example.test',otp:emailCode()})).status,200);
-      equal((await request('/sign-in/email',{email:'legacy-contact@example.test',password:'Synthetic-contact-password-123'})).status,200);
-      const legacy=(await owner.unsafe("SELECT user_id,phone_number FROM mlm.person WHERE email='legacy-contact@example.test'"))[0];equal(legacy.user_id,null);equal(legacy.phone_number,originalPhone,'never overwrite legacy contact or claim via email/phone');
+      equal((await request('/email-otp/verify-email',{email:'legacy-contact@example.test',otp:emailCode()})).status,200,'verified legacy email can establish its native session after eligible linking');
+      equal((await request('/sign-in/email',{email:'legacy-contact@example.test',password:'Synthetic-contact-password-123'})).status,401,'legacy proof also revokes the unproven password');
+      const legacy=(await owner.unsafe("SELECT user_id,phone_number FROM mlm.person WHERE email='legacy-contact@example.test'"))[0];equal(legacy.phone_number,originalPhone,'never overwrite a legacy contact from self-declared registration contacts');
       const legacyUser=(await owner.unsafe('SELECT id FROM auth."user" WHERE email=$1',['legacy-contact@example.test']))[0];
-      equal((await getAuthPersonBinding(db,{userId:legacyUser.id})).status,'claim_required');
+      equal(legacy.user_id,legacyUser.id,'canonical email proof links only the unique eligible non-admin legacy person');
+      equal((await getAuthPersonBinding(db,{userId:legacyUser.id})).status,'existing');
       equal((await signup('short-country@example.test',{contactPhone:'+6838888'})).status,200,'country metadata allows a possible seven-digit international number');
       equal((await signup('empty-contact@example.test',{contactPhone:'',contactWhatsapp:'  '})).status,200);
       equal((await owner.unsafe('SELECT contact_phone_e164,contact_whatsapp_e164 FROM auth."user" WHERE email=$1',['empty-contact@example.test']))[0],{contact_phone_e164:null,contact_whatsapp_e164:null});
@@ -164,7 +176,7 @@ try {
       equal(sms,0);equal(providerCalls,0);equal((await owner.unsafe("SELECT to_regclass('auth.sms_opt_in') AS relation"))[0].relation,null);
       console.log(JSON.stringify({syntheticPostgres:'17.11',assertions,migrationDatabaseGuard:true,inheritedReaderGuard:true,
         restrictedAuthRole:true,emailProofRequired:true,contactsPersisted:true,sharedContactsAllowed:true,
-        legacyPersonUnchanged:true,treeAndRankUnchanged:true,registrationSms:false,realMessages:0,network:'none',providerCalls,productionAccess:false}));
+        legacyContactUnchanged:true,uniqueEligibleLegacyLinked:true,treeAndRankUnchanged:true,registrationSms:false,realMessages:0,network:'none',providerCalls,productionAccess:false}));
     } finally {await Promise.all([writerConnection.end({timeout:2}),owner.end({timeout:2})]);}
   `);
   console.log(result);

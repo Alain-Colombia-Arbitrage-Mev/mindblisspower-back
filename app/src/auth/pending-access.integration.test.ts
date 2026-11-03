@@ -19,9 +19,9 @@ const env: AuthEnvironment = {
   CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001', AUTH_EMAIL_FROM: 'auth@example.test',
 };
 const email = 'pending-member@example.test';
-type Legacy = { id: string; email: string; user_id: string | null; status: string; blacklisted: boolean; is_admin: boolean };
+type Legacy = { id: string; email: string; user_id: string | null; status: string; blacklisted: boolean; is_admin: boolean; access_restricted: boolean };
 
-function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' | 'privileged' = 'unique',
+function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' | 'affiliate-blocked' | 'blacklist-only' | 'privileged' = 'unique',
   canonicalFault?: 'unverified' | 'other-subject' | 'other-email' | 'missing' | 'unavailable') {
   const userId = 'synthetic-precreated-access';
   const store: MemoryDB = {
@@ -29,7 +29,8 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' | 'privileged' = '
       createdAt: new Date(), updatedAt: new Date() }],
     account: [], session: [], verification: [], rateLimit: [], jwks: [],
   };
-  const legacy: Legacy[] = [{ id: '71', email, user_id: null, status: 'active', blacklisted: kind === 'blacklisted', is_admin: kind === 'privileged' }];
+  const legacy: Legacy[] = [{ id: '71', email, user_id: null, status: 'active', blacklisted: kind === 'blacklisted',
+    is_admin: kind === 'privileged', access_restricted: ['blacklisted', 'affiliate-blocked', 'blacklist-only'].includes(kind) }];
   if (kind === 'duplicate') legacy.push({ ...legacy[0]!, id: '72', email: email.toUpperCase() });
   const affiliates = legacy.map(row => ({ id: row.id, person_id: row.id, parent_id: null,
     sponsor_id: null, position: null, rank: 'PRESERVED', points_left: '110', points_right: '220' }));
@@ -52,10 +53,11 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' | 'privileged' = '
         name: store.user![0]!.name, person_id: person?.id ?? null,
         public_id: person ? '51f8d415-0f6c-40b9-9544-f553f8c247c6' : null, person_email: person?.email ?? null,
         person_status: person?.status ?? null, blacklisted: person?.blacklisted ?? null,
+        access_restricted: person?.access_restricted ?? null,
         user_id: person?.user_id ?? null, is_admin: person?.is_admin ?? null,
       }]; }
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return [];
-      if (text.includes('FROM mlm.person WHERE lower(btrim(email::text))=')) return legacy.filter(row => row.email.trim().toLowerCase() === String(compiled.params[0]));
+      if (text.includes('FROM mlm.person p WHERE lower(btrim(p.email::text))=')) return legacy.filter(row => row.email.trim().toLowerCase() === String(compiled.params[0]));
       if (text.includes('FROM identity.auth_binding WHERE person_id=')) return bindings.filter(row => row.person === compiled.params[0]);
       if (text.startsWith('UPDATE mlm.person SET user_id=')) {
         const person = legacy.find(row => row.id === compiled.params[1] && row.user_id === null);
@@ -144,7 +146,7 @@ function fixture(kind: 'unique' | 'duplicate' | 'blacklisted' | 'privileged' = '
 }
 const cookies = (response: Response) => response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
 
-for (const kind of ['unique', 'duplicate', 'blacklisted', 'privileged'] as const) {
+for (const kind of ['unique', 'duplicate', 'blacklisted', 'affiliate-blocked', 'blacklist-only', 'privileged'] as const) {
   test(`precreated ${kind} legacy access requires email proof and only a unique eligible non-admin can bind`, async () => {
     const app = fixture(kind);
     expect((await getAuthPersonBinding(app.database, { userId: 'synthetic-precreated-access' })).status).toBe('verification_required');
@@ -170,7 +172,7 @@ for (const kind of ['unique', 'duplicate', 'blacklisted', 'privileged'] as const
     expect(app.canonicalReads()).toBe(1);
     const resultStatus = kind === 'unique' ? 'existing' : kind === 'privileged' ? 'claim_required' : 'quarantined';
     expect(app.provisioned).toEqual([resultStatus]);
-    expect(app.conflicts.map(row => row.reason)).toEqual(kind === 'unique' ? [] : [kind === 'blacklisted' ? 'person_unavailable' : kind === 'duplicate' ? 'identity_collision' : 'legacy_claim_required']);
+    expect(app.conflicts.map(row => row.reason)).toEqual(kind === 'unique' ? [] : [kind === 'duplicate' ? 'identity_collision' : kind === 'privileged' ? 'legacy_claim_required' : 'person_unavailable']);
     const binding = await getAuthPersonBinding(app.database, { userId: 'synthetic-precreated-access' });
     expect(binding.status).toBe(resultStatus);
     const cookie = cookies(signedIn);

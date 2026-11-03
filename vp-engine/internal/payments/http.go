@@ -17,18 +17,19 @@ import (
 
 // Handler expone los endpoints HTTP del servicio de pagos.
 type Handler struct {
-	store            *Store
-	gw               *StripeGateway
-	nowMemberships   *nowPaymentsMemberships
-	nowCapture       *nowPaymentsCapture
-	nowJobs          *nowOperationalJobRunner
-	nowReady         func(context.Context) error
-	log              zerolog.Logger
-	serviceToken     string
-	adminEmails      []string
-	superAdminEmails []string // subconjunto con rol "super_admin" (acceso total)
-	companyRoot      int64
-	httpClient       *http.Client
+	store               *Store
+	referralPersistence verifiedReferralPersistence // Defaults to store; no financial writer or provider.
+	gw                  *StripeGateway
+	nowMemberships      *nowPaymentsMemberships
+	nowCapture          *nowPaymentsCapture
+	nowJobs             *nowOperationalJobRunner
+	nowReady            func(context.Context) error
+	log                 zerolog.Logger
+	serviceToken        string
+	adminEmails         []string
+	superAdminEmails    []string // subconjunto con rol "super_admin" (acceso total)
+	companyRoot         int64
+	httpClient          *http.Client
 
 	stripeCheckoutEnabled bool
 

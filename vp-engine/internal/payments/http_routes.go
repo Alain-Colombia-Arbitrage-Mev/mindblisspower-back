@@ -12,6 +12,7 @@ func (h *Handler) Routes() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/payments/checkout", h.handleCheckout)
+	mux.HandleFunc(verifiedReferralPath, h.handleVerifiedReferral)
 	mux.HandleFunc("/api/payments/resume", h.handleResume)
 	mux.HandleFunc("/api/payments/me", h.handleMe)
 	mux.HandleFunc("/api/payments/nowpayments/status", h.handleNOWPaymentsCaptureStatus)

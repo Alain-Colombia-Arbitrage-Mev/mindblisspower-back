@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { bind, claimInput, normalizedEmail, principal, principalResult, quarantine, tokenHash, type IdentityDatabase, type IdentityResult } from './model';
+import { bind, claimInput, normalizedEmail, personAccessRestricted, principal, principalResult, quarantine, tokenHash, type IdentityDatabase, type IdentityResult } from './model';
 
 const approvalInput = z.object({
   approverUserId: z.string().min(1).max(255), userId: z.string().min(1).max(255), personPublicId: z.string().uuid(),
@@ -17,10 +17,11 @@ export async function approveLegacyClaim(database: IdentityDatabase, input: z.in
     if (value.approverUserId === value.userId || principalResult(approver).status !== 'existing' || !approver?.is_admin) throw new Error('identity_approval_denied');
     await tx.execute(sql`SELECT id FROM auth.user WHERE id=${value.userId} FOR UPDATE`);
     const target = await principal(tx, value.userId);
-    const people = await tx.execute<{ id: string; email: string; status: string; blacklisted: boolean; user_id: string | null }>(sql`
-      SELECT id::text,email::text,status::text,blacklisted,user_id FROM mlm.person WHERE public_id=${value.personPublicId}::uuid FOR UPDATE`);
+    const people = await tx.execute<{ id: string; email: string; status: string; blacklisted: boolean; user_id: string | null; access_restricted: boolean }>(sql`
+      SELECT p.id::text,p.email::text,p.status::text,p.blacklisted,p.user_id,${personAccessRestricted} AS access_restricted
+      FROM mlm.person p WHERE p.public_id=${value.personPublicId}::uuid FOR UPDATE OF p`);
     const person = people[0];
-    if (!target?.email_verified || target.person_id || !person || person.user_id || person.blacklisted
+    if (!target?.email_verified || target.person_id || !person || person.user_id || person.blacklisted || person.access_restricted !== false
       || !['pending', 'active'].includes(person.status) || normalizedEmail(target.auth_email) !== normalizedEmail(person.email)) throw new Error('identity_approval_denied');
     const token = randomBytes(32).toString('hex');
     const grants = await tx.execute<{ id: string }>(sql`
@@ -44,12 +45,14 @@ export async function claimLegacyPerson(database: IdentityDatabase, input: { use
       FROM identity.legacy_claim_grant WHERE token_hash=${tokenHash(token)} FOR UPDATE`);
     const grant = grants[0];
     if (!grant || grant.subject !== userId || !grant.valid) return quarantine(tx, userId, 'invalid_claim');
-    const people = await tx.execute<{ id: string; email: string; status: string; blacklisted: boolean; user_id: string | null }>(sql`
-      SELECT id::text,email::text,status::text,blacklisted,user_id FROM mlm.person WHERE id=${grant.person_id}::bigint FOR UPDATE`);
+    const people = await tx.execute<{ id: string; email: string; status: string; blacklisted: boolean; user_id: string | null; access_restricted: boolean }>(sql`
+      SELECT p.id::text,p.email::text,p.status::text,p.blacklisted,p.user_id,${personAccessRestricted} AS access_restricted
+      FROM mlm.person p WHERE p.id=${grant.person_id}::bigint FOR UPDATE OF p`);
     const person = people[0];
-    if (!person || person.user_id || person.blacklisted || !['pending', 'active'].includes(person.status)
+    if (!person || person.user_id || person.blacklisted || person.access_restricted !== false || !['pending', 'active'].includes(person.status)
       || normalizedEmail(auth.auth_email) !== normalizedEmail(person.email)) return quarantine(tx, userId, 'identity_collision', grant.person_id);
     const result = await bind(tx, userId, person.id, grant.kind);
+    if (result.status !== 'existing') return result;
     await tx.execute(sql`UPDATE identity.legacy_claim_grant SET consumed_at=now() WHERE id=${grant.id}::uuid`);
     return result;
   });

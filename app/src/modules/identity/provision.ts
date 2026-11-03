@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
-import { bind, normalizedEmail, principal, principalResult, quarantine, userInput, type IdentityDatabase, type IdentityResult } from './model';
+import { registrationAllowed } from '../../auth/registration';
+import { bind, normalizedEmail, personAccessRestricted, principal, principalResult, quarantine, userInput, type IdentityDatabase, type IdentityResult } from './model';
 
 /** Read-only authority for JWTs. No person creation, email matching or repair. */
 export async function getAuthPersonBinding(database: Pick<IdentityDatabase, 'execute'>, input: { userId: string }): Promise<IdentityResult> {
@@ -27,13 +28,13 @@ export async function provisionAuthPerson(database: IdentityDatabase, input: { u
     // Serializes normalized email variants across auth subjects. Existing
     // bindings remain authoritative; no email, person data or node is replaced.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'person-email:' + normalizedEmail(auth.auth_email)},0))`);
-    const candidates = await tx.execute<{ id: string; user_id: string | null; status: string; blacklisted: boolean; is_admin: boolean }>(sql`
-      SELECT id::text,user_id,status::text,blacklisted,is_admin FROM mlm.person
-      WHERE lower(btrim(email::text))=${normalizedEmail(auth.auth_email)} ORDER BY id FOR UPDATE`);
+    const candidates = await tx.execute<{ id: string; user_id: string | null; status: string; blacklisted: boolean; is_admin: boolean; access_restricted: boolean }>(sql`
+      SELECT p.id::text,p.user_id,p.status::text,p.blacklisted,p.is_admin,${personAccessRestricted} AS access_restricted FROM mlm.person p
+      WHERE lower(btrim(p.email::text))=${normalizedEmail(auth.auth_email)} ORDER BY p.id FOR UPDATE OF p`);
     if (candidates.length > 1) return quarantine(tx, userId, 'identity_collision');
     const candidate = candidates[0];
     if (candidate) {
-      if (candidate.blacklisted || !['pending', 'active'].includes(candidate.status)) return quarantine(tx, userId, 'person_unavailable', candidate.id);
+      if (candidate.blacklisted || candidate.access_restricted !== false || !['pending', 'active'].includes(candidate.status)) return quarantine(tx, userId, 'person_unavailable', candidate.id);
       if (candidate.user_id && candidate.user_id !== userId) return quarantine(tx, userId, 'identity_collision', candidate.id);
       // The person row is already locked. The immutable binding is read-only
       // here: SELECT FOR UPDATE would require forbidden UPDATE privileges.
@@ -48,11 +49,18 @@ export async function provisionAuthPerson(database: IdentityDatabase, input: { u
       }
       return bind(tx, userId, candidate.id, candidate.user_id === userId ? 'legacy_user_id' : 'verified_email');
     }
+    // A blacklist may have changed since signup. Recheck before creating any
+    // person/binding; an OTP proves email ownership, not business eligibility.
+    const phone = locked[0]!.contact_phone_e164;
+    if (!await registrationAllowed(tx, { email: auth.auth_email,
+      name: (auth.name ?? '').trim() || auth.auth_email.split('@')[0]!, ...(phone ? { phone } : {}) })) {
+      return quarantine(tx, userId, 'person_unavailable');
+    }
     const [first, ...last] = (auth.name ?? '').trim().split(/\s+/);
     const created = await tx.execute<{ id: string }>(sql`
       INSERT INTO mlm.person(user_id,first_name,last_name,email,phone_number,status,kyc_status)
       VALUES(${userId},${first || auth.auth_email.split('@')[0]!},${last.join(' ') || '-'},${normalizedEmail(auth.auth_email)},${locked[0]!.contact_phone_e164 ?? ''},'pending','not_started') RETURNING id::text`);
     const result = await bind(tx, userId, created[0]!.id, 'new_registration');
-    return { ...result, status: 'created' };
+    return result.status === 'existing' ? { ...result, status: 'created' } : result;
   });
 }

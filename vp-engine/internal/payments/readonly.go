@@ -36,6 +36,14 @@ func (c *Config) ReadOnlyHandler(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
+		// A separately granted SECURITY DEFINER capability may only persist an
+		// authenticated, unpositioned owner's referral hint. No financial flags,
+		// legacy registration writes, or general table DML are enabled here.
+		if r.URL.Path == verifiedReferralPath && r.URL.RawPath == "" && !r.URL.ForceQuery &&
+			((r.Method == http.MethodGet && r.URL.RawQuery != "") || (r.Method == http.MethodPost && r.URL.RawQuery == "")) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery &&
 			((r.Method == http.MethodGet && r.URL.Path == nowPurchasesPath && (c.NOWPaymentsOperational.Enabled || c.NOWPaymentsCapture.Enabled)) ||
 				(r.Method == http.MethodPost && c.NOWPaymentsOperational.Enabled && (r.URL.Path == nowPurchasesPath+"/resume" || r.URL.Path == nowPurchasesPath+"/cancel"))) {
