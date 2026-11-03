@@ -37,8 +37,29 @@ OTP, registro, vinculación y sesiones sólo de base de datos conservan sus regl
 - Logout nativo con origen ajeno o cookie inválida no elimina sesiones.
 - Sin pagos, OTP reales, cambio de contraseña de usuarios ni acceso a datos
   productivos para las pruebas de regresión.
-- Portal: 655 pruebas correctas; administrador: 339, incluidas 17 regresiones
+- Portal: 655 pruebas correctas; administrador: 340, incluidas 18 regresiones
   del hook y panel reales; Core: 130. Cero fallos.
+- El orden de relevancia de búsquedas conserva el orden del backend; ordenar
+  por lado e ID sigue reservado a raíces y ramas.
+- Smoke de los Workers compilados: portal 100 comprobaciones y administrador
+  36, sin red externa, consultas reales ni mensajes.
 
 Los bloqueos transaccionales siguen la [documentación de PostgreSQL](https://www.postgresql.org/docs/17/explicit-locking.html),
 y las sesiones permanecen sin [caché de cookies de Better Auth](https://better-auth.com/docs/concepts/session-management).
+
+## Publicación
+
+- Core Worker `c6e0ea92-d972-42bf-95a4-9049f91f432a`, 100 %.
+- API v13, 100 %, instancia saludable, cero errores y rollout terminado.
+- Imagen `mindbliss/api-session-guards-20261103`, digest
+  `sha256:fe7a0ce3a71831bddc8a0ffd2390c596c34736a696d853a847bc576245207f9e`.
+- Sólo cambió la imagen de la API: motor v1, pagos v15 y retiros v3 intactos.
+  Se conservaron flags, bindings y secretos de correo.
+- Portal sin cambios de código ni nuevo despliegue: versión publicada
+  `9a33313a-5af7-46c2-b795-92f4ddffbbc7`; utiliza el backend actualizado.
+- Administrador `26d2dfd`, Worker
+  `eca0250c-1d12-47ab-8c8c-b35c708821ba`, 100 %. Compilación y smoke offline
+  correctos; 6 rutas y 5 chunks comprobados por GET con digest e inmutabilidad.
+  Variables, cinco nombres de secretos y bindings coinciden con la referencia.
+- En producción se usaron sólo comprobaciones de metadatos/GET y un rechazo
+  vacío de origen ajeno, sin sesiones reales, mensajes ni facturas nuevas.
