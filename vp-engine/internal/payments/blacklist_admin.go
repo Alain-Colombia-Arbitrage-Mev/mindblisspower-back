@@ -3,16 +3,16 @@ package payments
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
 
-// Gestión de la lista negra desde el panel admin. Banear = agregar a
-// mlm.blacklist (bloquea futuros registros) + deshabilitar la cuenta viva si
-// existe (mlm.person.status=suspended + Cognito AdminDisableUser). Desbanear =
-// quitar de la lista + rehabilitar la cuenta.
+// The blacklist is an email-only dynamic veto. Adding/removing an entry never
+// changes independent person flags, account/affiliate statuses or Cognito.
+var errInvalidBlacklistEmail = errors.New("invalid blacklist email")
 
 // BlacklistRow es una fila de la lista negra para el panel.
 type BlacklistRow struct {
@@ -76,23 +76,33 @@ func (s *Store) ListBlacklist(ctx context.Context, q string, limit, offset int) 
 	return out, total, rows.Err()
 }
 
-// AddBlacklist inserta una entrada normalizando con las funciones SQL. Devuelve
-// el id nuevo. birthdate vacío ⇒ NULL. source='admin_panel'. Una fila solo con
-// fullname crea un veto exacto por nombre normalizado.
+// AddBlacklist keeps its legacy signature, but name/phone/birthdate no longer
+// create blocking identifiers. Only a valid normalized email is persisted.
 func (s *Store) AddBlacklist(ctx context.Context, fullname, email, phone, birthdate, motive string) (int64, error) {
+	id, err := insertBlacklistEmail(ctx, s.db, email, motive)
+	if err != nil {
+		return 0, err
+	}
+	s.treeReads.invalidate()
+	return id, nil
+}
+
+func insertBlacklistEmail(ctx context.Context, q banQuerier, email, motive string) (int64, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !validVerifiedReferralEmail(email) {
+		return 0, errInvalidBlacklistEmail
+	}
 	var id int64
-	err := s.db.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO mlm.blacklist
-		    (fullname, birthdate, email, phone, email_norm, phone_last10, name_norm, motive, source)
+		    (email, email_norm, motive, source)
 		VALUES
-		    (NULLIF($1,''), NULLIF($4,'')::date, NULLIF($2,''), NULLIF($3,''),
-		     mlm.norm_email($2), mlm.norm_phone10($3), mlm.norm_name($1), NULLIF($5,''), 'admin_panel')
+		    ($1, mlm.norm_email($1), NULLIF($2,''), 'admin_panel')
 		RETURNING id
-	`, fullname, email, phone, birthdate, motive).Scan(&id)
+	`, email, motive).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("add blacklist: %w", err)
 	}
-	s.treeReads.invalidate()
 	return id, nil
 }
 
@@ -148,32 +158,6 @@ func (s *Store) PersonSuspendedByEmail(ctx context.Context, email string) (bool,
 	return decision.Blocked, nil
 }
 
-// applyAccountBan aplica el efecto "cuenta activa" al banear/desbanear por email:
-// mlm.person.status (SetBlocked) + Cognito enable/disable. Devuelve si había una
-// persona en la DB que se tocó. El efecto Cognito es best-effort (se loguea).
-func (h *Handler) applyAccountBan(ctx context.Context, email string, banned bool) bool {
-	email = strings.TrimSpace(email)
-	if email == "" {
-		return false
-	}
-	affected := false
-	if pid, exists, err := h.store.PersonIDByEmail(ctx, email); err != nil {
-		h.log.Error().Err(err).Str("email", email).Msg("blacklist: person lookup")
-	} else if exists {
-		if err := h.store.SetBlocked(ctx, pid, banned); err != nil {
-			h.log.Error().Err(err).Int64("person_id", pid).Msg("blacklist: set blocked")
-		} else {
-			affected = true
-		}
-	}
-	if h.cognitoAdmin != nil {
-		if _, err := h.cognitoAdmin.SetEnabled(ctx, email, !banned); err != nil {
-			h.log.Error().Err(err).Str("email", email).Msg("blacklist: cognito set enabled")
-		}
-	}
-	return affected
-}
-
 // rejectIfSuspended escribe 403 account_suspended y devuelve true si la cuenta
 // está baneada/suspendida. Ante error de infra falla cerrado: no se permite
 // operar sin validar el estado de acceso.
@@ -218,45 +202,33 @@ func (h *Handler) handleAdminBlacklist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"rows": rows, "total": total, "limit": limit, "offset": offset})
 	case http.MethodPost:
 		var req struct {
-			Fullname  string `json:"fullname"`
-			Email     string `json:"email"`
-			Phone     string `json:"phone"`
-			Birthdate string `json:"birthdate"`
-			Motive    string `json:"motive"`
+			Email  string `json:"email"`
+			Motive string `json:"motive"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-		req.Phone = strings.TrimSpace(req.Phone)
-		req.Fullname = strings.TrimSpace(req.Fullname)
-		req.Birthdate = strings.TrimSpace(req.Birthdate)
-		// Email/teléfono son identificadores fuertes. Nombre exacto también se
-		// permite para vetos operativos explícitos desde admin.
-		if req.Email == "" && req.Phone == "" && req.Fullname == "" {
-			writeErr(w, http.StatusBadRequest, "need_email_phone_or_name")
+		if !validVerifiedReferralEmail(req.Email) {
+			writeErr(w, http.StatusBadRequest, "invalid_blacklist_email")
 			return
 		}
-		id, err := h.store.AddBlacklist(r.Context(), req.Fullname, req.Email, req.Phone, req.Birthdate, req.Motive)
+		id, err := h.store.AddBlacklist(r.Context(), "", req.Email, "", "", req.Motive)
 		if err != nil {
 			h.log.Error().Err(err).Msg("add blacklist")
 			writeErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		accountDisabled := false
-		if req.Email != "" {
-			accountDisabled = h.applyAccountBan(r.Context(), req.Email, true)
-		}
 		h.log.Info().Int64("id", id).Str("email", req.Email).Msg("blacklist: added")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "account_disabled": accountDisabled})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "account_disabled": false})
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
 	}
 }
 
 // handleAdminBlacklistRemove: POST {id} (una fila) o {email} (todas las
-// coincidencias) — desbanear. Rehabilita la cuenta viva si existe.
+// coincidencias). Independent account/affiliate restrictions remain untouched.
 func (h *Handler) handleAdminBlacklistRemove(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdmin(w, r); !ok {
 		return
@@ -302,10 +274,6 @@ func (h *Handler) handleAdminBlacklistRemove(w http.ResponseWriter, r *http.Requ
 		removed = n
 	}
 
-	accountEnabled := false
-	if email != "" {
-		accountEnabled = h.applyAccountBan(r.Context(), email, false)
-	}
 	h.log.Info().Int64("removed", removed).Str("email", email).Msg("blacklist: removed")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "account_enabled": accountEnabled})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "account_enabled": false})
 }
