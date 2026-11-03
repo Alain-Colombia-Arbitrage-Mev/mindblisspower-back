@@ -53,6 +53,9 @@ not logged. Migrations are operator actions, never application startup tasks.
   Go 1.26.10 broad Payments/NOW suite: 221 primary tests and 1,133 subtests
   passed with the race detector; 32 explicit short-mode skips, zero failures.
   The new critical PostgreSQL capability suite also passed separately.
+  A separate non-short PostgreSQL/race run passed 8 primary tests and 37
+  subtests, with no skips, covering restricted NOW engine roles, membership
+  activation/lifecycle, idempotency and tree-cache authorization.
 - No production OTP, payment, invoice, customer placement or rank promotion was
   executed as a test. Application deployment checks must use metadata/public
   anonymous requests, not bypass email verification.
@@ -68,3 +71,20 @@ binary caps, pay rank bonuses, or change ROI/withdrawal policy.
 
 Deployment scope: portal, API, Payments and private Core routing only. Admin,
 Engine and Withdrawals images and all existing flags/secrets are preserved.
+
+## Published release
+
+- Portal source: `4c4c92c86052c856d41159eda0930c4322f3b868`.
+  Worker `e1bfc256-f81a-42a0-b50f-f1790393d6ad`, 100%.
+- Backend runtime source: `13b04785068961ded1b8570c4037761829f64ead`.
+  Core Worker `c3784a31-fd4c-47b6-8aec-cb50ad758d7d`, 100%.
+- API container v15 and Payments v16: 100%, expected digest matches, healthy,
+  no rollout errors. Engine v1 and Withdrawals v3 unchanged.
+- Admin Worker remains `eca0250c-1d12-47ab-8c8c-b35c708821ba`.
+- Anonymous production checks passed for login/registration guidance, private
+  no-store headers, unauthenticated referral GET (401), foreign-origin POST
+  (403), and matching immutable hashes of all affected public chunks. No owner
+  metadata, OTP, invoice or payment was written by these checks.
+- Existing portal artifact was preserved locally before replacement. Release
+  verification confirmed unchanged portal/admin binding and secret-name
+  fingerprints, and unchanged Core flags and inactive-service image digests.
