@@ -487,9 +487,11 @@ func autoPlaceAffiliateWithEnrollment(ctx context.Context, tx pgx.Tx, personID, 
 			// NOW volumes live in its immutable sidecar, not global tree_event.
 			// Count the new descendant without even acquiring UPDATE permission
 			// on historical/global PV columns via the legacy enrollment trigger.
+			// Counts do not change keys: NO KEY UPDATE preserves ancestor ordering
+			// without conflicting with another placement's FK KEY SHARE locks.
 			if _, err := tx.Exec(ctx, `WITH ancestors AS(
  SELECT a.id,a.depth FROM mlm.affiliate a JOIN mlm.affiliate_closure c ON c.ancestor_id=a.id
- WHERE c.descendant_id=$1 AND c.distance>0 ORDER BY a.depth FOR UPDATE OF a), legs AS(
+ WHERE c.descendant_id=$1 AND c.distance>0 ORDER BY a.depth FOR NO KEY UPDATE OF a), legs AS(
  SELECT a.id,l.position FROM ancestors a JOIN mlm.affiliate l ON l.parent_id=a.id
  JOIN mlm.affiliate_closure c ON c.ancestor_id=l.id AND c.descendant_id=$1)
  UPDATE mlm.affiliate a SET left_count=a.left_count+CASE WHEN l.position='L' THEN 1 ELSE 0 END,
