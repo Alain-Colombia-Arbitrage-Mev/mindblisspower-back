@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { betterAuth } from 'better-auth';
 import { APIError } from 'better-auth/api';
 import type { GenericEndpointContext } from '@better-auth/core';
+import type { DBAdapter } from '@better-auth/core/db/adapter';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
@@ -591,4 +592,76 @@ if (!ownerURL && !authURL) {
     const credentials = await owner.unsafe('SELECT a.password FROM auth.account a JOIN auth."user" u ON u.id=a.user_id WHERE u.email=$1', [email]);
     expect(credentials.every(row => row.password === null)).toBe(true);
   });
+
+  for (const stage of ['consume', 'expired-read'] as const) {
+  test(`a delayed expired OTP ${stage} cannot delete a newer manual resend from another PostgreSQL replica`, async () => {
+    const app = await fixture('missing', true);
+    const firstWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {} });
+    const secondWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {} });
+    const firstFactory = postgresAuthAdapter(drizzle(firstWriter));
+    let arrived!: () => void, release!: () => void;
+    const consumed = new Promise<void>(resolve => { arrived = resolve; });
+    const resumed = new Promise<void>(resolve => { release = resolve; });
+    let pause = false;
+    const pausable: typeof firstFactory = configuration => {
+      const adapter = firstFactory(configuration), consume = adapter.consumeOne.bind(adapter), find = adapter.findMany.bind(adapter);
+      adapter.consumeOne = async <T>(input: Parameters<DBAdapter['consumeOne']>[0]): Promise<T | null> => {
+        const row = await consume<T>(input);
+        if (pause && stage === 'consume' && input.model === 'verification' && row) {
+          pause = false;
+          // Simulated elapsed deadline of this already-consumed exchange;
+          // never a real clock, production challenge or production budget.
+          (row as unknown as { expiresAt: Date }).expiresAt = new Date(Date.now() - 1000);
+          arrived(); await resumed;
+        }
+        return row;
+      };
+      adapter.findMany = async <T>(input: Parameters<DBAdapter['findMany']>[0]): Promise<T[]> => {
+        const rows = await find<T>(input);
+        if (pause && stage === 'expired-read' && input.model === 'verification'
+          && input.sortBy?.field === 'createdAt' && rows.length) {
+          pause = false;
+          const expired = { ...rows[0]!, expiresAt: new Date(Date.now() - 1000) };
+          arrived(); await resumed;
+          return [expired];
+        }
+        return rows;
+      };
+      return adapter;
+    };
+    const identity = { provision: async () => ({ status: 'existing' }), binding: async () => ({ status: 'claim_required' }), registrationAllowed: async () => true };
+    const delivery = { email: async (message: EmailMessage) => { app.messages.push(message); }, phone: async () => { throw new Error('No SMS'); } };
+    const first = betterAuth(createAuthOptions(env, pausable, identity, delivery));
+    const second = betterAuth(createAuthOptions(env, postgresAuthAdapter(drizzle(secondWriter)), identity, delivery));
+    const request = (replica: typeof first, path: string, body: unknown) => replica.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
+      method: 'POST', headers: { origin: 'https://portal.example.test', 'content-type': 'application/json',
+        'x-forwarded-for': replica === first ? '192.0.2.101' : '192.0.2.102' }, body: JSON.stringify(body),
+    }));
+    const send = (replica: typeof first) => request(replica, '/email-otp/send-verification-otp', { email: app.email, type: 'sign-in' });
+    let old: Promise<Response> | undefined;
+    try {
+      expect((await send(first)).status).toBe(200);
+      pause = true;
+      old = request(first, '/sign-in/email-otp', { email: app.email, otp: app.code() });
+      await consumed;
+      await owner.unsafe('UPDATE auth.rate_limit SET last_request=$1 WHERE key=$2', [Date.now() - 1, recipientBudgetKey(env.BETTER_AUTH_SECRET!, app.email)]);
+      expect((await send(second)).status).toBe(200);
+      const newCode = app.code();
+      const generation = await owner.unsafe('SELECT id,value,created_at,expires_at FROM auth.verification WHERE identifier=$1', [`sign-in-otp-${app.email}`]);
+      expect(generation).toHaveLength(1);
+      release();
+      const expired = await old;
+      expect(expired.status).toBe(400); expect(expired.headers.has('set-cookie')).toBe(false);
+      expect(await owner.unsafe('SELECT id,value,created_at,expires_at FROM auth.verification WHERE identifier=$1', [`sign-in-otp-${app.email}`])).toEqual(generation);
+      expect((await owner.unsafe('SELECT count(*)::int AS n FROM auth.session WHERE user_id=$1', [app.id]))[0]!.n).toBe(0);
+      expect((await request(second, '/sign-in/email-otp', { email: app.email, otp: newCode })).status).toBe(200);
+      expect((await owner.unsafe('SELECT count(*)::int AS n FROM auth.session WHERE user_id=$1', [app.id]))[0]!.n).toBe(1);
+      expect((await request(second, '/sign-in/email-otp', { email: app.email, otp: newCode })).status).toBe(400);
+      expect(app.messages).toHaveLength(2);
+    } finally {
+      release(); await old?.catch(() => {});
+      await Promise.all([firstWriter.end({ timeout: 2 }), secondWriter.end({ timeout: 2 })]);
+    }
+  });
+  }
 });

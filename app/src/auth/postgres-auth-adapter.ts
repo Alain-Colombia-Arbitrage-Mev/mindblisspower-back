@@ -5,6 +5,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import type { authDb } from '../db/auth-client';
 import * as schema from '../db/schema/auth';
 import { isRecoveryBudgetKey, RecoveryBudgetConflict } from './recovery-daily-budget';
+import { guardVerificationCleanup } from './verification-consume-cleanup';
 
 type Kind = 'string' | 'number' | 'date';
 // A real PgTransaction has the same builders but no pool/client. Keeping the
@@ -59,7 +60,7 @@ export function postgresAuthAdapter(database: AuthAdapterDatabase) {
   const factory = drizzleAdapter(database, { provider: 'pg', schema, usePlural: false, transaction: false });
   return (options: Parameters<typeof factory>[0]): DBAdapter => {
     const base = factory(options);
-    const wrapped: DBAdapter = { ...base,
+    const wrapped: DBAdapter = guardVerificationCleanup({ ...base,
       create: async <T extends Record<string, any>, R = T>(input: {
         model: string; data: Omit<T, 'id'>; select?: string[]; forceAllowId?: boolean;
       }): Promise<R> => {
@@ -102,7 +103,7 @@ export function postgresAuthAdapter(database: AuthAdapterDatabase) {
       // Do NOT enable global transactions: identity provisioning uses another
       // bounded auth connection and must not wait on its own uncommitted rows.
       transaction: async callback => callback(wrapped),
-    };
+    });
     return wrapped;
   };
 }
