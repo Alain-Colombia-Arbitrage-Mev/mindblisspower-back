@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AUTH_OTP_LENGTH, AUTH_OTP_RESEND_ALIASES, type AuthOtpHostedTemplate } from './email-templates';
+import { createEmailObserver } from './email-observation';
 
 export type AuthEnvironment = Record<string, string | undefined>;
 export type EmailMessage = { to: string; subject: string; text: string; html?: string; template?: AuthOtpHostedTemplate };
@@ -48,6 +49,7 @@ const resendConfirmedRejection = (status: number) => [400, 401, 403, 404, 405, 4
 // request input. Provider bodies/errors may contain OTPs and must not escape.
 export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch = globalThis.fetch,
   report: EmailDeliveryReporter = diagnostic => { if (diagnostic.outcome !== 'accepted') console.warn(JSON.stringify(diagnostic)); }): AuthDelivery {
+  const observe = createEmailObserver(env, fetchImpl);
   async function post(url: string, headers: Record<string, string>, body: unknown) {
     try {
       const response = await fetchImpl(url, { method: 'POST', redirect: 'error',
@@ -60,13 +62,17 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
   }
   return {
     async email(message) {
+      let terminal: Omit<EmailDeliveryDiagnostic, 'event'> | undefined;
+      let failure: unknown;
       // Log only this fixed allowlist of classifications and numeric statuses.
       // Better Auth suppresses sender errors; without independent diagnostics
       // provider rejection used to be indistinguishable from an inbox delay.
       // No address, token, OTP, action URL or provider error text may be logged.
       const diagnostic = (value: Omit<EmailDeliveryDiagnostic, 'event'>) => {
+        terminal = value;
         try { report({ event: 'auth_email_delivery', ...value }); } catch { /* A log sink must not change delivery. */ }
       };
+      try {
       if (!authEmailConfigured(env) || !z.email().safeParse(message.to).success) {
         diagnostic({ outcome: 'configuration' }); throw new AuthEmailDeliveryError(true);
       }
@@ -146,6 +152,17 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
       diagnostic({ outcome: 'accepted', httpStatus: response.status, queued: result.data.result.queued.length === 1 });
       // Queued/SMTP acceptance is not inbox delivery or identity proof. There
       // is no undocumented idempotency header or automatic resend/fallback.
+      } catch (error) { failure = error; throw error; }
+      finally {
+        // Monitoring is independent of delivery/identity. A bounded, failed
+        // observation cannot revoke a valid code, resend or select a fallback.
+        await observe({ provider: authEmailProvider(env),
+          outcome: terminal?.outcome === 'configuration' ? 'configuration'
+            : terminal?.outcome === 'accepted' ? 'accepted'
+            : failure instanceof AuthEmailDeliveryError && failure.confirmedRejected ? 'rejected' : 'unknown',
+          ...(terminal?.httpStatus !== undefined ? { http_status: terminal.httpStatus } : {}),
+          ...(terminal?.providerCode !== undefined ? { provider_code: terminal.providerCode } : {}) });
+      }
     },
     async phone(phone, code) {
       if (!env.SENTDM_API_KEY || !uuid.safeParse(env.SENTDM_OTP_TEMPLATE_ID).success || !validPhone(phone)

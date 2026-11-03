@@ -20,7 +20,7 @@ const email = 'registration-redirect@example.test';
 const missing = 'missing-redirect@example.test';
 const password = 'Synthetic-Registration-Password-123';
 
-function fixture(lookupUnavailable = false) {
+function fixture(lookupUnavailable = false, registrationAllowed = true) {
   const store: MemoryDB = {
     user: [{ id: 'synthetic-existing-access', name: 'Synthetic Existing User', email, emailVerified: true,
       createdAt: new Date(), updatedAt: new Date() }], account: [], session: [], verification: [], rateLimit: [], jwks: [],
@@ -41,7 +41,7 @@ function fixture(lookupUnavailable = false) {
   };
   const create = () => betterAuth(createAuthOptions(env, adapter, {
     provision: async userId => { provisions.push(userId); return { status: 'claim_required' }; },
-    binding: async () => ({ status: 'claim_required' }), registrationAllowed: async () => true,
+    binding: async () => ({ status: 'claim_required' }), registrationAllowed: async () => registrationAllowed,
   }, { email: async message => { messages.push(message); }, phone: async () => { throw new Error('Unexpected synthetic SMS'); } }));
   let auth = create();
   const request = (path: string, body: unknown, ip = '192.0.2.61', origin = 'https://portal.example.test') =>
@@ -197,4 +197,70 @@ test('unknown password reset and verification stay generic, never registration-r
     expect(app.store.user).toHaveLength(1);
     expect(app.store.session).toHaveLength(0);
   }
+});
+
+for (const verified of [true, false]) {
+  test(`registration of an existing ${verified ? 'verified' : 'unverified'} access uses only the isolated probe budget`, async () => {
+    const app = fixture();
+    app.store.user![0]!.emailVerified = verified;
+    const original = JSON.stringify(app.store.user);
+    const signup = () => app.request('/sign-up/email', {
+      email: email.toUpperCase(), name: 'Untrusted Replacement Name', password,
+      contactPhone: '+12025550123', contactWhatsapp: '+12025550124',
+    }, '192.0.2.65');
+    const response = await signup();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: 'USER_ALREADY_EXISTS', message: 'Account already exists. Sign in to continue.' });
+    expect(response.headers.has('set-cookie')).toBe(false);
+    expect(JSON.stringify(app.store.user)).toBe(original);
+    expect(app.store.account).toHaveLength(0);
+    expect(app.store.session).toHaveLength(0);
+    expect(app.store.verification).toHaveLength(0);
+    expect(app.provisions).toHaveLength(0);
+    expect(app.messages).toHaveLength(0);
+    const realBudget = recipientBudgetKey(env.BETTER_AUTH_SECRET!, email);
+    const probeBudget = recipientBudgetKey(env.BETTER_AUTH_SECRET!, `registration-existing:${email}`);
+    expect(app.store.rateLimit!.find(row => row.key === realBudget)).toBeUndefined();
+    expect(app.store.rateLimit!.find(row => row.key === probeBudget)?.count).toBe(1);
+    expect(JSON.stringify(app.store.rateLimit)).not.toContain(email);
+    app.restart();
+    const repeated = await signup();
+    expect(repeated.status).toBe(429);
+    expect(Number(repeated.headers.get('retry-after'))).toBeGreaterThanOrEqual(299);
+    expect(app.messages).toHaveLength(0);
+    expect(app.store.rateLimit!.find(row => row.key === realBudget)).toBeUndefined();
+    expect((await app.send(email, '192.0.2.66')).status).toBe(200);
+    expect(app.messages).toHaveLength(1);
+    expect(JSON.stringify(app.store.user)).toBe(original);
+    expect(app.store.session).toHaveLength(0);
+    expect(app.provisions).toHaveLength(0);
+  });
+}
+
+test('registration lookup failure is sanitized and does not reserve either real-message or existence-probe budgets', async () => {
+  const app = fixture(true);
+  const response = await app.request('/sign-up/email', { email, name: 'Synthetic Existing Member', password });
+  expect(response.status).toBe(503);
+  expect(await response.clone().json()).toEqual({ code: 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', message: 'Authentication temporarily unavailable' });
+  expect(await response.text()).not.toContain('synthetic-sensitive');
+  for (const recipient of [email, `registration-existing:${email}`]) {
+    expect(app.store.rateLimit!.find(row => row.key === recipientBudgetKey(env.BETTER_AUTH_SECRET!, recipient))).toBeUndefined();
+  }
+  expect(app.messages).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(0);
+  expect(app.store.account).toHaveLength(0);
+  expect(app.store.session).toHaveLength(0);
+});
+
+test('blacklist and registration policy run before an existing-access probe or any message reservation', async () => {
+  const app = fixture(true, false);
+  const response = await app.request('/sign-up/email', { email, name: 'Synthetic Existing Member', password });
+  expect(response.status).toBe(403);
+  expect(await response.json()).toEqual({ code: 'REGISTRATION_NOT_ALLOWED', message: 'Registration not allowed' });
+  expect(app.lookups()).toBe(0);
+  for (const recipient of [email, `registration-existing:${email}`]) {
+    expect(app.store.rateLimit!.find(row => row.key === recipientBudgetKey(env.BETTER_AUTH_SECRET!, recipient))).toBeUndefined();
+  }
+  expect(app.messages).toHaveLength(0);
+  expect(app.provisions).toHaveLength(0);
 });

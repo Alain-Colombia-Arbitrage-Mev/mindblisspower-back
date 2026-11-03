@@ -2,6 +2,7 @@ import type { BetterAuthOptions, BetterAuthPlugin } from 'better-auth';
 import { defineRequestState, getCurrentAdapter, getCurrentAuthContext } from '@better-auth/core/context';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { emailOTP } from 'better-auth/plugins/email-otp';
+import { revokeUnprovenAccountAccess } from 'better-auth/db';
 import { jwt } from 'better-auth/plugins/jwt';
 import { AuthEmailDeliveryError, authActionMessage, authEmailConfigured, createAuthDelivery, smsDeliveryConfigured, type AuthDelivery, type AuthEnvironment } from './delivery';
 import { AUTH_OTP_EXPIRES_IN_SECONDS, AUTH_OTP_LENGTH, authOtpMessage } from './email-templates';
@@ -11,6 +12,7 @@ import { registrationCandidate, type RegistrationCandidate } from './registratio
 import { contactPhoneField, registrationContacts } from './registration-contacts';
 import { verifiedOtpSignInResponse } from './otp-sign-in-response';
 import { requireRegisteredEmailForSignIn } from './sign-in-registration';
+import { requireNewEmailForRegistration } from './registration-existing';
 import { z } from 'zod';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
@@ -101,9 +103,17 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     emailAndPassword: { enabled: true, requireEmailVerification: true, minPasswordLength: 12, maxPasswordLength: 128, autoSignIn: false,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => delivery.email(authActionMessage(env, user.email, url, true)) },
-    emailVerification: { sendOnSignUp: true, autoSignInAfterVerification: false,
+    emailVerification: { sendOnSignUp: true, autoSignInAfterVerification: emailEnabled,
       // Do not shadow the emailOTP plugin's override during Better Auth init.
-      ...(emailEnabled ? {} : { sendVerificationEmail: async ({ user, url }: { user: { email: string }; url: string }) => delivery.email(authActionMessage(env, user.email, url, false)) }) },
+      ...(emailEnabled ? { beforeEmailVerification: async user => {
+        if (user.emailVerified !== false) return;
+        // The installed native handler calls this ONLY after consuming valid
+        // email proof, before flipping emailVerified or creating its session.
+        // Reuse the public native helper used by OTP sign-in: an unverified
+        // password/session may have been planted by somebody else beforehand.
+        const current = await getCurrentAuthContext();
+        await revokeUnprovenAccountAccess(current as Parameters<typeof revokeUnprovenAccountAccess>[0], user.id);
+      } } : { sendVerificationEmail: async ({ user, url }: { user: { email: string }; url: string }) => delivery.email(authActionMessage(env, user.email, url, false)) }) },
     socialProviders: env.GOOGLE_CLIENT_ID ? { google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET! } } : undefined,
     account: { accountLinking: { enabled: false } },
     // Self-declared contact details, never authentication/possession claims.
@@ -158,6 +168,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
           code: 'REGISTRATION_PRECHECK_UNAVAILABLE', message: 'Registration temporarily unavailable' }); }
         if (allowed !== true) throw new APIError('FORBIDDEN', {
           code: 'REGISTRATION_NOT_ALLOWED', message: 'Registration not allowed' });
+        await requireNewEmailForRegistration(secret, candidate.data.email, ctx);
       }
       if (messagePaths.has(ctx.path)) {
         const recipient = ctx.body?.email || ctx.body?.phoneNumber;

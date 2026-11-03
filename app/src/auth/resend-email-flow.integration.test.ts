@@ -141,7 +141,7 @@ test('native verification sends its fixed hosted alias but only redeeming the st
   const verified = await app.request('/email-otp/verify-email', { email, otp });
   expect(verified.status).toBe(200);
   expect(app.store.user![0]!.emailVerified).toBe(true);
-  expect(app.store.session).toHaveLength(0);
+  expect(app.store.session).toHaveLength(1);
   expect(app.messages).toHaveLength(1);
 });
 
@@ -180,4 +180,57 @@ test('unknown Resend OTP login still requires registration without generating or
   expect(app.store.verification).toHaveLength(0);
   expect(app.store.session).toHaveLength(0);
   expect(app.provisions).toHaveLength(0);
+});
+
+test('all three native hosted OTP purposes reject the two other consuming endpoints without spending their own challenge', async () => {
+  const password = 'Synthetic-Cross-Purpose-Password-123';
+  const purposes = ['sign-in', 'email-verification', 'forget-password'] as const;
+  const destinations = {
+    'sign-in': '/sign-in/email-otp',
+    'email-verification': '/email-otp/verify-email',
+    'forget-password': '/email-otp/reset-password',
+  };
+  for (const source of purposes) {
+    const app = fixture();
+    const sent = source === 'forget-password'
+      ? await app.request('/email-otp/request-password-reset', { email })
+      : await app.request('/email-otp/send-verification-otp', { email, type: source });
+    expect(sent.status).toBe(200);
+    expect(app.messages).toHaveLength(1);
+    expect(app.messages[0]!.template.id).toBe(AUTH_OTP_RESEND_ALIASES[source]);
+    const otp = app.code();
+    const stored = app.store.verification![0]!.value;
+    for (const target of purposes.filter(type => type !== source)) {
+      const crossed = await app.request(destinations[target], { email, otp,
+        ...(target === 'forget-password' ? { password } : {}) });
+      expect(crossed.status).toBe(400);
+      expect(app.store.user![0]!.emailVerified).toBe(false);
+      expect(app.store.account).toHaveLength(0);
+      expect(app.store.session).toHaveLength(0);
+      expect(app.store.verification).toHaveLength(1);
+      expect(app.store.verification![0]!.value).toBe(stored);
+      expect(app.messages).toHaveLength(1);
+    }
+    const correct = await app.request(destinations[source], { email, otp,
+      ...(source === 'forget-password' ? { password } : {}) });
+    expect(correct.status).toBe(200);
+    expect(app.store.verification).toHaveLength(0);
+    expect(app.store.user![0]!.emailVerified).toBe(true);
+    expect(app.store.session).toHaveLength(source === 'forget-password' ? 0 : 1);
+    expect(app.store.account).toHaveLength(source === 'forget-password' ? 1 : 0);
+    expect(app.messages).toHaveLength(1);
+  }
+});
+
+test('an expired hosted registration-verification code cannot verify the pending account or create a session', async () => {
+  const app = fixture();
+  expect((await app.request('/email-otp/send-verification-otp', { email, type: 'email-verification' })).status).toBe(200);
+  app.store.verification![0]!.expiresAt = new Date(Date.now() - 1000);
+  const response = await app.request('/email-otp/verify-email', { email, otp: app.code() });
+  expect(response.status).toBe(400);
+  expect(response.headers.has('set-cookie')).toBe(false);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.account).toHaveLength(0);
+  expect(app.store.session).toHaveLength(0);
+  expect(app.messages).toHaveLength(1);
 });

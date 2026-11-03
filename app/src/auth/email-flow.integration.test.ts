@@ -317,7 +317,7 @@ test('simultaneous successful and rejected registrations keep delivery state iso
   expect(app.store.session).toHaveLength(0);
 });
 
-test('registration verifies its own OTP and then signs in with the original password without a second email', async () => {
+test('registration opens its native session only after one OTP and removes the unproven signup password', async () => {
   const app = fixture();
   app.store.user!.length = 0;
   const password = 'Synthetic-Registration-Password-123';
@@ -354,26 +354,40 @@ test('registration verifies its own OTP and then signs in with the original pass
   app.restart();
   const verified = await app.request('/email-otp/verify-email', { email, otp: code });
   expect(verified.status).toBe(200);
-  expect((await verified.clone().json() as { token: unknown }).token).toBeNull();
-  expect(verified.headers.has('set-cookie')).toBe(false);
+  const verifiedBody = await verified.clone().json() as { status: boolean; token: unknown; user: { emailVerified: boolean } };
+  expect(verifiedBody.status).toBe(true);
+  expect(typeof verifiedBody.token).toBe('string');
+  expect(verifiedBody.user.emailVerified).toBe(true);
+  expect(verified.headers.has('set-cookie')).toBe(true);
   expect(app.store.user![0]!.emailVerified).toBe(true);
-  expect(app.store.session).toHaveLength(0);
+  expect(app.store.session).toHaveLength(1);
   expect(app.store.verification).toHaveLength(0);
-  expect(app.store.account![0]!.password).toBeTruthy();
+  expect(app.store.account).toHaveLength(0);
   expect((await app.request('/email-otp/verify-email', { email, otp: code })).status).toBe(400);
 
+  // Verification consumes its challenge, not the cross-purpose send budget.
+  // The established session needs no second OTP; a UI that requests another
+  // message immediately must still respect the original wait.
+  const secondMessage = await requestCode(app);
+  expect(secondMessage.status).toBe(429);
+  expect(Number(secondMessage.headers.get('retry-after'))).toBeGreaterThan(0);
+  expect(Number(secondMessage.headers.get('retry-after'))).toBeLessThanOrEqual(301);
+  expect(app.calls).toHaveLength(1);
+  expect(app.store.verification).toHaveLength(0);
+  expect(app.store.session).toHaveLength(1);
+
   const login = await app.request('/sign-in/email', { email, password });
-  expect(login.status).toBe(200);
+  expect(login.status).toBe(401);
   expect(app.store.session).toHaveLength(1);
   expect(app.calls).toHaveLength(1);
-  const sessionCookie = login.headers.getSetCookie().find(value => value.includes('better-auth.session_token='));
+  const sessionCookie = verified.headers.getSetCookie().find(value => value.includes('better-auth.session_token='));
   expect(sessionCookie).toContain('HttpOnly');
   expect(sessionCookie).toContain('Secure');
   expect(sessionCookie).toContain('SameSite=Lax');
-  const session = await app.request('/get-session', undefined, cookies(login));
+  const session = await app.request('/get-session', undefined, cookies(verified));
   expect((await session.json() as { user: { email: string; emailVerified: boolean } }).user)
     .toMatchObject({ email, emailVerified: true });
-  await expectNoDeliverySecrets(login, code);
+  await expectNoDeliverySecrets(verified, code);
 });
 
 test('registration validation cannot create an account or contact Cloudflare for an invalid password or email', async () => {

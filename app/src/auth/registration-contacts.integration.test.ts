@@ -92,18 +92,20 @@ test('malformed, noncanonical or nonstring contacts cannot be saved or trigger e
   }
 });
 
-test('email proof remains mandatory and does not mark a contact phone verified or create a session', async () => {
+test('email proof opens its native session but never marks a contact phone verified', async () => {
   const app = fixture();
   expect((await app.signup({ contactPhone: phone, contactWhatsapp: whatsapp })).status).toBe(200);
   expect((await app.request('/sign-in/email', { email, password: 'Synthetic-Contact-Password-123' })).status).toBe(403);
   const otp = /\b(\d{6})\b/.exec(app.emails[0]!.text)![1]!;
-  expect((await app.request('/email-otp/verify-email', { email, otp })).status).toBe(200);
+  const verification = await app.request('/email-otp/verify-email', { email, otp });
+  expect(verification.status).toBe(200);
   expect(app.store.user![0]!.emailVerified).toBe(true);
   expect(app.store.user![0]!.phoneNumberVerified).not.toBe(true);
-  expect(app.store.session).toHaveLength(0);
+  expect(app.store.session).toHaveLength(1);
+  expect(app.store.account).toHaveLength(0);
   const login = await app.request('/sign-in/email', { email, password: 'Synthetic-Contact-Password-123' });
-  expect(login.status).toBe(200);
-  const cookie = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+  expect(login.status).toBe(401);
+  const cookie = verification.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
   const session = await app.request('/get-session', undefined, cookie);
   const payload = await session.json() as { user: Record<string, unknown> };
   expect(payload.user.emailVerified).toBe(true);

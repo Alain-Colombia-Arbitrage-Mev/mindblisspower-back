@@ -6,6 +6,8 @@ import { privateReadiness } from './private-probe.mjs';
 import { captureConfiguration } from './capture-configuration.mjs';
 import { runNOWPaymentsScheduled } from './nowpayments-scheduled.mjs';
 import { privateNOWPaymentsReadiness, privateNOWPaymentsDiagnostics } from './nowpayments-readiness.mjs';
+import { handleOperationalStorage, observationRequest, operationalMonitoringEnabled } from './observability-store.mjs';
+import { privateOperationalSnapshot, runOperationalMonitoring } from './observability-monitor.mjs';
 import { relayWebSocketToSocket } from '../../../../app/src/clients/opaque-tcp-relay.mjs';
 export { ContainerProxy };
 
@@ -27,7 +29,13 @@ function coreContainer(service, port, healthPath) {
   };
 }
 
-export class CoreApi extends coreContainer('api', 3000, '/health') {}
+export class CoreApi extends coreContainer('api', 3000, '/health') {
+  constructor(ctx, env) { super(ctx, env); this.interceptHttps = operationalMonitoringEnabled(env); }
+  fetch(request) {
+    if (observationRequest(request)) return handleOperationalStorage(request, this.ctx.storage, this.env);
+    return super.fetch(request);
+  }
+}
 export class CoreEngine extends coreContainer('engine', 9090, '/ready') {
   activeTunnels = 0;
   async fetch(request) {
@@ -77,6 +85,10 @@ const resolveFor = env => (service, instance) => getContainer(env[BINDINGS[servi
 // Named service-binding RPC only. No HTTP fetch handler, arbitrary target,
 // request forwarding or public route is added to the default Worker.
 export class PrivateCoreProbe extends WorkerEntrypoint {
+  operationalSnapshot() {
+    if (arguments.length !== 0) throw new Error('Operational snapshot accepts no arguments');
+    return privateOperationalSnapshot(this.env, resolveFor(this.env));
+  }
   nowpaymentsDiagnostics() {
     if (arguments.length !== 0) throw new Error('NOWPayments diagnosis accepts no arguments');
     return privateNOWPaymentsDiagnostics(this.env, resolveFor(this.env));
@@ -95,7 +107,7 @@ export class PrivateCoreProbe extends WorkerEntrypoint {
   }
 }
 for (const [source, Class, hosts] of [
-  ['api', CoreApi, ['engine-grpc.core.internal', 'engine.core.internal']],
+  ['api', CoreApi, ['engine-grpc.core.internal', 'engine.core.internal', 'observability.core.internal']],
   ['payments', CorePayments, ['engine.core.internal', 'auth.core.internal', 'api.nowpayments.io']],
   ['withdrawals', CoreWithdrawals, ['auth.core.internal']],
 ]) {
@@ -110,5 +122,6 @@ export default {
   scheduled(controller, env, ctx) {
     if (controller.cron !== '*/5 * * * *') throw new Error('Unknown scheduled operation');
     ctx.waitUntil(runNOWPaymentsScheduled(env, resolveFor(env)));
+    if (operationalMonitoringEnabled(env)) ctx.waitUntil(runOperationalMonitoring(env, resolveFor(env)));
   },
 };

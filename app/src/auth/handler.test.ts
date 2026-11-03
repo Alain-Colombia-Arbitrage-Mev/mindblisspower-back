@@ -257,7 +257,8 @@ test('email signup stays unverified without session until its independently deli
   expect(app.store.verification![0]!.value).toMatch(/^[a-f0-9]{64}:0$/);
   expect((await app.request('/email-otp/verify-email', { email, otp })).status).toBe(200);
   expect(app.store.user![0]!.emailVerified).toBe(true);
-  expect(app.store.session).toHaveLength(0);
+  expect(app.store.session).toHaveLength(1);
+  expect(app.store.account).toHaveLength(0);
 });
 
 test('email wrong attempts cannot request a concurrent new generation before expiry across restart', async () => {

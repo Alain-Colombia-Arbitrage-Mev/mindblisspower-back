@@ -101,6 +101,14 @@ export function isGrpcTunnelRequest(request) {
 export async function dispatchContainerOutbound(source, request, env, resolve, internetFetch = fetch) {
   let url;
   try { url = new URL(request.url); } catch { return failure('not_found', 404); }
+  if (url.hostname === 'observability.core.internal') {
+    // Only API-container egress can submit terminal mail observations. Reads
+    // and provider refreshes are generated inside this Worker, never forwarded.
+    if (source !== 'api' || env.CORE_OBSERVABILITY_ENABLED !== 'true' || !authReady(env)) return failure('not_found', 404);
+    if (url.protocol !== 'https:' || url.pathname !== '/v1/email' || url.search || url.port || url.username || url.password || url.hash
+      || request.method !== 'POST' || request.headers.has('upgrade')) return failure('not_found', 404);
+    return resolve('api', 'singleton').fetch(request);
+  }
   if (url.hostname === 'api.nowpayments.io') {
     // Capture permits existing-payment verification. The separate operational
     // capability additionally permits only our bounded merchant invoice contract.

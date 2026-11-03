@@ -101,6 +101,10 @@ export function containerEnvironment(service, env) {
     }
   }
   if (service === 'api') {
+    values.AUTH_OBSERVABILITY_ENABLED = String(env.CORE_OBSERVABILITY_ENABLED === 'true');
+    // The SDK injects this ephemeral interception CA; Bun keeps its public CA
+    // roots and adds this one for the fixed private HTTPS observation hostname.
+    if (env.CORE_OBSERVABILITY_ENABLED === 'true') values.NODE_EXTRA_CA_CERTS = '/etc/cloudflare/certs/cloudflare-containers-ca.crt';
     const engine = new URL(values.VP_ENGINE_GRPC_URL);
     if (engine.protocol !== 'https:' || !engine.hostname || engine.username || engine.password || engine.hash || engine.search || engine.pathname !== '/') throw new Error('Engine mTLS origin is invalid');
     const auth = postgresTarget(values.AUTH_DATABASE_URL);

@@ -235,17 +235,22 @@ for (const fault of ['unverified', 'other-subject', 'other-email', 'missing', 'u
   });
 }
 
-test('registration of an already precreated access remains generic and cannot install a supplied password or send a registration code', async () => {
+test('registration of a precreated access directs to login without changing the account or reserving a real-message budget', async () => {
   const app = fixture();
   const signup = await app.request('/sign-up/email', { email, name: 'Not the stored neutral name', password: 'Synthetic-Unproven-Password-123' });
-  expect(signup.status).toBe(200);
-  const payload = await signup.json() as { token: unknown; user: { id: string; emailVerified: boolean } };
-  expect(payload.token).toBeNull();
-  expect(payload.user.emailVerified).toBe(false);
-  expect(payload.user.id).not.toBe('synthetic-precreated-access');
+  expect(signup.status).toBe(409);
+  expect(await signup.json()).toEqual({ code: 'USER_ALREADY_EXISTS', message: 'Account already exists. Sign in to continue.' });
+  expect(signup.headers.has('set-cookie')).toBe(false);
   expect(app.emails).toHaveLength(0);
   expect(app.store.user![0]!.emailVerified).toBe(false);
   expect(app.store.session).toHaveLength(0);
   expect(app.provisioned).toHaveLength(0);
+  expect((await app.request('/sign-up/email', { email, name: 'Another unproven name', password: 'Synthetic-Unproven-Password-123' })).status).toBe(429);
+  expect(app.emails).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(0);
   app.unchanged();
+  expect((await app.request('/email-otp/send-verification-otp', { email, type: 'sign-in' })).status).toBe(200);
+  expect(app.emails).toHaveLength(1);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.session).toHaveLength(0);
 });
