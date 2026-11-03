@@ -4,6 +4,7 @@ import type { DBAdapter, Where } from '@better-auth/core/db/adapter';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import type { authDb } from '../db/auth-client';
 import * as schema from '../db/schema/auth';
+import { isRecoveryBudgetKey, RecoveryBudgetConflict } from './recovery-daily-budget';
 
 type Kind = 'string' | 'number' | 'date';
 // A real PgTransaction has the same builders but no pool/client. Keeping the
@@ -59,6 +60,22 @@ export function postgresAuthAdapter(database: AuthAdapterDatabase) {
   return (options: Parameters<typeof factory>[0]): DBAdapter => {
     const base = factory(options);
     const wrapped: DBAdapter = { ...base,
+      create: async <T extends Record<string, any>, R = T>(input: {
+        model: string; data: Omit<T, 'id'>; select?: string[]; forceAllowId?: boolean;
+      }): Promise<R> => {
+        const data = input.data as Record<string, unknown>;
+        if (input.model !== 'verification' || !isRecoveryBudgetKey(data.id)) return base.create<T, R>(input);
+        if (data.identifier !== data.id || input.forceAllowId !== true || typeof data.value !== 'string'
+          || !(data.expiresAt instanceof Date) || !(data.createdAt instanceof Date) || !(data.updatedAt instanceof Date)) throw unsupported();
+        // A concurrent first reservation must NOT abort the OTP reset's outer
+        // transaction. Only this deterministic quota PK gets conflict handling;
+        // permission errors, foreign conflicts and all other models propagate.
+        const rows = await database.insert(schema.verification).values({ id: data.id, identifier: data.id, value: data.value,
+          expiresAt: data.expiresAt, createdAt: data.createdAt, updatedAt: data.updatedAt })
+          .onConflictDoNothing({ target: schema.verification.id }).returning();
+        if (!rows.length) throw new RecoveryBudgetConflict();
+        return rows[0] as R;
+      },
       incrementOne: async <T>(input: Parameters<DBAdapter['incrementOne']>[0]): Promise<T | null> => {
         const record = Object.hasOwn(guardedModels, input.model) ? guardedModels[input.model]! : null;
         if (!record) return base.incrementOne<T>(input);

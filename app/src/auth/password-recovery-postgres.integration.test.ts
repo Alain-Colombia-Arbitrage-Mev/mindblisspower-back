@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { betterAuth } from 'better-auth';
 import { APIError } from 'better-auth/api';
+import type { GenericEndpointContext } from '@better-auth/core';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
@@ -8,6 +9,8 @@ import { atomicPasswordResetHandler, atomicPasswordResetOptions } from './atomic
 import { postgresAuthAdapter } from './postgres-auth-adapter';
 import { secureSessionHandler } from './secure-session-handler';
 import { createAuthOptions } from './options';
+import { consumeRecoveryBudget, recoveryBudgetKey, RECOVERY_DAILY_WINDOW_MS } from './recovery-daily-budget';
+import { recipientBudgetKey } from './phone-otp';
 import type { AuthEnvironment, EmailMessage } from './delivery';
 
 // Run only via test-password-recovery-postgres.mjs --synthetic-docker. These
@@ -112,7 +115,17 @@ if (!ownerURL && !authURL) {
       const selectedHandler = create(selectedDatabase, afterHash);
       return (otp = code(), password = newPassword) => requestUsing(selectedHandler, '/email-otp/reset-password', { email, otp, password });
     };
+    const budget = (kind: 'request' | 'validation') => owner.unsafe('SELECT id,identifier,value,expires_at FROM auth.verification WHERE id=$1',
+      [recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, kind)]);
+    // Time travel is confined to this disposable synthetic fixture. Never
+    // clear application limits or OTPs to make a real recovery request pass.
+    const expireSendCooldown = async () => {
+      await owner.unsafe('UPDATE auth.rate_limit SET last_request=$1 WHERE key=$2', [Date.now() - 1, recipientBudgetKey(env.BETTER_AUTH_SECRET!, email)]);
+      await owner.unsafe('UPDATE auth.verification SET expires_at=now()-interval \'1 second\' WHERE identifier=$1', [`forget-password-otp-${email}`]);
+    };
     return { id, email, request, send, reset, resetUsing, code, messages, provisioned, fault, clearFault, seedSession, snapshot,
+      budget, expireSendCooldown,
+      contextUsing: (selectedDatabase: Parameters<typeof postgresAuthAdapter>[0]) => betterAuth(options(selectedDatabase)).$context,
       setProvisionGate: (gate?: () => Promise<void>) => { provisionGate = gate; },
       requestWithDatabase: (selectedDatabase: typeof database, path: string, body?: unknown, cookie = '') =>
         requestUsing(create(selectedDatabase), path, body, cookie),
@@ -411,6 +424,159 @@ if (!ownerURL && !authURL) {
       await Promise.all([loginWriter.end({ timeout: 2 }), resetWriter.end({ timeout: 2 })]);
     }
   });
+
+  test('five recovery sends share one persistent normalized budget across aliases and restarts without blocking ordinary login', async () => {
+    const app = await fixture('existing', true);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt) await app.expireSendCooldown();
+      app.restart();
+      const email = attempt % 2 ? app.email.toUpperCase() : app.email;
+      const response = attempt % 2
+        ? await app.request('/email-otp/send-verification-otp', { email, type: 'forget-password' })
+        : await app.request('/email-otp/request-password-reset', { email });
+      expect(response.status).toBe(200);
+      expect(app.messages).toHaveLength(attempt + 1);
+      const rows = await app.budget('request'); expect(rows).toHaveLength(1);
+      expect(rows[0]!.id).toMatch(/^auth-recovery-request:[a-f0-9]{64}$/);
+      expect(rows[0]!.identifier).toBe(rows[0]!.id);
+      expect(rows[0]!.identifier).not.toContain(app.email);
+      expect(JSON.parse(String(rows[0]!.value))).toHaveLength(attempt + 1);
+    }
+    const before = await app.budget('request');
+    await app.expireSendCooldown(); app.restart();
+    for (const path of ['/email-otp/request-password-reset', '/email-otp/send-verification-otp']) {
+      const denied = await app.request(path, { email: app.email.toUpperCase(), ...(path.includes('send-verification') ? { type: 'forget-password' } : {}) });
+      expect(denied.status).toBe(429); expect(denied.headers.has('set-cookie')).toBe(false);
+      expect(Number(denied.headers.get('retry-after'))).toBeGreaterThan(0);
+    }
+    expect(app.messages).toHaveLength(5); expect(await app.budget('request')).toEqual(before);
+    expect((await app.budget('validation'))).toHaveLength(0);
+    const passwordLogin = await app.request('/sign-in/email', { email: app.email, password: oldPassword });
+    expect(passwordLogin.status).toBe(200);
+    const otpSend = await app.request('/email-otp/send-verification-otp', { email: app.email, type: 'sign-in' });
+    expect(otpSend.status).toBe(200); expect(app.messages).toHaveLength(6);
+    const otpLogin = await app.request('/sign-in/email-otp', { email: app.email, otp: app.code() });
+    expect(otpLogin.status).toBe(200);
+    expect(await app.budget('request')).toEqual(before); expect(await app.budget('validation')).toHaveLength(0);
+  });
+
+  test('the five-minute message cooldown remains enforced without consuming extra daily recovery sends', async () => {
+    const app = await fixture('existing', true);
+    expect((await app.send()).status).toBe(200);
+    const before = await app.budget('request');
+    const blocked = await app.send(); expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers.get('retry-after'))).toBeGreaterThanOrEqual(295);
+    expect(app.messages).toHaveLength(1); expect(await app.budget('request')).toEqual(before);
+    const budget = await app.budget('request');
+    const timestamps = JSON.parse(String(budget[0]!.value)) as number[];
+    expect(new Date(budget[0]!.expires_at).getTime()).toBe(timestamps[0]! + RECOVERY_DAILY_WINDOW_MS);
+  });
+
+  test('ten failed validations persist across OTP generations and block even a later valid code without changing the password', async () => {
+    const app = await fixture('existing', true); const before = await app.snapshot();
+    let attempted = 0;
+    for (let generation = 0; generation < 4; generation++) {
+      if (generation) await app.expireSendCooldown();
+      expect((await app.send()).status).toBe(200);
+      const wrong = app.code() === '000000' ? '111111' : '000000';
+      const generationAttempts = generation === 3 ? 1 : 3;
+      for (let attempt = 0; attempt < generationAttempts; attempt++) {
+        const failed = await app.reset(wrong); expect(failed.status).toBe(400); app.restart();
+        attempted++;
+        const budget = await app.budget('validation'); expect(budget).toHaveLength(1);
+        expect(JSON.parse(String(budget[0]!.value))).toHaveLength(attempted);
+      }
+      const challenge = (await app.snapshot()).challenge;
+      expect(challenge).toHaveLength(1); expect(challenge[0]!.value).toMatch(new RegExp(`:${generationAttempts}$`));
+    }
+    const beforeBlocked = await app.snapshot(); const spentBudget = await app.budget('validation');
+    const blockedCorrect = await app.reset(); expect(blockedCorrect.status).toBe(429);
+    expect(blockedCorrect.headers.has('set-cookie')).toBe(false);
+    expect(await app.snapshot()).toEqual(beforeBlocked); expect(await app.budget('validation')).toEqual(spentBudget);
+    // Rotating to a fifth legitimate challenge must not reset the recipient's
+    // attempt quota, and an existing password cannot be replaced without proof.
+    await app.expireSendCooldown(); expect((await app.send()).status).toBe(200); app.restart();
+    const replacementBlocked = await app.reset(); expect(replacementBlocked.status).toBe(429);
+    const after = await app.snapshot();
+    expect(after.user).toEqual(before.user); expect(after.credential).toEqual(before.credential); expect(after.session).toEqual(before.session);
+    expect(await verifyPassword({ hash: String(after.credential[0]!.password), password: oldPassword })).toBe(true);
+    expect(await verifyPassword({ hash: String(after.credential[0]!.password), password: newPassword })).toBe(false);
+    expect(await app.budget('validation')).toEqual(spentBudget);
+  });
+
+  async function reserveBudget(app: Awaited<ReturnType<typeof fixture>>, selectedDatabase: typeof database,
+    kind: 'request' | 'validation', now: number, firstRead?: () => Promise<void>, recipient = app.email) {
+    return selectedDatabase.transaction(async transaction => {
+      const context = await app.contextUsing(transaction);
+      const adapter = context.adapter;
+      const originalRead = adapter.findOne.bind(adapter);
+      let observed = false;
+      adapter.findOne = async <T>(input: Parameters<typeof adapter.findOne>[0]): Promise<T | null> => {
+        const result = await originalRead<T>(input);
+        if (!observed && input.model === 'verification' && firstRead) { observed = true; await firstRead(); }
+        return result;
+      };
+      const ctx = { context: { adapter } } as unknown as GenericEndpointContext;
+      try { await consumeRecoveryBudget(env.BETTER_AUTH_SECRET!, recipient, kind, ctx, () => now); return 200; }
+      catch (error) { if (error instanceof APIError) return error.statusCode; throw error; }
+    });
+  }
+
+  test('daily budget expiry is an exact rolling 24-hour window rather than a resettable daily burst', async () => {
+    const app = await fixture(); const start = Date.now(); const hour = 3_600_000;
+    for (let index = 0; index < 5; index++) {
+      expect(await reserveBudget(app, database, 'request', start + index * hour, undefined, ` ${app.email.toUpperCase()} `)).toBe(200);
+    }
+    const before = await app.budget('request');
+    expect(await reserveBudget(app, database, 'request', start + RECOVERY_DAILY_WINDOW_MS - 1)).toBe(429);
+    expect(await app.budget('request')).toEqual(before);
+    app.restart();
+    expect(await reserveBudget(app, database, 'request', start + RECOVERY_DAILY_WINDOW_MS)).toBe(200);
+    const after = await app.budget('request'); const timestamps = JSON.parse(String(after[0]!.value)) as number[];
+    expect(timestamps).toEqual([start + hour, start + 2 * hour, start + 3 * hour, start + 4 * hour, start + RECOVERY_DAILY_WINDOW_MS]);
+    expect(new Date(after[0]!.expires_at).getTime()).toBe(start + 2 * RECOVERY_DAILY_WINDOW_MS);
+    expect(await reserveBudget(app, database, 'request', start + RECOVERY_DAILY_WINDOW_MS + 1)).toBe(429);
+    expect(await app.budget('request')).toEqual(after);
+    expect(await reserveBudget(app, database, 'request', start + 3 * RECOVERY_DAILY_WINDOW_MS)).toBe(200);
+    const expired = await app.budget('request');
+    expect(JSON.parse(String(expired[0]!.value))).toEqual([start + 3 * RECOVERY_DAILY_WINDOW_MS]);
+  });
+
+  for (const kind of ['request', 'validation'] as const) {
+    test(`two writer pools enforce exactly the ${kind} ceiling across concurrent first creation and stale near-limit reads`, async () => {
+      const connection = { statement_timeout: 8000, lock_timeout: 6000, idle_in_transaction_session_timeout: 10000 };
+      const firstWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {}, connection });
+      const secondWriter = postgres(syntheticURL(authURL, 'recovery_auth_fixture'), { max: 1, prepare: false, onnotice: () => {}, connection });
+      const firstDatabase = drizzle(firstWriter); const secondDatabase = drizzle(secondWriter);
+      const limit = kind === 'request' ? 5 : 10; const now = Date.now();
+      const barrier = () => {
+        let arrived = 0; let release!: () => void;
+        const ready = new Promise<void>(resolve => { release = resolve; });
+        return async () => {
+          if (++arrived === 2) release();
+          await Promise.race([ready, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Synthetic budget race did not reach both reads')), 3000))]);
+        };
+      };
+      try {
+        const app = await fixture(); const initialReads = barrier();
+        // Both independent transactions observe absence before either INSERT;
+        // the loser must recover from the real unique-ID conflict without
+        // poisoning its transaction or returning a spurious 500/503.
+        const first = await Promise.all([reserveBudget(app, firstDatabase, kind, now, initialReads), reserveBudget(app, secondDatabase, kind, now, initialReads)]);
+        expect(first).toEqual([200, 200]);
+        expect(JSON.parse(String((await app.budget(kind))[0]!.value))).toHaveLength(2);
+        for (let used = 2; used < limit - 1; used++) expect(await reserveBudget(app, firstDatabase, kind, now + used)).toBe(200);
+        const nearLimitReads = barrier();
+        const nearLimit = await Promise.all([reserveBudget(app, firstDatabase, kind, now + limit, nearLimitReads), reserveBudget(app, secondDatabase, kind, now + limit, nearLimitReads)]);
+        expect(nearLimit.sort()).toEqual([200, 429]);
+        const saturated = await app.budget(kind); expect(saturated).toHaveLength(1);
+        expect(JSON.parse(String(saturated[0]!.value))).toHaveLength(limit);
+        app.restart();
+        expect(await reserveBudget(app, secondDatabase, kind, now + limit + 1)).toBe(429);
+        expect(await app.budget(kind)).toEqual(saturated); expect(app.messages).toHaveLength(0);
+      } finally { await Promise.all([firstWriter.end({ timeout: 2 }), secondWriter.end({ timeout: 2 })]); }
+    });
+  }
 
   test('ordinary signup and email OTP proof remain outside the reset transaction and preserve max:1 identity hooks', async () => {
     const app = await fixture(); const email = `synthetic-signup-pg-${++sequence}@example.test`;

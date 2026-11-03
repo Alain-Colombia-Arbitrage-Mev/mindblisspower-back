@@ -6,6 +6,7 @@ import { hashPassword, verifyPassword } from 'better-auth/crypto';
 import { createAuthOptions } from './options';
 import { AuthEmailDeliveryError, type AuthEnvironment, type EmailMessage } from './delivery';
 import { otpHash } from './phone-otp';
+import { isRecoveryBudgetKey, recoveryBudgetKey, type RecoveryBudgetKind } from './recovery-daily-budget';
 
 // Real installed Better Auth 1.6.22 HTTP handlers; synthetic in-memory accounts
 // and delivery only. No sockets, real messages, legacy rows or production data.
@@ -74,6 +75,18 @@ function fixture(options: { missing?: boolean; verified?: boolean; deliveryRejec
     restart: () => { auth = create(); } };
 }
 const cookies = (response: Response) => response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
+const challenges = (app: ReturnType<typeof fixture>, address = email) =>
+  app.store.verification!.filter(row => row.identifier === `forget-password-otp-${address}`);
+
+function expectBudget(app: ReturnType<typeof fixture>, kind: RecoveryBudgetKind, attempts: number, address = email) {
+  const key = recoveryBudgetKey(env.BETTER_AUTH_SECRET!, address, kind);
+  const budget = app.store.verification!.find(row => row.id === key);
+  expect(budget).toBeDefined();
+  expect(budget!.identifier).toBe(key);
+  expect(isRecoveryBudgetKey(budget!.identifier)).toBe(true);
+  expect(JSON.parse(String(budget!.value))).toHaveLength(attempts);
+  expect(JSON.stringify(budget)).not.toContain(address);
+}
 
 async function expectNoSession(response: Response) {
   expect(response.headers.has('set-cookie')).toBe(false);
@@ -95,7 +108,9 @@ for (const credential of ['missing', 'existing', 'empty'] as const) {
     expect(app.messages[0]!.subject).toContain('restablecer');
     expect(app.store.account).toHaveLength(credential === 'missing' ? 0 : 1);
     const otp = app.code();
-    expect(app.store.verification![0]!.value).toBe(`${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', otp)}:0`);
+    expect(challenges(app)).toHaveLength(1);
+    expect(challenges(app)[0]!.value).toBe(`${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', otp)}:0`);
+    expectBudget(app, 'request', 1);
     expect(JSON.stringify(app.store.verification)).not.toContain(otp);
     const replacement = `  ${password}  `;
     const reset = await app.reset(otp, replacement, ` ${email.toUpperCase()} `);
@@ -112,7 +127,10 @@ for (const credential of ['missing', 'existing', 'empty'] as const) {
     expect(await verifyPassword({ hash: String(account.password), password: oldPassword })).toBe(false);
     expect(app.store.user![0]!).toMatchObject({ id: original.id, name: original.name, email: original.email, emailVerified: true });
     expect(app.store.session).toHaveLength(0);
-    expect(app.store.verification).toHaveLength(0);
+    expect(challenges(app)).toHaveLength(0);
+    expect(app.store.verification).toHaveLength(2);
+    expectBudget(app, 'request', 1);
+    expectBudget(app, 'validation', 1);
     expect(app.provisioned).toHaveLength(0);
     expect(app.bound).toHaveLength(0);
     expect((await app.reset(otp, password)).status).toBe(400);
@@ -236,8 +254,11 @@ test('unknown email has the same request acknowledgement but never creates a use
   expect(unknownResponse.status).toBe(200);
   expect(await unknownResponse.json()).toEqual(await knownResponse.json());
   expect(unknown.messages).toHaveLength(0);
-  expect(unknown.store.verification).toHaveLength(0);
+  expect(challenges(unknown, missing)).toHaveLength(0);
+  expect(unknown.store.verification).toHaveLength(1);
+  expectBudget(unknown, 'request', 1, missing);
   expect((await unknown.reset('000000', password, missing)).status).toBe(400);
+  expectBudget(unknown, 'validation', 1, missing);
   for (const rows of [unknown.store.user, unknown.store.account, unknown.store.session, unknown.provisioned, unknown.bound]) expect(rows).toHaveLength(0);
 });
 
@@ -304,9 +325,14 @@ test('wrong recovery codes exhaust their persistent attempt budget without chang
 test('expired and concurrently replayed recovery challenges cannot be reused', async () => {
   const expired = fixture();
   await expired.send();
-  expired.store.verification![0]!.expiresAt = new Date(Date.now() - 1000);
+  expect(challenges(expired)).toHaveLength(1);
+  const originalBudget = expired.store.verification!.filter(row => isRecoveryBudgetKey(row.identifier)).map(row => ({ ...row }));
+  challenges(expired)[0]!.expiresAt = new Date(Date.now() - 1000);
   expect((await expired.reset()).status).toBe(400);
   expect(expired.store.account).toHaveLength(0);
+  expectBudget(expired, 'request', 1);
+  expectBudget(expired, 'validation', 1);
+  expect(expired.store.verification!.filter(row => row.identifier === originalBudget[0]!.identifier)).toEqual(originalBudget);
   const app = fixture();
   await app.send();
   const otp = app.code();
@@ -331,6 +357,61 @@ test('recovery resend respects the shared persistent recipient cooldown across h
   expect((await app.reset()).status).toBe(200);
 });
 
+test('classic reset links, deprecated aliases and the non-consuming OTP checker cannot bypass the mandatory recovery flow', async () => {
+  const app = fixture({ verified: true });
+  await app.seedCredential();
+  app.seedSession();
+  const original = JSON.stringify([app.store.user, app.store.account, app.store.session, app.store.verification]);
+  for (const [path, body] of [
+    ['/request-password-reset', { email, redirectTo: 'https://portal.example.test/forgot-password' }],
+    ['/forget-password/email-otp', { email }],
+    ['/reset-password', { newPassword: password, token: 'synthetic-reset-token' }],
+    ['/email-otp/check-verification-otp', { email, type: 'forget-password', otp: '123456' }],
+  ] as const) {
+    const response = await app.request(path, body);
+    expect(response.status).toBe(404);
+    expect(response.headers.has('set-cookie')).toBe(false);
+  }
+  const callback = await app.request('/reset-password/synthetic-reset-token?callbackURL=https%3A%2F%2Fportal.example.test%2Fforgot-password');
+  expect(callback.status).toBe(404);
+  expect(callback.headers.has('location')).toBe(false);
+  expect(JSON.stringify([app.store.user, app.store.account, app.store.session, app.store.verification])).toBe(original);
+  expect(app.messages).toHaveLength(0);
+  expect(app.provisioned).toHaveLength(0);
+  expect(app.bound).toHaveLength(0);
+});
+
+test('generic forget-password sends share the exhausted normalized recovery budget without blocking ordinary sign-in', async () => {
+  const app = fixture();
+  const now = Date.now();
+  const key = recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, 'request');
+  const events = Array.from({ length: 5 }, (_, index) => now - 10_000 + index);
+  app.store.verification!.push({ id: key, identifier: key, value: JSON.stringify(events),
+    expiresAt: new Date(events.at(-1)! + 86_400_000), createdAt: new Date(events[0]!), updatedAt: new Date(events.at(-1)!) });
+  const original = JSON.stringify(app.store.verification);
+  for (const [path, body] of [
+    ['/email-otp/request-password-reset', { email: ` ${email.toUpperCase()} ` }],
+    ['/email-otp/send-verification-otp', { email: ` ${email.toUpperCase()} `, type: 'forget-password' }],
+  ] as const) {
+    const response = await app.request(path, body);
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ code: 'PASSWORD_RECOVERY_DAILY_LIMIT' });
+    expect(Number(response.headers.get('retry-after'))).toBeGreaterThan(86_380);
+    expect(JSON.stringify(app.store.verification)).toBe(original);
+    expect(app.store.rateLimit!.filter(row => String(row.key).startsWith('auth-recipient:'))).toHaveLength(0);
+  }
+  expect(app.messages).toHaveLength(0);
+  expect(app.store.account).toHaveLength(0);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect((await app.request('/email-otp/send-verification-otp', { email, type: 'sign-in' })).status).toBe(200);
+  expect(app.messages).toHaveLength(1);
+  expect(app.messages[0]!.subject).toContain('acceso');
+  expect(app.store.verification!.filter(row => row.identifier === `sign-in-otp-${email}`)).toHaveLength(1);
+  expect((await app.request('/sign-in/email-otp', { email, otp: app.code() })).status).toBe(200);
+  expect(app.store.session).toHaveLength(1);
+  expectBudget(app, 'request', 5);
+});
+
 test('provider rejection or ambiguity uses the generic acknowledgement without claiming email proof', async () => {
   for (const confirmedRejected of [true, false]) {
     const app = fixture({ deliveryRejected: confirmedRejected, deliveryAmbiguous: !confirmedRejected });
@@ -344,7 +425,9 @@ test('provider rejection or ambiguity uses the generic acknowledgement without c
     expect(app.store.account).toHaveLength(0);
     expect(app.store.session).toHaveLength(0);
     expect(app.store.user![0]!.emailVerified).toBe(false);
-    expect(app.store.verification).toHaveLength(confirmedRejected ? 0 : 1);
+    expect(challenges(app)).toHaveLength(confirmedRejected ? 0 : 1);
+    expect(app.store.verification).toHaveLength(confirmedRejected ? 1 : 2);
+    expectBudget(app, 'request', 1);
     expect(app.provisioned).toHaveLength(0);
     expect(app.bound).toHaveLength(0);
   }
@@ -359,7 +442,10 @@ test('raw dependency reset remains sequential without the application atomic wra
   expect(response.status).toBe(500);
   expect(await response.text()).not.toContain('Synthetic private');
   expect(response.headers.has('set-cookie')).toBe(false);
-  expect(app.store.verification).toHaveLength(0);
+  expect(challenges(app)).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(2);
+  expectBudget(app, 'request', 1);
+  expectBudget(app, 'validation', 1);
   // This fixture intentionally calls the raw library, not the application's
   // atomic-password-reset handler. Keep the dependency regression explicit;
   // separate real PostgreSQL tests must prove the production wrapper rolls it

@@ -14,6 +14,7 @@ import { verifiedOtpSignInResponse } from './otp-sign-in-response';
 import { requireRegisteredEmailForSignIn } from './sign-in-registration';
 import { requireNewEmailForRegistration } from './registration-existing';
 import { z } from 'zod';
+import { checkRecoveryBudget, consumeRecoveryBudget } from './recovery-daily-budget';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
@@ -95,7 +96,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
       if (error instanceof APIError && error.statusCode === 503
-        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', 'AUTH_SIGN_OUT_UNAVAILABLE'].includes(error.body?.code || '')) return;
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', 'AUTH_SIGN_OUT_UNAVAILABLE', 'PASSWORD_RECOVERY_BUDGET_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }
@@ -128,9 +129,13 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 30 },
     // Sign-in must atomically consume the code. Do not expose the optional
     // non-consuming checker as a second public verification oracle.
-    disabledPaths: ['/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
+    disabledPaths: [...(emailEnabled ? ['/request-password-reset', '/reset-password', '/forget-password/email-otp'] : []),
+      '/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
       '/registration/phone/send', '/registration/phone/verify'],
     hooks: { before: createAuthMiddleware(async ctx => {
+      if (emailEnabled && ctx.path === '/reset-password/:token') throw new APIError('NOT_FOUND', { message: 'Not found' });
+      const recoveryRequestPath = emailEnabled && (ctx.path === '/email-otp/request-password-reset'
+        || (ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'forget-password'));
       if (ctx.path === '/sign-out') {
         // Native 1.6.22 swallows deletion/lookup errors then reports success.
         // Revoke directly BEFORE its cookie clearing and outside that catch.
@@ -145,8 +150,10 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
           throw new APIError('SERVICE_UNAVAILABLE', { code: 'AUTH_SIGN_OUT_UNAVAILABLE', message: 'Sign out temporarily unavailable' });
         }
       }
-      if (emailEnabled && (ctx.path === '/email-otp/request-password-reset' || ctx.path === '/email-otp/reset-password')) {
-        const parsed = (ctx.path === '/email-otp/request-password-reset' ? recoveryRequest : recoveryReset).safeParse(ctx.body);
+      if (emailEnabled && (recoveryRequestPath || ctx.path === '/email-otp/reset-password')) {
+        const genericRecovery = ctx.path === '/email-otp/send-verification-otp';
+        const parsed = (genericRecovery ? recoveryEmail : recoveryRequestPath ? recoveryRequest : recoveryReset)
+          .safeParse(genericRecovery ? ctx.body?.email : ctx.body);
         if (!parsed.success) throw new APIError('BAD_REQUEST', {
           code: 'INVALID_PASSWORD_RECOVERY_REQUEST', message: 'Invalid password recovery details',
         });
@@ -156,7 +163,9 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         // email proof and session revocation; no legacy identity is reassigned.
         // The hook receives a shallow context copy. Mutate the shared body
         // field, not ctx.body itself, so native lookup uses the normalized email.
-        ctx.body.email = parsed.data.email;
+        ctx.body.email = typeof parsed.data === 'string' ? parsed.data : parsed.data.email;
+        if (ctx.path === '/email-otp/reset-password') await consumeRecoveryBudget(secret, ctx.body.email, 'validation', ctx);
+        else await checkRecoveryBudget(secret, ctx.body.email, 'request', ctx);
       }
       if (emailEnabled && ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'sign-in') {
         await requireRegisteredEmailForSignIn(secret, ctx);
@@ -187,6 +196,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
       if (messagePaths.has(ctx.path)) {
         const recipient = ctx.body?.email || ctx.body?.phoneNumber;
         if (typeof recipient === 'string') await limitRecipient(secret, recipient, ctx, typeof ctx.body?.email === 'string' ? 300_000 : 60_000);
+        if (recoveryRequestPath) await consumeRecoveryBudget(secret, ctx.body.email, 'request', ctx);
       }
     }), after: createAuthMiddleware(async ctx => {
       if (ctx.path === '/sign-in/email-otp') {

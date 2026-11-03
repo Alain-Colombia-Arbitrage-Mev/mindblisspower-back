@@ -6,6 +6,7 @@ import { createAuthOptions } from './options';
 import { createAuthDelivery, type AuthEnvironment } from './delivery';
 import { otpHash } from './phone-otp';
 import { AUTH_OTP_RESEND_ALIASES } from './email-templates';
+import { isRecoveryBudgetKey, recoveryBudgetKey } from './recovery-daily-budget';
 
 // Real installed Better Auth handlers and Resend transport with an in-memory
 // adapter and injected HTTP responses. No database sockets or real messages.
@@ -15,6 +16,7 @@ const env: AuthEnvironment = { AUTH_EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'r
   BETTER_AUTH_TRUSTED_ORIGINS: 'https://portal.example.test', BETTER_AUTH_EMAIL_OTP_ENABLED: 'true',
   BETTER_AUTH_PHONE_OTP_ENABLED: 'false', BETTER_AUTH_JWT_ENABLED: 'false' };
 const acknowledgement = { id: '00000000-0000-4000-8000-000000000072' };
+const otpRows = (store: MemoryDB) => store.verification!.filter(row => !isRecoveryBudgetKey(row.identifier));
 type Body = { from: string; to: string[]; subject: string; template: { id: string; variables: { OTP: string } } };
 function fixture(status = 200, missing = false, transportFailure = false) {
   const store: MemoryDB = { user: missing ? [] : [{ id: 'synthetic-resend-flow-user', email, name: 'Synthetic Resend Member', emailVerified: false,
@@ -76,7 +78,12 @@ test('Resend recovery creates a credential only after its native recovery OTP an
   const sent = await app.request('/email-otp/request-password-reset', { email });
   expect(sent.status).toBe(200);
   expect(app.messages).toHaveLength(1);
-  expect(app.store.verification![0]!.identifier).toBe(`forget-password-otp-${email}`);
+  expect(otpRows(app.store)).toHaveLength(1);
+  expect(otpRows(app.store)[0]!.identifier).toBe(`forget-password-otp-${email}`);
+  expect(otpRows(app.store)[0]!.value).toBe(`${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', app.code())}:0`);
+  const requestBudget = app.store.verification!.find(row => row.id === recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, 'request'));
+  expect(requestBudget).toBeDefined();
+  expect(JSON.parse(String(requestBudget!.value))).toHaveLength(1);
   expect(app.messages[0]!.subject).toContain('restablecer');
   expect(app.messages[0]!.template.id).toBe(AUTH_OTP_RESEND_ALIASES['forget-password']);
   expect(app.store.account).toHaveLength(0);
@@ -89,6 +96,11 @@ test('Resend recovery creates a credential only after its native recovery OTP an
   expect(app.store.user![0]!.emailVerified).toBe(true);
   expect(app.store.session).toHaveLength(0);
   expect(app.provisions).toHaveLength(0);
+  expect(otpRows(app.store)).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(2);
+  const validationBudget = app.store.verification!.find(row => row.id === recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, 'validation'));
+  expect(validationBudget).toBeDefined();
+  expect(JSON.parse(String(validationBudget!.value))).toHaveLength(1);
 });
 
 test('confirmed Resend rejection preserves generic recovery privacy and recipient cooldown without fallback', async () => {
@@ -199,7 +211,9 @@ test('all three native hosted OTP purposes reject the two other consuming endpoi
     expect(app.messages).toHaveLength(1);
     expect(app.messages[0]!.template.id).toBe(AUTH_OTP_RESEND_ALIASES[source]);
     const otp = app.code();
-    const stored = app.store.verification![0]!.value;
+    expect(otpRows(app.store)).toHaveLength(1);
+    expect(otpRows(app.store)[0]!.identifier).toBe(`${source}-otp-${email}`);
+    const stored = otpRows(app.store)[0]!.value;
     for (const target of purposes.filter(type => type !== source)) {
       const crossed = await app.request(destinations[target], { email, otp,
         ...(target === 'forget-password' ? { password } : {}) });
@@ -207,14 +221,19 @@ test('all three native hosted OTP purposes reject the two other consuming endpoi
       expect(app.store.user![0]!.emailVerified).toBe(false);
       expect(app.store.account).toHaveLength(0);
       expect(app.store.session).toHaveLength(0);
-      expect(app.store.verification).toHaveLength(1);
-      expect(app.store.verification![0]!.value).toBe(stored);
+      expect(otpRows(app.store)).toHaveLength(1);
+      expect(otpRows(app.store)[0]!.identifier).toBe(`${source}-otp-${email}`);
+      expect(otpRows(app.store)[0]!.value).toBe(stored);
       expect(app.messages).toHaveLength(1);
     }
     const correct = await app.request(destinations[source], { email, otp,
       ...(source === 'forget-password' ? { password } : {}) });
     expect(correct.status).toBe(200);
-    expect(app.store.verification).toHaveLength(0);
+    expect(otpRows(app.store)).toHaveLength(0);
+    const quotaKeys = app.store.verification!.map(row => row.identifier).sort();
+    expect(quotaKeys).toEqual((source === 'forget-password' ? ['request', 'validation'] as const : ['validation'] as const)
+      .map(kind => recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, kind)).sort());
+    for (const budget of app.store.verification!) expect(JSON.parse(String(budget.value))).toHaveLength(1);
     expect(app.store.user![0]!.emailVerified).toBe(true);
     expect(app.store.session).toHaveLength(source === 'forget-password' ? 0 : 1);
     expect(app.store.account).toHaveLength(source === 'forget-password' ? 1 : 0);

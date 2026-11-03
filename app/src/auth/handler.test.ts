@@ -5,6 +5,7 @@ import { createLocalJWKSet, jwtVerify } from 'jose';
 import { createAuthOptions, type AuthIdentity } from './options';
 import type { AuthDelivery, AuthEnvironment, EmailMessage } from './delivery';
 import { consumePhoneOTP, otpHash } from './phone-otp';
+import { recoveryBudgetKey } from './recovery-daily-budget';
 
 const email = 'synthetic@example.test';
 const phone = '+12025550123';
@@ -215,7 +216,12 @@ test('email reset uses a single-use hashed OTP and revokes existing auth session
   const app = fixture();
   expect((await app.request('/email-otp/request-password-reset', { email })).status).toBe(200);
   const code = /\b(\d{6})\b/.exec(app.messages[0]!.text)![1]!;
-  expect(app.store.verification![0]!.value).toMatch(/^[a-f0-9]{64}:0$/);
+  const challenge = app.store.verification!.filter(row => row.identifier === `forget-password-otp-${email}`);
+  expect(challenge).toHaveLength(1);
+  expect(challenge[0]!.value).toBe(`${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', code)}:0`);
+  const requestBudget = app.store.verification!.find(row => row.id === recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, 'request'));
+  expect(requestBudget).toBeDefined();
+  expect(JSON.parse(String(requestBudget!.value))).toHaveLength(1);
   app.store.session!.push({ id: 'synthetic-old-session', userId: 'synthetic-user', token: 'synthetic-old-token',
     expiresAt: new Date(Date.now() + 60000), createdAt: new Date(), updatedAt: new Date() });
   const reset = await app.request('/email-otp/reset-password', { email, otp: code, password: 'Synthetic-Reset-Password-123' });
@@ -223,6 +229,11 @@ test('email reset uses a single-use hashed OTP and revokes existing auth session
   expect(app.store.session).toHaveLength(0);
   expect(app.store.account).toHaveLength(1);
   expect(app.store.account![0]!.password).not.toContain('Synthetic-Reset-Password-123');
+  expect(app.store.verification!.filter(row => row.identifier === `forget-password-otp-${email}`)).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(2);
+  const validationBudget = app.store.verification!.find(row => row.id === recoveryBudgetKey(env.BETTER_AUTH_SECRET!, email, 'validation'));
+  expect(validationBudget).toBeDefined();
+  expect(JSON.parse(String(validationBudget!.value))).toHaveLength(1);
   expect((await app.request('/email-otp/reset-password', { email, otp: code, password: 'Synthetic-Reset-Password-123' })).status).toBe(400);
 });
 
