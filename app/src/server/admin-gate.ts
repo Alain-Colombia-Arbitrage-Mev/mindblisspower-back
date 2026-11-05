@@ -1,28 +1,35 @@
 import type { Context, Next } from 'hono';
-import { sql } from 'drizzle-orm';
+import { principal, principalResult, type Principal } from '../modules/identity/model';
 
-export type PersonGateRow = { isAdmin: boolean; status: string } | null;
+export type PersonGateRow = Principal | null | undefined;
 
-/** Pure predicate: only an active admin passes. */
-export function isAdminPerson(p: PersonGateRow): boolean {
-  return !!p && p.isAdmin === true && p.status === 'active';
+/** Email ownership, canonical binding and live restrictions precede the role. */
+export function isAdminPerson(p: PersonGateRow, expectedSubject: string): boolean {
+  return !!p && expectedSubject.length > 0 && p.subject === expectedSubject
+    && principalResult(p).status === 'existing' && p.is_admin === true && p.person_status === 'active';
 }
 
-/** Hono middleware: 401 if no session, 403 if the session's person is not an active admin. */
-export async function requireAdmin(c: Context, next: Next) {
-  const session = c.get('session') as { user?: { id?: string } } | null;
-  const userId = session?.user?.id;
-  if (!userId) return c.json({ error: 'unauthenticated' }, 401);
+type AdminPrincipalLookup = (subject: string) => Promise<PersonGateRow>;
 
-  const { db } = await import('../db/client');
-  const rows = await db.execute<{ is_admin: boolean; status: string }>(sql`
-    SELECT is_admin, status FROM mlm.person WHERE user_id = ${userId} LIMIT 1
-  `);
-  const p: PersonGateRow = rows.length
-    ? { isAdmin: rows[0]!.is_admin, status: rows[0]!.status }
-    : null;
-  if (!isAdminPerson(p)) return c.json({ error: 'forbidden' }, 403);
-
-  c.set('personIsAdmin', true);
-  await next();
+// Reuse the primary authority used to issue service JWTs, not a read replica or
+// cookie role. This is SELECT-only; no provisioning, role changes or repair.
+async function currentPrincipal(subject: string): Promise<PersonGateRow> {
+  const { authDb } = await import('../db/auth-client');
+  return principal(authDb, subject);
 }
+
+export function createRequireAdmin(lookup: AdminPrincipalLookup = currentPrincipal) {
+  return async (c: Context, next: Next) => {
+    const session = c.get('session') as { user?: { id?: string } } | null;
+    const userId = session?.user?.id;
+    if (typeof userId !== 'string' || !userId.trim() || userId.length > 255) return c.json({ error: 'unauthenticated' }, 401);
+    let person: PersonGateRow;
+    try { person = await lookup(userId); }
+    catch { return c.json({ error: 'account_status_unavailable' }, 503); }
+    if (!isAdminPerson(person, userId)) return c.json({ error: 'forbidden' }, 403);
+    c.set('personIsAdmin', true);
+    await next();
+  };
+}
+
+export const requireAdmin = createRequireAdmin();

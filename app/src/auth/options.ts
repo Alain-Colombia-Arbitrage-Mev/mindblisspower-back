@@ -15,6 +15,7 @@ import { requireRegisteredEmailForSignIn } from './sign-in-registration';
 import { requireNewEmailForRegistration } from './registration-existing';
 import { z } from 'zod';
 import { checkRecoveryBudget, consumeRecoveryBudget } from './recovery-daily-budget';
+import { captureOtpTraceRequest, recordOtpTraceError } from './otp-trace';
 
 export type BoundIdentity = { status: string; publicId?: string; email?: string };
 export type AuthIdentity = {
@@ -137,6 +138,8 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
       '/email-otp/check-verification-otp', '/sign-in/phone-number', '/phone-number/request-password-reset', '/phone-number/reset-password',
       '/registration/phone/send', '/registration/phone/verify'],
     hooks: { before: createAuthMiddleware(async ctx => {
+      captureOtpTraceRequest(ctx.path, ctx.body?.email, ctx.body?.type);
+      try {
       if (emailEnabled && ctx.path === '/reset-password/:token') throw new APIError('NOT_FOUND', { message: 'Not found' });
       const recoveryRequestPath = emailEnabled && (ctx.path === '/email-otp/request-password-reset'
         || (ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'forget-password'));
@@ -202,6 +205,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         if (typeof recipient === 'string') await limitRecipient(secret, recipient, ctx, typeof ctx.body?.email === 'string' ? 300_000 : 60_000);
         if (recoveryRequestPath) await consumeRecoveryBudget(secret, ctx.body.email, 'request', ctx);
       }
+      } catch (error) { recordOtpTraceError(error); throw error; }
     }), after: createAuthMiddleware(async ctx => {
       if (ctx.path === '/sign-in/email-otp') {
         try {

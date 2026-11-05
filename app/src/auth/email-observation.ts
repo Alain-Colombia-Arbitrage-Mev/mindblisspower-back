@@ -21,7 +21,7 @@ export const EMAIL_OBSERVATION_URL = 'https://observability.core.internal/v1/ema
 export const EMAIL_OBSERVATION_TIMEOUT_MS = 500;
 const MAX_ACK_BYTES = 128;
 
-async function readAcknowledgement(response: Response, signal: AbortSignal) {
+export async function readAcknowledgement(response: Response, signal: AbortSignal) {
   if (response.status !== 200 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) return false;
   const declared = response.headers.get('content-length');
   if (declared !== null && (!/^[0-9]{1,4}$/.test(declared) || Number(declared) > MAX_ACK_BYTES)) return false;
