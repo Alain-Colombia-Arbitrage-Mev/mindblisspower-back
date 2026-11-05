@@ -201,12 +201,19 @@ func (s *Service) load(ctx context.Context, tx pgx.Tx, mode sourceLoadMode) (uni
  (SELECT count(*) FROM payments.manual_membership_order WHERE state='activated')`).Scan(&count); err != nil || count != len(u.orders) {
 		return u, ErrNotReady
 	}
-	rows, err = tx.Query(ctx, `SELECT a.id,COALESCE(a.parent_id,0),COALESCE(a.sponsor_id,0),COALESCE(a.position::text,''),a.status::text,a.is_founder,COALESCE(r.bonus_amount_usd,100)
- FROM mlm.affiliate a LEFT JOIN mlm.rank r ON r.id=a.current_rank_id
- WHERE EXISTS(SELECT 1 FROM payments.v_compensation_source o JOIN mlm.affiliate_closure c ON c.descendant_id=o.affiliate_id
- WHERE c.ancestor_id=a.id AND c.distance<=10)
- OR EXISTS(SELECT 1 FROM payments.v_compensation_source o JOIN mlm.affiliate buyer ON buyer.id=o.affiliate_id
- LEFT JOIN mlm.affiliate sponsor ON sponsor.id=buyer.sponsor_id WHERE a.id=buyer.sponsor_id OR a.id=sponsor.sponsor_id)
+	// Materialize the small, verified source set once. Correlated OR EXISTS
+	// against a security-barrier UNION view would otherwise re-evaluate both
+	// source adapters for every historical affiliate, even for one active sale.
+	rows, err = tx.Query(ctx, `WITH source_affiliates AS MATERIALIZED (
+ SELECT DISTINCT affiliate_id FROM payments.v_compensation_source
+ ), member_ids AS (
+ SELECT c.ancestor_id AS id FROM source_affiliates o JOIN mlm.affiliate_closure c ON c.descendant_id=o.affiliate_id AND c.distance<=10
+ UNION SELECT buyer.sponsor_id FROM source_affiliates o JOIN mlm.affiliate buyer ON buyer.id=o.affiliate_id
+ UNION SELECT sponsor.sponsor_id FROM source_affiliates o JOIN mlm.affiliate buyer ON buyer.id=o.affiliate_id
+ JOIN mlm.affiliate sponsor ON sponsor.id=buyer.sponsor_id
+ )
+ SELECT a.id,COALESCE(a.parent_id,0),COALESCE(a.sponsor_id,0),COALESCE(a.position::text,''),a.status::text,a.is_founder,COALESCE(r.bonus_amount_usd,100)
+ FROM member_ids ids JOIN mlm.affiliate a ON a.id=ids.id LEFT JOIN mlm.rank r ON r.id=a.current_rank_id
  ORDER BY a.id LIMIT 55001`)
 	if err != nil {
 		return u, err

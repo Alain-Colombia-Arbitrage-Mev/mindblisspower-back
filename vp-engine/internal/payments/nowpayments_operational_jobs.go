@@ -14,6 +14,7 @@ import (
 
 const nowJobPath = "/api/payments/internal/nowpayments/run"
 const nowReadyPath = "/api/payments/internal/nowpayments/ready"
+const nowReadinessTimeout = 12 * time.Second
 
 var errNOWJobRunning = errors.New("NOW job is already running")
 
@@ -198,7 +199,7 @@ func (h *Handler) handleNOWOperationalReadiness(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusServiceUnavailable, "nowpayments_not_ready")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), nowReadinessTimeout)
 	defer cancel()
 	if err := h.nowReady(ctx); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "nowpayments_not_ready")

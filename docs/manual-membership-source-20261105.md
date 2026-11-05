@@ -217,3 +217,24 @@ loads the actual payment test schema files plus migrations 70/74/75/77/79/80/82
 and 91. Its cleanup removes only the uniquely named container it created.
 Separate Go integration tests must verify actual shared-engine/ledger behavior;
 passing this schema rehearsal alone does not authorize production activation.
+
+## Bounded readiness and source projection
+
+Materialize distinct validated source affiliates before selecting closure
+ancestors (distance 0–10), direct sponsors and their sponsors. Deduplicate
+those IDs with UNION, then join the affiliate/rank projection. Do not correlate
+OR EXISTS against the security-barrier source view for every historical
+affiliate: PostgreSQL can repeatedly evaluate both provider adapters.
+This rewrite preserves inclusion rules and the existing 55,001-row guard;
+it does not add missing closure-self rows or filter historical statuses.
+
+A read-only production EXPLAIN on 2026-11-05 found two correlated SubPlans in
+the previous projection (estimated cost 4,402,040.91). The materialized-source
+projection had no correlated SubPlans (estimated cost 147.47) and completed
+in 1.64 ms in that single database-side measurement. These are not end-to-end
+checkout latency or a guarantee under future load.
+
+The private readiness handler retains every policy/source check, with a
+12-second maximum bounded by caller cancellation and the Core 20-second RPC.
+Diagnostics contain only a fixed stage, elapsed time, deadline flag and validated
+SQLSTATE; never raw errors, SQL text, credentials, provider evidence or identity.

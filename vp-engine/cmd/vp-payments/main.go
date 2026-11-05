@@ -141,18 +141,28 @@ func run() error {
 		engine := nowengine.New(operationalPool, cfg.CompanyRootAffiliateID)
 		operationalStore.SetNOWOperationalReadiness(engine.ValidateReady)
 		handler.SetNOWOperationalReadinessRunner(func(ctx context.Context) error {
-			tx, err := operationalPool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-			if err != nil {
+			var tx pgx.Tx
+			if err := observeNOWReadinessStage(ctx, logger, "begin", func() error {
+				var err error
+				tx, err = operationalPool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+				return err
+			}); err != nil {
 				return err
 			}
 			defer tx.Rollback(ctx)
-			if err := operationalStore.ValidateNOWPurchasePolicy(ctx, tx); err != nil {
+			if err := observeNOWReadinessStage(ctx, logger, "policy", func() error {
+				return operationalStore.ValidateNOWPurchasePolicy(ctx, tx)
+			}); err != nil {
 				return err
 			}
-			if err := engine.ValidateReady(ctx, tx); err != nil {
+			if err := observeNOWReadinessStage(ctx, logger, "engine", func() error {
+				return engine.ValidateReady(ctx, tx)
+			}); err != nil {
 				return err
 			}
-			return tx.Commit(ctx)
+			return observeNOWReadinessStage(ctx, logger, "commit", func() error {
+				return tx.Commit(ctx)
+			})
 		})
 		if err := handler.SetNOWPaymentsOperational(client, operationalStore, settings.Provider); err != nil {
 			return err
@@ -182,7 +192,7 @@ func run() error {
 				}
 			}
 		}()
-		logger.Info().Msg("NOWPayments isolated operational membership flow configured; non-NOW finance remains read-only")
+		logger.Info().Msg("isolated operational memberships configured; unrelated finance remains read-only")
 	}
 	handler.SetSuperAdmins(cfg.SuperAdminEmails)
 	handler.SetCartConfig(cfg.CartResumeBaseURL, cfg.SuccessURL) // recuperación de carritos abandonados
