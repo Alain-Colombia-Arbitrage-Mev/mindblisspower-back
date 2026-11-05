@@ -201,7 +201,8 @@ func TestNOWMembershipInvoiceUsesOnlyPersistedSnapshot(t *testing.T) {
 func TestNOWMembershipPortalOriginIsRequestLocalAndNeverChangesWebhook(t *testing.T) {
 	h, client, store := fakeNOWMembershipHandler()
 	originalSuccess, originalCancel := h.nowMemberships.successURL, h.nowMemberships.cancelURL
-	for _, origin := range []string{"https://app.mindblisspower.com", "", "https://mindblisspower.com", ""} {
+	for _, origin := range []string{"https://mindbliss-portal-rewon.devfidubit.workers.dev", "",
+		"https://app.mindblisspower.com", "", "https://mindblisspower.com", ""} {
 		r := httptest.NewRequest(http.MethodPost, "/", nil)
 		if origin != "" {
 			r.Header.Set(nowPaymentsPortalOriginHeader, origin)
@@ -224,7 +225,7 @@ func TestNOWMembershipPortalOriginIsRequestLocalAndNeverChangesWebhook(t *testin
 			t.Fatal("origin selection changed persisted pricing, identity or shared configuration")
 		}
 	}
-	if client.creates != 4 || store.creates != 4 || store.attaches != 4 || store.unknowns != 0 {
+	if client.creates != 6 || store.creates != 6 || store.attaches != 6 || store.unknowns != 0 {
 		t.Fatal("return selection retried or changed the invoice lifecycle")
 	}
 }
@@ -239,6 +240,13 @@ func TestNOWMembershipInvalidPortalOriginStopsBeforePersistenceAndProvider(t *te
 		{"https://app.mindblisspower.com#fragment"},
 		{"https://mindblisspower.com", "https://app.mindblisspower.com"},
 		{"https://app.mindblisspower.com, https://mindblisspower.com"},
+		{"https://*.workers.dev"}, {"https://other.devfidubit.workers.dev"},
+		{"https://mindbliss-portal-rewon.other.workers.dev"},
+		{"https://mindbliss-portal-rewon.devfidubit.workers.dev.evil.example"},
+		{"http://mindbliss-portal-rewon.devfidubit.workers.dev"},
+		{"https://mindbliss-portal-rewon.devfidubit.workers.dev/"},
+		{"https://mindbliss-portal-rewon.devfidubit.workers.dev:443"},
+		{"https://MINDBLISS-PORTAL-REWON.devfidubit.workers.dev"},
 	} {
 		h, client, store := fakeNOWMembershipHandler()
 		r := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -282,7 +290,8 @@ func TestNOWMembershipReturnOriginsRemainIsolatedConcurrently(t *testing.T) {
 	flow := h.nowMemberships
 	originalSuccess, originalCancel := flow.successURL, flow.cancelURL
 	var wg sync.WaitGroup
-	for _, origin := range []string{"https://mindblisspower.com", "https://app.mindblisspower.com"} {
+	for _, origin := range []string{"https://mindblisspower.com", "https://app.mindblisspower.com",
+		"https://mindbliss-portal-rewon.devfidubit.workers.dev"} {
 		wg.Go(func() {
 			for range 20 {
 				success, cancel, err := flow.returnURLsForOrder(syntheticNOWOrder, origin)

@@ -2,7 +2,8 @@ export const NOWPAYMENTS_CALLBACK = 'https://mindblisspower.com/api/webhooks/now
 export const NOWPAYMENTS_CHECKOUT = '/api/payments/checkout';
 export const NOWPAYMENTS_MAX_INVOICE_BODY = 16 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const PORTAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com']);
+const PORTAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com',
+  'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 
 /** A separate, explicitly reviewed capability; never enables the full Core. */
 export function nowpaymentsOperationalReady(env) {

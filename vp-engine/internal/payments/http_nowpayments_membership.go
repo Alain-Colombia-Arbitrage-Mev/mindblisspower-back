@@ -21,7 +21,8 @@ var errMembershipProvider = errors.New("invalid membership payment provider")
 const nowPaymentsPortalOriginHeader = "X-VP-Portal-Origin"
 
 func validNOWPaymentsPortalOrigin(origin string) bool {
-	return origin == "https://mindblisspower.com" || origin == "https://app.mindblisspower.com"
+	return origin == "https://mindblisspower.com" || origin == "https://app.mindblisspower.com" ||
+		origin == "https://mindbliss-portal-rewon.devfidubit.workers.dev"
 }
 
 // Only the authenticated portal BFF may select a return origin. It is not an

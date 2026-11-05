@@ -17,11 +17,11 @@ const unreadable = (env, keys) => {
   return env;
 };
 
-test('branch portal appends an exact trusted origin without changing credentials, issuer or existing origins', () => {
+test('branch portals append exact trusted origins without changing credentials, issuer or existing origins', () => {
   const env = { ...fixture(), API_AUTH_ORIGINS: 'https://mindblisspower.com,https://admin.mindblisspower.com',
-    API_AUTH_ADDITIONAL_ORIGINS: 'https://app.mindblisspower.com' };
+    API_AUTH_ADDITIONAL_ORIGINS: 'https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev' };
   const values = containerEnvironment('api', env);
-  assert.equal(values.BETTER_AUTH_TRUSTED_ORIGINS, `${env.API_AUTH_ORIGINS},https://app.mindblisspower.com`);
+  assert.equal(values.BETTER_AUTH_TRUSTED_ORIGINS, `${env.API_AUTH_ORIGINS},${env.API_AUTH_ADDITIONAL_ORIGINS}`);
   assert.equal(values.BETTER_AUTH_URL, env.API_AUTH_URL);
   assert.equal(values.BETTER_AUTH_JWT_ISSUER, env.AUTH_JWT_ISSUER);
   assert.equal(values.BETTER_AUTH_JWT_AUDIENCE, env.AUTH_JWT_AUDIENCE);
@@ -34,7 +34,14 @@ test('additional auth origins reject wildcards, lookalikes, insecure hosts and m
     'https://*.mindblisspower.com', 'https://app.mindblisspower.com.evil.test',
     'http://app.mindblisspower.com', 'https://app.mindblisspower.com/',
     'https://app.mindblisspower.com:443', ' https://app.mindblisspower.com',
-    'https://app.mindblisspower.com,', 'https://app.mindblisspower.com\r\n']) {
+    'https://app.mindblisspower.com,', 'https://app.mindblisspower.com\r\n',
+    'https://*.workers.dev', 'https://other.devfidubit.workers.dev',
+    'https://mindbliss-portal-rewon.other.workers.dev',
+    'https://mindbliss-portal-rewon.devfidubit.workers.dev.evil.test',
+    'http://mindbliss-portal-rewon.devfidubit.workers.dev',
+    'https://mindbliss-portal-rewon.devfidubit.workers.dev/',
+    'https://mindbliss-portal-rewon.devfidubit.workers.dev:443',
+    'https://MINDBLISS-PORTAL-REWON.devfidubit.workers.dev']) {
     assert.throws(() => containerEnvironment('api', { ...fixture(), API_AUTH_ADDITIONAL_ORIGINS: origin }),
       { message: 'Invalid additional authentication origins' });
   }

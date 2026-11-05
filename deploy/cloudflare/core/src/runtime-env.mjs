@@ -105,7 +105,8 @@ export function containerEnvironment(service, env) {
     // Append explicit deployed origins without replacing the existing secret.
     if (env.API_AUTH_ADDITIONAL_ORIGINS !== undefined) {
       const additional = env.API_AUTH_ADDITIONAL_ORIGINS;
-      const allowed = new Set(['https://mindblisspower.com', 'https://admin.mindblisspower.com', 'https://app.mindblisspower.com']);
+      const allowed = new Set(['https://mindblisspower.com', 'https://admin.mindblisspower.com', 'https://app.mindblisspower.com',
+        'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
       if (typeof additional !== 'string' || !additional || additional.length > 512
         || additional.split(',').some(origin => !allowed.has(origin))) throw new Error('Invalid additional authentication origins');
       values.BETTER_AUTH_TRUSTED_ORIGINS = [...new Set([...values.BETTER_AUTH_TRUSTED_ORIGINS.split(',').map(origin => origin.trim()).filter(Boolean), ...additional.split(',')])].join(',');

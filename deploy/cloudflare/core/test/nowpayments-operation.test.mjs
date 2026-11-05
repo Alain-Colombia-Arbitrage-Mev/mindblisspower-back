@@ -134,8 +134,10 @@ test('operational invoice egress preserves validated bytes and never retries or 
   assert.equal(failed.status, 503); assert.equal(calls, 2);
 });
 
-test('NOW return origins allow only coherent main or app pairs while preserving the canonical callback', async () => {
-  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+test('NOW return origins allow coherent main, app or approved Workers pairs while preserving the canonical callback', async () => {
+  const origins = ['https://mindblisspower.com', 'https://app.mindblisspower.com',
+    'https://mindbliss-portal-rewon.devfidubit.workers.dev'];
+  for (const origin of origins) {
     const body = { ...invoice(),
       success_url: `${origin}/dashboard/packages?order_id=${order}&payment_provider=nowpayments&status=review`,
       cancel_url: `${origin}/dashboard/packages?payment_provider=nowpayments&status=cancelled` };
@@ -151,7 +153,7 @@ test('NOW return origins allow only coherent main or app pairs while preserving 
     });
     assert.equal(response.status, 200); assert.equal(calls, 1);
   }
-  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+  for (const origin of origins) {
     const input = checkout(undefined, undefined, { headers: { ...headers, 'x-vp-portal-origin': origin } });
     const response = await dispatchCore(input, env, () => ({ fetch: async request => {
       assert.equal(request.headers.get('x-vp-portal-origin'), origin);
@@ -179,6 +181,20 @@ test('NOW return origins reject aliases, mixed pairs and an app callback before 
   ]) {
     const response = await dispatchContainerOutbound('payments', outbound(JSON.stringify({ ...appInvoice, ...changes })), env, never, never);
     assert.equal(response.status, 400);
+  }
+  const approved = 'https://mindbliss-portal-rewon.devfidubit.workers.dev';
+  const workerInvoice = { ...invoice(), success_url: invoice().success_url.replace('https://mindblisspower.com', approved),
+    cancel_url: `${approved}/dashboard/packages?payment_provider=nowpayments&status=cancelled` };
+  for (const origin of ['https://*.workers.dev', 'https://other.devfidubit.workers.dev',
+    'https://mindbliss-portal-rewon.other.workers.dev', `${approved}.evil.test`, `${approved}:443`,
+    'http://mindbliss-portal-rewon.devfidubit.workers.dev', 'https://MINDBLISS-PORTAL-REWON.devfidubit.workers.dev']) {
+    const changed = { ...workerInvoice, success_url: workerInvoice.success_url.replace(approved, origin),
+      cancel_url: workerInvoice.cancel_url.replace(approved, origin) };
+    assert.equal((await dispatchContainerOutbound('payments', outbound(JSON.stringify(changed)), env, never, never)).status, 400);
+  }
+  for (const changes of [{ cancel_url: invoice().cancel_url }, { success_url: invoice().success_url },
+    { ipn_callback_url: `${approved}/api/webhooks/nowpayments` }]) {
+    assert.equal((await dispatchContainerOutbound('payments', outbound(JSON.stringify({ ...workerInvoice, ...changes })), env, never, never)).status, 400);
   }
 });
 
