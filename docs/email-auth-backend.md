@@ -5,20 +5,21 @@
 Better Auth 1.6.22 es la librería MIT instalada dentro de la API Bun existente.
 No se contrata su infraestructura gestionada, no hay una suscripción de
 autenticación ni un servidor adicional. PostgreSQL existente guarda cuentas,
-sesiones, desafíos y límites. Cloudflare sólo entrega el correo.
+sesiones, desafíos y límites. Resend entrega el correo cuando
+`AUTH_EMAIL_PROVIDER=resend`; Cloudflare permanece como alternativa explícita.
 
 El procesamiento y almacenamiento siguen consumiendo la infraestructura propia.
-Cloudflare Email Sending tiene sus propios requisitos y cuotas: esta integración
+Los proveedores de email tienen sus propios requisitos y cuotas: esta integración
 no cambia planes, contrata servicios ni garantiza envíos ilimitados gratuitos.
 SMS y WhatsApp permanecen desactivados en el perfil de email.
 
 Referencias oficiales: [Better Auth](https://better-auth.com/pricing) y
-[Cloudflare Email Sending](https://developers.cloudflare.com/email-service/platform/pricing/).
+[Resend](https://resend.com/docs/api-reference/emails/send-email).
 
 ## Contrato HTTP
 
 La composición `app/src/auth.ts` ya conecta `createAuthOptions` con PostgreSQL y
-`createAuthDelivery` con Cloudflare. No hay un generador de códigos independiente:
+`createAuthDelivery` con el proveedor configurado. No hay un generador de códigos independiente:
 Better Auth genera el desafío y verifica su canje.
 
 1. `POST /api/auth/email-otp/send-verification-otp`
@@ -31,7 +32,7 @@ Better Auth genera el desafío y verifica su canje.
 En navegador, usar las rutas del BFF del mismo origen y sus cookies; no almacenar
 tokens en localStorage. Con `AUTH_BFF_SHARED_SECRET` configurado, Bun exige el
 contexto firmado por el BFF: no quitar esa protección para probar una llamada.
-Esta integración del backend no cambia las pantallas actuales de Cognito.
+El portal utiliza el BFF del mismo origen para registro, acceso y recuperación.
 
 El código tiene seis dígitos, caduca en cinco minutos y permite tres intentos.
 La base persiste su HMAC, no el código en claro. El canje correcto lo consume y
@@ -41,12 +42,20 @@ El contador por IP también vive en PostgreSQL; no requiere otro servicio pago.
 
 No existe registro automático al solicitar un código para un correo desconocido.
 Que una persona figure en `mlm.person` no crea por sí solo una cuenta de acceso.
+La lista canónica de acceso vive en `auth.user`: una cuenta pendiente puede
+solicitar un OTP sin contraseña y sin marcar antes `email_verified=true`.
+Crear ese principal no envía mensajes; el envío exige una solicitud explícita
+de su titular. No hace falta importar contactos a Resend Audience. El operador
+revisado de accesos pendientes está descrito en `pending-email-access-migration.md`.
 El vínculo con personas heredadas exige el procedimiento aprobado de identidad;
 iniciar sesión no mueve nodos, cambia rangos ni habilita pagos.
 
-La respuesta genérica de solicitud de acceso no prueba que exista una cuenta ni
-que el correo se haya entregado. Se conserva para no enumerar cuentas. Los
-rechazos confirmados del proveedor retiran únicamente el reto de ese destinatario,
+Un login para un correo desconocido devuelve `400/REGISTRATION_REQUIRED` y no
+genera ni envía OTP; el portal dirige al registro conservando ese correo.
+Una solicitud aceptada no prueba entrega a la bandeja. Si el envío de login falla,
+devuelve `503/AUTH_EMAIL_DELIVERY_UNAVAILABLE`, sin reflejar detalles privados
+del proveedor. La recuperación mantiene sus respuestas genéricas de privacidad.
+Los rechazos confirmados del proveedor retiran únicamente el reto de ese destinatario,
 propósito y HMAC; no reinician el presupuesto de cinco minutos. Una confirmación
 ambigua, timeout o 5xx no retira un código que podría haberse entregado.
 
@@ -76,7 +85,17 @@ archivo privado de desarrollo a la imagen.
 
 Antes de activar, revisar:
 
-- `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_API_TOKEN` y `AUTH_EMAIL_FROM`.
+- `AUTH_EMAIL_PROVIDER` y `AUTH_EMAIL_FROM`, con una selección de proveedor
+  intencional y un remitente verificado.
+- Para Resend, configurar explícitamente `AUTH_EMAIL_PROVIDER=resend`,
+  `RESEND_API_KEY` de envío restringido al dominio y `AUTH_EMAIL_FROM` con el
+  remitente verificado. La clave sólo pertenece al backend privado, no al portal.
+  No hay fallback automático entre proveedores ni reintento del mismo envío.
+  Las plantillas publicadas deben coincidir con los alias y variable `OTP`
+  documentados en `resend-email-cutover.md`. No utilizar una plantilla de prueba.
+- Para Cloudflare, revisar `CLOUDFLARE_ACCOUNT_ID` y
+  `CLOUDFLARE_EMAIL_API_TOKEN`. Sólo son necesarias si se selecciona ese
+  proveedor; no se leen ni se usan para rescatar un fallo de Resend.
 - `BETTER_AUTH_SECRET`: secreto aleatorio estable de al menos 32 caracteres.
 - `BETTER_AUTH_URL` y `BETTER_AUTH_TRUSTED_ORIGINS`: URLs reales de API y portales,
   HTTPS en producción. No inferir dominios desde encabezados del cliente.
@@ -99,6 +118,11 @@ No ejecutar migraciones automáticamente al iniciar la API.
 Auth y el transporte real de Cloudflare con un fetch sintético. Comprueba el
 desafío, HMAC, caducidad, intentos, sesión, cookie, replay, limitación de reenvío,
 usuario desconocido y fallos del proveedor. No utiliza credenciales reales ni red.
+`app/src/auth/resend-email-flow.integration.test.ts` verifica el mismo recorrido
+con Resend y sus plantillas, rechazos, timeouts y solicitudes concurrentes. El
+login fallido devuelve 503 sin sesiones ni datos del proveedor; la recuperación
+conserva su privacidad. En fallos ambiguos puede introducirse manualmente el
+código si llegó, sin reenvío automático y respetando el plazo persistente.
 El harness de identidad prueba PostgreSQL aparte, en una instancia desechable.
 
 Estas pruebas no aplican cambios a la copia curada ni a PlanetScale. La activación

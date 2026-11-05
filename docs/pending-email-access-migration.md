@@ -21,8 +21,10 @@ compatible con los portales. Excluye:
 - Formatos inválidos y espacios al principio/final. Recortar un email histórico
   podría impedir encontrar su persona original después de verificarlo.
 - Colisiones entre emails normalizados, aunque uno esté bloqueado o sea inválido.
-- Estados suspendidos, baneados, eliminados y coincidencias en blacklist por
-  email, teléfono o nombre/fecha, conforme a la política de registro existente.
+- Estados suspendidos, baneados, eliminados, la marca explícita
+  `person.blacklisted` y coincidencias en blacklist únicamente por email
+  normalizado. Compartir teléfono, nombre o fecha con una fila de blacklist no
+  excluye a otra persona cuyo correo no está listado.
 - Afiliados suspendidos/baneados/eliminados, personas ya ligadas y principales
   existentes. Nunca se modifican, fusionan o sustituyen estos registros.
 
@@ -31,6 +33,12 @@ IDs de auditoría, UUID aleatorios previstos, hashes de emails, conteos y digest
 no copia nombres ni correos claros a logs. Todos los archivos operativos deben
 estar fuera del repositorio, con ACL privada; `mode:0600` no sustituye las ACL
 de Windows. Cualquier respaldo con PII debe estar cifrado.
+
+La política email-only usa el formato de plan
+`pending-email-access-v2-email-only`. Un plan `pending-email-access-v1` no se
+acepta: se debe generar y revisar un plan nuevo. El advisory lock conserva su
+nombre anterior para serializar esta operación también con operadores antiguos;
+no modifica ninguna otra regla de elegibilidad ni levanta restricciones explícitas.
 
 ## Plan, respaldo y aplicación
 
@@ -111,10 +119,12 @@ La presencia de un acceso pendiente no prueba propiedad de un nodo de la red.
 ## Pruebas aisladas
 
 - `bun --no-env-file test scripts/pending-email-access-migration.test.ts` valida
-  selección, colisiones, privacidad del plan y pins.
+  selección, colisiones, privacidad del plan, pins y rechazo del formato anterior.
 - `node scripts/test-pending-email-access-postgres.mjs --synthetic-docker`
   utiliza PostgreSQL efímero fijado por digest, tmpfs y `--network none`;
-  comprueba neutralidad, no-op, rollback y guard de triggers. No acepta un DSN
+  comprueba que las colisiones de teléfono/nombre no bloquean, que los emails
+  listados y restricciones explícitas sí excluyen, y neutralidad, no-op, rollback
+  y guard de triggers. No acepta un DSN
   productivo, no contacta proveedores y elimina su contenedor de fixture.
 
 Los datos reales y las credenciales no deben entrar en imágenes Docker ni tests.

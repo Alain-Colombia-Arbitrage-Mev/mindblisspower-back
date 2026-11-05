@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { classify, connectTarget, createPlan, targetConfiguration, validatePlan, type Snapshot, type Source } from './pending-email-access-migration';
+import { classify, connectTarget, createPlan, targetConfiguration, validatePlan, VERSION, type Snapshot, type Source } from './pending-email-access-migration';
 const source = (id: number, email: string, extra: Partial<Source> = {}): Source => ({ id: String(id), email, status: 'active', userId: null, blocked: false, ...extra });
 const snapshot = (rows: Source[]): Snapshot => ({ source: rows, existing: [{ id: 'admin', email: 'admin@example.test' }], schemaDigest: 'a'.repeat(64) });
 const target = 'b'.repeat(64);
@@ -41,6 +41,15 @@ test('operator plans are pinned and cannot silently accept a changed cohort, ID 
   expect(() => validatePlan(plan, plan.digest, 'd'.repeat(64))).toThrow('PLAN_PIN_MISMATCH');
   expect(() => validatePlan({ ...plan, candidates: [] }, plan.digest, target)).toThrow('PLAN_PIN_MISMATCH');
   expect(() => validatePlan({ ...plan, authority: true }, plan.digest, target)).toThrow('PLAN_INVALID');
+});
+
+test('email-only policy requires a fresh versioned plan and rejects every previous plan format', () => {
+  expect(VERSION).toBe('pending-email-access-v2-email-only');
+  const plan = createPlan(snapshot([source(1, 'one@example.test')]), target);
+  expect(plan.format).toBe(VERSION);
+  for (const format of ['pending-email-access-v1', 'pending-email-access-v2']) {
+    expect(() => validatePlan({ ...plan, format }, plan.digest, target)).toThrow('PLAN_INVALID');
+  }
 });
 
 test('target validation requires explicit verified TLS, fixed connection routing and an independent target pin', () => {

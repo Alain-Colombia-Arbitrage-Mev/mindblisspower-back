@@ -27,7 +27,7 @@ try {
   }
   assert.ok(ready);
   docker(['exec', '-i', name, 'psql', '-U', 'postgres', '-d', 'pending_access_synthetic', '-v', 'ON_ERROR_STOP=1'], `
-    CREATE SCHEMA auth; CREATE SCHEMA mlm; CREATE SCHEMA identity;
+    CREATE SCHEMA auth; CREATE SCHEMA mlm; CREATE SCHEMA identity; CREATE SCHEMA payments;
     CREATE TABLE auth."user"(id text PRIMARY KEY,email text NOT NULL UNIQUE,email_verified boolean NOT NULL DEFAULT false,name text,image text,
       phone_number text,phone_number_verified boolean NOT NULL DEFAULT false,contact_phone_e164 text,contact_whatsapp_e164 text,
       created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
@@ -37,6 +37,8 @@ try {
       phone_number text,first_name text,last_name text,birthday date);
     CREATE TABLE mlm.affiliate(id bigint,person_id bigint,status text,parent_id bigint,position text,current_rank_id int);
     CREATE TABLE mlm.blacklist(email_norm text,phone_last10 text,name_norm text,birthdate date);
+    CREATE TABLE payments.synthetic_sale(id text PRIMARY KEY,amount numeric(20,2),status text);
+    CREATE TABLE payments.synthetic_ledger(id text PRIMARY KEY,amount numeric(20,2),status text);
     CREATE FUNCTION mlm.norm_email(text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT lower(btrim($1)) $$;
     CREATE FUNCTION mlm.norm_phone10(text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT right(regexp_replace($1,'[^0-9]','','g'),10) $$;
     CREATE FUNCTION mlm.norm_name(text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT lower(btrim($1)) $$;
@@ -53,40 +55,56 @@ try {
       (9,'affiliate-blocked@example.test','active',NULL,false,'9999999999','Aff','Member',NULL),
       (10,'blacklisted@example.test','active',NULL,false,'1231231231','List','Member',NULL),
       (11,'linked@example.test','active','old-auth-subject',false,'1231231232','Linked','Member',NULL),
-      (12,' padded@example.test ','active',NULL,false,'1231231233','Padded','Member',NULL);
+      (12,' padded@example.test ','active',NULL,false,'1231231233','Padded','Member',NULL),
+      (13,'phone-collision@example.test','active',NULL,false,'9090909090','Distinct','Phone',NULL),
+      (14,'name-collision@example.test','active',NULL,false,'9090909091','Shared','Name','1990-01-01');
     INSERT INTO mlm.affiliate VALUES(11,1,'active',NULL,NULL,7),(12,9,'suspended',11,'L',5);
-    INSERT INTO mlm.blacklist(email_norm) VALUES('blacklisted@example.test');
+    INSERT INTO mlm.blacklist(email_norm,phone_last10,name_norm,birthdate)
+      VALUES('blacklisted@example.test','9090909090','shared name','1990-01-01');
+    INSERT INTO payments.synthetic_sale VALUES('protected-sale',100.00,'confirmed');
+    INSERT INTO payments.synthetic_ledger VALUES('protected-ledger',97.00,'pending');
   `);
   const output = docker(['run', '--pull=never', '--rm', '-i', '--read-only', '--tmpfs', '/tmp', '--network', `container:${name}`,
     '--mount', `type=bind,source=${source},target=/app/scripts,readonly`, '-e', 'PENDING_ACCESS_SYNTHETIC_URL',
     '--entrypoint', 'bun', 'mindbliss/api-login-recovery-test-20261030:local', '--no-env-file', '-'], String.raw`
     import assert from 'node:assert/strict';
     import {createHash} from 'node:crypto';
-    import {connectTarget,targetConfiguration,planMigration,applyMigration,validatePlan} from './scripts/pending-email-access-migration.ts';
+    import {connectTarget,targetConfiguration,planMigration,applyMigration,validatePlan,VERSION} from './scripts/pending-email-access-migration.ts';
     const raw=process.env.PENDING_ACCESS_SYNTHETIC_URL;
     const config=targetConfiguration(raw);assert.equal(config.local,true);assert.equal(config.database,'pending_access_synthetic');
     const {sql}=connectTarget(raw,config.target);let assertions=0;
     const equal=(a,b)=>{assert.deepEqual(a,b);assertions++;};
     const digest=async()=>createHash('sha256').update(JSON.stringify(await sql.unsafe('SELECT to_jsonb(p) AS row FROM mlm.person p ORDER BY id'))
-      +JSON.stringify(await sql.unsafe('SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id'))).digest('hex');
+      +JSON.stringify(await sql.unsafe('SELECT to_jsonb(a) AS row FROM mlm.affiliate a ORDER BY id'))
+      +JSON.stringify(await sql.unsafe('SELECT to_jsonb(s) AS row FROM payments.synthetic_sale s ORDER BY id'))
+      +JSON.stringify(await sql.unsafe('SELECT to_jsonb(l) AS row FROM payments.synthetic_ledger l ORDER BY id'))).digest('hex');
     globalThis.fetch=async()=>{throw new Error('External providers forbidden');};
     try {
       const businessBefore=await digest();
+      const existingAuthBefore=await sql.unsafe('SELECT to_jsonb(u) AS row FROM auth."user" u ORDER BY id');
       const plan=await planMigration(sql,config.database,config.target);
-      equal(plan.counts.eligible,2);equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth."user"'))[0].n,1);
+      equal(plan.format,VERSION);equal(VERSION,'pending-email-access-v2-email-only');
+      equal(plan.counts.eligible,4);equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth."user"'))[0].n,1);
+      equal(plan.candidates.map(row=>row.sourceId),['1','2','13','14']);
+      assert.throws(()=>validatePlan({...plan,format:'pending-email-access-v1'},plan.digest,config.target),/PLAN_INVALID/);assertions++;
       validatePlan(plan,plan.digest,config.target);assertions++;
-      equal(await applyMigration(sql,config.database,plan),{status:'applied',inserted:2,total:2});
-      equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth."user" WHERE email_verified=false AND phone_number_verified=false AND phone_number IS NULL AND contact_phone_e164 IS NULL AND contact_whatsapp_e164 IS NULL'))[0].n,2);
+      equal(await applyMigration(sql,config.database,plan),{status:'applied',inserted:4,total:4});
+      equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth."user" WHERE email_verified=false AND phone_number_verified=false AND phone_number IS NULL AND contact_phone_e164 IS NULL AND contact_whatsapp_e164 IS NULL'))[0].n,4);
+      equal((await sql.unsafe('SELECT email FROM auth."user" WHERE email LIKE $1 ORDER BY email',['%-collision@example.test'])).map(row=>row.email),
+        ['name-collision@example.test','phone-collision@example.test']);
+      equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth."user" WHERE email=ANY($1::text[])',
+        [['blocked@example.test','blacklisted@example.test','affiliate-blocked@example.test','suspended@example.test','linked@example.test']]))[0].n,0);
       equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth.account'))[0].n,0);
       equal((await sql.unsafe('SELECT count(*)::int AS n FROM auth.session'))[0].n,0);
       equal((await sql.unsafe('SELECT count(*)::int AS n FROM identity.auth_binding'))[0].n,0);
       equal(await digest(),businessBefore);
+      equal(await sql.unsafe('SELECT to_jsonb(u) AS row FROM auth."user" u WHERE id=$1',['existing-admin']),existingAuthBefore);
       const first=plan.candidates[0].authId;
       await sql.unsafe('UPDATE auth."user" SET email_verified=true WHERE id=$1',[first]);
-      equal(await applyMigration(sql,config.database,plan),{status:'already-applied',inserted:0,total:2});
+      equal(await applyMigration(sql,config.database,plan),{status:'already-applied',inserted:0,total:4});
       equal((await sql.unsafe('SELECT email_verified FROM auth."user" WHERE id=$1',[first]))[0].email_verified,true);
       const fresh=await planMigration(sql,config.database,config.target);equal(fresh.counts.eligible,0);
-      await sql.unsafe("INSERT INTO mlm.person VALUES(13,'new@example.test','active',NULL,false,'1231231234','New','Member',NULL)");
+      await sql.unsafe("INSERT INTO mlm.person VALUES(15,'new@example.test','active',NULL,false,'1231231234','New','Member',NULL)");
       await assert.rejects(()=>applyMigration(sql,config.database,fresh),/SOURCE_CHANGED_REPLAN_REQUIRED/);assertions++;
       const rollbackPlan=await planMigration(sql,config.database,config.target);
       await sql.unsafe("ALTER TABLE auth.\"user\" ADD CONSTRAINT synthetic_reject CHECK(email <> 'new@example.test')");
@@ -97,8 +115,9 @@ try {
       await sql.unsafe('CREATE TRIGGER synthetic_side_effect BEFORE INSERT ON auth."user" FOR EACH ROW EXECUTE FUNCTION auth.synthetic_trigger()');
       await assert.rejects(()=>planMigration(sql,config.database,config.target),/AUTH_USER_SHAPE_OR_SIDE_EFFECT_REQUIRES_REVIEW/);assertions++;
       equal((await sql.unsafe('SELECT email_verified,name FROM auth."user" WHERE id=$1',['existing-admin']))[0],{email_verified:true,name:'Existing Administrator'});
-      console.log(JSON.stringify({syntheticPostgres:'17.11',assertions,pendingInserted:2,neutralAuthOnly:true,idempotent:true,
-        sourceAndTreeUnchanged:true,rollback:true,triggerGuard:true,messagesSent:0,productionAccess:false,network:'none'}));
+      console.log(JSON.stringify({syntheticPostgres:'17.11',assertions,pendingInserted:4,neutralAuthOnly:true,idempotent:true,
+        emailOnlyBlacklist:true,phoneAndNameCollisionsAllowed:true,explicitRestrictionsPreserved:true,oldPlanRejected:true,
+        sourceTreeSalesAndLedgerUnchanged:true,rollback:true,triggerGuard:true,messagesSent:0,productionAccess:false,network:'none'}));
     }finally{await sql.end({timeout:2});}
   `);
   console.log(output);

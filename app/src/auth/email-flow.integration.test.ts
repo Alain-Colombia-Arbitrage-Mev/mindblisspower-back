@@ -242,9 +242,11 @@ test('Cloudflare rejection stays generic, never retries or falls back, and never
   for (const status of [401, 429, 500]) {
     const app = fixture(status);
     const response = await requestCode(app);
-    // Known-login provider failures remain generic. This is a request
-    // acknowledgement, not delivery confirmation or a session.
-    expect(response.status).toBe(200);
+    // Known-login provider failures are explicit, without exposing provider
+    // details or claiming that delivery or authentication succeeded.
+    expect(response.status).toBe(503);
+    expect(await response.clone().json()).toEqual({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE',
+      message: 'Email verification is temporarily unavailable. Request a new code later.' });
     expect(response.headers.has('set-cookie')).toBe(false);
     expect(app.calls).toHaveLength(1);
     expect(app.store.session).toHaveLength(0);
@@ -261,7 +263,10 @@ test('a confirmed Cloudflare rejection invalidates only its code while keeping t
       value: `${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', '123456')}:0`, expiresAt: new Date(Date.now() + 300_000),
       createdAt: new Date(), updatedAt: new Date() });
     const response = await requestCode(app);
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
+    expect(await response.clone().json()).toMatchObject({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE' });
+    expect(response.headers.has('set-cookie')).toBe(false);
+    await expectNoDeliverySecrets(response, app.code());
     expect((await redeemCode(app)).status).toBe(400);
     expect(app.store.verification!.map(row => row.id)).toEqual(['unrelated-generation']);
     expect((await requestCode(app)).status).toBe(429);
@@ -290,7 +295,11 @@ test('registration reports a confirmed delivery rejection without granting acces
 test('an ambiguous Cloudflare timeout or 5xx keeps a possibly delivered OTP usable without automatic retries', async () => {
   for (const failure of [500, () => { throw new DOMException('synthetic transport timeout', 'AbortError'); }]) {
     const app = fixture(failure);
-    expect((await requestCode(app)).status).toBe(200);
+    const response = await requestCode(app);
+    expect(response.status).toBe(503);
+    expect(await response.clone().json()).toMatchObject({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE' });
+    expect(response.headers.has('set-cookie')).toBe(false);
+    await expectNoDeliverySecrets(response, app.code());
     expect(app.store.verification).toHaveLength(1);
     expect((await redeemCode(app)).status).toBe(200);
     expect(app.store.session).toHaveLength(1);
