@@ -115,6 +115,14 @@ test('429 remains visible after a later success in the same bucket', async () =>
   assert.equal(snapshot.alerts.find(row => row.key === 'email:delivery_failure').severity, 'critical');
 });
 
+test('configuration failures are alertable and do not disappear behind accepted sends', async () => {
+  const store = storage();
+  for (let index = 0; index < 3; index++) await send(store, '/v1/email', event({ outcome: 'configuration' }));
+  await send(store, '/v1/email', event());
+  const snapshot = await read(store);
+  assert.equal(snapshot.alerts.find(row => row.key === 'email:delivery_failure').severity, 'warn');
+});
+
 test('local Cloudflare volume warns at160/190 without asserting actual provider usage or delivery', async () => {
   const store = storage();
   for (let index = 0; index < 160; index++) await send(store, '/v1/email', event({ provider: 'cloudflare' }));
@@ -186,7 +194,7 @@ test('scheduled collection only reads official provider APIs and writes the exis
   const worker = readFileSync(new URL('../src/worker.mjs', import.meta.url), 'utf8');
   assert.match(worker, /operationalSnapshot\(\)/);
   assert.match(worker, /if \(observationRequest\(request\)\) return handleOperationalStorage/);
-  assert.match(worker.split('export class CoreApi')[1].split('export class CoreEngine')[0], /this\.interceptHttps = operationalMonitoringEnabled\(env\)/);
+  assert.match(worker.split('export class CoreApi')[1].split('export class CoreEngine')[0], /this\.interceptHttps = strictHttpEgressEnabled\(env\) \|\| operationalMonitoringEnabled\(env\)/);
   const runtime = readFileSync(new URL('../src/runtime-env.mjs', import.meta.url), 'utf8');
   assert.match(runtime, /values\.NODE_EXTRA_CA_CERTS = '\/etc\/cloudflare\/certs\/cloudflare-containers-ca\.crt'/);
   assert.doesNotMatch(worker.split('operationalSnapshot()')[1].split('nowpaymentsDiagnostics()')[0], /privateReadiness|startAndWaitForPorts/);

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AUTH_OTP_LENGTH, AUTH_OTP_RESEND_ALIASES, type AuthOtpHostedTemplate } from './email-templates';
 import { createEmailObserver } from './email-observation';
+import { recordOtpTraceDelivery } from './otp-trace';
 
 export type AuthEnvironment = Record<string, string | undefined>;
 export type EmailMessage = { to: string; subject: string; text: string; html?: string; template?: AuthOtpHostedTemplate };
@@ -64,6 +65,7 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
     async email(message) {
       let terminal: Omit<EmailDeliveryDiagnostic, 'event'> | undefined;
       let failure: unknown;
+      let acceptedMessageId: string | undefined;
       // Log only this fixed allowlist of classifications and numeric statuses.
       // Better Auth suppresses sender errors; without independent diagnostics
       // provider rejection used to be indistinguishable from an inbox delay.
@@ -107,10 +109,12 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
         }
         // REST ACK is exactly {id:UUID}; it means accepted, never inbox delivery.
         // Do not reflect/log provider bodies, IDs, messages or arbitrary fields.
+        const acknowledgement = resendResult.safeParse(data);
         if (response.status !== 200 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')
-          || !resendResult.safeParse(data).success) {
+          || !acknowledgement.success) {
           diagnostic({ outcome: 'invalid_response', httpStatus: response.status }); throw new AuthEmailDeliveryError(false);
         }
+        acceptedMessageId = acknowledgement.data.id.toLowerCase();
         diagnostic({ outcome: 'accepted', httpStatus: response.status, queued: true });
         return;
       }
@@ -154,6 +158,9 @@ export function createAuthDelivery(env: AuthEnvironment, fetchImpl: typeof fetch
       // is no undocumented idempotency header or automatic resend/fallback.
       } catch (error) { failure = error; throw error; }
       finally {
+        recordOtpTraceDelivery(message.to, terminal?.outcome === 'accepted' ? 'send_accepted'
+          : failure instanceof AuthEmailDeliveryError && failure.confirmedRejected ? 'send_rejected' : 'send_unknown',
+          terminal?.httpStatus, acceptedMessageId);
         // Monitoring is independent of delivery/identity. A bounded, failed
         // observation cannot revoke a valid code, resend or select a fallback.
         await observe({ provider: authEmailProvider(env),

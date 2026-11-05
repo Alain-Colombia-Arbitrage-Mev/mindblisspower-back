@@ -134,6 +134,54 @@ test('operational invoice egress preserves validated bytes and never retries or 
   assert.equal(failed.status, 503); assert.equal(calls, 2);
 });
 
+test('NOW return origins allow only coherent main or app pairs while preserving the canonical callback', async () => {
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    const body = { ...invoice(),
+      success_url: `${origin}/dashboard/packages?order_id=${order}&payment_provider=nowpayments&status=review`,
+      cancel_url: `${origin}/dashboard/packages?payment_provider=nowpayments&status=cancelled` };
+    const raw = JSON.stringify(body).replaceAll('&', '\\u0026');
+    assert.equal(validOperationalInvoice(new TextEncoder().encode(raw)), true);
+    let calls = 0;
+    const response = await dispatchContainerOutbound('payments', outbound(raw), env, never, async request => {
+      calls++;
+      const sent = await request.json();
+      assert.equal(sent.success_url, body.success_url); assert.equal(sent.cancel_url, body.cancel_url);
+      assert.equal(sent.ipn_callback_url, NOWPAYMENTS_CALLBACK); assert.equal(sent.price_amount, 100);
+      return Response.json({ id: '123', invoice_url: 'https://nowpayments.io/payment/?iid=123' });
+    });
+    assert.equal(response.status, 200); assert.equal(calls, 1);
+  }
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    const input = checkout(undefined, undefined, { headers: { ...headers, 'x-vp-portal-origin': origin } });
+    const response = await dispatchCore(input, env, () => ({ fetch: async request => {
+      assert.equal(request.headers.get('x-vp-portal-origin'), origin);
+      return Response.json({ provider: 'nowpayments' });
+    } }));
+    assert.equal(response.status, 200);
+  }
+});
+
+test('NOW return origins reject aliases, mixed pairs and an app callback before provider fetch', async () => {
+  const app = 'https://app.mindblisspower.com';
+  const appInvoice = { ...invoice(), success_url: invoice().success_url.replace('https://mindblisspower.com', app),
+    cancel_url: `${app}/dashboard/packages?payment_provider=nowpayments&status=cancelled` };
+  for (const changes of [
+    { success_url: appInvoice.success_url.replace(app, 'http://app.mindblisspower.com') },
+    { success_url: appInvoice.success_url.replace(app, `${app}:443`) },
+    { success_url: appInvoice.success_url.replace(app, 'https://APP.mindblisspower.com') },
+    { success_url: appInvoice.success_url.replace(app, `${app}.evil.example`) },
+    { success_url: appInvoice.success_url.replace(app, 'https://user@app.mindblisspower.com') },
+    { success_url: `${appInvoice.success_url}#fragment` },
+    { success_url: appInvoice.success_url.replace('/dashboard/', '//dashboard/') },
+    { success_url: invoice().success_url }, { cancel_url: invoice().cancel_url },
+    { cancel_url: `${appInvoice.cancel_url}&order_id=${order}` },
+    { ipn_callback_url: `${app}/api/webhooks/nowpayments` },
+  ]) {
+    const response = await dispatchContainerOutbound('payments', outbound(JSON.stringify({ ...appInvoice, ...changes })), env, never, never);
+    assert.equal(response.status, 400);
+  }
+});
+
 test('invoice egress fails closed on changed money, user fees, callbacks, identifiers, credentials and routes', async () => {
   for (const changes of [{ price_amount: 0 }, { price_amount: -1 }, { price_amount: '100.00' }, { price_amount: 1.001 },
     { price_currency: 'eur' }, { order_id: 'not-an-order' }, { order_description: 'untrusted' }, { is_fee_paid_by_user: true },

@@ -64,9 +64,10 @@ test('probe has a fixed hard timeout even if a DO fetch ignores cancellation', a
   assert.ok(Object.values(result.checks).every(value => value.status === 503 && !value.ok));
 });
 
-test('named probe exposes only zero-argument readiness RPC, not an HTTP handler or caller-selected target', () => {
+test('named probe exposes fixed readiness and pseudonymous trace RPC, not an HTTP handler or caller-selected target', () => {
   const source = readFileSync(new URL('../src/worker.mjs', import.meta.url), 'utf8');
-  const probe = source.split('export class PrivateCoreProbe extends WorkerEntrypoint {')[1].split('\nfor (const')[0];
+  const probe = source.split('export class PrivateCoreProbe extends WorkerEntrypoint {')[1].split(/\r?\n}\r?\n/)[0];
   assert.match(probe, /readiness\(\)/); assert.match(probe, /arguments\.length !== 0/);
   assert.doesNotMatch(probe, /fetch\(|request\.url|request\.headers|target/);
+  assert.match(probe, /authTrace\(selector\)/); assert.match(probe, /arguments\.length !== 1/);
 });

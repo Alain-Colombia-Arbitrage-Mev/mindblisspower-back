@@ -101,10 +101,20 @@ export function containerEnvironment(service, env) {
     }
   }
   if (service === 'api') {
+    // Branch portals share the auth service, not browser cookies or JWT issuers.
+    // Append explicit deployed origins without replacing the existing secret.
+    if (env.API_AUTH_ADDITIONAL_ORIGINS !== undefined) {
+      const additional = env.API_AUTH_ADDITIONAL_ORIGINS;
+      const allowed = new Set(['https://mindblisspower.com', 'https://admin.mindblisspower.com', 'https://app.mindblisspower.com']);
+      if (typeof additional !== 'string' || !additional || additional.length > 512
+        || additional.split(',').some(origin => !allowed.has(origin))) throw new Error('Invalid additional authentication origins');
+      values.BETTER_AUTH_TRUSTED_ORIGINS = [...new Set([...values.BETTER_AUTH_TRUSTED_ORIGINS.split(',').map(origin => origin.trim()).filter(Boolean), ...additional.split(',')])].join(',');
+    }
     values.AUTH_OBSERVABILITY_ENABLED = String(env.CORE_OBSERVABILITY_ENABLED === 'true');
+    values.AUTH_OTP_TRACE_ENABLED = String(env.CORE_AUTH_TRACE_ENABLED === 'true');
     // The SDK injects this ephemeral interception CA; Bun keeps its public CA
     // roots and adds this one for the fixed private HTTPS observation hostname.
-    if (env.CORE_OBSERVABILITY_ENABLED === 'true') values.NODE_EXTRA_CA_CERTS = '/etc/cloudflare/certs/cloudflare-containers-ca.crt';
+    if (env.CORE_OBSERVABILITY_ENABLED === 'true' || env.CORE_AUTH_TRACE_ENABLED === 'true' || env.CORE_HTTP_EGRESS_STRICT_ENABLED === 'true') values.NODE_EXTRA_CA_CERTS = '/etc/cloudflare/certs/cloudflare-containers-ca.crt';
     const engine = new URL(values.VP_ENGINE_GRPC_URL);
     if (engine.protocol !== 'https:' || !engine.hostname || engine.username || engine.password || engine.hash || engine.search || engine.pathname !== '/') throw new Error('Engine mTLS origin is invalid');
     const auth = postgresTarget(values.AUTH_DATABASE_URL);

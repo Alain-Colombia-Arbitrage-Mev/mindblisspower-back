@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { CONTAINER_HTTP_HOSTS } from '../src/http-egress.mjs';
 import { dispatchCore, dispatchContainerOutbound, nowpaymentsCaptureReady, coreReady, TUNNEL_PROTOCOL } from '../src/routing.mjs';
 import { containerEnvironment } from '../src/runtime-env.mjs';
 
@@ -201,5 +202,7 @@ test('checked-in release keeps general services closed and intercepts the provid
     assert.equal(config.env[name].vars.CORE_NETWORK_VERIFIED, 'false');
   }
   const worker = readFileSync(new URL('../src/worker.mjs', import.meta.url), 'utf8');
-  assert.match(worker, /\['payments', CorePayments, \['engine\.core\.internal', 'auth\.core\.internal', 'api\.nowpayments\.io'\]\]/);
+  assert.deepEqual(CONTAINER_HTTP_HOSTS.payments, ['engine.core.internal', 'auth.core.internal', 'api.nowpayments.io']);
+  assert.match(worker, /\['payments', CorePayments\]/);
+  assert.match(worker, /Class\.outboundByHost = Object\.fromEntries\(CONTAINER_HTTP_HOSTS\[source\]\.map/);
 });

@@ -2,6 +2,7 @@ export const NOWPAYMENTS_CALLBACK = 'https://mindblisspower.com/api/webhooks/now
 export const NOWPAYMENTS_CHECKOUT = '/api/payments/checkout';
 export const NOWPAYMENTS_MAX_INVOICE_BODY = 16 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PORTAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com']);
 
 /** A separate, explicitly reviewed capability; never enables the full Core. */
 export function nowpaymentsOperationalReady(env) {
@@ -58,11 +59,11 @@ export function validOperationalInvoice(body) {
       || value.ipn_callback_url !== NOWPAYMENTS_CALLBACK) return false;
     const success = new URL(value.success_url);
     const order = value.order_id;
-    if (success.origin !== 'https://mindblisspower.com' || success.pathname !== '/dashboard/packages'
+    if (!PORTAL_ORIGINS.has(success.origin) || success.pathname !== '/dashboard/packages'
       || success.href !== value.success_url || success.username || success.password || success.port || success.hash
       || success.searchParams.get('payment_provider') !== 'nowpayments'
       || success.searchParams.get('status') !== 'review' || success.searchParams.get('order_id') !== order
       || [...success.searchParams.keys()].length !== 3) return false;
-    return value.cancel_url === 'https://mindblisspower.com/dashboard/packages?payment_provider=nowpayments&status=cancelled';
+    return value.cancel_url === `${success.origin}/dashboard/packages?payment_provider=nowpayments&status=cancelled`;
   } catch { return false; }
 }

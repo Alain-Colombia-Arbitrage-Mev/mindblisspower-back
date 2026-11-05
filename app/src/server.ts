@@ -7,10 +7,14 @@ import { registerTransactionRoutes } from './http/transaction-routes';
 import { registerCommandCenterRoutes } from './http/command-center-routes';
 import { registerIdentityRoutes } from './http/identity-routes';
 import { authProxyContext } from './http/auth-proxy-context';
+import { OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy, registerOtpDiagnosticRoutes, registerOtpTraceReadiness } from './http/otp-diagnostic-routes';
 import type { ApiEnvironment } from './http/types';
 
 const app = new Hono<ApiEnvironment>();
 app.onError(apiErrorHandler);
+registerOtpTraceReadiness(app);
+// Include failures returned by the shared session gate in private/no-store.
+app.use(OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy);
 app.use('/api/auth/*', bodyLimit({ maxSize: 32 * 1024,
   onError: c => c.json({ error: 'request_too_large' }, 413) }));
 app.use('/api/auth/*', authProxyContext(process.env.AUTH_BFF_SHARED_SECRET));
@@ -33,6 +37,7 @@ registerAffiliateRoutes(app);
 registerTransactionRoutes(app);
 registerCommandCenterRoutes(app);
 registerIdentityRoutes(app);
+registerOtpDiagnosticRoutes(app);
 
 app.get('/health', (c) => c.text('ok'));
 

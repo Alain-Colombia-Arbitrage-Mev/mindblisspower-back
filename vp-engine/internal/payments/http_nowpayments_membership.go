@@ -18,6 +18,25 @@ import (
 
 var errMembershipProvider = errors.New("invalid membership payment provider")
 
+const nowPaymentsPortalOriginHeader = "X-VP-Portal-Origin"
+
+func validNOWPaymentsPortalOrigin(origin string) bool {
+	return origin == "https://mindblisspower.com" || origin == "https://app.mindblisspower.com"
+}
+
+// Only the authenticated portal BFF may select a return origin. It is not an
+// arbitrary redirect URL, and the canonical payment webhook never changes.
+func (flow *nowPaymentsMemberships) portalOrigin(headers http.Header) (string, error) {
+	values := headers.Values(nowPaymentsPortalOriginHeader)
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 || flow.environment != "production" || !validNOWPaymentsPortalOrigin(values[0]) {
+		return "", nowpayments.ErrConfiguration
+	}
+	return values[0], nil
+}
+
 func membershipProvider(raw string) (string, error) {
 	switch raw {
 	case "", "stripe":
@@ -89,6 +108,11 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusServiceUnavailable, "nowpayments-unavailable")
 		return
 	}
+	portalOrigin, err := flow.portalOrigin(r.Header)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_portal_origin")
+		return
+	}
 	attempt, err := flow.store.CreateNOWPaymentsMembership(r.Context(), NOWPaymentsMembershipInput{
 		Email: req.Email, Subject: req.authSubject, Environment: flow.environment, PackageID: req.PackageID,
 		SponsorAffiliateID: sponsor, PreferredSide: side, PurchaseRequestID: req.PurchaseRequestID,
@@ -116,7 +140,7 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	invoice, err := flow.createInvoice(r.Context(), attempt)
+	invoice, err := flow.createInvoiceForPortal(r.Context(), attempt, portalOrigin)
 	if err != nil {
 		h.log.Error().Msg("NOWPayments invoice requires operational review; no automatic retry")
 		writeErr(w, http.StatusServiceUnavailable, "membership_payment_pending_review")
@@ -136,6 +160,13 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 }
 
 func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt NOWPaymentsMembershipAttempt) (nowpayments.Invoice, error) {
+	return flow.createInvoiceForPortal(ctx, attempt, "")
+}
+
+func (flow *nowPaymentsMemberships) createInvoiceForPortal(ctx context.Context, attempt NOWPaymentsMembershipAttempt, portalOrigin string) (nowpayments.Invoice, error) {
+	if portalOrigin != "" && (flow.environment != "production" || !validNOWPaymentsPortalOrigin(portalOrigin)) {
+		return nowpayments.Invoice{}, nowpayments.ErrConfiguration
+	}
 	if attempt.Reused {
 		if !flow.operational || !attempt.Reusable || attempt.Environment != flow.environment || attempt.State != "invoice_created" || attempt.TotalCents <= 0 || !validNOWPaymentsOrderID(attempt.ID) {
 			return nowpayments.Invoice{}, nowpayments.ErrEvidence
@@ -147,7 +178,7 @@ func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt N
 		attempt.State != "creating_invoice" || attempt.TotalCents <= 0 {
 		return nowpayments.Invoice{}, nowpayments.ErrEvidence
 	}
-	successURL, err := flow.successURLForOrder(attempt.ID)
+	successURL, cancelURL, err := flow.returnURLsForOrder(attempt.ID, portalOrigin)
 	if err != nil {
 		return nowpayments.Invoice{}, err
 	}
@@ -155,7 +186,7 @@ func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt N
 	// idempotency key: even a timeout may have created a payable invoice remotely.
 	invoice, err := flow.client.CreateInvoice(ctx, nowpayments.InvoiceRequest{
 		OrderID: attempt.ID, AmountUSDMinor: attempt.TotalCents, Description: "Mindbliss Power membership",
-		CallbackURL: flow.callbackURL, SuccessURL: successURL, CancelURL: flow.cancelURL,
+		CallbackURL: flow.callbackURL, SuccessURL: successURL, CancelURL: cancelURL,
 	})
 	if err == nil {
 		err = flow.store.AttachNOWPaymentsInvoice(ctx, attempt.ID, flow.environment, invoice.ID)
@@ -175,22 +206,33 @@ func (flow *nowPaymentsMemberships) createInvoice(ctx context.Context, attempt N
 // A browser redirect is never evidence of payment or ownership; the portal must
 // still obtain the authenticated, persisted status before showing confirmation.
 func (flow *nowPaymentsMemberships) successURLForOrder(orderID string) (string, error) {
+	successURL, _, err := flow.returnURLsForOrder(orderID, "")
+	return successURL, err
+}
+
+func (flow *nowPaymentsMemberships) returnURLsForOrder(orderID, portalOrigin string) (string, string, error) {
 	if !validNOWPaymentsOrderID(orderID) || !validNOWPaymentsCallbackURL(flow.callbackURL, flow.environment) {
-		return "", nowpayments.ErrEvidence
+		return "", "", nowpayments.ErrEvidence
 	}
 	origin := strings.TrimSuffix(flow.callbackURL, "/api/webhooks/nowpayments")
 	if flow.successURL != origin+"/dashboard/packages?payment_provider=nowpayments&status=review" ||
 		flow.cancelURL != origin+"/dashboard/packages?payment_provider=nowpayments&status=cancelled" {
-		return "", nowpayments.ErrConfiguration
+		return "", "", nowpayments.ErrConfiguration
 	}
-	result, err := url.Parse(flow.successURL)
+	if portalOrigin != "" {
+		if flow.environment != "production" || !validNOWPaymentsPortalOrigin(portalOrigin) {
+			return "", "", nowpayments.ErrConfiguration
+		}
+		origin = portalOrigin
+	}
+	result, err := url.Parse(origin + "/dashboard/packages?payment_provider=nowpayments&status=review")
 	if err != nil {
-		return "", nowpayments.ErrConfiguration
+		return "", "", nowpayments.ErrConfiguration
 	}
 	query := result.Query()
 	query.Set("order_id", orderID)
 	result.RawQuery = query.Encode()
-	return result.String(), nil
+	return result.String(), origin + "/dashboard/packages?payment_provider=nowpayments&status=cancelled", nil
 }
 
 // A signed callback is evidence for manual membership review only. It must not

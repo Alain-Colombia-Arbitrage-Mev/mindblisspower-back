@@ -1,4 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { authTraceEnabled, validAuthTrace, validDeliveryTrace, validTraceSelector, recordAuthTelemetry,
+  readAuthTrace, localDeliveryCounts, localAuthFailures, pruneAuthTraces } from './auth-trace-store.mjs';
 
 const HOST = 'observability.core.internal';
 const PREFIX = 'ops:v1:';
@@ -118,11 +120,13 @@ async function buildSnapshot(storage, env, now) {
       const count = await storage.get(`${PREFIX}count:${suffix}:${provider}`);
       // Local counts describe this app's observation window, NOT account-wide
       // usage or confirmed inbox delivery. A missing observation is never zero.
+      const delivery = await localDeliveryCounts(storage, localPeriod, now);
       email.push({ ...row, accepted: count?.accepted ?? (started ? 0 : null), rejected: count?.rejected ?? (started ? 0 : null),
         limit: row.limit ?? (row.coverage === 'provider' ? null : fallback.limit),
         limit_source: row.coverage === 'provider' ? 'provider' : 'administrator',
         attempted: count?.attempted ?? (started ? 0 : null), unknown: count?.unknown ?? (started ? 0 : null),
-        delivered: null, bounced: null, tracking_started_at: started || null,
+        ...(provider === 'resend' ? delivery : { delivered: null, bounced: null, delayed: null, failed: null,
+          delivery_tracking_started_at: null, delivery_coverage_limited: false }), tracking_started_at: started || null,
         local_period: localPeriod, local_window: suffix.split(':')[1],
         status: stale && row.status === 'ok' ? 'stale' : quotaStatus(row) });
     }
@@ -149,14 +153,25 @@ async function buildSnapshot(storage, env, now) {
     alerts.push({ key: 'monitor:source_unavailable', severity: 'warn', resource: 'monitor' });
   }
   const bucket = Math.floor(now / INTERVAL_MS);
-  let rejected = 0, unknown = 0, attempted = 0, throttled = false;
+  let rejected = 0, unknown = 0, configuration = 0, attempted = 0, accepted = 0, throttled = false;
   for (const provider of providers) for (let offset = 0; offset < 3; offset++) {
     const row = await storage.get(`${PREFIX}count:recent:${bucket - offset}:${provider}`);
-    rejected += row?.rejected || 0; unknown += row?.unknown || 0; attempted += row?.attempted || 0;
+    rejected += row?.rejected || 0; unknown += row?.unknown || 0; configuration += row?.configuration || 0; attempted += row?.attempted || 0; accepted += row?.accepted || 0;
     throttled ||= row?.throttled > 0;
   }
-  if (throttled || rejected + unknown >= 3) alerts.push({ key: 'email:delivery_failure',
-    severity: throttled || (attempted >= 10 && (rejected + unknown) / attempted >= .2) ? 'critical' : 'warn', resource: 'email' });
+  const traceFailures = authTraceEnabled(env) ? await localAuthFailures(storage, now) : { available: false };
+  // The old terminal observer and new auth trace can describe the same send.
+  // Never sum both into fictitious failures or attempts; use the larger bounded
+  // classification count, and preserve a throttle reported by either source.
+  const failureCount = Math.max(rejected + unknown + configuration, traceFailures.available ? traceFailures.failed + traceFailures.unknown : 0);
+  if (traceFailures.available) {
+    attempted = Math.max(attempted, traceFailures.attempted);
+    accepted = Math.max(accepted, traceFailures.accepted);
+    throttled ||= traceFailures.throttled > 0;
+  }
+  const callbackFailures = traceFailures.available ? traceFailures.delivery_failures : 0;
+  if (throttled || failureCount >= 3 || callbackFailures > 0) alerts.push({ key: 'email:delivery_failure',
+    severity: throttled || callbackFailures > 0 || (attempted >= 10 && failureCount / attempted >= .2) ? 'critical' : 'warn', resource: 'email' });
   const nowIso = iso(now);
   const history = await storage.get(`${PREFIX}alerts`) || {};
   const active = new Set(alerts.map(alert => alert.key));
@@ -166,7 +181,8 @@ async function buildSnapshot(storage, env, now) {
     const recovered = prior.basis === 'local_volume' ? prior.window !== iso(now).slice(0, 10)
       : key === 'monitor:stale' ? !stale
       : key === 'monitor:source_unavailable' ? !stale && ![...email, ...infrastructure].some(row => ['unknown', 'stale'].includes(row.status))
-      : key === 'email:delivery_failure' ? attempted > 0 && rejected + unknown === 0 && !throttled
+      : key === 'email:delivery_failure' ? accepted > 0 && failureCount + callbackFailures === 0 && !throttled
+        && (!authTraceEnabled(env) || traceFailures.available)
       : providers.includes(prior.resource) ? !stale && email.filter(row => row.provider === prior.resource).every(row => row.status === 'ok' && row.coverage === 'provider')
       : !stale && infrastructure.some(row => row.service === prior.resource && row.status === 'ok');
     if (recovered) history[key] = { ...prior, resolved_at: nowIso };
@@ -240,13 +256,14 @@ function projectSources(value, now) {
 
 /** Only the existing API Durable Object invokes this handler; never public. */
 export async function handleOperationalStorage(request, storage, env, now = Date.now()) {
-  if (!operationalMonitoringEnabled(env)) return response({ error: 'observability_disabled' }, 503);
   const url = new URL(request.url);
+  const tracePath = ['/v1/trace', '/v1/delivery', '/v1/trace-read', '/v1/probe', '/v1/prune-traces'].includes(url.pathname);
   const read = request.method === 'GET' && url.pathname === '/v1/snapshot';
+  if (tracePath ? !authTraceEnabled(env) : !(operationalMonitoringEnabled(env) || (read && authTraceEnabled(env)))) return response({ error: 'observability_disabled' }, 503);
   if (url.protocol !== 'https:' || url.hostname !== HOST || url.port || url.username || url.password || url.search || url.hash
     || request.headers.has('upgrade') || request.headers.has('cookie') || request.headers.has('content-encoding')
     || (!read && !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || ''))
-    || (!read && !(request.method === 'POST' && ['/v1/email', '/v1/refresh'].includes(url.pathname)))) return response({ error: 'not_found' }, 404);
+    || (!read && !(request.method === 'POST' && ['/v1/email', '/v1/refresh', '/v1/trace', '/v1/delivery', '/v1/trace-read', '/v1/probe', '/v1/prune-traces'].includes(url.pathname)))) return response({ error: 'not_found' }, 404);
   const secret = env.API_BFF_SHARED_SECRET;
   const timestamp = request.headers.get('x-vp-observation-timestamp') || '';
   const proof = request.headers.get('x-vp-observation-signature') || '';
@@ -260,6 +277,25 @@ export async function handleOperationalStorage(request, storage, env, now = Date
   finally { clearTimeout(timer); }
   if (!timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(signature(secret, request.method, url.pathname, timestamp, raw), 'hex'))) return response({ error: 'unauthorized' }, 401);
   try {
+    if (tracePath) {
+      const value = JSON.parse(raw);
+      if (url.pathname === '/v1/probe' || url.pathname === '/v1/prune-traces') {
+        if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length) return response({ error: 'invalid_observation' }, 400);
+        if (url.pathname === '/v1/prune-traces') {
+          await pruneAuthTraces(storage, now);
+          const { history } = await buildSnapshot(storage, env, now);
+          await storage.put(`${PREFIX}alerts`, history);
+        }
+        return response({ recorded: true });
+      }
+      if (url.pathname === '/v1/trace-read') {
+        if (!validTraceSelector(value)) return response({ error: 'invalid_observation' }, 400);
+        return response(await readAuthTrace(storage, value, now));
+      }
+      if (!(url.pathname === '/v1/trace' ? validAuthTrace(value, now) : validDeliveryTrace(value, now))) return response({ error: 'invalid_observation' }, 400);
+      await recordAuthTelemetry(storage, url.pathname === '/v1/trace' ? 'auth' : 'delivery', value, now);
+      return response({ recorded: true });
+    }
     if (url.pathname === '/v1/email') {
       const event = JSON.parse(raw); if (!validEvent(event, now)) return response({ error: 'invalid_observation' }, 400);
       await recordEmail(storage, event, now); return response({ recorded: true });
@@ -271,6 +307,7 @@ export async function handleOperationalStorage(request, storage, env, now = Date
       if (!await storage.get(`${PREFIX}tracking-start`)) await storage.put(`${PREFIX}tracking-start`, iso(now));
       const { history } = await buildSnapshot(storage, env, now);
       await storage.put(`${PREFIX}alerts`, history); await prune(storage, now);
+      if (authTraceEnabled(env)) await pruneAuthTraces(storage, now);
       return response({ recorded: true });
     }
     const { snapshot } = await buildSnapshot(storage, env, now);

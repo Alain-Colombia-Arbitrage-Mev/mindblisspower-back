@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -194,6 +195,107 @@ func TestNOWMembershipInvoiceUsesOnlyPersistedSnapshot(t *testing.T) {
 	if client.request.CancelURL != h.nowMemberships.cancelURL || strings.Contains(client.request.CancelURL, "order_id") ||
 		client.request.CallbackURL != h.nowMemberships.callbackURL {
 		t.Fatal("order return must not alter cancellation or webhook targets")
+	}
+}
+
+func TestNOWMembershipPortalOriginIsRequestLocalAndNeverChangesWebhook(t *testing.T) {
+	h, client, store := fakeNOWMembershipHandler()
+	originalSuccess, originalCancel := h.nowMemberships.successURL, h.nowMemberships.cancelURL
+	for _, origin := range []string{"https://app.mindblisspower.com", "", "https://mindblisspower.com", ""} {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		if origin != "" {
+			r.Header.Set(nowPaymentsPortalOriginHeader, origin)
+		}
+		w := httptest.NewRecorder()
+		h.handleNOWMembershipCheckout(w, r, checkoutRequest{Email: "verified@example.test", PackageID: 1}, nil, "")
+		expected := origin
+		if expected == "" {
+			expected = "https://mindblisspower.com"
+		}
+		success, err := url.Parse(client.request.SuccessURL)
+		if w.Code != http.StatusOK || err != nil || success.Scheme+"://"+success.Host != expected ||
+			success.Query().Get("order_id") != store.attempt.ID || len(success.Query()) != 3 ||
+			client.request.CancelURL != expected+"/dashboard/packages?payment_provider=nowpayments&status=cancelled" ||
+			client.request.CallbackURL != "https://mindblisspower.com/api/webhooks/nowpayments" {
+			t.Fatalf("incorrect request-local return target for %q", origin)
+		}
+		if client.request.AmountUSDMinor != store.attempt.TotalCents || client.request.OrderID != store.attempt.ID ||
+			h.nowMemberships.successURL != originalSuccess || h.nowMemberships.cancelURL != originalCancel {
+			t.Fatal("origin selection changed persisted pricing, identity or shared configuration")
+		}
+	}
+	if client.creates != 4 || store.creates != 4 || store.attaches != 4 || store.unknowns != 0 {
+		t.Fatal("return selection retried or changed the invoice lifecycle")
+	}
+}
+
+func TestNOWMembershipInvalidPortalOriginStopsBeforePersistenceAndProvider(t *testing.T) {
+	for _, values := range [][]string{
+		{""}, {"https://evil.example"}, {"http://app.mindblisspower.com"},
+		{"https://app.mindblisspower.com/"}, {"https://app.mindblisspower.com:443"},
+		{"https://APP.mindblisspower.com"}, {"https://app.mindblisspower.com.evil.example"},
+		{"https://user@app.mindblisspower.com"}, {" https://app.mindblisspower.com"},
+		{"https://app.mindblisspower.com "}, {"https://app.mindblisspower.com?x=1"},
+		{"https://app.mindblisspower.com#fragment"},
+		{"https://mindblisspower.com", "https://app.mindblisspower.com"},
+		{"https://app.mindblisspower.com, https://mindblisspower.com"},
+	} {
+		h, client, store := fakeNOWMembershipHandler()
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		for _, value := range values {
+			r.Header.Add(nowPaymentsPortalOriginHeader, value)
+		}
+		w := httptest.NewRecorder()
+		h.handleNOWMembershipCheckout(w, r, checkoutRequest{Email: "verified@example.test", PackageID: 1}, nil, "")
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"error":"invalid_portal_origin"`) ||
+			client.creates != 0 || store.creates != 0 || store.attaches != 0 || store.unknowns != 0 {
+			t.Fatalf("invalid origin reached provider or persistence: %q", values)
+		}
+	}
+	h, client, store := fakeNOWMembershipHandler()
+	h.nowMemberships.environment = "sandbox"
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.Header.Set(nowPaymentsPortalOriginHeader, "https://app.mindblisspower.com")
+	w := httptest.NewRecorder()
+	h.handleNOWMembershipCheckout(w, r, checkoutRequest{}, nil, "")
+	if w.Code != http.StatusBadRequest || client.creates != 0 || store.creates != 0 {
+		t.Fatal("production portal override accepted in sandbox")
+	}
+}
+
+func TestNOWMembershipPortalOriginDoesNotRecreateReusedInvoice(t *testing.T) {
+	h, client, store := fakeNOWMembershipHandler()
+	h.nowMemberships.operational = true
+	store.attempt.Reused, store.attempt.Reusable, store.attempt.State = true, true, "invoice_created"
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.Header.Set(nowPaymentsPortalOriginHeader, "https://app.mindblisspower.com")
+	w := httptest.NewRecorder()
+	h.handleNOWMembershipCheckout(w, r, checkoutRequest{Email: "verified@example.test", PackageID: 1}, nil, "")
+	if w.Code != http.StatusOK || client.creates != 0 || store.attaches != 0 || store.unknowns != 0 ||
+		!strings.Contains(w.Body.String(), `"reused":true`) {
+		t.Fatal("return origin must never recreate an existing remote invoice")
+	}
+}
+
+func TestNOWMembershipReturnOriginsRemainIsolatedConcurrently(t *testing.T) {
+	h, _, _ := fakeNOWMembershipHandler()
+	flow := h.nowMemberships
+	originalSuccess, originalCancel := flow.successURL, flow.cancelURL
+	var wg sync.WaitGroup
+	for _, origin := range []string{"https://mindblisspower.com", "https://app.mindblisspower.com"} {
+		wg.Go(func() {
+			for range 20 {
+				success, cancel, err := flow.returnURLsForOrder(syntheticNOWOrder, origin)
+				if err != nil || !strings.HasPrefix(success, origin+"/dashboard/packages?") ||
+					cancel != origin+"/dashboard/packages?payment_provider=nowpayments&status=cancelled" {
+					t.Errorf("return target leaked across concurrent requests for %s", origin)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if flow.successURL != originalSuccess || flow.cancelURL != originalCancel {
+		t.Fatal("concurrent origin selection mutated shared configuration")
 	}
 }
 

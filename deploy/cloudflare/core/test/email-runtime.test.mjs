@@ -17,6 +17,30 @@ const unreadable = (env, keys) => {
   return env;
 };
 
+test('branch portal appends an exact trusted origin without changing credentials, issuer or existing origins', () => {
+  const env = { ...fixture(), API_AUTH_ORIGINS: 'https://mindblisspower.com,https://admin.mindblisspower.com',
+    API_AUTH_ADDITIONAL_ORIGINS: 'https://app.mindblisspower.com' };
+  const values = containerEnvironment('api', env);
+  assert.equal(values.BETTER_AUTH_TRUSTED_ORIGINS, `${env.API_AUTH_ORIGINS},https://app.mindblisspower.com`);
+  assert.equal(values.BETTER_AUTH_URL, env.API_AUTH_URL);
+  assert.equal(values.BETTER_AUTH_JWT_ISSUER, env.AUTH_JWT_ISSUER);
+  assert.equal(values.BETTER_AUTH_JWT_AUDIENCE, env.AUTH_JWT_AUDIENCE);
+  assert.equal(values.BETTER_AUTH_SECRET, env.API_AUTH_SECRET);
+  assert.equal(containerEnvironment('api', { ...env, API_AUTH_ORIGINS: values.BETTER_AUTH_TRUSTED_ORIGINS }).BETTER_AUTH_TRUSTED_ORIGINS, values.BETTER_AUTH_TRUSTED_ORIGINS);
+});
+
+test('additional auth origins reject wildcards, lookalikes, insecure hosts and malformed configuration', () => {
+  for (const origin of ['', null, true, ['https://app.mindblisspower.com'],
+    'https://*.mindblisspower.com', 'https://app.mindblisspower.com.evil.test',
+    'http://app.mindblisspower.com', 'https://app.mindblisspower.com/',
+    'https://app.mindblisspower.com:443', ' https://app.mindblisspower.com',
+    'https://app.mindblisspower.com,', 'https://app.mindblisspower.com\r\n']) {
+    assert.throws(() => containerEnvironment('api', { ...fixture(), API_AUTH_ADDITIONAL_ORIGINS: origin }),
+      { message: 'Invalid additional authentication origins' });
+  }
+  assert.equal(containerEnvironment('api', fixture()).BETTER_AUTH_TRUSTED_ORIGINS, fixture().API_AUTH_ORIGINS);
+});
+
 test('legacy and explicit Cloudflare configuration preserve transport and do not read Resend', () => {
   for (const provider of [undefined, 'cloudflare']) {
     const env = unreadable({ ...fixture(), AUTH_EMAIL_PROVIDER: provider }, ['RESEND_API_KEY']);

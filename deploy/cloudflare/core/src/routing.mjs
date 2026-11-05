@@ -2,6 +2,8 @@ import { NOWPAYMENTS_CHECKOUT, NOWPAYMENTS_MAX_INVOICE_BODY, nowpaymentsOperatio
   operationalCheckoutRequest, parseCheckout, validOperationalInvoice } from './nowpayments-operation.mjs';
 import { NOWPAYMENTS_PURCHASE_MAX_BODY, nowpaymentsPurchaseRequest, purchasesNamespace } from './nowpayments-purchases.mjs';
 import { REFERRAL_ATTRIBUTION_MAX_BODY, referralAttributionRequest, referralAttributionNamespace } from './referral-attribution.mjs';
+import { boundedBody as readBoundedBody, fetchWithDeadline } from './transport.mjs';
+import { authTraceEnabled } from './auth-trace-store.mjs';
 export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
 
 export const SERVICES = Object.freeze({
@@ -16,6 +18,7 @@ const MAX_BODY = 256 * 1024;
 const MAX_NOWPAYMENTS_IPN_BODY = 128 * 1024;
 const NOWPAYMENTS_IPN_PATH = '/api/webhooks/nowpayments';
 const NOWPAYMENTS_STATUS_PATH = '/api/payments/nowpayments/status';
+const OTP_DIAGNOSTIC_PATH = '/api/admin/auth/otp-diagnostic';
 const NOW_CHECKOUT_ERRORS = new Set(['nowpayments-unavailable', 'nowpayments_financial_configuration_unavailable',
   'membership_eligibility_unavailable', 'membership_payment_pending_review']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -31,6 +34,10 @@ const AUTH_ONLY_PATHS = Object.freeze({
 
 function failure(error, status) {
   return Response.json({ error }, { status, headers: { 'Cache-Control': 'private, no-store' } });
+}
+
+function bodyReadFailure(error) {
+  return error?.message === 'body_limit' ? failure('request_too_large', 413) : failure('upstream_unavailable', 503);
 }
 
 export function coreReady(env) {
@@ -105,8 +112,10 @@ export async function dispatchContainerOutbound(source, request, env, resolve, i
   if (url.hostname === 'observability.core.internal') {
     // Only API-container egress can submit terminal mail observations. Reads
     // and provider refreshes are generated inside this Worker, never forwarded.
-    if (source !== 'api' || env.CORE_OBSERVABILITY_ENABLED !== 'true' || !authReady(env)) return failure('not_found', 404);
-    if (url.protocol !== 'https:' || url.pathname !== '/v1/email' || url.search || url.port || url.username || url.password || url.hash
+    const enabled = url.pathname === '/v1/email' ? env.CORE_OBSERVABILITY_ENABLED === 'true'
+      : ['/v1/trace', '/v1/probe'].includes(url.pathname) && authTraceEnabled(env);
+    if (source !== 'api' || !enabled || !authReady(env)) return failure('not_found', 404);
+    if (url.protocol !== 'https:' || url.search || url.port || url.username || url.password || url.hash
       || request.method !== 'POST' || request.headers.has('upgrade')) return failure('not_found', 404);
     return resolve('api', 'singleton').fetch(request);
   }
@@ -125,13 +134,13 @@ export async function dispatchContainerOutbound(source, request, env, resolve, i
         || typeof env.NOWPAYMENTS_API_KEY !== 'string' || !env.NOWPAYMENTS_API_KEY
         || request.headers.get('x-api-key') !== env.NOWPAYMENTS_API_KEY) return failure('invalid_invoice_request', 400);
       try { invoiceBody = await boundedBody(request, NOWPAYMENTS_MAX_INVOICE_BODY); }
-      catch { return failure('request_too_large', 413); }
+      catch (error) { return bodyReadFailure(error); }
       if (!invoiceBody?.length || !validOperationalInvoice(invoiceBody)) return failure('invalid_invoice_request', 400);
     }
     try {
       const forwarded = new Request(request, { ...(invoice ? { body: invoiceBody } : {}), redirect: 'manual',
         signal: AbortSignal.any([request.signal, AbortSignal.timeout(12000)]) });
-      const response = await internetFetch(forwarded);
+      const response = await fetchWithDeadline(forwarded, internetFetch, 12_000);
       if (response.status < 200 || response.status >= 300) {
         await response.body?.cancel();
         return failure('upstream_unavailable', 503);
@@ -158,27 +167,7 @@ export async function dispatchContainerOutbound(source, request, env, resolve, i
   return dispatchCore(request, env, resolve);
 }
 
-async function boundedBody(request, limit = MAX_BODY) {
-  const length = request.headers.get('content-length');
-  if (length !== null && (!/^\d+$/.test(length) || Number(length) > limit)) throw new Error('body_limit');
-  if (!request.body) return undefined;
-  const reader = request.body.getReader();
-  const parts = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) { await reader.cancel(); throw new Error('body_limit'); }
-      parts.push(value);
-    }
-  } finally { reader.releaseLock(); }
-  const body = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) { body.set(part, offset); offset += part.byteLength; }
-  return body;
-}
+const boundedBody = (request, limit = MAX_BODY) => readBoundedBody(request, limit);
 
 // Preserve only reviewed NOW checkout error enums. A failure can follow invoice
 // creation, so this never asserts that no external charge/invoice exists.
@@ -243,6 +232,30 @@ export async function dispatchCore(request, env, resolve) {
     }
   } catch { return failure('not_found', 404); }
   checkoutPath = checkoutPath.replace(/\/+/g, '/').replace(/\/+$/, '');
+  // This capability is a signed admin read, not a generic auth/admin write.
+  // Bun verifies the full-path HMAC, native session and live canonical role.
+  // Encoded aliases, query selectors and broad-Core fallthrough stay closed.
+  let diagnosticRequest = false;
+  if (checkoutPath === OTP_DIAGNOSTIC_PATH || checkoutPath.startsWith(`${OTP_DIAGNOSTIC_PATH}/`)) {
+    if (!reportsReady(env) || !authReady(env) || url.protocol !== 'https:' || url.hostname !== 'auth.core.internal'
+      || url.pathname !== OTP_DIAGNOSTIC_PATH || url.search || request.method !== 'POST'
+      || request.headers.has('content-encoding') || request.headers.has('x-vp-act-as')
+      || !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')
+      || !/^[a-f0-9]{64}$/.test(request.headers.get('x-vp-auth-signature') || '')
+      || !/^\d{10}$/.test(request.headers.get('x-vp-auth-timestamp') || '')
+      || !/^[a-f0-9:.]{2,45}$/i.test(request.headers.get('x-vp-auth-client-ip') || '')
+      || !(request.headers.get('cookie')?.length > 0) || request.headers.get('cookie').length > 8192) return failure('diagnostic_service_unavailable', 503);
+    try {
+      const origin = request.headers.get('origin');
+      const parsedOrigin = new URL(origin);
+      if (parsedOrigin.protocol !== 'https:' || parsedOrigin.origin !== origin) return failure('invalid_diagnostic_request', 400);
+      body = await boundedBody(request, 2048);
+      const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1
+        || typeof input.email !== 'string' || input.email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email)) return failure('invalid_diagnostic_request', 400);
+    } catch (error) { return error?.message === 'body_limit' ? failure('request_too_large', 413) : failure('invalid_diagnostic_request', 400); }
+    diagnosticRequest = true;
+  }
   // Scheduled processing is generated inside this Worker only. Never forward
   // this namespace from a portal, admin, public HTTP or private fetch caller.
   if (checkoutPath.startsWith('/api/payments/internal')) return failure('not_found', 404);
@@ -251,7 +264,7 @@ export async function dispatchCore(request, env, resolve) {
   if (referralPath) {
     if (request.method === 'POST') {
       try { body = await boundedBody(request, REFERRAL_ATTRIBUTION_MAX_BODY); }
-      catch { return failure('request_too_large', 413); }
+      catch (error) { return bodyReadFailure(error); }
     }
     referralRequest = referralAttributionRequest(request, url, body, env, reportsReady(env) && authReady(env));
     // Reserved even when broad Core is enabled: never fall through to generic
@@ -263,7 +276,7 @@ export async function dispatchCore(request, env, resolve) {
   if (purchasePath) {
     if (request.method === 'POST') {
       try { body = await boundedBody(request, NOWPAYMENTS_PURCHASE_MAX_BODY); }
-      catch { return failure('request_too_large', 413); }
+      catch (error) { return bodyReadFailure(error); }
     }
     purchaseRequest = nowpaymentsPurchaseRequest(request, url, body, env, reportsReady(env) && authReady(env));
     // Reserved paths never fall through generic report or full-Core gates.
@@ -279,14 +292,14 @@ export async function dispatchCore(request, env, resolve) {
       || request.headers.has('content-encoding')
       || !/^[a-f0-9]{128}$/i.test(request.headers.get('x-nowpayments-sig') ?? '')) return failure('invalid_webhook_request', 400);
     try { body = await boundedBody(request, MAX_NOWPAYMENTS_IPN_BODY); }
-    catch { return failure('request_too_large', 413); }
+    catch (error) { return bodyReadFailure(error); }
     if (!body?.length) return failure('invalid_webhook_request', 400);
   }
   if (env.STRIPE_CHECKOUT_ENABLED !== 'true' && serviceHostname(url.hostname)) {
     if (checkoutPath === '/api/payments/resume') return failure('stripe_checkout_disabled', 503);
     if (checkoutPath === '/api/payments/checkout' && request.method === 'POST') {
       try { body = await boundedBody(request); }
-      catch { return failure('request_too_large', 413); }
+      catch (error) { return bodyReadFailure(error); }
       if (!body?.length) return failure('stripe_checkout_disabled', 503);
       checkoutPayload = parseCheckout(body);
       if (!checkoutPayload) return failure('invalid_checkout_request', 400);
@@ -298,7 +311,7 @@ export async function dispatchCore(request, env, resolve) {
   let operationalCheckout = false;
   if (nowpaymentsOperationalReady(env) && checkoutPath === NOWPAYMENTS_CHECKOUT && request.method === 'POST') {
     try { body ??= await boundedBody(request); }
-    catch { return failure('request_too_large', 413); }
+    catch (error) { return bodyReadFailure(error); }
     if ((body?.length ?? 0) > NOWPAYMENTS_MAX_INVOICE_BODY) return failure('request_too_large', 413);
     checkoutPayload ??= parseCheckout(body);
     operationalCheckout = operationalCheckoutRequest(request, url, checkoutPayload, env);
@@ -310,13 +323,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim');
-  if (!read && !authWrite && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest) return failure('financial_review_required', 503);
+  if (!read && !authWrite && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);
@@ -328,8 +341,13 @@ export async function dispatchCore(request, env, resolve) {
     const forwarded = new Request(request.url, {
       method: request.method, headers, body, redirect: 'manual', signal: request.signal,
     });
-    const response = await resolve(service, 'singleton').fetch(forwarded);
-    if (response.status >= 500) return operationalCheckout ? nowCheckoutFailure(response) : failure('upstream_unavailable', 503);
+    const container = resolve(service, 'singleton');
+    const response = await fetchWithDeadline(forwarded, input => container.fetch(input));
+    if (response.status >= 500) {
+      if (operationalCheckout) return nowCheckoutFailure(response);
+      void response.body?.cancel().catch(() => {});
+      return failure('upstream_unavailable', 503);
+    }
     const safeHeaders = new Headers(response.headers);
     safeHeaders.set('Cache-Control', 'private, no-store');
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: safeHeaders });
