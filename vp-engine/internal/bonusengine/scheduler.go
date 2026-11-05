@@ -17,6 +17,7 @@ import (
 	"github.com/go-co-op/gocron/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // Scheduler agrupa los jobs periódicos del motor.
@@ -127,6 +128,10 @@ func (s *Scheduler) runCDROI(ctx context.Context) {
 // fn_open_next_binary_period también es idempotente por UNIQUE(period_start, period_end).
 func (s *Scheduler) runBinaryCycle(ctx context.Context) {
 	log := s.log.With().Str("job", "binary-period-cycle").Logger()
+	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+		log.Warn().Err(err).Msg("binary cycle financial mutations locked")
+		return
+	}
 	log.Info().Msg("starting weekly binary cycle")
 
 	// 1. Cerrar todos los períodos abiertos que ya terminaron, en orden. Esto

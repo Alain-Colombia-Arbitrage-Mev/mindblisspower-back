@@ -1,93 +1,31 @@
 import { betterAuth } from 'better-auth';
-import { drizzleAdapter } from 'better-auth/adapters/drizzle';
+import { sql } from 'drizzle-orm';
+import { authDb } from './db/auth-client';
 import { db } from './db/client';
-import * as schema from './db/schema/auth';
+import { postgresAuthAdapter } from './auth/postgres-auth-adapter';
+import { createAuthOptions } from './auth/options';
+import { getAuthPersonBinding, provisionAuthPerson } from './modules/identity';
+import { registrationAllowed } from './auth/registration';
+import { atomicPasswordResetHandler, atomicPasswordResetOptions } from './auth/atomic-password-reset';
+import { secureSessionHandler } from './auth/secure-session-handler';
 
-/**
- * Better Auth configuration. The drizzleAdapter writes to the `auth` schema
- * declared in schema_mlm.sql. Sessions cached in Redis (configure via the
- * `secondaryStorage` option once Redis client is wired in).
- *
- * Cost model: zero per-MAU. We pay only for the Postgres rows in auth.session
- * (TTL 7d) and auth.account (per OAuth link). Compare to Cognito ~$0.0055/MAU.
- */
-export const auth = betterAuth({
-  database: drizzleAdapter(db, {
-    provider: 'pg',
-    schema: {
-      user: schema.user,
-      session: schema.session,
-      account: schema.account,
-      verification: schema.verification,
-    },
-    // The DDL puts auth tables in the `auth` schema; tell the adapter so it
-    // qualifies queries correctly.
-    usePlural: false,
-  }),
-
-  baseURL: process.env.BETTER_AUTH_URL,
-  secret: process.env.BETTER_AUTH_SECRET!,
-  trustedOrigins: process.env.BETTER_AUTH_TRUSTED_ORIGINS?.split(',') ?? [],
-
-  emailAndPassword: {
-    enabled: true,
-    requireEmailVerification: true,
-    minPasswordLength: 12,
-    autoSignIn: false,
-  },
-
-  // Email verification + password reset wired through Resend
-  emailVerification: {
-    sendVerificationEmail: async ({ user, url }) => {
-      const { Resend } = await import('resend');
-      const resend = new Resend(process.env.RESEND_API_KEY!);
-      await resend.emails.send({
-        from: 'no-reply@vicionpower.com',
-        to: user.email,
-        subject: 'Verifica tu cuenta VicionPower',
-        html: `<p>Verifica tu correo: <a href="${url}">${url}</a></p>`,
-      });
-    },
-  },
-
-  socialProviders: process.env.GOOGLE_CLIENT_ID
-    ? {
-        google: {
-          clientId: process.env.GOOGLE_CLIENT_ID!,
-          clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-        },
-      }
-    : undefined,
-
-  session: {
-    expiresIn: 60 * 60 * 24 * 7,        // 7 days
-    updateAge: 60 * 60 * 24,            // refresh once per day
-    cookieCache: { enabled: true, maxAge: 60 * 5 },
-  },
-
-  rateLimit: {
-    enabled: true,
-    window: 60,
-    max: 30,
-  },
-
-  // Hook: when a user signs up, create the corresponding mlm.person row.
-  // The mlm.affiliate row is created later via /api/affiliate/place once
-  // sponsorship + tree position are validated (see server/affiliate.ts).
-  databaseHooks: {
-    user: {
-      create: {
-        after: async (user) => {
-          const { createPersonFromUser } = await import('./server/affiliate');
-          await createPersonFromUser({
-            userId: user.id,
-            email: user.email,
-            name: user.name ?? user.email.split('@')[0]!,
-          });
-        },
-      },
-    },
-  },
-});
+// Explicit feature flags and reviewed schema are required before cutover.
+// Importing this composition does not migrate a DB or send an auth message.
+const identity = {
+    provision: userId => provisionAuthPerson(authDb, { userId }),
+    binding: userId => getAuthPersonBinding(authDb, { userId }),
+    registrationAllowed: candidate => registrationAllowed(db, candidate),
+} satisfies Parameters<typeof createAuthOptions>[2];
+const native = betterAuth(createAuthOptions(process.env, postgresAuthAdapter(authDb), identity));
+export const auth = { ...native,
+  handler: secureSessionHandler(atomicPasswordResetHandler(native.handler, (state, work) => authDb.transaction(async transaction => {
+    await transaction.execute(sql`SET LOCAL lock_timeout='2s'`);
+    await transaction.execute(sql`SET LOCAL statement_timeout='10s'`);
+    await transaction.execute(sql`SET LOCAL idle_in_transaction_session_timeout='15s'`);
+    const options = atomicPasswordResetOptions(createAuthOptions(process.env, postgresAuthAdapter(transaction), identity), state);
+    const scoped = betterAuth(options);
+    return work(scoped.handler);
+  })), database => createAuthOptions(process.env, postgresAuthAdapter(database), identity), authDb),
+};
 
 export type Session = typeof auth.$Infer.Session;

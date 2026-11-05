@@ -1,0 +1,62 @@
+name: app-platform-deploy
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
+      release:
+        description: Reviewed JSON under deploy/digitalocean/releases/
+        required: true
+      apply:
+        description: Apply image changes (false is read-only planning)
+        type: boolean
+        default: false
+      confirmation:
+        description: For apply, type deploy-staging or deploy-production
+        required: false
+permissions: {contents: read}
+concurrency:
+  group: app-platform-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref_name == github.event.repository.default_branch && vars.DEPLOYMENT_PROVIDER == 'digitalocean'
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: {node-version: "24"}
+      - run: node --test deploy/digitalocean/release.test.mjs deploy/digitalocean/deploy.test.mjs
+      - name: Plan or deploy images only (no schema, secrets or database changes)
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          RELEASE_FILE: ${{ inputs.release }}
+          APPLY: ${{ inputs.apply }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          LAUNCH_APPROVED: ${{ vars.DO_LAUNCH_APPROVED }}
+          DO_APP_ID: ${{ vars.DO_APP_ID }}
+          DO_PROJECT_ID: ${{ vars.DO_PROJECT_ID }}
+          DO_STAGING_APP_ID: ${{ vars.DO_STAGING_APP_ID }}
+          DO_STAGING_PROJECT_ID: ${{ vars.DO_STAGING_PROJECT_ID }}
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DO_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--environment "$TARGET_ENV" --release "$RELEASE_FILE" --output deployment-receipt.json)
+          if [ "$APPLY" = true ]; then
+            test "$CONFIRMATION" = "deploy-$TARGET_ENV"
+            test "$LAUNCH_APPROVED" = true
+            args+=(--apply)
+          fi
+          node deploy/digitalocean/deploy.mjs "${args[@]}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: deployment-receipt-${{ inputs.environment }}
+          path: deployment-receipt.json
+          if-no-files-found: error
+          retention-days: 30

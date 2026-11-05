@@ -1,0 +1,16 @@
+**
+!vp-engine/
+!vp-engine/**
+!deploy/
+!deploy/cloudflare/
+!deploy/cloudflare/transport-spike/
+!deploy/cloudflare/transport-spike/go-jwks-probe.go
+**/.git
+**/.env*
+**/node_modules
+**/bin
+**/*.exe
+**/*.test
+**/*.log
+**/*.pem
+**/*.key

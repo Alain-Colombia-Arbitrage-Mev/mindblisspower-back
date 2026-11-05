@@ -68,7 +68,7 @@ func (h *Handler) ReconcileStuckPayments(ctx context.Context, minAge time.Durati
 	}
 	for _, c := range cands {
 		res.Checked++
-		paid, piID, serr := h.gw.SessionPaid(c.SessionID)
+		evidence, paid, serr := h.gw.paidCheckout(c.SessionID)
 		if serr != nil {
 			res.Errors++
 			h.log.Warn().Err(serr).Str("session", c.SessionID).Msg("reconcile: stripe session lookup failed")
@@ -78,7 +78,7 @@ func (h *Handler) ReconcileStuckPayments(ctx context.Context, minAge time.Durati
 			continue
 		}
 		res.PaidFound++
-		ar, aerr := h.store.ActivatePaidPurchase(ctx, c.SessionID, piID)
+		ar, aerr := h.store.activateVerifiedCheckout(ctx, evidence)
 		if aerr != nil {
 			if errors.Is(aerr, ErrIntentNotFound) {
 				continue

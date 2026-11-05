@@ -1,0 +1,9 @@
+environment        = "staging"
+region             = "us-east-1"
+zones              = ["us-east-1a", "us-east-1b"]
+vpc_cidr           = "10.62.0.0/16"
+app_cidrs          = ["10.62.10.0/24", "10.62.11.0/24"]
+database_cidrs     = ["10.62.20.0/24", "10.62.21.0/24"]
+rds_instance_class = "REPLACE_WITH_CONFIRMED_HA_CLASS"
+rds_storage_gb     = 100
+rds_kms_key_id     = "REPLACE_WITH_AUTHORIZED_KMS_KEY_ID"

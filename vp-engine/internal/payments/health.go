@@ -49,7 +49,7 @@ func (s *Store) GetSystemHealth(ctx context.Context, siblings map[string]string)
 	{
 		t0 := time.Now()
 		var one int
-		err := s.reader().QueryRow(ctx, "SELECT 1").Scan(&one)
+		err := s.db.QueryRow(ctx, "SELECT 1").Scan(&one)
 		e := HealthEntry{Name: "rds", LatencyMs: time.Since(t0).Milliseconds()}
 		if err != nil {
 			e.Status, e.Detail = "down", err.Error()
@@ -182,6 +182,8 @@ func pingHealth(ctx context.Context, name, url string) HealthEntry {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		e.Status, e.Detail = "up", fmt.Sprintf("HTTP %d", resp.StatusCode)
+	} else if resp.StatusCode >= 500 {
+		e.Status, e.Detail = "down", fmt.Sprintf("HTTP %d", resp.StatusCode)
 	} else {
 		e.Status, e.Detail = "warn", fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}

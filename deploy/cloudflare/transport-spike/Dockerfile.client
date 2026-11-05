@@ -1,0 +1,4 @@
+FROM mindbliss/api:auth-identity-20261025
+WORKDIR /spike
+COPY client.mjs framed-relay.mjs ./
+ENTRYPOINT ["bun", "client.mjs"]

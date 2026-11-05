@@ -36,6 +36,7 @@ func (s *Store) IsAdmin(ctx context.Context, email string) (bool, error) {
 
 // AdminUser es una fila de la tabla de usuarios del panel.
 type AdminUser struct {
+	DataSource     string `json:"data_source,omitempty"`
 	PersonID       int64  `json:"person_id"`
 	Name           string `json:"name"`
 	Email          string `json:"email"`
@@ -54,6 +55,17 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
+	if offset < 0 {
+		offset = 0
+	}
+	recovered, err := s.hasRecoveredStripe(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	consolidated, err := s.hasAdminSales(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	var total int64
 	if err := s.db.QueryRow(ctx, `
 		SELECT count(*) FROM mlm.person p
@@ -62,26 +74,11 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
 
-	rows, err := s.db.Query(ctx, `
-		SELECT p.id,
-		       trim(p.first_name||' '||p.last_name) AS name,
-		       p.email, p.status::text, COALESCE(p.blacklisted,false),
-		       COALESCE(r.name_es,'—') AS rank,
-		       COALESCE(a.left_count,0), COALESCE(a.right_count,0),
-		       (a.id IS NOT NULL) AS positioned,
-		       COALESCE((SELECT SUM(amount_usd+fee_usd) FROM payments.purchase_intent pi
-		                  WHERE (pi.person_id = p.id OR (pi.person_id IS NULL AND lower(pi.user_id)=lower(p.email)))
-		                    AND pi.status IN ('paid','activated')
-		                    AND pi.stripe_present IS DISTINCT FROM false),0)::text AS total_paid,
-		       COALESCE((SELECT count(*) FROM mlm.affiliate_package ap
-		                  WHERE ap.affiliate_id=a.id AND ap.status='active'),0) AS active_packages
-		  FROM mlm.person p
-		  LEFT JOIN mlm.affiliate a ON a.person_id=p.id
-		  LEFT JOIN mlm.rank r      ON r.id=a.current_rank_id
-		 WHERE ($1='' OR p.email ILIKE '%'||$1||'%' OR (p.first_name||' '||p.last_name) ILIKE '%'||$1||'%')
-		 ORDER BY p.id DESC
-		 LIMIT $2 OFFSET $3
-	`, q, limit, offset)
+	query := adminUsersReadSQL(recovered)
+	if consolidated {
+		query = adminSalesUsersSQL()
+	}
+	rows, err := s.db.Query(ctx, query, q, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
@@ -90,6 +87,11 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 	out := []AdminUser{}
 	for rows.Next() {
 		var u AdminUser
+		if consolidated {
+			u.DataSource = consolidatedSalesSource
+		} else if recovered {
+			u.DataSource = recoveredStripeSource
+		}
 		if err := rows.Scan(&u.PersonID, &u.Name, &u.Email, &u.Status, &u.Blocked, &u.Rank,
 			&u.LeftCount, &u.RightCount, &u.Positioned, &u.TotalPaidUSD, &u.ActivePackages); err != nil {
 			return nil, 0, fmt.Errorf("scan user: %w", err)
@@ -99,8 +101,47 @@ func (s *Store) ListUsers(ctx context.Context, q string, limit, offset int) ([]A
 	return out, total, rows.Err()
 }
 
+func adminUsersReadSQL(recovered bool) string {
+	paid := `COALESCE((SELECT SUM(amount_usd+fee_usd) FROM payments.purchase_intent pi
+		WHERE (pi.person_id = p.id OR (pi.person_id IS NULL AND lower(pi.user_id)=lower(p.email)))
+		AND pi.status IN ('paid','activated')
+		AND pi.stripe_present IS DISTINCT FROM false),0)::text`
+	if recovered {
+		// Captures are attributed only by the independently verified identity.
+		// Never match email, metadata candidates or unrelated checkout intents.
+		// This is gross captured money, not net proceeds, activation or commission.
+		paid = `COALESCE((SELECT SUM(s.captured_minor)::numeric/100
+			FROM payments.stripe_sale s
+			JOIN recovery.stripe_sale_identity i USING(payment_intent_id)
+			WHERE i.person_id=p.id AND i.identity_verified AND ` + recoveredStripePredicate + `),0)::numeric(24,2)::text`
+	}
+	return adminUsersReadSQLWithPaid(paid)
+}
+
+func adminUsersReadSQLWithPaid(paid string) string {
+	return `
+		SELECT p.id,
+		       trim(p.first_name||' '||p.last_name) AS name,
+		       p.email, p.status::text, COALESCE(p.blacklisted,false),
+		       COALESCE(r.name_es,'—') AS rank,
+		       COALESCE(a.left_count,0), COALESCE(a.right_count,0),
+		       (a.id IS NOT NULL) AS positioned,
+		       ` + paid + ` AS total_paid,
+		       COALESCE((SELECT count(*) FROM mlm.affiliate_package ap
+		                  WHERE ap.affiliate_id=a.id AND ap.status='active'),0) AS active_packages
+		  FROM mlm.person p
+		  LEFT JOIN mlm.affiliate a ON a.person_id=p.id
+		  LEFT JOIN mlm.rank r      ON r.id=a.current_rank_id
+		 WHERE ($1='' OR p.email ILIKE '%'||$1||'%' OR (p.first_name||' '||p.last_name) ILIKE '%'||$1||'%')
+		 ORDER BY p.id DESC
+		 LIMIT $2 OFFSET $3
+	`
+}
+
 // ProductSales: total vendido por producto (vía Stripe, status activated).
 type ProductSales struct {
+	DataSource  string `json:"data_source,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 	PackageID   int    `json:"package_id"`
 	Name        string `json:"name"`
 	AmountUSD   string `json:"amount_usd"`
@@ -111,17 +152,64 @@ type ProductSales struct {
 
 // AdminSummary agrega ventas por producto + totales.
 type AdminSummary struct {
-	Products                  []ProductSales `json:"products"`
-	TotalSold                 int64          `json:"total_sold"`
-	TotalRevenUSD             string         `json:"total_revenue_usd"`
-	TotalUsers                int64          `json:"total_users"`
-	BlockedUsers              int64          `json:"blocked_users"`
-	RefundedUSD               string         `json:"refunded_usd"`
-	SecurityPendingCharges    int64          `json:"security_pending_charges"`
-	SecurityPendingChargesUSD string         `json:"security_pending_charges_usd"`
+	DataSource                string                `json:"data_source,omitempty"`
+	SalesSummary              *AdminSalesSummary    `json:"sales_summary,omitempty"`
+	StripeRecovery            *StripeRecoveryReview `json:"stripe_recovery,omitempty"`
+	Products                  []ProductSales        `json:"products"`
+	TotalSold                 int64                 `json:"total_sold"`
+	TotalRevenUSD             string                `json:"total_revenue_usd"`
+	TotalUsers                int64                 `json:"total_users"`
+	BlockedUsers              int64                 `json:"blocked_users"`
+	RefundedUSD               string                `json:"refunded_usd"`
+	SecurityPendingCharges    int64                 `json:"security_pending_charges"`
+	SecurityPendingChargesUSD string                `json:"security_pending_charges_usd"`
 }
 
 func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return AdminSummary{}, err
+	} else if present {
+		summary, err := s.adminSalesSummary(ctx, time.Time{})
+		if err != nil {
+			return AdminSummary{}, err
+		}
+		out := AdminSummary{DataSource: consolidatedSalesSource, SalesSummary: summary, TotalSold: summary.Sales,
+			TotalRevenUSD: summary.GrossUSD, RefundedUSD: summary.RefundedUSD, Products: []ProductSales{}}
+		rows, err := s.adminSalesReport(ctx, time.Time{})
+		if err != nil {
+			return out, err
+		}
+		for _, row := range rows {
+			out.Products = append(out.Products, ProductSales{DataSource: consolidatedSalesSource, Provider: row.Provider,
+				PackageID: int(row.PackageID), Name: row.Name, AmountUSD: row.AmountUSD, Sold: row.Sales, RevenueUSD: row.GrossUSD, RefundedUSD: row.RefundedUSD})
+		}
+		if err := s.db.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE blacklisted) FROM mlm.person`).Scan(&out.TotalUsers, &out.BlockedUsers); err != nil {
+			return out, err
+		}
+		return out, nil
+	}
+	if recovered, err := s.hasRecoveredStripe(ctx); err != nil {
+		return AdminSummary{}, err
+	} else if recovered {
+		r, err := s.recoveredStripeReview(ctx, time.Time{})
+		if err != nil {
+			return AdminSummary{}, err
+		}
+		out := AdminSummary{DataSource: recoveredStripeSource, StripeRecovery: r, TotalSold: r.Sales, TotalRevenUSD: r.GrossUSD,
+			RefundedUSD: r.RefundedUSD, Products: []ProductSales{}}
+		rows, err := s.recoveredSalesReport(ctx, time.Time{})
+		if err != nil {
+			return AdminSummary{}, err
+		}
+		for _, row := range rows {
+			out.Products = append(out.Products, ProductSales{DataSource: recoveredStripeSource, PackageID: int(row.PackageID), Name: row.Name, AmountUSD: row.AmountUSD,
+				Sold: row.Paid, RevenueUSD: row.GrossUSD, RefundedUSD: row.RefundedUSD})
+		}
+		if err := s.db.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE blacklisted) FROM mlm.person`).Scan(&out.TotalUsers, &out.BlockedUsers); err != nil {
+			return AdminSummary{}, err
+		}
+		return out, nil
+	}
 	var sum AdminSummary
 	rows, err := s.db.Query(ctx, `
 		SELECT pk.id, pk.name, pk.amount_usd::text,
@@ -171,27 +259,55 @@ func (s *Store) AdminSummary(ctx context.Context) (AdminSummary, error) {
 
 // AdminPayment es un pago de NUESTRO endpoint (payments.purchase_intent).
 type AdminPayment struct {
-	ID              string `json:"id"`
-	Email           string `json:"email"`
-	Name            string `json:"name"`
-	PackageID       int    `json:"package_id"`
-	AmountUSD       string `json:"amount_usd"`
-	FeeUSD          string `json:"fee_usd"`
-	TotalUSD        string `json:"total_usd"`
-	Status          string `json:"status"`
-	PaymentIntentID string `json:"payment_intent_id"`
-	CreatedAt       string `json:"created_at"`
-	PaidAt          string `json:"paid_at"`
-	RefundCents     int64  `json:"refund_cents"`
-	RefundUSD       string `json:"refund_usd"`
-	RefundedAt      string `json:"refunded_at"`
-	StripeRefundID  string `json:"stripe_refund_id"`
-	RefundReason    string `json:"refund_reason"`
+	DataSource               string  `json:"data_source,omitempty"`
+	Provider                 string  `json:"provider,omitempty"`
+	ReadOnly                 bool    `json:"read_only,omitempty"`
+	SourceStatus             string  `json:"source_status,omitempty"`
+	ActivationStatus         string  `json:"activation_status,omitempty"`
+	RiskStatus               string  `json:"risk_status,omitempty"`
+	ProcessingFeeUSD         string  `json:"processing_fee_usd,omitempty"`
+	VerifiedProcessingFeeUSD *string `json:"verified_processing_fee_usd"`
+	NetUSD                   string  `json:"net_usd,omitempty"`
+	ProductScope             string  `json:"product_scope,omitempty"`
+	CommissionEligible       bool    `json:"commission_eligible"`
+	ProviderVerified         bool    `json:"provider_verified"`
+	FeeReconciliationStatus  string  `json:"fee_reconciliation_status,omitempty"`
+	ID                       string  `json:"id"`
+	Email                    string  `json:"email"`
+	Name                     string  `json:"name"`
+	PackageID                int     `json:"package_id"`
+	AmountUSD                string  `json:"amount_usd"`
+	FeeUSD                   string  `json:"fee_usd"`
+	TotalUSD                 string  `json:"total_usd"`
+	Status                   string  `json:"status"`
+	PaymentIntentID          string  `json:"payment_intent_id"`
+	CreatedAt                string  `json:"created_at"`
+	PaidAt                   string  `json:"paid_at"`
+	RefundCents              int64   `json:"refund_cents"`
+	RefundUSD                string  `json:"refund_usd"`
+	RefundedAt               string  `json:"refunded_at"`
+	StripeRefundID           string  `json:"stripe_refund_id"`
+	RefundReason             string  `json:"refund_reason"`
 }
 
 // ListPayments lista los pagos hechos por NUESTRO checkout/webhook
 // (tabla payments.purchase_intent) — no incluye otros endpoints de Stripe.
 func (s *Store) ListPayments(ctx context.Context, status, q string, limit, offset int) ([]AdminPayment, int64, error) {
+	if present, err := s.hasAdminSales(ctx); err != nil {
+		return nil, 0, err
+	} else if present {
+		rows, total, err := s.adminSalesTransactions(ctx, time.Time{}, status, q, limit, offset)
+		out := []AdminPayment{}
+		for _, row := range rows {
+			out = append(out, AdminPayment{DataSource: row.DataSource, Provider: row.Provider, ReadOnly: true,
+				ID: row.ID, Email: row.Email, Name: row.Name, AmountUSD: row.AmountUSD, FeeUSD: row.FeeUSD, TotalUSD: row.TotalUSD,
+				Status: row.Status, PaymentIntentID: row.Reference, CreatedAt: row.CreatedAt, PaidAt: row.PaidAt, RefundUSD: row.RefundUSD,
+				SourceStatus: row.SourceStatus, ActivationStatus: row.ActivationStatus, RiskStatus: row.RiskStatus,
+				ProcessingFeeUSD: row.ProcessingFeeUSD, VerifiedProcessingFeeUSD: row.VerifiedProcessingFeeUSD, NetUSD: row.NetUSD,
+				ProductScope: row.ProductScope, CommissionEligible: row.CommissionEligible, ProviderVerified: row.ProviderVerified, FeeReconciliationStatus: row.FeeReconciliationStatus})
+		}
+		return out, total, err
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
@@ -257,9 +373,7 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 		   FROM mlm.affiliate a
 		   JOIN mlm.person p ON p.id = a.person_id
 		  WHERE a.invitation_link = $1
-		    AND a.status::text = 'active'
-		    AND p.status::text = 'active'
-		    AND NOT COALESCE(p.blacklisted,false)
+		    AND `+placementSponsorEligibilitySQL+`
 		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
@@ -274,9 +388,7 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 		   FROM mlm.affiliate a
 		   JOIN mlm.person p ON p.id = a.person_id
 		  WHERE lower(a.invitation_link) = lower($1)
-		    AND a.status::text = 'active'
-		    AND p.status::text = 'active'
-		    AND NOT COALESCE(p.blacklisted,false)
+		    AND `+placementSponsorEligibilitySQL+`
 		  LIMIT 1`, code).Scan(&id)
 	if err == nil {
 		return &id, nil
@@ -293,9 +405,7 @@ func (s *Store) ResolveSponsorByCode(ctx context.Context, code string) (*int64, 
 				   FROM mlm.affiliate a
 				   JOIN mlm.person p ON p.id = a.person_id
 				  WHERE a.id = $1
-				    AND a.status::text = 'active'
-				    AND p.status::text = 'active'
-				    AND NOT COALESCE(p.blacklisted,false)
+				    AND `+placementSponsorEligibilitySQL+`
 				  LIMIT 1`, n).Scan(&id)
 			if err == nil {
 				return &id, nil
@@ -343,5 +453,6 @@ func (s *Store) SetBlocked(ctx context.Context, personID int64, blocked bool) er
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("set blocked commit: %w", err)
 	}
+	s.treeReads.invalidate()
 	return nil
 }

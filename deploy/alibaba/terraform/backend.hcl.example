@@ -1,0 +1,8 @@
+bucket              = "REPLACE_PRIVATE_VERSIONED_STATE_BUCKET"
+region              = "us-east-1"
+prefix              = "mindbliss/staging"
+key                 = "infrastructure.tfstate"
+encrypt             = true
+acl                 = "private"
+tablestore_endpoint = "REPLACE_HTTPS_TABLESTORE_ENDPOINT"
+tablestore_table    = "terraform_locks"

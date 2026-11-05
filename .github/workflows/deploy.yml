@@ -29,6 +29,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -84,18 +85,19 @@ jobs:
           TARGETS: ${{ steps.t.outputs.targets }}
         run: |
           set -euo pipefail
-          repos=""
+          repos=()
           IFS=';' read -ra targets <<< "$TARGETS"
           for target in "${targets[@]}"; do
             services="${target##*|}"
             for spec in $services; do
               svc="${spec%%@*}"
               case "$svc" in
-                api|vp-engine|vp-payments|vp-withdrawals|vp-support|vp-kb-indexer|vp-voice-agent) repos="$repos vp/$svc" ;;
+                api|vp-engine|vp-payments|vp-withdrawals|vp-support|vp-kb-indexer|vp-voice-agent) repos+=("vp/$svc") ;;
               esac
             done
           done
-          for repo in $(printf '%s\n' $repos | sort -u); do
+          test "${#repos[@]}" -gt 0
+          for repo in $(printf '%s\n' "${repos[@]}" | sort -u); do
             echo "checking $repo:$TAG"
             aws ecr describe-images \
               --repository-name "$repo" \

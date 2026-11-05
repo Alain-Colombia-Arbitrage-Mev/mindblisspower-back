@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // MinWithdrawalUSD: monto mínimo de retiro (política). Aplica al BRUTO.
@@ -38,6 +39,10 @@ func NewStore(db *pgxpool.Pool) *Store {
 	// requireBMP arranca en true: el default seguro no depende de que alguien se
 	// acuerde de llamar a SetRequireBMP.
 	return &Store{db: db, log: zerolog.Nop(), requireBMP: true}
+}
+
+func (s *Store) CheckFinancialWrites(ctx context.Context) error {
+	return financialguard.RequireOperational(ctx, s.db)
 }
 
 func (s *Store) SetLogger(l zerolog.Logger) { s.log = l }
@@ -143,6 +148,9 @@ func (s *Store) RequestWithdrawalWithBMP(ctx context.Context, email, amountStr, 
 	amount = QuantizeUSD(amount)
 	if amount.LessThan(decimal.NewFromInt(MinWithdrawalUSD)) {
 		return WithdrawalResult{}, ErrMinWithdrawal
+	}
+	if err := s.CheckFinancialWrites(ctx); err != nil {
+		return WithdrawalResult{}, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})

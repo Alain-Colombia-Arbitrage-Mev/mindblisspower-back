@@ -13,6 +13,32 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("SERVICE_TOKEN", "test-service-token")
 }
 
+func TestLoadConfig_VerifiedIdentityPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, environment, setting string
+		want                       bool
+	}{
+		{"production_default", "production", "", true},
+		{"production_typo_fails_closed", "production", "flase", true},
+		{"staging_explicit", "staging", "true", true},
+		{"legacy_dev_default", "dev", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("ENV", tc.environment)
+			t.Setenv("BMP_BASE_URL", "https://bmp.example.invalid")
+			t.Setenv("WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY", tc.setting)
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RequireVerifiedIdentity != tc.want {
+				t.Fatalf("RequireVerifiedIdentity = %v, want %v", cfg.RequireVerifiedIdentity, tc.want)
+			}
+		})
+	}
+}
+
 // En producción, si BMP_BASE_URL no fue provisto explícitamente el servicio
 // debe fallar al arrancar en vez de decidir pagos contra el backend de dev de
 // BMP en silencio.

@@ -28,6 +28,9 @@ type Config struct {
 	GRPCTLSCert              string
 	GRPCTLSKey               string
 	GRPCTLSClientCA          string
+	GRPCTLSCertPEM           string
+	GRPCTLSKeyPEM            string
+	GRPCTLSClientCAPEM       string
 	GRPCTLSRequireClientCert bool
 
 	// HTTP
@@ -52,6 +55,7 @@ type Config struct {
 	BonusEngineBinaryCron             string
 	BonusEngineROICron                string
 	BonusEngineBinaryCycleEnabled     bool
+	BonusEngineSchedulerEnabled       bool
 	BonusEngineCompanyRootAffiliateID int64
 }
 
@@ -69,6 +73,9 @@ func Load() (*Config, error) {
 		GRPCTLSCert:                   env("GRPC_TLS_CERT", ""),
 		GRPCTLSKey:                    env("GRPC_TLS_KEY", ""),
 		GRPCTLSClientCA:               env("GRPC_TLS_CLIENT_CA", ""),
+		GRPCTLSCertPEM:                env("GRPC_TLS_CERT_PEM", ""),
+		GRPCTLSKeyPEM:                 env("GRPC_TLS_KEY_PEM", ""),
+		GRPCTLSClientCAPEM:            env("GRPC_TLS_CLIENT_CA_PEM", ""),
 		GRPCTLSRequireClientCert:      envBool("GRPC_TLS_REQUIRE_CLIENT_CERT", true),
 		HTTPListenAddr:                env("HTTP_LISTEN_ADDR", "0.0.0.0:9090"),
 		OpenRouterAPIKey:              env("OPENROUTER_API_KEY", ""),
@@ -85,6 +92,7 @@ func Load() (*Config, error) {
 		BonusEngineBinaryCron:         env("BONUS_ENGINE_BINARY_CRON", "0 2 * * 1"),
 		BonusEngineROICron:            env("BONUS_ENGINE_ROI_CRON", "0 1 * * *"),
 		BonusEngineBinaryCycleEnabled: envBool("BONUS_ENGINE_BINARY_CYCLE_ENABLED", true),
+		BonusEngineSchedulerEnabled:   envBool("BONUS_ENGINE_SCHEDULER_ENABLED", true),
 		BonusEngineCompanyRootAffiliateID: int64(envInt(
 			"BONUS_ENGINE_COMPANY_ROOT_AFFILIATE_ID",
 			envInt("PAYMENTS_COMPANY_ROOT_AFFILIATE_ID", 0),
@@ -94,12 +102,26 @@ func Load() (*Config, error) {
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
+	// An explicit empty value disables optional messaging; unset keeps dev defaults.
+	if value, present := os.LookupEnv("NATS_URL"); present {
+		c.NATSURL = value
+	}
 
-	// In production, mTLS is non-negotiable.
+	files := c.GRPCTLSCert != "" || c.GRPCTLSKey != "" || c.GRPCTLSClientCA != ""
+	inline := c.GRPCTLSCertPEM != "" || c.GRPCTLSKeyPEM != "" || c.GRPCTLSClientCAPEM != ""
+	if files && inline {
+		return nil, fmt.Errorf("choose file or inline gRPC TLS credentials, not both")
+	}
+	complete := (c.GRPCTLSCert != "" && c.GRPCTLSKey != "" && c.GRPCTLSClientCA != "") ||
+		(c.GRPCTLSCertPEM != "" && c.GRPCTLSKeyPEM != "" && c.GRPCTLSClientCAPEM != "")
+	// In production, mTLS is non-negotiable, including client verification.
 	if c.Env == "production" {
-		if c.GRPCTLSCert == "" || c.GRPCTLSKey == "" || c.GRPCTLSClientCA == "" {
-			return nil, fmt.Errorf("production requires GRPC_TLS_CERT, GRPC_TLS_KEY, GRPC_TLS_CLIENT_CA")
+		if !complete || !c.GRPCTLSRequireClientCert {
+			return nil, fmt.Errorf("production requires complete gRPC TLS credentials and verified client certificates")
 		}
+	}
+	if (files || inline) && !complete {
+		return nil, fmt.Errorf("incomplete gRPC TLS credentials")
 	}
 
 	return c, nil

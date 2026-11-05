@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"strconv"
 	"testing"
 )
 
@@ -10,8 +11,8 @@ import (
 //
 // Fixture:
 //   - One company root affiliate (parent_id IS NULL) with
-//       left_pv_lifetime=100, right_pv_lifetime=40,
-//       left_count=2, right_count=1
+//     left_pv_lifetime=100, right_pv_lifetime=40,
+//     left_count=2, right_count=1
 //   - Two active persons.
 //   - One unpaid rank_bonus_installment of $25 (seeds affiliate_rank_achieved first).
 //
@@ -103,4 +104,45 @@ func TestBuildNetworkMetrics_Integration(t *testing.T) {
 		m.CompanyFund, m.ProjectedOutflows, m.WorstTheta)
 	t.Logf("rank exposure: pending=%d liability=%s ratio=%.4f",
 		rx.PendingInstallments, rx.LiabilityUSD.String(), rx.ExposureRatio)
+}
+
+func TestNetworkMetricsRootMatchesExplorer_Integration(t *testing.T) {
+	pool, cleanup := pgContainer(t)
+	defer cleanup()
+	ctx := context.Background()
+	canonical := seedAdminTreeAffiliate(t, ctx, pool, "Canonical", "Root", "canonical-root@t.local", nil, "", nil, "canonical-root")
+	configured := seedAdminTreeAffiliate(t, ctx, pool, "Configured", "Root", "configured-root@t.local", nil, "", nil, "configured-root")
+	if _, err := pool.Exec(ctx, `
+		UPDATE mlm.affiliate SET legacy_id_vicionario = 1, left_count = 2,
+		       right_count = 1, left_pv_lifetime = 100, right_pv_lifetime = 40 WHERE id = $1;
+	`, canonical.affID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE mlm.affiliate SET left_count = 20,
+		right_count = 80, left_pv_lifetime = 900, right_pv_lifetime = 1800 WHERE id = $1`, configured.affID); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	assertCanonical := func(t *testing.T) {
+		t.Helper()
+		roots, err := store.ListAdminTreeRoots(ctx, configured.affID)
+		if err != nil || len(roots) != 1 || roots[0].ID != strconv.FormatInt(canonical.affID, 10) {
+			t.Fatalf("explorer roots = %+v, err=%v", roots, err)
+		}
+		metrics, _, err := store.BuildNetworkMetrics(ctx, configured.affID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if metrics.LeftMembers != 2 || metrics.RightMembers != 1 || metrics.LeftVolume != 100 || metrics.RightVolume != 40 {
+			t.Fatalf("health selected a different root: left/right=%d/%d volume=%v/%v", metrics.LeftMembers, metrics.RightMembers, metrics.LeftVolume, metrics.RightVolume)
+		}
+	}
+	t.Run("legacy company root takes precedence over stale configuration", assertCanonical)
+	if _, err := pool.Exec(ctx, `UPDATE mlm.person SET status = 'deleted' WHERE id = $1`, canonical.personID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE mlm.affiliate SET status = 'deleted' WHERE id = $1`, canonical.affID); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("unavailable company root retains the same structural legs", assertCanonical)
 }

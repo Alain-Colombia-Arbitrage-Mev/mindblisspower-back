@@ -80,6 +80,7 @@ export const pkg = mlmSchema.table('package', {
 // ---------------------------------------------------------------------------
 export const person = mlmSchema.table('person', {
   id: bigint('id', { mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+  publicId: uuid('public_id').notNull().defaultRandom().unique(),
   userId: text('user_id').references(() => user.id, { onDelete: 'restrict' }).unique(),
   legacyIdPerson: integer('legacy_id_person').unique(),
   firstName: text('first_name').notNull(),
@@ -110,8 +111,8 @@ export const affiliate = mlmSchema.table('affiliate', {
   sponsorId: bigint('sponsor_id', { mode: 'bigint' }).references((): any => affiliate.id, { onDelete: 'restrict' }),
   path: ltree('path').notNull(),
   depth: integer('depth').notNull(),
-  leftCount: bigint('left_count', { mode: 'bigint' }).notNull().default(0n),
-  rightCount: bigint('right_count', { mode: 'bigint' }).notNull().default(0n),
+  leftCount: bigint('left_count', { mode: 'bigint' }).notNull().default(sql`0`),
+  rightCount: bigint('right_count', { mode: 'bigint' }).notNull().default(sql`0`),
   leftPvLifetime: numeric('left_pv_lifetime', { precision: 20, scale: 2 }).notNull().default('0'),
   rightPvLifetime: numeric('right_pv_lifetime', { precision: 20, scale: 2 }).notNull().default('0'),
   leftPvCurrent: numeric('left_pv_current', { precision: 20, scale: 2 }).notNull().default('0'),

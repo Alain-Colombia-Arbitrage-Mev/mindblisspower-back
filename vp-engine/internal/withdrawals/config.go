@@ -10,6 +10,7 @@ import (
 )
 
 type Config struct {
+	ReadOnly       bool // SERVICE_READ_ONLY disables BMP integration and all mutation routes.
 	Env            string
 	LogLevel       string
 	DatabaseURL    string
@@ -20,8 +21,9 @@ type Config struct {
 	// aunque NO estén en ADMIN_EMAILS ni en mlm.person.is_admin.
 	SuperAdminEmails []string
 
-	CognitoIssuer   string
-	CognitoClientID string
+	CognitoIssuer           string
+	CognitoClientID         string
+	RequireVerifiedIdentity bool
 
 	DBMaxConns     int32
 	DBConnLifetime time.Duration
@@ -59,7 +61,16 @@ func (c *Config) JWKSURL() string {
 }
 
 func LoadConfig() (Config, error) {
+	readOnly, err := loadServiceReadOnly()
+	if err != nil {
+		return Config{}, err
+	}
+	bmpDefault := "https://dev-backend.be-mindpower.net"
+	if readOnly {
+		bmpDefault = ""
+	}
 	cfg := Config{
+		ReadOnly:       readOnly,
 		Env:            getenv("ENV", "dev"),
 		LogLevel:       getenv("LOG_LEVEL", "info"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
@@ -68,21 +79,29 @@ func LoadConfig() (Config, error) {
 		AdminEmails:    splitCSV(os.Getenv("ADMIN_EMAILS")),
 		// Mismo default que payments (PAYMENTS_SUPER_ADMIN_EMAILS) para no dejar
 		// al super-admin fuera de la cola de retiros si la variable no está.
-		SuperAdminEmails: splitCSV(getenv("SUPER_ADMIN_EMAILS", "devfidubit@gmail.com")),
-		CognitoIssuer:    os.Getenv("COGNITO_ISSUER"),
-		CognitoClientID:  os.Getenv("COGNITO_CLIENT_ID"),
-		DBMaxConns:       10,
-		DBConnLifetime:   30 * time.Minute,
-		BMPBaseURL:       getenv("BMP_BASE_URL", "https://dev-backend.be-mindpower.net"),
-		BMPClientID:      os.Getenv("BMP_CLIENT_ID"),
-		BMPClientSecret:  os.Getenv("BMP_CLIENT_SECRET"),
-		RequireBMP:       getenvBool("WITHDRAWALS_REQUIRE_BMP", true),
+		SuperAdminEmails:        splitCSV(getenv("SUPER_ADMIN_EMAILS", "devfidubit@gmail.com")),
+		CognitoIssuer:           os.Getenv("COGNITO_ISSUER"),
+		CognitoClientID:         os.Getenv("COGNITO_CLIENT_ID"),
+		RequireVerifiedIdentity: getenvBool("WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY", getenv("ENV", "dev") == "production"),
+		DBMaxConns:              10,
+		DBConnLifetime:          30 * time.Minute,
+		BMPBaseURL:              getenv("BMP_BASE_URL", bmpDefault),
+		BMPClientID:             os.Getenv("BMP_CLIENT_ID"),
+		BMPClientSecret:         os.Getenv("BMP_CLIENT_SECRET"),
+		RequireBMP:              getenvBool("WITHDRAWALS_REQUIRE_BMP", true),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("DATABASE_URL requerido")
 	}
 	if cfg.ServiceToken == "" {
 		return cfg, fmt.Errorf("SERVICE_TOKEN requerido")
+	}
+	if cfg.ReadOnly {
+		cfg.RequireVerifiedIdentity, cfg.RequireBMP = true, true
+		cfg.AdminEmails = splitCSV(os.Getenv("ADMIN_EMAILS"))
+		cfg.SuperAdminEmails = splitCSV(os.Getenv("SUPER_ADMIN_EMAILS"))
+		cfg.BMPBaseURL, cfg.BMPClientID, cfg.BMPClientSecret = "", "", ""
+		return cfg, nil
 	}
 	// En producción, BMP_BASE_URL debe ser explícito. El default apunta al
 	// backend de DEV de BMP, que no conoce afiliados reales y responde

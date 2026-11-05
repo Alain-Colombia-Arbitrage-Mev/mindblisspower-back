@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 func TestGetAdminFinance_PendingPayoutSubtractsSecurityCharges(t *testing.T) {
@@ -68,7 +70,8 @@ func TestGetAdminFinance_PendingPayoutSubtractsSecurityCharges(t *testing.T) {
 		t.Fatalf("GetAdminFinance: %v", err)
 	}
 
-	if f.PendingPayoutGrossUSD != "1000.00" {
+	// Ledger amounts retain eight decimals; compare value without rounding production data.
+	if gross, err := decimal.NewFromString(f.PendingPayoutGrossUSD); err != nil || !gross.Equal(decimal.NewFromInt(1000)) {
 		t.Fatalf("PendingPayoutGrossUSD = %q, want %q", f.PendingPayoutGrossUSD, "1000.00")
 	}
 	if f.SecurityPendingPayoutOffsetUSD != "210.00" {

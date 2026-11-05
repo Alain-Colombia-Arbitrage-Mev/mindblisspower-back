@@ -120,14 +120,20 @@ func TestCloseBinaryPeriod_RoutesBannedBranchPayoutToCompany(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO mlm.person (id, first_name, last_name, email, phone_number, status)
 		OVERRIDING SYSTEM VALUE
-		VALUES ($1, 'Company', 'Root', 'company-root@t.local', '0', 'active');
+		VALUES ($1, 'Company', 'Root', 'company-root@t.local', '0', 'active')`, companyPersonID); err != nil {
+		t.Fatalf("company person: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO mlm.affiliate (id, person_id, parent_id, position, status, current_rank_id, path, depth)
 		OVERRIDING SYSTEM VALUE
-		VALUES ($2, $1, NULL, NULL, 'active', 1, '999'::ltree, 0);
-		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
-		VALUES ($2, 1, 'company-usd', 0)`,
+		VALUES ($2, $1, NULL, NULL, 'active', 1, '999'::ltree, 0)`,
 		companyPersonID, companyAffiliateID); err != nil {
 		t.Fatalf("company root: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mlm.wallet (affiliate_id, asset_id, address, balance)
+		VALUES ($1, 1, 'company-usd', 0)`, companyAffiliateID); err != nil {
+		t.Fatalf("company wallet: %v", err)
 	}
 
 	now := time.Now().UTC()
@@ -140,6 +146,19 @@ func TestCloseBinaryPeriod_RoutesBannedBranchPayoutToCompany(t *testing.T) {
 		t.Fatalf("period: %v", err)
 	}
 	inWindow := now.Add(-1 * time.Hour)
+	// A payable close needs purchase inflows and a fresh own purchase (R1).
+	if _, err := pool.Exec(ctx, `
+		WITH purchase AS (
+		  INSERT INTO mlm.transaction (external_ref, description, status, posted_at)
+		  VALUES ('test:purchase:route', 'Synthetic purchase', 'posted', $2)
+		  RETURNING id
+		)
+		INSERT INTO mlm.wallet_movement
+		  (transaction_id, wallet_id, affiliate_id, concept_id, amount, posted_at)
+		SELECT purchase.id, w.id, $1, 1004, 1000, $2
+		  FROM purchase, mlm.wallet w WHERE w.affiliate_id = $1`, root, inWindow); err != nil {
+		t.Fatalf("purchase inflow: %v", err)
+	}
 
 	for _, src := range []int64{leftID, rightID} {
 		if _, err := pool.Exec(ctx, `

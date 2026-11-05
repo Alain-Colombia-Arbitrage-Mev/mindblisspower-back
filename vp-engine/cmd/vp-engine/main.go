@@ -100,11 +100,14 @@ func run() error {
 	)
 	bridge := walletbridge.New(pool, nc, logger)
 	invariants := bonusengine.NewInvariants(pool, logger)
-	scheduler, err := bonusengine.NewScheduler(engine, invariants, pool, logger, cfg.BonusEngineBinaryCycleEnabled)
-	if err != nil {
-		return err
+	var scheduler *bonusengine.Scheduler
+	if cfg.BonusEngineSchedulerEnabled {
+		scheduler, err = bonusengine.NewScheduler(engine, invariants, pool, logger, cfg.BonusEngineBinaryCycleEnabled)
+		if err != nil {
+			return err
+		}
 	}
-	logger.Info().Bool("binary_cycle_enabled", cfg.BonusEngineBinaryCycleEnabled).Msg("bonus engine scheduler configured")
+	logger.Info().Bool("scheduler_enabled", cfg.BonusEngineSchedulerEnabled).Bool("binary_cycle_enabled", cfg.BonusEngineBinaryCycleEnabled).Msg("bonus engine scheduler configured")
 
 	// gRPC mux + LedgerService handler
 	grpcMux := http.NewServeMux()
@@ -117,6 +120,9 @@ func run() error {
 		TLSCert:              cfg.GRPCTLSCert,
 		TLSKey:               cfg.GRPCTLSKey,
 		TLSClientCA:          cfg.GRPCTLSClientCA,
+		TLSCertPEM:           cfg.GRPCTLSCertPEM,
+		TLSKeyPEM:            cfg.GRPCTLSKeyPEM,
+		TLSClientCAPEM:       cfg.GRPCTLSClientCAPEM,
 		TLSRequireClientCert: cfg.GRPCTLSRequireClientCert,
 	}, grpcMux, logger)
 	if err != nil {
@@ -155,7 +161,9 @@ func run() error {
 	g.Go(func() error { return grpcSrv.Run(gctx) })
 	g.Go(func() error { return httpSrv.Run(gctx) })
 	g.Go(func() error { return bridge.Run(gctx) })
-	g.Go(func() error { return scheduler.Run(gctx) })
+	if scheduler != nil {
+		g.Go(func() error { return scheduler.Run(gctx) })
+	}
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err

@@ -2,13 +2,15 @@ name: build
 on:
   push: { branches: [main, staging] }
   workflow_dispatch:
-permissions: { id-token: write, contents: read }
+permissions: { contents: read }
 env:
   AWS_REGION: us-east-1
   REGISTRY: 522814703714.dkr.ecr.us-east-1.amazonaws.com
 jobs:
   ecr-preflight:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
     steps:
       - uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -47,22 +49,38 @@ jobs:
           done
 
   test:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Pin a la misma línea de Bun que usa app/Dockerfile (oven/bun:1.2). Evita
+      # Pin a la misma linea de Bun que usa app/Dockerfile. Evita
       # depender de resolver "latest" contra la API de GitHub (que rompió el CI
       # durante una degradación de api.github.com) y da builds reproducibles.
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: "1.2" }
+        with: { bun-version: "1.4.4" }
       - run: bun install --frozen-lockfile
         working-directory: app
       - run: bun run typecheck
+        working-directory: app
+      - run: bun audit
+        working-directory: app
+      - run: bun run test:toolchain
         working-directory: app
       - uses: actions/setup-go@v7
         with:
           go-version-file: vp-engine/go.mod
           cache-dependency-path: vp-engine/go.sum
+      - name: Go dependency security gate
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -scan=package -test ./...
+        working-directory: vp-engine
+      - name: Reject unmaintained OpenPGP imports
+        working-directory: vp-engine
+        run: |
+          go list -deps -test ./... > "$RUNNER_TEMP/go-deps.txt"
+          if grep -Eq '^golang.org/x/crypto/openpgp(/|$)' "$RUNNER_TEMP/go-deps.txt"; then
+            echo 'Unmaintained OpenPGP must not be imported.'
+            exit 1
+          fi
       - run: go build ./...
         working-directory: vp-engine
       - run: go vet ./...
@@ -72,17 +90,15 @@ jobs:
       - name: go test (unit, bloqueante)
         run: go test -count=1 -timeout 180s -run 'Theta' ./internal/bonusengine/ && go test -count=1 -timeout 120s ./internal/shared/config/...
         working-directory: vp-engine
-      # Suite completa (incluye integración con testcontainers/Postgres — los
-      # runners de GitHub traen Docker). OBSERVACIONAL por ahora
-      # (continue-on-error): cuando acumule corridas verdes, quitar el
-      # continue-on-error para hacerla bloqueante.
-      - name: go test (full, observacional)
-        continue-on-error: true
+      # La integracion con Postgres tambien bloquea la publicacion de imagenes.
+      - name: go test (full, bloqueante)
         run: go test -count=1 -timeout 15m ./...
         working-directory: vp-engine
   push:
+    if: vars.DEPLOYMENT_PROVIDER == 'aws'
     needs: [ecr-preflight, test]
     runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
     strategy:
       matrix:
         include:

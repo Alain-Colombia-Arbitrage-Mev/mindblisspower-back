@@ -10,8 +10,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// IdentityVerifier verifica un id token Cognito (firma JWKS + iss + aud +
-// token_use + exp) y devuelve el email verificado (lowercased). Es una interfaz
+// IdentityVerifier verifica la identidad del proveedor configurado y devuelve
+// el email canónico (lowercased). Cognito verifica su id token; Better Auth usa
+// JWT de servicio más un binding explícito subject/person. Es una interfaz
 // para que los tests puedan inyectar un fake sin montar un JWKS real.
 type IdentityVerifier interface {
 	// VerifyEmail verifica el token y devuelve el email del claim. Cualquier

@@ -1,0 +1,180 @@
+import { expect, test } from 'bun:test';
+import { AuthEmailDeliveryError, cloudflareEmailConfigured, createAuthDelivery, type EmailDeliveryDiagnostic } from './delivery';
+import { AUTH_OTP_PURPOSES, authOtpMessage } from './email-templates';
+
+const configuration = { SENTDM_API_KEY: 'synthetic-key', SENTDM_OTP_TEMPLATE_ID: '00000000-0000-4000-8000-000000000001', SENTDM_OTP_CHANNEL: 'whatsapp' };
+const emailConfiguration = { CLOUDFLARE_ACCOUNT_ID: '00000000000000000000000000000001',
+  CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic-cloudflare-token', AUTH_EMAIL_FROM: 'auth@example.test' };
+const emailMessage = { to: 'member@example.test', subject: 'Synthetic sign-in', text: 'Synthetic code 123456', html: '<p>Synthetic code 123456</p>' };
+const acceptedEmail = { success: true, errors: [], result: { delivered: [], queued: [emailMessage.to], permanent_bounces: [] } };
+
+test('Cloudflare email transport uses the account-scoped fixed REST API and checks delivered or queued recipient', async () => {
+  let calls = 0;
+  for (const status of ['delivered', 'queued']) {
+    const delivery = createAuthDelivery(emailConfiguration, (async (url, request) => {
+      calls++;
+      expect(url).toBe(`https://api.cloudflare.com/client/v4/accounts/${emailConfiguration.CLOUDFLARE_ACCOUNT_ID}/email/sending/send`);
+      expect(request?.method).toBe('POST');
+      expect(request?.redirect).toBe('error');
+      expect(request?.signal).toBeInstanceOf(AbortSignal);
+      expect(request?.headers).toEqual({ 'content-type': 'application/json', authorization: 'Bearer synthetic-cloudflare-token' });
+      expect(JSON.parse(request?.body as string)).toEqual({ ...emailMessage, to: [emailMessage.to], from: emailConfiguration.AUTH_EMAIL_FROM });
+      return Response.json({ success: true, errors: [], messages: [], result: {
+        delivered: status === 'delivered' ? [emailMessage.to] : [], queued: status === 'queued' ? [emailMessage.to] : [], permanent_bounces: [],
+        ...(status === 'delivered' ? { message_id: 'synthetic-message-id', suppressed_recipients: [] } : {}),
+      } }); // Accept both documented shapes, with or without a message_id.
+    }) as typeof fetch);
+    await delivery.email(emailMessage);
+  }
+  expect(calls).toBe(2);
+});
+
+test('Cloudflare configuration fails closed before transport and never falls back to a Resend credential', async () => {
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; return Response.json(acceptedEmail); }) as unknown as typeof fetch;
+  expect(cloudflareEmailConfigured(emailConfiguration)).toBe(true);
+  for (const env of [{}, { RESEND_API_KEY: 'synthetic-old-provider', AUTH_EMAIL_FROM: 'auth@example.test' },
+    { ...emailConfiguration, CLOUDFLARE_ACCOUNT_ID: '../other-account' },
+    { ...emailConfiguration, CLOUDFLARE_EMAIL_API_TOKEN: ' ' }, { ...emailConfiguration, CLOUDFLARE_EMAIL_API_TOKEN: 'synthetic\r\ninjected' },
+    { ...emailConfiguration, AUTH_EMAIL_FROM: 'invalid' }]) {
+    expect(cloudflareEmailConfigured(env)).toBe(false);
+    await expect(createAuthDelivery(env, fetchImpl).email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
+  }
+  await expect(createAuthDelivery(emailConfiguration, fetchImpl).email({ ...emailMessage, to: 'invalid' })).rejects.toThrow('authentication_delivery_unavailable');
+  expect(calls).toBe(0);
+});
+
+test('Cloudflare native OTP keeps reviewed HTML and text without reading or forwarding hosted-template metadata', async () => {
+  let calls = 0;
+  for (const purpose of AUTH_OTP_PURPOSES) {
+    const message = authOtpMessage(emailMessage.to, '012345', purpose);
+    const expected = { from: emailConfiguration.AUTH_EMAIL_FROM, to: [message.to], subject: message.subject,
+      text: message.text, html: message.html };
+    Object.defineProperty(message, 'template', { get() { throw new Error('Inactive hosted-template metadata was accessed'); } });
+    await createAuthDelivery(emailConfiguration, (async (url, request) => {
+      calls++;
+      expect(String(url)).toContain('https://api.cloudflare.com/client/v4/accounts/');
+      const body = JSON.parse(request?.body as string);
+      expect(body).toEqual(expected);
+      expect(body).not.toHaveProperty('template');
+      return Response.json(acceptedEmail);
+    }) as typeof fetch, () => {}).email(message);
+  }
+  expect(calls).toBe(3);
+});
+
+test('Cloudflare HTTP success is not enough: reject malformed, bounced, suppressed or mismatched email results', async () => {
+  const result = acceptedEmail.result;
+  const invalid = [
+    { id: 'old-provider-response' }, { ...acceptedEmail, success: false }, { ...acceptedEmail, errors: [{ message: 'private 123456' }] },
+    { ...acceptedEmail, result: null }, { ...acceptedEmail, result: { ...result, queued: [] } },
+    { ...acceptedEmail, result: { ...result, queued: ['other@example.test'] } },
+    { ...acceptedEmail, result: { ...result, delivered: [emailMessage.to] } },
+    { ...acceptedEmail, result: { ...result, permanent_bounces: [emailMessage.to] } },
+    { ...acceptedEmail, result: { ...result, suppressed_recipients: [emailMessage.to] } },
+  ];
+  let calls = 0;
+  for (const response of invalid) {
+    const delivery = createAuthDelivery(emailConfiguration, (async () => { calls++; return Response.json(response); }) as unknown as typeof fetch);
+    await expect(delivery.email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
+  }
+  expect(calls).toBe(invalid.length);
+});
+
+test('Cloudflare errors, throttling, malformed JSON and timeouts stay generic with no automatic retry', async () => {
+  for (const status of [401, 403, 429, 500]) {
+    let calls = 0;
+    const delivery = createAuthDelivery(emailConfiguration, (async () => { calls++; return Response.json({ error: 'private 123456' }, { status }); }) as unknown as typeof fetch);
+    await expect(delivery.email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
+    expect(calls).toBe(1);
+  }
+  await expect(createAuthDelivery(emailConfiguration, (async () => new Response('private 123456')) as unknown as typeof fetch).email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
+  await expect(createAuthDelivery(emailConfiguration, (async () => { throw new Error('private destination and token'); }) as unknown as typeof fetch).email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
+  await expect(createAuthDelivery(emailConfiguration, (async () => { throw new DOMException('private timeout response', 'AbortError'); }) as unknown as typeof fetch).email(emailMessage)).rejects.toThrow('authentication_delivery_unavailable');
+});
+
+test('delivery diagnostics contain only fixed classifications and numeric codes, never destinations, OTPs, tokens or provider messages', async () => {
+  const events: EmailDeliveryDiagnostic[] = [];
+  const report = (event: EmailDeliveryDiagnostic) => { events.push(event); };
+  const providerError = { success: false, errors: [{ code: 10102,
+    message: `private ${emailMessage.to} ${emailMessage.text} ${emailConfiguration.CLOUDFLARE_EMAIL_API_TOKEN}` }] };
+  await expect(createAuthDelivery(emailConfiguration,
+    (async () => Response.json(providerError, { status: 403 })) as unknown as typeof fetch, report).email(emailMessage))
+    .rejects.toThrow('authentication_delivery_unavailable');
+  await expect(createAuthDelivery(emailConfiguration,
+    (async () => { throw new Error(JSON.stringify(providerError)); }) as unknown as typeof fetch, report).email(emailMessage))
+    .rejects.toThrow('authentication_delivery_unavailable');
+  await createAuthDelivery(emailConfiguration,
+    (async () => Response.json(acceptedEmail)) as unknown as typeof fetch, report).email(emailMessage);
+  expect(events).toEqual([
+    { event: 'auth_email_delivery', outcome: 'rejected', httpStatus: 403, providerCode: 10102 },
+    { event: 'auth_email_delivery', outcome: 'transport' },
+    { event: 'auth_email_delivery', outcome: 'accepted', httpStatus: 200, queued: true },
+  ]);
+  const logged = JSON.stringify(events);
+  for (const value of [emailMessage.to, '123456', emailConfiguration.CLOUDFLARE_EMAIL_API_TOKEN, 'private']) expect(logged).not.toContain(value);
+  // An unavailable diagnostics sink must neither resend nor reject acceptance.
+  await createAuthDelivery(emailConfiguration, (async () => Response.json(acceptedEmail)) as unknown as typeof fetch,
+    () => { throw new Error('synthetic log failure'); }).email(emailMessage);
+});
+
+test('only explicit nonacceptance is a confirmed rejection; ambiguous acknowledgements never authorize retry or challenge removal', async () => {
+  const rejected = [400, 401, 403, 404, 429].map(status => ({ response: Response.json({ success: false }, { status }), confirmed: true }));
+  const ambiguous = [500, 503].map(status => ({ response: Response.json({ success: false }, { status }), confirmed: false }));
+  for (const group of ['permanent_bounces', 'suppressed_recipients']) rejected.push({ response: Response.json({ success: true, errors: [],
+    result: { delivered: [], queued: [], permanent_bounces: [], suppressed_recipients: [], [group]: [emailMessage.to] } }), confirmed: true });
+  ambiguous.push({ response: new Response('malformed acknowledgement'), confirmed: false });
+  ambiguous.push({ response: Response.json({ ...acceptedEmail, result: { ...acceptedEmail.result, queued: ['other@example.test'] } }), confirmed: false });
+  for (const { response, confirmed } of [...rejected, ...ambiguous]) {
+    let failure: unknown;
+    try { await createAuthDelivery(emailConfiguration, (async () => response) as unknown as typeof fetch, () => {}).email(emailMessage); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(AuthEmailDeliveryError);
+    expect((failure as AuthEmailDeliveryError).confirmedRejected).toBe(confirmed);
+    expect((failure as Error).message).toBe('authentication_delivery_unavailable');
+  }
+});
+test('Sent v3 transport pins an approved channel/template and never uses email or broadcast', async () => {
+  let calls = 0;
+  const delivery = createAuthDelivery(configuration, (async (url, request) => {
+    calls++;
+    expect(url).toBe('https://api.sent.dm/v3/messages');
+    expect(request?.redirect).toBe('error');
+    const headers = request?.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBe('synthetic-key');
+    const body = JSON.parse(request?.body as string);
+    expect(body.channel).toEqual(['whatsapp']);
+    expect(body.template.parameters.code).toBe('123456');
+    return Response.json({ success: true, error: null, data: { status: 'QUEUED', template_id: configuration.SENTDM_OTP_TEMPLATE_ID,
+      recipients: [{ message_id: 'synthetic-id', to: '+12025550123', channel: 'whatsapp' }] } }, { status: 202 });
+  }) as typeof fetch);
+  await delivery.phone('+12025550123', '123456');
+  expect(calls).toBe(1);
+});
+
+test('missing credentials and malformed provider success fail closed with no sensitive error details', async () => {
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; return Response.json({ error: 'private recipient +12025550123 and 123456' }); }) as unknown as typeof fetch;
+  await expect(createAuthDelivery({}, fetchImpl).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+  expect(calls).toBe(0);
+  await expect(createAuthDelivery(configuration, fetchImpl).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+  await expect(createAuthDelivery(configuration, (async () => { throw new Error('private 123456'); }) as unknown as typeof fetch).phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+});
+
+test('Sent acceptance must identify the requested recipient, pinned channel and approved template', async () => {
+  const data = { status: 'QUEUED', template_id: configuration.SENTDM_OTP_TEMPLATE_ID,
+    recipients: [{ message_id: 'synthetic-id', to: '+12025550123', channel: 'whatsapp' }] };
+  for (const result of [
+    { success: true, data: { status: 'QUEUED', recipients: [{ message_id: 'old-incomplete-ack' }] } },
+    { success: true, error: { message: 'private 123456' }, data },
+    { success: true, data: { ...data, template_id: '00000000-0000-4000-8000-000000000002' } },
+    { success: true, data: { ...data, recipients: [{ ...data.recipients[0], to: '+12025550124' }] } },
+    { success: true, data: { ...data, recipients: [{ ...data.recipients[0], channel: 'sms' }] } },
+    { success: true, data: { ...data, recipients: [...data.recipients, ...data.recipients] } },
+  ]) {
+    let calls = 0;
+    const delivery = createAuthDelivery(configuration, (async () => { calls++; return Response.json(result, { status: 202 }); }) as unknown as typeof fetch);
+    await expect(delivery.phone('+12025550123', '123456')).rejects.toThrow('authentication_delivery_unavailable');
+    expect(calls).toBe(1);
+  }
+});

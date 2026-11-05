@@ -1,0 +1,116 @@
+{
+  "scenarios": [
+    {
+      "name": "illustrative-core-lab-80h",
+      "pricingDate": "2026-10-25",
+      "monthHours": 730,
+      "containers": [
+        { "name": "bun-api", "environment": "lab", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 },
+        { "name": "engine", "environment": "lab", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 },
+        { "name": "payments", "environment": "lab", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 },
+        { "name": "withdrawals", "environment": "lab", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 }
+      ],
+      "workers": { "requests": 100000, "averageCpuMsPerRequest": 5 },
+      "durableObjects": { "billedRequests": 100000, "nonHibernatingInstanceHours": 320 },
+      "logs": { "events": 300000 },
+      "r2Standard": { "gbMonths": 0, "classAOperations": 0, "classBOperations": 0 },
+      "containerEgressGb": { "northAmericaEurope": 20, "oceaniaKoreaTaiwan": 0, "other": 0 },
+      "existingAccountUsage": {
+        "containerMemoryGibSeconds": 0, "containerCpuVcpuSeconds": 0, "containerDiskGbSeconds": 0,
+        "workerRequests": 0, "workerCpuMs": 0, "durableObjectRequests": 0, "durableObjectGbSeconds": 0,
+        "logEvents": 0, "r2GbMonths": 0, "r2ClassAOperations": 0, "r2ClassBOperations": 0,
+        "egressNorthAmericaEuropeGb": 0, "egressOceaniaKoreaTaiwanGb": 0, "egressOtherGb": 0
+      },
+      "otherCosts": [
+        { "name": "postgresql", "monthlyUsd": null, "note": "Price the existing canonical PlanetScale database, including backups, storage, connections, and provider egress." },
+        { "name": "redis", "monthlyUsd": 0, "note": "This core scenario assumes Payments optional cache disabled with empty REDIS_ADDR and its fallback tested. Chatwoot is deferred. Price Redis separately if needed; do not copy Compose redis:6379 without a real service." },
+        { "name": "email-delivery", "monthlyUsd": null, "note": "Verify the account email sending plan, allowance, and projected authentication email volume." },
+        { "name": "other-cloudflare", "monthlyUsd": null, "note": "Review DO storage, image registry, builds, KV, queues, and any additional products before approval." },
+        { "name": "taxes-and-other", "monthlyUsd": null, "note": "Taxes, support, domains, transfer/migration costs, and any provider fees are not priced here." }
+      ],
+      "notes": [
+        "Hypothetical 730-hour planning month with 80 active hours per core instance, not measured account or application usage. Existing account usage zero is illustrative and unverified.",
+        "Both portales are assumed adapted to Workers; request and CPU inputs aggregate both portal Workers and the container gateway. Add portal container rows if that adaptation is not complete.",
+        "Chatwoot, its database, Redis, R2 attachments, and AI agents are explicitly outside the current phase and are not proposed for activation.",
+        "Four distinct core containers are budgeted for Bun API, engine, payments, and withdrawals. Inclusion in a hypothetical budget does not authorize financial workers or payment processing.",
+        "DO non-hibernating duration conservatively equals total container instance-hours, explicitly specified rather than assumed by the calculator. Runtime DO hibernation must be measured."
+      ]
+    },
+    {
+      "name": "illustrative-core-production-730h",
+      "pricingDate": "2026-10-25",
+      "monthHours": 730,
+      "containers": [
+        { "name": "bun-api", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "engine", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "payments", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "withdrawals", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 }
+      ],
+      "workers": { "requests": 500000, "averageCpuMsPerRequest": 5 },
+      "durableObjects": { "billedRequests": 500000, "nonHibernatingInstanceHours": 2920 },
+      "logs": { "events": 2000000 },
+      "r2Standard": { "gbMonths": 0, "classAOperations": 0, "classBOperations": 0 },
+      "containerEgressGb": { "northAmericaEurope": 100, "oceaniaKoreaTaiwan": 0, "other": 0 },
+      "existingAccountUsage": {
+        "containerMemoryGibSeconds": 0, "containerCpuVcpuSeconds": 0, "containerDiskGbSeconds": 0,
+        "workerRequests": 0, "workerCpuMs": 0, "durableObjectRequests": 0, "durableObjectGbSeconds": 0,
+        "logEvents": 0, "r2GbMonths": 0, "r2ClassAOperations": 0, "r2ClassBOperations": 0,
+        "egressNorthAmericaEuropeGb": 0, "egressOceaniaKoreaTaiwanGb": 0, "egressOtherGb": 0
+      },
+      "otherCosts": [
+        { "name": "postgresql", "monthlyUsd": null, "note": "Price the existing canonical PlanetScale database, including backups, storage, connections, and provider egress." },
+        { "name": "redis", "monthlyUsd": 0, "note": "This core scenario assumes Payments optional cache disabled with empty REDIS_ADDR and its fallback tested. Chatwoot is deferred. Price Redis separately if needed; do not copy Compose redis:6379 without a real service." },
+        { "name": "email-delivery", "monthlyUsd": null, "note": "Verify the account email sending plan, allowance, and projected authentication email volume." },
+        { "name": "other-cloudflare", "monthlyUsd": null, "note": "Review DO storage, image registry, builds, KV, queues, and any additional products before approval." },
+        { "name": "taxes-and-other", "monthlyUsd": null, "note": "Taxes, support, domains, transfer/migration costs, and any provider fees are not priced here." }
+      ],
+      "notes": [
+        "Hypothetical 730-hour production schedule, not measured account or application usage. Existing account usage zero is illustrative and unverified.",
+        "Both portales are assumed adapted to Workers; input volume aggregates both portal Workers and the gateway. No staging environment is included.",
+        "DO billed non-hibernating duration is conservatively specified as four container instance-months. Actual DO duration must be measured separately.",
+        "Chatwoot, its database, Redis, R2 attachments, and AI agents are deferred and not proposed for activation.",
+        "Core sizing is hypothetical, not a performance, high-availability or uptime promise. Financial workers remain disabled until separately authorized and validated."
+      ]
+    },
+    {
+      "name": "illustrative-core-production-plus-staging",
+      "pricingDate": "2026-10-25",
+      "monthHours": 730,
+      "containers": [
+        { "name": "bun-api", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "engine", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "payments", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "withdrawals", "environment": "production", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 730, "averageActiveVcpu": 0.02 },
+        { "name": "bun-api", "environment": "staging", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 },
+        { "name": "engine", "environment": "staging", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 },
+        { "name": "payments", "environment": "staging", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 },
+        { "name": "withdrawals", "environment": "staging", "instanceType": "basic", "instances": 1, "activeHoursPerInstance": 80, "averageActiveVcpu": 0.02 }
+      ],
+      "workers": { "requests": 600000, "averageCpuMsPerRequest": 5 },
+      "durableObjects": { "billedRequests": 600000, "nonHibernatingInstanceHours": 3240 },
+      "logs": { "events": 2300000 },
+      "r2Standard": { "gbMonths": 0, "classAOperations": 0, "classBOperations": 0 },
+      "containerEgressGb": { "northAmericaEurope": 120, "oceaniaKoreaTaiwan": 0, "other": 0 },
+      "existingAccountUsage": {
+        "containerMemoryGibSeconds": 0, "containerCpuVcpuSeconds": 0, "containerDiskGbSeconds": 0,
+        "workerRequests": 0, "workerCpuMs": 0, "durableObjectRequests": 0, "durableObjectGbSeconds": 0,
+        "logEvents": 0, "r2GbMonths": 0, "r2ClassAOperations": 0, "r2ClassBOperations": 0,
+        "egressNorthAmericaEuropeGb": 0, "egressOceaniaKoreaTaiwanGb": 0, "egressOtherGb": 0
+      },
+      "otherCosts": [
+        { "name": "postgresql", "monthlyUsd": null, "note": "Price existing canonical PlanetScale plus any isolated staging branch, backups, storage, connections, and provider egress." },
+        { "name": "redis", "monthlyUsd": 0, "note": "This core scenario assumes Payments optional cache disabled with empty REDIS_ADDR and its fallback tested. Chatwoot is deferred. Price Redis separately if needed; do not copy Compose redis:6379 without a real service." },
+        { "name": "email-delivery", "monthlyUsd": null, "note": "Verify the account email sending plan, allowance, and projected authentication email volume." },
+        { "name": "other-cloudflare", "monthlyUsd": null, "note": "Review DO storage, image registry, builds, KV, queues, and any additional products before approval." },
+        { "name": "taxes-and-other", "monthlyUsd": null, "note": "Taxes, support, domains, transfer/migration costs, and any provider fees are not priced here." }
+      ],
+      "notes": [
+        "Hypothetical 730-hour production plus 80-hour staging core schedule, not measured account or application usage. Existing account usage zero is illustrative and unverified.",
+        "Both portales are assumed adapted to Workers. Workers volume, logs, and egress aggregate both environments, with account allowances deducted only once.",
+        "DO non-hibernating duration conservatively equals aggregate container instance-hours. It crosses a second whole million GB-s billing block; actual DO hibernation can substantially change this subtotal.",
+        "Chatwoot, its database, Redis, R2 attachments, and AI agents are deferred and not proposed for activation.",
+        "Financial workers are costed as hypothetical resources only; this neither enables their schedules nor authorizes writes or payments."
+      ]
+    }
+  ]
+}

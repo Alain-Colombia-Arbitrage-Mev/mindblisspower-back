@@ -66,7 +66,7 @@ func run() error {
 	// Verificación BMP. Sin credenciales el servicio sigue arriba: la solicitud
 	// se registra marcada 'unavailable' (fail-open) y el candado al pagar la
 	// re-verifica. Se avisa fuerte porque en producción es una mala config.
-	if cfg.BMPClientID != "" && cfg.BMPClientSecret != "" {
+	if cfg.ExternalProvidersEnabled() && cfg.BMPClientID != "" && cfg.BMPClientSecret != "" {
 		handler.SetBMPClient(withdrawals.NewBMPClient(cfg.BMPBaseURL, cfg.BMPClientID, cfg.BMPClientSecret))
 		logger.Info().Str("bmp_base_url", cfg.BMPBaseURL).Msg("BMP verification enabled")
 	} else {
@@ -74,16 +74,27 @@ func run() error {
 	}
 
 	// Misma defensa H-2 que vp-payments: re-verificar el id token Cognito.
-	if jwksURL := cfg.JWKSURL(); jwksURL != "" {
+	if verifier, enabled, err := payments.ConfiguredBetterAuthVerifier(rootCtx, pool); err != nil {
+		return err
+	} else if enabled {
+		handler.SetIdentityVerifier(verifier, true)
+		logger.Info().Msg("Better Auth verified service identity and MLM subject binding enabled")
+	} else if jwksURL := cfg.JWKSURL(); jwksURL != "" {
 		verifier, verr := payments.NewCognitoVerifier(rootCtx, jwksURL, cfg.CognitoIssuer, cfg.CognitoClientID)
 		if verr != nil {
+			if cfg.RequireVerifiedIdentity {
+				return verr
+			}
 			logger.Warn().Err(verr).
 				Msg("id-token verifier init failed; identidad SIN verificar: se confía en el email declarado por el llamador")
 		} else {
-			handler.SetIdentityVerifier(verifier, false)
+			handler.SetIdentityVerifier(verifier, cfg.RequireVerifiedIdentity)
 			logger.Info().Str("issuer", cfg.CognitoIssuer).Msg("id-token identity verification enabled")
 		}
 	} else {
+		if cfg.RequireVerifiedIdentity {
+			return errors.New("WITHDRAWALS_REQUIRE_VERIFIED_IDENTITY=true but Cognito issuer is not configured")
+		}
 		// No es fail-closed: requireVerified queda en false, así que resolveIdentity
 		// acepta el email declarado (query/body) sin verificarlo. Cualquiera con el
 		// token de servicio puede hacerse pasar por admin. Paridad intencional con
@@ -94,7 +105,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
-		Handler:           handler.Routes(),
+		Handler:           cfg.ReadOnlyHandler(handler.Routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

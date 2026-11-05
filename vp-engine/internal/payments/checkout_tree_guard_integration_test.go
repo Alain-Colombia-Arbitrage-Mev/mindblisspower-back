@@ -59,6 +59,7 @@ func TestCheckoutBlocksExistingAffiliateWhenSponsorIsOutsideBinaryTree(t *testin
 		serviceToken: "test-token",
 		log:          zerolog.Nop(),
 	}
+	h.SetStripeCheckoutEnabled(true)
 	req := httptest.NewRequest(http.MethodPost, "/api/payments/checkout", strings.NewReader(`{
 		"email":"legacy-buyer-tree-guard@t.local",
 		"package_id":1001

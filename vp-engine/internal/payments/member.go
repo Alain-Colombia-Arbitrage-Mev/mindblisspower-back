@@ -41,19 +41,25 @@ type MemberWithdrawal struct {
 
 // MemberSummary: lo que ve el miembro — sus pagos + posición + comisiones.
 type MemberSummary struct {
-	Positioned             bool               `json:"positioned"`
-	AffiliateID            *int64             `json:"affiliate_id,omitempty"`
-	Rank                   string             `json:"rank"`               // nombre del rango actual (mlm.rank.name_es) o '—'
-	Plan                   string             `json:"plan"`               // perfil: passive_investor | network
-	JoinedAt               string             `json:"joined_at"`          // fecha de ingreso (affiliate.created_at, o person.created_at si no posicionado)
-	WalletBalanceUSD       string             `json:"wallet_balance_usd"` // balance total del ledger (no congelado): disponible + madurando
-	ActivePackages         int                `json:"active_packages"`
-	Payments               []MemberPayment    `json:"payments"`
-	CommissionAvailable    string             `json:"commission_available_usd"`     // madurado, no congelado
-	CommissionMaturing     string             `json:"commission_maturing_usd"`      // créditos que aún no maduran
-	AvailableForWithdrawal string             `json:"available_for_withdrawal_usd"` // disponible − retiros pendientes
-	MinWithdrawalUSD       int                `json:"min_withdrawal_usd"`
-	Withdrawals            []MemberWithdrawal `json:"withdrawals"`
+	NOWPayments            *NOWMemberPolicy    `json:"nowpayments,omitempty"`
+	ManualMemberships      *ManualMemberPolicy `json:"manual_memberships,omitempty"`
+	DataSource             string              `json:"data_source,omitempty"`
+	FinancialStatus        string              `json:"financial_status,omitempty"`
+	PayoutLocked           bool                `json:"payout_locked,omitempty"`
+	StripeSales            []MemberStripeSale  `json:"stripe_sales,omitempty"`
+	Positioned             bool                `json:"positioned"`
+	AffiliateID            *int64              `json:"affiliate_id,omitempty"`
+	Rank                   string              `json:"rank"`               // nombre del rango actual (mlm.rank.name_es) o '—'
+	Plan                   string              `json:"plan"`               // perfil: passive_investor | network
+	JoinedAt               string              `json:"joined_at"`          // fecha de ingreso (affiliate.created_at, o person.created_at si no posicionado)
+	WalletBalanceUSD       string              `json:"wallet_balance_usd"` // balance total del ledger (no congelado): disponible + madurando
+	ActivePackages         int                 `json:"active_packages"`
+	Payments               []MemberPayment     `json:"payments"`
+	CommissionAvailable    string              `json:"commission_available_usd"`     // madurado, no congelado
+	CommissionMaturing     string              `json:"commission_maturing_usd"`      // créditos que aún no maduran
+	AvailableForWithdrawal string              `json:"available_for_withdrawal_usd"` // disponible − retiros pendientes
+	MinWithdrawalUSD       int                 `json:"min_withdrawal_usd"`
+	Withdrawals            []MemberWithdrawal  `json:"withdrawals"`
 }
 
 // memberContext es el par cacheado nombre+código de referido.
@@ -65,7 +71,8 @@ type memberContext struct {
 // GetMemberContext devuelve el nombre real (mlm.person) y el código de referido
 // real (mlm.affiliate.invitation_link) del miembro por email — la fuente
 // autoritativa para los 117k migrados (cuyo id token de Cognito puede no traer
-// el nombre). Genera+persiste el código si el afiliado no tiene uno.
+// el nombre). Si no hay código persistido, deriva MP{id} sin escribir en DB;
+// ResolveSponsor ya reconoce ese código por el id del afiliado.
 // Cache-aside 10 min: se consulta en CADA carga del dashboard y el código es
 // inmutable una vez generado — sin cache, la carga pesada de registros
 // martillea RDS con esta query.
@@ -133,11 +140,7 @@ func (s *Store) GetMemberContext(ctx context.Context, email string) (name, code 
 	if affID == nil {
 		return name, "", nil // registrado, aún sin colocar en el árbol
 	}
-	newCode := fmt.Sprintf("MP%d", *affID)
-	_, _ = s.db.Exec(ctx,
-		`UPDATE mlm.affiliate SET invitation_link=$2 WHERE id=$1 AND invitation_link IS NULL`,
-		*affID, newCode)
-	return name, newCode, nil
+	return name, fmt.Sprintf("MP%d", *affID), nil
 }
 
 // GetMemberSummary arma el resumen para el miembro identificado por email.
@@ -153,6 +156,15 @@ func (s *Store) GetMemberSummaryFresh(ctx context.Context, email string) (Member
 }
 
 func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) (MemberSummary, error) {
+	// Detect the source on the primary before using operational cached balances.
+	// Imported captures do not prove an affiliate liability or available funds.
+	recovered, err := s.hasRecoveredStripe(ctx)
+	if err != nil {
+		return MemberSummary{}, err
+	}
+	if recovered {
+		return s.recoveredMemberSummary(ctx, email)
+	}
 	var out MemberSummary
 	ckey := "member:" + strings.ToLower(strings.TrimSpace(email))
 	if !fresh && s.cache.get(ctx, ckey, &out) {
@@ -163,7 +175,7 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 	// Identidad → person + affiliate + rango + perfil + fecha de ingreso.
 	var personID int64
 	var affiliateID *int64
-	err := reader.QueryRow(ctx, `
+	err = reader.QueryRow(ctx, `
 		SELECT p.id, a.id,
 		       COALESCE(r.name_es, '—') AS rank,
 		       p.profile::text AS plan,
@@ -254,6 +266,16 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 	// son asientos de la compra, no dinero retirable del comprador.
 	// Scoped al wallet USD (JOIN wallet+asset symbol='USD') para excluir la wallet
 	// USD-RET de jubilación y evitar que el saldo 401k se muestre como retirable.
+	// Scoped NOW credits use exact TIMESTAMPTZ eligibility in the separate read
+	// model. Never re-open them through this legacy DATE-based calculation.
+	nowLedgerExclusion := ""
+	var scopedNOWLedger bool
+	if err := reader.QueryRow(ctx, `SELECT to_regclass('payments.nowpayments_engine_payment') IS NOT NULL`).Scan(&scopedNOWLedger); err != nil {
+		return MemberSummary{}, fmt.Errorf("NOW ledger scope unavailable: %w", err)
+	}
+	if scopedNOWLedger {
+		nowLedgerExclusion = ` AND NOT EXISTS(SELECT 1 FROM mlm.transaction nt JOIN payments.nowpayments_engine_payment np ON np.transaction_ref=nt.external_ref WHERE nt.id=wm.transaction_id)`
+	}
 	err = reader.QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(wm.amount) FILTER (
@@ -268,7 +290,7 @@ func (s *Store) getMemberSummary(ctx context.Context, email string, fresh bool) 
 		  JOIN mlm.wallet  w ON w.id = wm.wallet_id
 		  JOIN mlm.asset   s ON s.id = w.asset_id AND s.symbol = 'USD'
 		 WHERE wm.affiliate_id = $1
-		   AND `+withdrawals.ExcludedKindsPredicate+`
+		   AND `+withdrawals.ExcludedKindsPredicate+nowLedgerExclusion+`
 	`, *affiliateID).Scan(&out.CommissionAvailable, &out.CommissionMaturing, &out.WalletBalanceUSD)
 	if err != nil {
 		return MemberSummary{}, fmt.Errorf("commissions: %w", err)

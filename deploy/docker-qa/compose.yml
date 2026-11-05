@@ -1,0 +1,194 @@
+name: mindbliss-qa
+services:
+  gateway:
+    image: node:24.16.0-bookworm-slim
+    command: [node, /qa/gateway.mjs]
+    user: node
+    volumes:
+      - ./gateway.mjs:/qa/gateway.mjs:ro
+    ports:
+      - 127.0.0.1:3300:3300
+      - 127.0.0.1:3301:3301
+      - 127.0.0.1:3302:3302
+      - 127.0.0.1:3305:3305
+      - 127.0.0.1:3307:3307
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [preview, edge]
+  postgres:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-qa/Dockerfile.postgres
+    environment:
+      POSTGRES_DB: mindbliss_qa
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: synthetic-qa-only
+    tmpfs: [/var/lib/postgresql/data]
+    shm_size: 256mb
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U postgres -d mindbliss_qa"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+    networks: [preview]
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --save, "", --appendonly, "no"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    read_only: true
+    tmpfs: [/data]
+    networks: [preview]
+  api:
+    build:
+      context: ../../app
+      target: runtime
+    environment:
+      DATABASE_URL: postgres://postgres:synthetic-qa-only@postgres:5432/mindbliss_qa
+      BETTER_AUTH_SECRET: synthetic-qa-only-not-for-production-20261023
+      BETTER_AUTH_URL: http://localhost:3302
+      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3302
+    depends_on:
+      postgres: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+  payments:
+    build:
+      context: ../../vp-engine
+      dockerfile: deployments/Dockerfile
+      args: {CMD: vp-payments}
+    environment:
+      ENV: qa
+      DATABASE_URL: postgres://postgres:synthetic-qa-only@postgres:5432/mindbliss_qa
+      PAYMENTS_SERVICE_TOKEN: synthetic-qa-only-not-for-production
+      STRIPE_SECRET_KEY: sk_test_synthetic_invalid
+      STRIPE_WEBHOOK_SECRET: whsec_synthetic_invalid
+      REDIS_ADDR: redis:6379
+      REQUIRE_VERIFIED_IDENTITY: "false"
+      PAYMENTS_ADMIN_EMAILS: admin@example.invalid
+      PAYMENTS_SUPER_ADMIN_EMAILS: admin@example.invalid
+      PAYMENTS_RECONCILE_INTERVAL_MIN: "0"
+      PAYMENTS_CART_REMINDER_ENABLED: "false"
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+  withdrawals:
+    build:
+      context: ../../vp-engine
+      dockerfile: deployments/Dockerfile
+      args: {CMD: vp-withdrawals}
+    environment:
+      ENV: qa
+      DATABASE_URL: postgres://postgres:synthetic-qa-only@postgres:5432/mindbliss_qa
+      SERVICE_TOKEN: synthetic-qa-only-not-for-production
+      ADMIN_EMAILS: admin@example.invalid
+      SUPER_ADMIN_EMAILS: admin@example.invalid
+      BMP_BASE_URL: http://bmp-disabled.invalid
+      WITHDRAWALS_REQUIRE_BMP: "true"
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+  go-tests:
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: deploy/docker-qa/Dockerfile.go-test
+    environment:
+      DOCKER_HOST: unix:///var/run/docker.sock
+      TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+      AWS_EC2_METADATA_DISABLED: "true"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  bun-tests:
+    profiles: [test]
+    build:
+      context: ../../app
+      target: test
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:synthetic-qa-only@postgres:5432/mindbliss_qa
+      TEST_DATABASE_URL: postgres://postgres:synthetic-qa-only@postgres:5432/mindbliss_qa
+      BETTER_AUTH_SECRET: synthetic-qa-only-not-for-production-20261023
+      BETTER_AUTH_URL: http://localhost:3302
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [preview]
+  cache-tests:
+    profiles: [test]
+    image: mindbliss-qa-go-tests
+    command: [go, test, -race, -count=1, -timeout=5m, -run, TestRequestBudgetsRedisAtomic, ./internal/payments]
+    environment:
+      REQUEST_LIMIT_TEST_REDIS: 127.0.0.1:6379
+    network_mode: service:redis
+    depends_on:
+      redis: {condition: service_healthy}
+  client-tests:
+    profiles: [test]
+    build:
+      context: ../../../mindblisspowerfront
+      target: test
+    network_mode: none
+  admin-tests:
+    profiles: [test]
+    build:
+      context: ../../../mindblisspower-admin
+      target: test
+    network_mode: none
+  client:
+    build:
+      context: ../../../mindblisspowerfront
+      target: runtime
+    environment:
+      DEMO_LOGIN_ENABLED: "0"
+      COGNITO_USER_POOL_ID: ""
+      COGNITO_CLIENT_ID: ""
+      VP_PAYMENTS_URL: http://payments:9095
+      VP_WITHDRAWALS_URL: http://withdrawals:9097
+      PAYMENTS_SERVICE_TOKEN: synthetic-qa-only-not-for-production
+      MEMBER_DATABASE_URL: postgres://qa_member_read:synthetic-qa-read-only@postgres:5432/mindbliss_qa
+      MEMBER_DB_SSL: disable
+    depends_on:
+      postgres: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp, /app/.next/cache]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+  admin:
+    build:
+      context: ../../../mindblisspower-admin
+      target: runtime
+    environment:
+      DEMO_LOGIN_ENABLED: "0"
+      COGNITO_USER_POOL_ID: ""
+      COGNITO_CLIENT_ID: ""
+      VP_PAYMENTS_URL: http://payments:9095
+      VP_WITHDRAWALS_URL: http://withdrawals:9097
+      PAYMENTS_SERVICE_TOKEN: synthetic-qa-only-not-for-production
+    read_only: true
+    tmpfs: [/tmp, /app/.next/cache]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+networks:
+  edge:
+  preview:
+    internal: true

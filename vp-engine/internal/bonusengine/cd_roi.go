@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // cdROIConceptID = concepto 1006 'ROI diario CD' (seed schema_payouts_v1.3).
@@ -44,6 +45,9 @@ type cdAccrualRow struct {
 //
 // Corre aunque el cierre binario esté apagado (es el mecanismo de ROI de la red).
 func (e *Engine) AccrueCDROIDaily(ctx context.Context) (CDROIResult, error) {
+	if err := financialguard.RequireOperational(ctx, e.db); err != nil {
+		return CDROIResult{}, err
+	}
 	start := time.Now()
 	defer func() { e.roiRunDuration.Observe(time.Since(start).Seconds()) }()
 

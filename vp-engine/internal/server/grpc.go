@@ -21,11 +21,11 @@ import (
 // GRPCServer corre HTTP/2 server con connectrpc handlers.
 // connectrpc soporta gRPC + gRPC-Web + Connect protocol simultáneamente.
 type GRPCServer struct {
-	srv     *http.Server
-	addr    string
-	useTLS  bool
-	tlsCfg  *tls.Config
-	log     zerolog.Logger
+	srv    *http.Server
+	addr   string
+	useTLS bool
+	tlsCfg *tls.Config
+	log    zerolog.Logger
 }
 
 // GRPCConfig groups TLS/listen options.
@@ -34,6 +34,9 @@ type GRPCConfig struct {
 	TLSCert              string
 	TLSKey               string
 	TLSClientCA          string
+	TLSCertPEM           string
+	TLSKeyPEM            string
+	TLSClientCAPEM       string
 	TLSRequireClientCert bool
 }
 
@@ -46,7 +49,7 @@ func NewGRPC(cfg GRPCConfig, handler http.Handler, log zerolog.Logger) (*GRPCSer
 		log:  log.With().Str("component", "grpc").Logger(),
 	}
 
-	useTLS := cfg.TLSCert != "" && cfg.TLSKey != ""
+	useTLS := cfg.TLSCert != "" || cfg.TLSKey != "" || cfg.TLSCertPEM != "" || cfg.TLSKeyPEM != "" || cfg.TLSClientCA != "" || cfg.TLSClientCAPEM != ""
 
 	if useTLS {
 		tlsCfg, err := buildTLSConfig(cfg)
@@ -105,7 +108,18 @@ func (s *GRPCServer) Run(ctx context.Context) error {
 }
 
 func buildTLSConfig(cfg GRPCConfig) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+	files := cfg.TLSCert != "" || cfg.TLSKey != "" || cfg.TLSClientCA != ""
+	inline := cfg.TLSCertPEM != "" || cfg.TLSKeyPEM != "" || cfg.TLSClientCAPEM != ""
+	if files && inline {
+		return nil, errors.New("choose file or inline TLS credentials, not both")
+	}
+	var cert tls.Certificate
+	var err error
+	if inline {
+		cert, err = tls.X509KeyPair([]byte(cfg.TLSCertPEM), []byte(cfg.TLSKeyPEM))
+	} else {
+		cert, err = tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load server cert: %w", err)
 	}
@@ -117,9 +131,12 @@ func buildTLSConfig(cfg GRPCConfig) (*tls.Config, error) {
 	}
 
 	if cfg.TLSRequireClientCert {
-		caBytes, err := os.ReadFile(cfg.TLSClientCA)
-		if err != nil {
-			return nil, fmt.Errorf("read client ca: %w", err)
+		caBytes := []byte(cfg.TLSClientCAPEM)
+		if !inline {
+			caBytes, err = os.ReadFile(cfg.TLSClientCA)
+			if err != nil {
+				return nil, fmt.Errorf("read client ca: %w", err)
+			}
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caBytes) {

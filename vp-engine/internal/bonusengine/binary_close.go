@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/shopspring/decimal"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 // PeriodSnapshot es el resultado inmutable del cierre.
@@ -27,6 +28,9 @@ type PeriodSnapshot struct {
 // Concurrencia: pg_advisory_xact_lock sobre period_id (la 2da llamada espera
 // dentro de la tx; al recibir el lock, comprueba que sigue 'open' y aborta si no).
 func (e *Engine) CloseBinaryPeriod(ctx context.Context, periodID int64) error {
+	if err := financialguard.RequireOperational(ctx, e.db); err != nil {
+		return err
+	}
 	timer := prometheus.NewTimer(e.closeRunDuration)
 	defer timer.ObserveDuration()
 	log := e.log.With().Int64("period_id", periodID).Logger()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/vicionpower/vp-engine/internal/shared/financialguard"
 )
 
 var (
@@ -63,6 +64,10 @@ func (h *Handler) handleAdminPaymentRefund(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	res, err := h.store.RefundPurchaseIntent(r.Context(), h.gw, req.ID, req.AmountCents, req.Reason, adminEmail)
+	if errors.Is(err, ErrRecoveryFinancialReview) {
+		writeErr(w, http.StatusServiceUnavailable, "stripe_recovery_financial_review_required")
+		return
+	}
 	if errors.Is(err, ErrIntentNotFound) {
 		writeErr(w, http.StatusNotFound, "payment_not_found")
 		return
@@ -100,6 +105,9 @@ func (h *Handler) handleAdminPaymentRefund(w http.ResponseWriter, r *http.Reques
 func (s *Store) RefundPurchaseIntent(ctx context.Context, gw *StripeGateway, intentID string, amountCents int64, note, adminEmail string) (RefundResult, error) {
 	if gw == nil {
 		return RefundResult{}, ErrRefundGatewayUnavailable
+	}
+	if err := financialguard.RequireOperational(ctx, s.db); err != nil {
+		return RefundResult{}, err
 	}
 	intentID = strings.TrimSpace(intentID)
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})

@@ -14,11 +14,12 @@ import (
 	"time"
 )
 
-// Config para el binario cmd/vp-payments. Auth = Cognito (ya conectado aguas
-// arriba); este servicio no usa better-auth. El endpoint de checkout confía en
-// el BFF Next mediante un token de servicio compartido; el webhook se
-// autentica por firma de Stripe, no por sesión.
+// Config para el binario cmd/vp-payments. Cognito sigue siendo el proveedor por
+// defecto; AUTH_PROVIDER=better-auth opta por JWT/JWKS y binding MLM estricto.
+// Las sesiones Better Auth viven en el runtime de autenticación, no en Go.
+// El BFF envía además un token de servicio; Stripe usa firma de webhook.
 type Config struct {
+	ReadOnly       bool // Explicit SERVICE_READ_ONLY: no providers, writes or background jobs.
 	Env            string
 	LogLevel       string
 	HTTPListenAddr string
@@ -35,10 +36,17 @@ type Config struct {
 	NATSUser     string
 	NATSPassword string
 
-	StripeSecretKey     string
-	StripeWebhookSecret string
-	StripeProductID     string // Producto Stripe "PACK MINDBLISS" (prod_…)
-	StripePMConfig      string // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
+	// New Stripe Checkout sessions require an explicit literal true. Historical
+	// reads and signed webhooks remain available when checkout is disabled.
+	StripeCheckoutEnabled bool
+
+	StripeSecretKey        string
+	StripeWebhookSecret    string
+	StripeProductID        string                         // Producto Stripe "PACK MINDBLISS" (prod_…)
+	StripePMConfig         string                         // payment_method_configuration (pmc_…); si está, gana sobre PaymentMethods
+	NOWPayments            NOWPaymentsSettings            `json:"-"` // Server-only; not a financial activation gate.
+	NOWPaymentsCapture     NOWPaymentsCaptureSettings     `json:"-"` // Isolated append-only notification capture.
+	NOWPaymentsOperational NOWPaymentsOperationalSettings `json:"-"` // Explicit NOW-only writer; reader remains read-only.
 
 	// ServiceToken: secreto compartido que el BFF Next debe enviar en
 	// X-VP-Service-Token para crear sesiones de checkout.
@@ -133,6 +141,25 @@ type Config struct {
 	VoiceAgentMode         string
 	PipecatStreamURL       string
 	PipecatStreamSecret    string
+
+	// ── Comunicados masivos (comms) ────────────────────────────────────────────
+	CommsEnabled                bool
+	CommsSendRatePerSec         int
+	CommsBatchSize              int
+	CommsSESConfigSet           string
+	CommsUnsubscribeSecret      string
+	CommsUnsubscribeBaseURL     string
+	CommsUnsubscribeOneClickURL string
+	CommsReplyTo                string
+	CommsSQSQueueURL            string
+	CommsMaxAudience            int
+	CommsMaxPerDay              int
+	CommsMaxTestSends           int
+	// CommsLegalName / CommsPostalAddress: identidad legal que va en el pie de
+	// todo comunicado (CAN-SPAM §7704(a)(5)). El render falla si el nombre está
+	// vacío; la dirección postal es opcional pero debería configurarse en prod.
+	CommsLegalName     string
+	CommsPostalAddress string
 }
 
 // LoadConfig lee variables de entorno y falla rápido si falta algo crítico.
@@ -145,7 +172,17 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("load env file %s: %w", p, err)
 		}
 	}
+	readOnly, err := loadServiceReadOnly()
+	if err != nil {
+		return nil, err
+	}
+	nowPayments, err := loadNOWPaymentsSettings(readOnly)
+	if err != nil {
+		return nil, err
+	}
 	c := &Config{
+		ReadOnly:       readOnly,
+		NOWPayments:    nowPayments,
 		Env:            env("ENV", "development"),
 		LogLevel:       env("LOG_LEVEL", "info"),
 		HTTPListenAddr: env("PAYMENTS_HTTP_ADDR", "0.0.0.0:9095"),
@@ -162,8 +199,9 @@ func LoadConfig() (*Config, error) {
 		// Aliases aceptados (los que ya pusiste en backend/.env.local):
 		//   STRIPE_SECRET_KEY      | CLAVE_API
 		//   STRIPE_WEBHOOK_SECRET  | SECRET_FIRMA
-		StripeSecretKey:     firstEnv("STRIPE_SECRET_KEY", "CLAVE_API"),
-		StripeWebhookSecret: firstEnv("STRIPE_WEBHOOK_SECRET", "SECRET_FIRMA"),
+		StripeCheckoutEnabled: os.Getenv("STRIPE_CHECKOUT_ENABLED") == "true",
+		StripeSecretKey:       firstEnv("STRIPE_SECRET_KEY", "CLAVE_API"),
+		StripeWebhookSecret:   firstEnv("STRIPE_WEBHOOK_SECRET", "SECRET_FIRMA"),
 		// Vacío ⇒ producto inline. PAYMENTS_STRIPE_PRODUCT_ID (explícito) gana;
 		// fallback a ID_PRODUCTO_TEST para correr en test sin renombrar. En
 		// producción setear PAYMENTS_STRIPE_PRODUCT_ID al prod_… LIVE.
@@ -211,6 +249,21 @@ func LoadConfig() (*Config, error) {
 		VoiceAgentMode:          env("PAYMENTS_VOICE_AGENT_MODE", "gather"),
 		PipecatStreamURL:        env("PAYMENTS_PIPECAT_WS_URL", ""),
 		PipecatStreamSecret:     env("PAYMENTS_PIPECAT_STREAM_SECRET", ""),
+
+		CommsEnabled:                envBool("COMMS_ENABLED", false),
+		CommsSendRatePerSec:         envInt("COMMS_SEND_RATE_PER_SEC", 10),
+		CommsBatchSize:              envInt("COMMS_BATCH_SIZE", 100),
+		CommsSESConfigSet:           strings.TrimSpace(env("COMMS_SES_CONFIG_SET", "entregas")),
+		CommsUnsubscribeSecret:      os.Getenv("COMMS_UNSUBSCRIBE_SECRET"),
+		CommsUnsubscribeBaseURL:     strings.TrimSpace(env("COMMS_UNSUBSCRIBE_BASE_URL", "https://app.mindblisspower.com/baja")),
+		CommsUnsubscribeOneClickURL: os.Getenv("COMMS_UNSUBSCRIBE_ONECLICK_URL"),
+		CommsReplyTo:                strings.TrimSpace(env("COMMS_REPLY_TO", "soporte@mindblisspower.com")),
+		CommsSQSQueueURL:            os.Getenv("COMMS_SQS_QUEUE_URL"),
+		CommsMaxAudience:            envInt("COMMS_MAX_AUDIENCE", 150000),
+		CommsMaxPerDay:              envInt("COMMS_MAX_CAMPAIGNS_PER_DAY", 3),
+		CommsMaxTestSends:           envInt("COMMS_MAX_TEST_SENDS", 5),
+		CommsLegalName:              strings.TrimSpace(env("COMMS_LEGAL_NAME", "Mindbliss Power")),
+		CommsPostalAddress:          strings.TrimSpace(env("COMMS_POSTAL_ADDRESS", "")),
 	}
 	if c.KYCRegion == "" {
 		c.KYCRegion = "us-east-1"
@@ -219,14 +272,42 @@ func LoadConfig() (*Config, error) {
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
-	if c.StripeSecretKey == "" {
+	c.NOWPaymentsCapture, err = loadNOWPaymentsCaptureSettings(c.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	c.NOWPaymentsOperational, err = loadNOWPaymentsOperationalSettings(c.DatabaseURL, c.NOWPaymentsCapture.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if c.ReadOnly {
+		c.StripeCheckoutEnabled = false
+		c.RequireVerifiedIdentity = true
+		c.AdminEmails = splitCSV(os.Getenv("PAYMENTS_ADMIN_EMAILS"))
+		c.SuperAdminEmails = splitCSV(os.Getenv("PAYMENTS_SUPER_ADMIN_EMAILS"))
+		// Provider material is intentionally discarded, even if accidentally set.
+		// Read-only startup must not require or initialize financial integrations.
+		c.StripeSecretKey, c.StripeWebhookSecret, c.StripeProductID, c.StripePMConfig = "", "", "", ""
+		c.NATSURL, c.NATSUser, c.NATSPassword = "", "", ""
+		c.RedisAddr, c.RedisPassword = "", ""
+		c.ReconcileInterval, c.CartReminderInterval = 0, 0
+		c.CartReminderEnabled, c.CommsEnabled = false, false
+		c.SupportAIAutoDraft, c.SupportAIAutoReply = false, false
+		c.SupportAIServiceToken, c.TwilioWebhookAuthToken = "", ""
+		c.KYCBucket, c.KYCOCRAPIKey = "", ""
+		c.CommsUnsubscribeSecret, c.CommsSQSQueueURL = "", ""
+	}
+	if !c.ReadOnly && c.StripeSecretKey == "" {
 		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required")
 	}
-	if c.StripeWebhookSecret == "" {
+	if !c.ReadOnly && c.StripeWebhookSecret == "" {
 		return nil, fmt.Errorf("STRIPE_WEBHOOK_SECRET is required")
 	}
 	if c.ServiceToken == "" {
 		return nil, fmt.Errorf("PAYMENTS_SERVICE_TOKEN is required")
+	}
+	if c.CommsEnabled && strings.TrimSpace(c.CommsUnsubscribeSecret) == "" {
+		return nil, fmt.Errorf("COMMS_ENABLED=true requiere COMMS_UNSUBSCRIBE_SECRET")
 	}
 	if len(c.PaymentMethods) == 0 {
 		c.PaymentMethods = []string{"card"}

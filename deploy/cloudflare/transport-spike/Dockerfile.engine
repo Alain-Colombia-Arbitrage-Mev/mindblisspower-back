@@ -1,0 +1,5 @@
+FROM node:24.16.0-bookworm-slim
+WORKDIR /spike
+COPY engine.mjs ./engine.mjs
+USER node
+ENTRYPOINT ["node", "engine.mjs"]

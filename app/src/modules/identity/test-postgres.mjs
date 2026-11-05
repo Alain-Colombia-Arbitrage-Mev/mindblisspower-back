@@ -1,0 +1,51 @@
+// Explicit, ephemeral integration harness. No host/cloud DSN is ever accepted.
+import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+
+if (process.argv.slice(2).join(' ') !== '--synthetic-docker') throw new Error('Requires --synthetic-docker');
+const name = `identity-synthetic-${randomBytes(6).toString('hex')}`;
+const password = randomBytes(24).toString('hex');
+const app = fileURLToPath(new URL('../../../', import.meta.url));
+const migration = fileURLToPath(new URL('../../../../_meta/migration/70_stable_identity_bindings.sql', import.meta.url));
+const smsMigration = fileURLToPath(new URL('../../../../_meta/migration/75_sms_auth_opt_in.sql', import.meta.url));
+const contactMigration = fileURLToPath(new URL('../../../../_meta/migration/76_registration_contact_details.sql', import.meta.url));
+const verifiedEmailMigration = fileURLToPath(new URL('../../../../_meta/migration/78_verified_email_identity_binding.sql', import.meta.url));
+const eligibilityMigration = fileURLToPath(new URL('../../../../_meta/migration/90_auth_identity_eligibility_reads.sql', import.meta.url));
+const phoneLibrary = fileURLToPath(new URL('../../../node_modules/libphonenumber-js', import.meta.url));
+let created = false;
+const docker = args => {
+  const result = spawnSync('docker', args, { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error((result.stderr || 'Synthetic Docker command failed').replaceAll(password, '[redacted]'));
+  return result.stdout.trim();
+};
+try {
+  docker(['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql/data',
+    '-e', `POSTGRES_PASSWORD=${password}`, '-e', 'POSTGRES_DB=identity_synthetic',
+    'postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27']);
+  created = true;
+  let ready = false;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (spawnSync('docker', ['exec', name, 'pg_isready', '-U', 'postgres'], { stdio: 'ignore' }).status === 0) { ready = true; break; }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  assert.ok(ready, 'disposable PostgreSQL did not become ready');
+  const args = ['run', '--rm', '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp:mode=1777',
+    '-v', `${app}/src:/app/src:ro`, '-v', `${migration}:/_meta/migration/70_stable_identity_bindings.sql:ro`,
+    '-v', `${smsMigration}:/_meta/migration/75_sms_auth_opt_in.sql:ro`,
+    '-v', `${contactMigration}:/_meta/migration/76_registration_contact_details.sql:ro`,
+    '-v', `${verifiedEmailMigration}:/_meta/migration/78_verified_email_identity_binding.sql:ro`,
+    '-v', `${eligibilityMigration}:/_meta/migration/90_auth_identity_eligibility_reads.sql:ro`,
+    '-v', `${phoneLibrary}:/app/node_modules/libphonenumber-js:ro`,
+    '-e', 'IDENTITY_SYNTHETIC_DOCKER=1', '-e', `IDENTITY_TEST_DATABASE_URL=postgres://postgres:${password}@127.0.0.1:5432/identity_synthetic`,
+    '--entrypoint', 'bun', 'mindbliss/api-test:auth-identity-20261025', '--no-env-file', 'test', 'src/modules/identity/model.test.ts', 'src/modules/identity/identity.integration.test.ts'];
+  const result = spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+  // The only connection string contains a disposable random password; suppress
+  // it defensively even if a driver ever includes it in an unexpected error.
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.replaceAll(password, '[redacted]');
+  console.log(output);
+  assert.equal(result.status, 0, 'synthetic identity integration failed');
+} finally {
+  if (created) docker(['rm', '-f', name]);
+}

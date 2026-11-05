@@ -1,0 +1,26 @@
+services:
+  api:
+    build: {context: ../../app, target: runtime}
+  engine:
+    build:
+      context: ../../vp-engine
+      dockerfile: deployments/Dockerfile
+      args: {CMD: vp-engine}
+  payments:
+    build:
+      context: ../../vp-engine
+      dockerfile: deployments/Dockerfile
+      args: {CMD: vp-payments}
+  withdrawals:
+    build:
+      context: ../../vp-engine
+      dockerfile: deployments/Dockerfile
+      args: {CMD: vp-withdrawals}
+  client:
+    build: {context: ../../../mindblisspowerfront, target: runtime}
+  admin:
+    build: {context: ../../../mindblisspower-admin, target: runtime}
+  backup:
+    build: {context: ./backup}
+  edge:
+    build: {context: ., dockerfile: Dockerfile.edge}
