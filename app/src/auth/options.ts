@@ -56,12 +56,16 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     sendVerificationOTP: async ({ email, otp, type }) => {
       try { await delivery.email(authOtpMessage(email, otp, type)); }
       catch (error) {
+        const confirmedRejected = error instanceof AuthEmailDeliveryError && error.confirmedRejected;
+        // The native sender swallows callback errors. A login request must not
+        // claim success after any send failure, including an ambiguous timeout.
+        // Other purposes retain their existing generic/privacy response rules.
+        if (type === 'sign-in' || confirmedRejected) await emailRejected.set(true);
         // A rejected send must not leave a redeemable challenge. Delete only
         // this code's HMAC generation, never another recipient/purpose/resend.
         // Timeouts/5xx/malformed acknowledgements are ambiguous: a user may
         // actually receive the code, so keep it valid and never auto-resend.
-        if (error instanceof AuthEmailDeliveryError && error.confirmedRejected) {
-          await emailRejected.set(true);
+        if (confirmedRejected) {
           const adapter = await getCurrentAdapter((await getCurrentAuthContext()).context.adapter);
           await adapter.deleteMany({ model: 'verification', where: [
             { field: 'identifier', value: `${type}-otp-${email.toLowerCase()}` },
@@ -211,12 +215,13 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
           throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
         }
       }
-      // Unknown login addresses explicitly require registration; provider send
-      // failures remain generic and never reveal provider rejection details.
+      // Unknown login addresses explicitly require registration; login send
+      // failures are explicit but never reveal provider rejection details.
       // Password resets retain the native generic account-existence behavior.
       // Better Auth swallows send callbacks; this state is isolated per request
       // (including the signup plugin's nested callback), never shared globally.
-      if (ctx.path === '/sign-up/email' && await emailRejected.get()) throw new APIError('SERVICE_UNAVAILABLE', {
+      const signInOtpRequest = ctx.path === '/email-otp/send-verification-otp' && ctx.body?.type === 'sign-in';
+      if ((ctx.path === '/sign-up/email' || signInOtpRequest) && await emailRejected.get()) throw new APIError('SERVICE_UNAVAILABLE', {
         code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', message: 'Email verification is temporarily unavailable. Request a new code later.',
       });
     }) },

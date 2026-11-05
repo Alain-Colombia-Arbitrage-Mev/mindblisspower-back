@@ -15,7 +15,7 @@ const requireCondition: (value: unknown, code: string) => asserts value = (value
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const id = z.uuid();
-export const VERSION = 'pending-email-access-v1';
+export const VERSION = 'pending-email-access-v2-email-only';
 export type Source = { id: string; email: string; status: string; userId: string | null; blocked: boolean };
 export type Existing = { id: string; email: string };
 export type Snapshot = { source: Source[]; existing: Existing[]; schemaDigest: string };
@@ -139,10 +139,7 @@ export async function readSnapshot(sql: Query, database: string): Promise<Snapsh
     (COALESCE(p.blacklisted,false)
      OR EXISTS(SELECT 1 FROM mlm.affiliate a WHERE a.person_id=p.id AND a.status::text IN('suspended','banned','deleted'))
      OR EXISTS(SELECT 1 FROM mlm.blacklist b
-       WHERE (b.email_norm IS NOT NULL AND b.email_norm=mlm.norm_email(p.email))
-          OR (b.phone_last10 IS NOT NULL AND b.phone_last10=mlm.norm_phone10(p.phone_number))
-          OR (b.name_norm IS NOT NULL AND b.name_norm=mlm.norm_name(p.first_name||' '||p.last_name)
-              AND (b.birthdate IS NULL OR (p.birthday IS NOT NULL AND b.birthdate=p.birthday))))) AS blocked
+        WHERE b.email_norm IS NOT NULL AND b.email_norm=mlm.norm_email(p.email))) AS blocked
     FROM mlm.person p ORDER BY p.id`);
   const existing = await sql.unsafe(`SELECT id,email FROM auth."user" ORDER BY id`);
   return { source: source as unknown as Source[], existing: existing as unknown as Existing[], schemaDigest };

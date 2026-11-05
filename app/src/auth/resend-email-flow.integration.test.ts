@@ -18,7 +18,8 @@ const env: AuthEnvironment = { AUTH_EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'r
 const acknowledgement = { id: '00000000-0000-4000-8000-000000000072' };
 const otpRows = (store: MemoryDB) => store.verification!.filter(row => !isRecoveryBudgetKey(row.identifier));
 type Body = { from: string; to: string[]; subject: string; template: { id: string; variables: { OTP: string } } };
-function fixture(status = 200, missing = false, transportFailure = false) {
+function fixture(status = 200, missing = false, transportFailure = false,
+  responseFor?: (payload: Body, store: MemoryDB) => Response | Promise<Response>) {
   const store: MemoryDB = { user: missing ? [] : [{ id: 'synthetic-resend-flow-user', email, name: 'Synthetic Resend Member', emailVerified: false,
     createdAt: new Date(), updatedAt: new Date() }], account: [], session: [], verification: [], rateLimit: [], jwks: [] };
   const messages: Body[] = [];
@@ -29,6 +30,7 @@ function fixture(status = 200, missing = false, transportFailure = false) {
     expect(payload).not.toHaveProperty('html');
     expect(payload).not.toHaveProperty('text');
     messages.push(payload);
+    if (responseFor) return await responseFor(payload, store);
     if (transportFailure) throw new DOMException('Synthetic ambiguous Resend timeout', 'AbortError');
     return Response.json(status === 200 ? acknowledgement : { name: 'validation_error', message: 'Synthetic private provider failure' }, { status });
   }) as typeof fetch, () => {});
@@ -48,6 +50,9 @@ function fixture(status = 200, missing = false, transportFailure = false) {
 
 test('Resend-backed login keeps native OTP proof, purpose, storage and session rules unchanged', async () => {
   const app = fixture();
+  expect(app.messages).toHaveLength(0);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.account).toHaveLength(0);
   const sent = await app.send();
   expect(sent.status).toBe(200);
   expect(await sent.clone().json()).toEqual({ success: true });
@@ -103,11 +108,13 @@ test('Resend recovery creates a credential only after its native recovery OTP an
   expect(JSON.parse(String(validationBudget!.value))).toHaveLength(1);
 });
 
-test('confirmed Resend rejection preserves generic recovery privacy and recipient cooldown without fallback', async () => {
-  const app = fixture(422);
+for (const status of [422, 429]) test(`confirmed Resend ${status} login rejection returns generic503 and preserves cleanup and recipient cooldown`, async () => {
+  const app = fixture(status);
   const sent = await app.send();
-  expect(sent.status).toBe(200);
-  expect(await sent.json()).toEqual({ success: true });
+  expect(sent.status).toBe(503);
+  expect(await sent.clone().json()).toEqual({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE',
+    message: 'Email verification is temporarily unavailable. Request a new code later.' });
+  expect(sent.headers.has('set-cookie')).toBe(false);
   expect(app.messages).toHaveLength(1);
   expect(app.store.verification).toHaveLength(0);
   expect(app.store.user![0]!.emailVerified).toBe(false);
@@ -173,8 +180,17 @@ test('request-supplied hosted templates cannot override Better Auth purpose, rec
 test('ambiguous Resend timeout or 5xx retains a potentially delivered code and never resends automatically', async () => {
   for (const transport of [false, true]) {
     const app = fixture(503, false, transport);
-    expect((await app.send()).status).toBe(200);
+    const sent = await app.send();
+    expect(sent.status).toBe(503);
+    expect(await sent.json()).toMatchObject({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE' });
+    expect(sent.headers.has('set-cookie')).toBe(false);
     expect(app.store.verification).toHaveLength(1);
+    const challenge = app.store.verification![0]!.value;
+    const blockedResend = await app.send();
+    expect(blockedResend.status).toBe(429);
+    expect(Number(blockedResend.headers.get('retry-after'))).toBeGreaterThanOrEqual(299);
+    expect(app.store.verification![0]!.value).toBe(challenge);
+    expect(app.messages).toHaveLength(1);
     expect((await app.request('/sign-in/email-otp', { email, otp: app.code() })).status).toBe(200);
     expect(app.store.user![0]!.emailVerified).toBe(true);
     expect(app.store.session).toHaveLength(1);
@@ -193,6 +209,137 @@ test('unknown Resend OTP login still requires registration without generating or
   expect(app.store.session).toHaveLength(0);
   expect(app.provisions).toHaveLength(0);
 });
+
+test('inserting a pending authentication principal is inert until an explicit login-code request', async () => {
+  const app = fixture(200, true);
+  app.store.user!.push({ id: 'synthetic-activated-principal', email, name: 'Cuenta pendiente', emailVerified: false,
+    createdAt: new Date(), updatedAt: new Date() });
+  await Promise.resolve();
+  expect(app.messages).toHaveLength(0);
+  expect(app.store.verification).toHaveLength(0);
+  expect(app.store.account).toHaveLength(0);
+  expect(app.store.session).toHaveLength(0);
+  expect(app.provisions).toHaveLength(0);
+  const response = await app.send();
+  expect(response.status).toBe(200);
+  expect(app.messages).toHaveLength(1);
+  expect(app.messages[0]!.template.id).toBe(AUTH_OTP_RESEND_ALIASES['sign-in']);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.account).toHaveLength(0);
+  expect(app.store.session).toHaveLength(0);
+  expect(app.provisions).toHaveLength(0);
+});
+
+test('confirmed login rejection deletes only its exact generated challenge, never another purpose, recipient or generation', async () => {
+  const preserved: Record<string, unknown>[] = [];
+  const app = fixture(422, false, false, (payload, store) => {
+    const now = new Date();
+    for (const [id, identifier] of [
+      ['synthetic-other-generation', `sign-in-otp-${email}`],
+      ['synthetic-other-purpose', `email-verification-otp-${email}`],
+      ['synthetic-other-recipient', 'sign-in-otp-other-member@example.test'],
+    ]) {
+      const row = { id, identifier,
+        value: `${otpHash(env.BETTER_AUTH_SECRET!, 'email-otp', `${payload.template.variables.OTP}:unrelated`)}:0`,
+        expiresAt: new Date(now.getTime() + 300_000), createdAt: now, updatedAt: now };
+      preserved.push(row); store.verification!.push(row);
+    }
+    return Response.json({ name: 'validation_error', message: 'Synthetic private rejection' }, { status: 422 });
+  });
+  const response = await app.send();
+  expect(response.status).toBe(503);
+  expect(app.messages).toHaveLength(1);
+  expect(app.store.verification).toEqual(preserved);
+  expect(app.store.user![0]!.emailVerified).toBe(false);
+  expect(app.store.account).toHaveLength(0);
+  expect(app.store.session).toHaveLength(0);
+});
+
+for (const failure of ['rejected', 'rate-limited', 'ambiguous', 'timeout', 'invalid-ack'] as const) {
+  test(`recovery and ordinary verification keep their generic privacy responses after ${failure} delivery`, async () => {
+    const responseFor = () => {
+      if (failure === 'timeout') throw new DOMException('Synthetic ambiguous timeout', 'AbortError');
+      return Response.json(failure === 'invalid-ack' ? { id: 'synthetic-invalid-ack' }
+        : { name: 'validation_error', message: 'Synthetic private rejection' },
+      { status: failure === 'rejected' ? 422 : failure === 'rate-limited' ? 429 : failure === 'invalid-ack' ? 200 : 503 });
+    };
+    for (const [path, type] of [
+      ['/email-otp/request-password-reset', undefined],
+      ['/email-otp/send-verification-otp', 'forget-password'],
+      ['/email-otp/send-verification-otp', 'email-verification'],
+    ] as const) {
+      const known = fixture(200, false, false, responseFor);
+      const unknown = fixture(200, true, false, responseFor);
+      const body = { email, ...(type ? { type } : {}) };
+      const [knownResponse, unknownResponse] = await Promise.all([known.request(path, body), unknown.request(path, body)]);
+      expect(knownResponse.status).toBe(200);
+      expect(unknownResponse.status).toBe(200);
+      expect(await knownResponse.json()).toEqual({ success: true });
+      expect(await unknownResponse.json()).toEqual({ success: true });
+      expect(knownResponse.headers.has('set-cookie')).toBe(false);
+      expect(unknownResponse.headers.has('set-cookie')).toBe(false);
+      expect(known.messages).toHaveLength(1);
+      expect(unknown.messages).toHaveLength(0);
+      expect(known.store.user![0]!.emailVerified).toBe(false);
+      for (const app of [known, unknown]) {
+        expect(app.store.account).toHaveLength(0);
+        expect(app.store.session).toHaveLength(0);
+        expect(app.provisions).toHaveLength(0);
+      }
+    }
+  });
+}
+
+function gate() {
+  let release!: () => void;
+  const ready = new Promise<void>(resolve => { release = resolve; });
+  return { ready, release };
+}
+
+for (const failure of ['rejected', 'ambiguous', 'timeout', 'invalid-ack'] as const) {
+  for (const first of ['accepted', 'failed'] as const) {
+    test(`concurrent pending login requests isolate ${failure} delivery when ${first} starts first`, async () => {
+      const otherEmail = 'accepted-pending-member@example.test';
+      const heldEmail = first === 'accepted' ? otherEmail : email;
+      const entered = gate(), proceed = gate();
+      const app = fixture(200, false, false, async payload => {
+        if (payload.to[0] === heldEmail) { entered.release(); await proceed.ready; }
+        if (payload.to[0] === otherEmail) return Response.json(acknowledgement);
+        if (failure === 'timeout') throw new DOMException('Synthetic ambiguous timeout', 'AbortError');
+        return Response.json(failure === 'invalid-ack' ? { id: 'synthetic-invalid-ack' }
+          : { name: 'validation_error', message: 'Synthetic private rejection' },
+        { status: failure === 'rejected' ? 422 : failure === 'invalid-ack' ? 200 : 503 });
+      });
+      app.store.user!.push({ id: 'synthetic-accepted-pending-user', email: otherEmail, name: 'Cuenta pendiente', emailVerified: false,
+        createdAt: new Date(), updatedAt: new Date() });
+      const firstRequest = app.send(heldEmail);
+      await entered.ready;
+      let secondResponse: Response;
+      try { secondResponse = await app.send(first === 'accepted' ? email : otherEmail); }
+      finally { proceed.release(); }
+      const firstResponse = await firstRequest;
+      const accepted = first === 'accepted' ? firstResponse : secondResponse;
+      const failed = first === 'failed' ? firstResponse : secondResponse;
+      expect(accepted.status).toBe(200);
+      expect(await accepted.clone().json()).toEqual({ success: true });
+      expect(failed.status).toBe(503);
+      expect(await failed.clone().json()).toMatchObject({ code: 'AUTH_EMAIL_DELIVERY_UNAVAILABLE' });
+      expect(app.messages).toHaveLength(2);
+      expect(app.store.verification!.filter(row => row.identifier === `sign-in-otp-${otherEmail}`)).toHaveLength(1);
+      expect(app.store.verification!.filter(row => row.identifier === `sign-in-otp-${email}`)).toHaveLength(failure === 'rejected' ? 0 : 1);
+      expect(app.store.user!.every(row => row.emailVerified === false)).toBe(true);
+      expect(app.store.account).toHaveLength(0);
+      expect(app.store.session).toHaveLength(0);
+      expect(app.provisions).toHaveLength(0);
+      for (const response of [accepted, failed]) {
+        expect(response.headers.has('set-cookie')).toBe(false);
+        const body = await response.text();
+        for (const privateValue of [email, otherEmail, acknowledgement.id, env.RESEND_API_KEY!,
+          ...app.messages.map(message => message.template.variables.OTP)]) expect(body).not.toContain(privateValue);
+      }
+    });
+  }
+}
 
 test('all three native hosted OTP purposes reject the two other consuming endpoints without spending their own challenge', async () => {
   const password = 'Synthetic-Cross-Purpose-Password-123';
