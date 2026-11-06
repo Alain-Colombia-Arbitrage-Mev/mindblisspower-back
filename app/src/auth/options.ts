@@ -88,8 +88,9 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         if (user.emailVerified !== true) throw new APIError('FORBIDDEN', { message: 'Verified identity required' });
         const bound = await identity.binding(user.id);
         if (!['created', 'existing'].includes(bound.status) || !bound.publicId || !bound.email
-          || bound.email.trim().toLowerCase() !== user.email.trim().toLowerCase()) throw new APIError('FORBIDDEN', { message: 'Identity review required' });
-        return { email: bound.email, email_verified: true, authVerified: true, person_public_id: bound.publicId };
+          || bound.email.trim().toLowerCase() !== user.email.trim().toLowerCase()) throw new APIError('FORBIDDEN', {
+            code: 'AUTH_IDENTITY_REVIEW_REQUIRED', message: 'Identity review required' });
+        return { email: bound.email.trim().toLowerCase(), email_verified: true, authVerified: true, person_public_id: bound.publicId };
       } } }));
   return {
     database, baseURL: env.BETTER_AUTH_URL, secret: env.BETTER_AUTH_SECRET,
