@@ -74,12 +74,22 @@ const meldCodes = new Set(['ACCOUNT_OFFRAMP_NOT_ENABLED', 'ACCOUNT_ONRAMP_NOT_EN
   'TRANSACTION_PROPERTY_COMBINATION_NOT_SUPPORTED_BY_SERVICE_PROVIDER', 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION',
   'VERIFICATION_REQUIRED', 'SERVICE_PROVIDER_ERROR', 'TRANSACTION_EXCEPTION', 'UNAUTHORIZED', 'FORBIDDEN',
   'CONFLICT', 'NOT_FOUND', 'UNEXPECTED_ERROR', 'JSON_PROCESSING_ERROR', 'METHOD_NOT_ALLOWED',
-  'UNSUPPORTED_MEDIA_TYPE', 'NOT_ACCEPTABLE', 'ENCRYPTION_ERROR']);
+  'UNSUPPORTED_MEDIA_TYPE', 'NOT_ACCEPTABLE', 'ENCRYPTION_ERROR', 'QUOTE_TIMEOUT',
+  'TRANSACTION_FAILED_GETTING_CRYPTO_QUOTE_FROM_PROVIDER', 'TRANSACTION_FAILED_GETTING_CRYPTO_QUOTE',
+  'KYC_TOKEN_GENERATION_FAILED', 'PRIOR_AUTHENTICATION_ERROR']);
+// The widget OpenAPI includes a 24-character Crockford reference example.
+// Retain that bounded format and canonical UUID/ULID references only; arbitrary
+// provider strings and messages stay out of diagnostics.
+const meldUuidReference = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const meldDocumentedReference = /^[0-9A-HJKMNP-TV-Z]{24}$/;
+const meldUlidReference = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 function providerMetadata(value: unknown): Pick<FundingDiagnostic, 'providerCode' | 'providerRequestId'> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const { code, requestId } = value as Record<string, unknown>;
   return { ...(typeof code === 'string' && meldCodes.has(code) ? { providerCode: code } : {}),
-    ...(typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)
+    ...(typeof requestId === 'string' && ((requestId.length === 36 && meldUuidReference.test(requestId))
+      || (requestId.length === 24 && meldDocumentedReference.test(requestId))
+      || (requestId.length === 26 && meldUlidReference.test(requestId)))
       ? { providerRequestId: requestId } : {}) };
 }
 

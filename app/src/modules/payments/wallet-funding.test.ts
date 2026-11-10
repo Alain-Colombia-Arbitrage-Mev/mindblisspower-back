@@ -212,6 +212,44 @@ test('sandbox checks its selected method USD limits and logs only safe correlati
   expect(JSON.stringify(diagnostics)).not.toMatch(/private|secret|0x|@|wt=/);
 });
 
+test('documented widget quote, timeout and authentication failures retain only their top-level code and bounded reference', async () => {
+  for (const providerRequestId of ['01JB2K7C9XQZ4M8N2P5R6T3V', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'A1111111-1111-4111-8111-11111111111A']) {
+    for (const [status, providerCode] of [[408, 'QUOTE_TIMEOUT'], [422, 'TRANSACTION_FAILED_GETTING_CRYPTO_QUOTE_FROM_PROVIDER'],
+      [500, 'TRANSACTION_FAILED_GETTING_CRYPTO_QUOTE'], [500, 'KYC_TOKEN_GENERATION_FAILED'], [500, 'PRIOR_AUTHENTICATION_ERROR']] as const) {
+      const diagnostics: unknown[] = [];
+      const { database, queries } = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+      await expect(createAdministrativeSandboxSession(database, adminInput, { subject: 'private-owner', clientIp: '192.0.2.1', environment,
+        diagnostic: event => diagnostics.push(event), fetchImpl: withSandboxOptions((async () => Response.json({ code: providerCode, requestId: providerRequestId,
+          message: 'private-user@example.invalid', errors: ['private-token'], serviceProviderDetails: { code: 'PRIVATE_CODE', message: 'private-message', walletAddress: address },
+          token: 'private-token', widgetUrl: 'https://sb.meldcrypto.com/?wt=private-token' }, { status })) as unknown as typeof fetch),
+      })).rejects.toThrow('wallet_funding_provider_unavailable');
+      expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'session', status, requestId: id,
+        code: 'UPSTREAM_REJECTED', providerCode, providerRequestId }]);
+      expect(queries[2]!.params).toEqual(['private-owner', id, 'unavailable', null]);
+      expect(JSON.stringify(diagnostics)).not.toMatch(/private|0x|@|wt=|192\.0\.2/);
+    }
+  }
+});
+
+test('sandbox diagnostics reject malformed references and never promote nested provider data', async () => {
+  const validReference = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const documentedReference = '01JB2K7C9XQZ4M8N2P5R6T3V';
+  for (const requestId of ['private-user@example.invalid', 'Bearer private-token', 'https://example.invalid/private-token',
+    `${validReference}\n`, `${validReference}\nprivate-token`, `${validReference}?token=private-token`,
+    '81ARZ3NDEKTSV4RRFFQ69G5FAV', '01ARZ3NDEKTSV4RRFFQ69G5FAI', validReference.toLowerCase(), validReference.slice(1),
+    `${documentedReference}\n`, documentedReference.toLowerCase(), documentedReference.slice(1), '01JB2K7C9XQZ4M8N2P5R6T3I',
+    { value: validReference }, [validReference], null]) {
+    const diagnostics: unknown[] = [];
+    await expect(readAdministrativeSandboxOptions({ country: 'CO', serviceProvider: 'BANXA' }, { environment,
+      diagnostic: event => diagnostics.push(event), fetchImpl: (async () => Response.json({ code: 'PRIVATE_CODE', requestId,
+        message: 'private-message', errors: ['private-token'], serviceProviderDetails: { code: 'QUOTE_TIMEOUT', requestId: validReference, walletAddress: address },
+        token: 'private-token', widgetUrl: 'https://sb.meldcrypto.com/?wt=private-token' }, { status: 500 })) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_provider_unavailable');
+    expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'options', status: 500, code: 'UPSTREAM_REJECTED' }]);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/private|0x|@|wt=|QUOTE_TIMEOUT|01AR/);
+  }
+});
+
 test('one whole-operation deadline stops a slow sandbox widget and never retries or marks an ambiguous session failed', async () => {
   const originalTimeout = globalThis.setTimeout;
   const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: Parameters<typeof globalThis.setTimeout>[0], milliseconds?: number, ...args: unknown[]) =>
