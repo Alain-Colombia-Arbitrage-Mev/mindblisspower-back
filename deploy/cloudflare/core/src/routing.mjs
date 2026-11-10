@@ -24,6 +24,9 @@ const NOWPAYMENTS_STATUS_PATH = '/api/payments/nowpayments/status';
 const OTP_DIAGNOSTIC_PATH = '/api/admin/auth/otp-diagnostic';
 const NOW_CHECKOUT_ERRORS = new Set(['nowpayments-unavailable', 'nowpayments_financial_configuration_unavailable',
   'membership_eligibility_unavailable', 'membership_payment_pending_review']);
+const FUNDING_SERVICE_ERRORS = new Set(['wallet_funding_unconfigured', 'wallet_funding_provider_unavailable',
+  'wallet_funding_valuation_unavailable', 'wallet_funding_unavailable']);
+const ADMINISTRATIVE_FUNDING_SERVICE_ERRORS = new Set([...FUNDING_SERVICE_ERRORS, 'wallet_funding_provider_authentication_unavailable']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const GRPC_TUNNEL_HOST = 'engine-grpc.core.internal';
 export const GRPC_TUNNEL_PATH = '/v1/engine-tunnel';
@@ -203,9 +206,9 @@ export async function dispatchContainerOutbound(source, request, env, resolve, i
 
 const boundedBody = (request, limit = MAX_BODY) => readBoundedBody(request, limit);
 
-// Preserve only reviewed NOW checkout error enums. A failure can follow invoice
-// creation, so this never asserts that no external charge/invoice exists.
-async function nowCheckoutFailure(response) {
+// Preserve only reviewed error enums, never provider messages or response headers.
+// A failure can follow session/invoice creation and never proves settlement.
+async function reviewedUpstreamFailure(response, allowedErrors) {
   let reader, timer;
   try {
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')
@@ -228,7 +231,7 @@ async function nowCheckoutFailure(response) {
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
       const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-      return typeof value?.error === 'string' && NOW_CHECKOUT_ERRORS.has(value.error) ? value.error : null;
+      return typeof value?.error === 'string' && allowedErrors.has(value.error) ? value.error : null;
     };
     const code = await Promise.race([read(), new Promise(resolve => { timer = setTimeout(() => resolve(null), 2000); })]);
     return failure(code ?? 'upstream_unavailable', 503);
@@ -397,7 +400,10 @@ export async function dispatchCore(request, env, resolve) {
     const container = resolve(service, 'singleton');
     const response = await fetchWithDeadline(forwarded, input => container.fetch(input));
     if (response.status >= 500) {
-      if (operationalCheckout) return nowCheckoutFailure(response);
+      if (operationalCheckout) return reviewedUpstreamFailure(response, NOW_CHECKOUT_ERRORS);
+      if (fundingRequest) return reviewedUpstreamFailure(response,
+        url.pathname === '/api/member/wallet-funding/administrative/session'
+          ? ADMINISTRATIVE_FUNDING_SERVICE_ERRORS : FUNDING_SERVICE_ERRORS);
       void response.body?.cancel().catch(() => {});
       return failure('upstream_unavailable', 503);
     }

@@ -131,3 +131,37 @@ test('owned status reads are a separate exact native-session capability with no 
   }
   assert.equal(calls, 2);
 });
+
+test('funding failures preserve reviewed actionable enums through the real Core route without provider payload or headers', async () => {
+  const adminPath = '/api/member/wallet-funding/administrative/session';
+  const admin = { ...input, country: 'CO', serviceProvider: 'BANXA' };
+  for (const code of ['wallet_funding_provider_authentication_unavailable', 'wallet_funding_valuation_unavailable',
+    'wallet_funding_provider_unavailable', 'wallet_funding_unconfigured']) {
+    let calls = 0;
+    const response = await dispatchCore(request(adminPath, admin), env, () => ({ fetch: async () => {
+      calls++;
+      return Response.json({ error: code, message: 'private provider message', token: 'private-token',
+        address: input.walletAddress }, { status: 503, headers: { 'x-private-provider': 'secret', 'set-cookie': 'private=token' } });
+    } }));
+    assert.equal(response.status, 503);
+    assert.equal(calls, 1);
+    assert.deepEqual(await response.json(), { error: code });
+    assert.equal(response.headers.get('x-private-provider'), null);
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  }
+  const privateError = async response => {
+    const projected = await dispatchCore(request(adminPath, admin), env, () => ({ fetch: async () => response }));
+    assert.equal(projected.status, 503);
+    assert.deepEqual(await projected.json(), { error: 'upstream_unavailable' });
+  };
+  await privateError(Response.json({ error: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION', message: 'private-secret' }, { status: 503 }));
+  await privateError(Response.json({ error: 'wallet_funding_provider_authentication_unavailable' }, { status: 503,
+    headers: { 'content-encoding': 'gzip' } }));
+  await privateError(new Response('x'.repeat(1025), { status: 503, headers: { 'content-type': 'application/json' } }));
+  await privateError(new Response('{"error":"wallet_funding_provider_authentication_unavailable"}', { status: 503,
+    headers: { 'content-type': 'text/plain' } }));
+  const personal = await dispatchCore(request(), env, () => ({ fetch: async () => Response.json({
+    error: 'wallet_funding_provider_authentication_unavailable' }, { status: 503 }) }));
+  assert.deepEqual(await personal.json(), { error: 'upstream_unavailable' });
+});
