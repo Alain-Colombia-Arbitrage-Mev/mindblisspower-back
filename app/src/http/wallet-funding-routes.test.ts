@@ -33,7 +33,7 @@ function application({ signedIn = true, execute = async () => [] }: { signedIn?:
       BETTER_AUTH_TRUSTED_ORIGINS: `${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
     fetchImpl: (async url => {
       expect(String(url)).toStartWith('https://api.meld.io/');
-      return Response.json([{ partner: 'TOPPER', source: 'USD', destination: 'USDT_POLYGON',
+      return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT_POLYGON',
         paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
     }) as typeof fetch });
   return app;
@@ -67,6 +67,22 @@ test('personal funding returns an uncached initiated acknowledgement while sandb
   const sandbox = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'TRANSAK' })));
   expect(sandbox.status).toBe(503);
   expect(await sandbox.json()).toEqual({ error: 'wallet_funding_unconfigured' });
+});
+
+test('HTTP personal funding accepts USD20 and rejects USD19.99 while administrative funding still rejects USD20', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });
+  for (const [amount, status] of [[19.99, 409], [20, 201]] as const) {
+    const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...input, amount }) });
+    expect(response.status).toBe(status);
+    if (amount === 20) expect(await response.json()).toMatchObject({ requestedAmount: 20, allowedProviders: ['SWAPPED'] });
+  }
+  const administrative = await app.request(administrativePath, signedRequest(administrativePath,
+    JSON.stringify({ ...input, amount: 20, serviceProvider: 'TRANSAK' })));
+  expect(administrative.status).toBe(409);
+  expect(await administrative.json()).toEqual({ error: 'wallet_funding_amount_unavailable' });
+  expect(calls).toBe(1);
 });
 
 test('funding mutations are isolated by exact portal origin even when both hosts trust the same native auth service', async () => {

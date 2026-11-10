@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { normalizeReownProductionRoutes, readReownProductionOptions } from './reown-funding-options';
 
-const route = (partner = 'TOPPER', methods: unknown[] = [
+const route = (partner = 'SWAPPED', methods: unknown[] = [
   { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 10, max: 30_000 } },
 ]) => ({ partner, source: 'USD', destination: 'USDT_POLYGON', paymentMethods: methods });
 const mockFetch = (handler: (url: string, init: RequestInit) => Response | Promise<Response>) =>
@@ -11,14 +11,14 @@ test('personal discovery is a read-only production request scoped to the public 
   let calls = 0;
   const result = await readReownProductionOptions('US', { fetchImpl: mockFetch((url, init) => {
     calls++;
-    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON?partners=TOPPER,SWAPPED');
+    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO');
     expect(init.method).toBe('GET');
     expect(init.redirect).toBe('error');
     expect(init.cache).toBe('no-store');
     expect(init.credentials).toBe('omit');
     expect(new Headers(init.headers).get('authorization')).toBe(
       'BASIC WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU');
-    return Response.json([route(), route('TRANSAK'), route('SWAPPED', [
+    return Response.json([route(), route('TRANSAK'), route('TOPPER'), route('MERCURYO', [
       { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 7.81, max: 111_530 } },
       { name: 'ASTROPAY', limits: { currencyCode: 'USD', min: 7.81, max: 20_633.05 } },
     ])]);
@@ -26,8 +26,8 @@ test('personal discovery is a read-only production request scoped to the public 
   expect(calls).toBe(1);
   expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', sourceCurrencyCode: 'USD',
     paymentMethods: ['CREDIT_DEBIT_CARD', 'ASTROPAY'], routes: [
-      { serviceProvider: 'TOPPER', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 10, maximumAmount: 30_000, minimumUsd: 10, maximumUsd: 30_000 }] },
-      { serviceProvider: 'SWAPPED', paymentMethods: [
+      { serviceProvider: 'SWAPPED', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 10, maximumAmount: 30_000, minimumUsd: 10, maximumUsd: 30_000 }] },
+      { serviceProvider: 'MERCURYO', paymentMethods: [
         { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 7.81, maximumAmount: 111_530, minimumUsd: 7.81, maximumUsd: 111_530 },
         { method: 'ASTROPAY', currencyCode: 'USD', minimumAmount: 7.81, maximumAmount: 20_633.05, minimumUsd: 7.81, maximumUsd: 20_633.05 },
       ] },
@@ -37,7 +37,8 @@ test('personal discovery is a read-only production request scoped to the public 
 
 test('MXN SPEI discovery keeps provider currency and limits distinct from USD', async () => {
   const speiRoute = { partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
-    paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } }] };
+    paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } },
+      { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'MXN', min: 100, max: 500000 } }] };
   const result = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch((url, init) => {
     expect(url).toContain('/MX/MXN/USDT_POLYGON');
     expect(url).not.toContain('api-sb');
@@ -52,10 +53,12 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
   expect(() => normalizeReownProductionRoutes([speiRoute], 'USD')).toThrow();
   expect(() => normalizeReownProductionRoutes([{ ...speiRoute,
     paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'USD', min: 50, max: 1000 } }] }], 'MXN')).toThrow();
-  for (const sourceCurrencyCode of ['mxn', 'MXN/USD', 'US', 'MXN?x=y']) {
+  for (const sourceCurrencyCode of ['mxn', 'MXN/USD', 'US', 'MXN?x=y', 'COP']) {
     await expect(readReownProductionOptions('MX', { sourceCurrencyCode, fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }) }))
       .rejects.toThrow('wallet_funding_invalid_currency');
   }
+  await expect(readReownProductionOptions('US', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }) }))
+    .rejects.toThrow('wallet_funding_invalid_currency');
 });
 
 test('personal funding is limited to US and Mexico and removes Neteller and Skrill rails', async () => {
@@ -75,7 +78,7 @@ test('personal funding is limited to US and Mexico and removes Neteller and Skri
 });
 
 test('unavailable country routes and unknown limits never invent default rails', async () => {
-  for (const data of [[], [route('BANXA')], [route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: null }])]]) {
+  for (const data of [[], [route('BANXA')], [route('TOPPER')], [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: null }])]]) {
     const result = await readReownProductionOptions('US', { fetchImpl: mockFetch(() => Response.json(data)) });
     expect(result.paymentMethods).toEqual([]);
     expect(result.routes).toEqual([]);
@@ -84,12 +87,12 @@ test('unavailable country routes and unknown limits never invent default rails',
 
 test('malformed provider routes cannot broaden allowed country, currency or amount', async () => {
   const invalid: unknown[] = [null, {}, { routes: [route()] }, [null], [{ ...route(), source: 'COP' }],
-    [{ ...route(), destination: 'USDT_ETHEREUM' }], [route('TOPPER', [{ name: 'card', limits: { currencyCode: 'USD', min: 10, max: 100 } }])],
-    [route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'COP', min: 10, max: 100 } }])],
-    [route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: '10', max: 100 } }])],
-    [route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: -1, max: 100 } }])],
-    [route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 100, max: 10 } }])],
-    [route(), route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 100 } }])]];
+    [{ ...route(), destination: 'USDT_ETHEREUM' }], [route('SWAPPED', [{ name: 'card', limits: { currencyCode: 'USD', min: 10, max: 100 } }])],
+    [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'COP', min: 10, max: 100 } }])],
+    [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: '10', max: 100 } }])],
+    [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: -1, max: 100 } }])],
+    [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 100, max: 10 } }])],
+    [route(), route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 100 } }])]];
   for (const data of invalid) {
     expect(() => normalizeReownProductionRoutes(data)).toThrow('wallet_funding_provider_unavailable');
   }

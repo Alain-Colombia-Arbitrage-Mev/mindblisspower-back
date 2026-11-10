@@ -15,6 +15,8 @@ func TestNOWPaymentsPriceIncludesProviderCostWithoutCustomerSurcharge(t *testing
 		amount, wantCost, wantBase string
 		wantCents                  int64
 	}{
+		{"20", "0.2000", "19.8000", 2000},
+		{"50", "0.5000", "49.5000", 5000},
 		{"100", "1.0000", "99.0000", 10000},
 		{"250", "2.5000", "247.5000", 25000},
 		{"500", "5.0000", "495.0000", 50000},
@@ -71,21 +73,25 @@ func TestNOWPaymentsPricingDoesNotChangeStripePackPricing(t *testing.T) {
 }
 
 func TestNOWPaymentsNewInvoiceUsesPersistedIncludedPrice(t *testing.T) {
-	handler, client, store := fakeNOWMembershipHandler()
-	pricing, err := nowPaymentsPrice(decimal.NewFromInt(100))
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.attempt.AmountUSD, store.attempt.FeeUSD, store.attempt.TotalCents = pricing.AmountUSD, pricing.FeeUSD, pricing.TotalCents
-	store.attempt.PricingPolicy, store.attempt.ProviderCostUSD, store.attempt.CommissionBaseUSD = pricing.Policy, pricing.ProviderCostUSD, pricing.CommissionBaseUSD
-	w := httptest.NewRecorder()
-	handler.handleNOWMembershipCheckout(w, httptest.NewRequest(http.MethodPost, "/", nil), checkoutRequest{Email: "verified@example.test", PackageID: 1}, nil, "")
-	var response checkoutResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if w.Code != http.StatusOK || client.creates != 1 || client.request.AmountUSDMinor != 10000 ||
-		response.TotalUSD != "100.00" || response.FeeUSD != "0.00" || response.Provider != "nowpayments" || response.FulfillmentStatus != "review_required" {
-		t.Fatal("included provider cost was added to the customer invoice or changed review-only delivery", response, w.Code)
+	for _, amount := range []int64{20, 100} {
+		t.Run(decimal.NewFromInt(amount).String(), func(t *testing.T) {
+			handler, client, store := fakeNOWMembershipHandler()
+			pricing, err := nowPaymentsPrice(decimal.NewFromInt(amount))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.attempt.AmountUSD, store.attempt.FeeUSD, store.attempt.TotalCents = pricing.AmountUSD, pricing.FeeUSD, pricing.TotalCents
+			store.attempt.PricingPolicy, store.attempt.ProviderCostUSD, store.attempt.CommissionBaseUSD = pricing.Policy, pricing.ProviderCostUSD, pricing.CommissionBaseUSD
+			w := httptest.NewRecorder()
+			handler.handleNOWMembershipCheckout(w, httptest.NewRequest(http.MethodPost, "/", nil), checkoutRequest{Email: "verified@example.test", PackageID: 1}, nil, "")
+			var response checkoutResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusOK || client.creates != 1 || client.request.AmountUSDMinor != amount*100 ||
+				response.TotalUSD != pricing.AmountUSD || response.FeeUSD != "0.00" || response.Provider != "nowpayments" || response.FulfillmentStatus != "review_required" {
+				t.Fatal("included provider cost was added to the customer invoice or changed review-only delivery", response, w.Code)
+			}
+		})
 	}
 }

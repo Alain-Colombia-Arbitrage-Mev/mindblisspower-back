@@ -2,7 +2,7 @@
 // Published by @reown/appkit-controllers 1.8.24 (src/utils/ConstantsUtil.js).
 // This is the public checkout key shipped by Reown, not a Mindbliss private API key.
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
-const PROVIDERS = ['TOPPER', 'SWAPPED'] as const;
+const PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
 export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX'] as const;
 const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
@@ -41,6 +41,9 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
         throw unavailable();
       }
       if (EXCLUDED_PERSONAL_METHODS.has(method.name)) continue;
+      // The approved local-fiat policy is SPEI in Mexico; other local methods
+      // cannot silently inherit the USD minimum or currency conversion rules.
+      if (sourceCurrencyCode === 'MXN' && method.name !== 'SPEI') continue;
       // Without limits, the server cannot verify the selected amount for this rail.
       if (method.limits === null || method.limits === undefined) continue;
       if (!record(method.limits)) throw unavailable();
@@ -128,13 +131,16 @@ export async function readReownProductionOptions(country: string, {
     throw new Error('wallet_funding_invalid_country');
   }
   if (typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw new Error('wallet_funding_invalid_currency');
+  if (sourceCurrencyCode !== 'USD' && !(country === 'MX' && sourceCurrencyCode === 'MXN')) {
+    throw new Error('wallet_funding_invalid_currency');
+  }
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(abort, TIMEOUT_MS);
   try {
-    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT_POLYGON?partners=TOPPER,SWAPPED`;
+    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT_POLYGON?partners=SWAPPED,MERCURYO`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       headers: { Authorization: `BASIC ${REOWN_MELD_PUBLIC_KEY}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },
@@ -142,6 +148,7 @@ export async function readReownProductionOptions(country: string, {
     if (!response.ok || response.redirected) { disposeBody(response.body); throw unavailable(); }
     const routes = normalizeReownProductionRoutes(await boundedJson(response, controller.signal), sourceCurrencyCode);
     const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
+    if (controller.signal.aborted) throw unavailable();
     return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode, paymentMethods, routes };
   } catch {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');

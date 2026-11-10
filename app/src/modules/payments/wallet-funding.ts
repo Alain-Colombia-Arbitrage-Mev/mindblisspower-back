@@ -42,21 +42,26 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
 }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {}) {
   const owner = subjectInput.parse(subject);
   const input = personalFundingInput.parse(rawInput);
-  // Local-fiat requests must supply verified provider valuation before writing a USD reference.
-  if (input.sourceCurrencyCode !== 'USD') throw new Error('wallet_funding_valuation_unavailable');
-  if (input.amount < 50 || input.amount > 25_000) throw new Error('wallet_funding_amount_unavailable');
+  const localSpei = input.country === 'MX' && input.sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
+  if (input.sourceCurrencyCode !== 'USD' && !localSpei) throw new Error('wallet_funding_valuation_unavailable');
+  if (input.sourceCurrencyCode === 'USD' && (input.amount < 20 || input.amount > 25_000)) throw new Error('wallet_funding_amount_unavailable');
   const options = await readReownProductionOptions(input.country, { fetchImpl, signal, sourceCurrencyCode: input.sourceCurrencyCode });
   const matching = options.routes.filter(route => route.paymentMethods.some(method => method.method === input.paymentMethodType));
   if (!matching.length) throw new Error('wallet_funding_method_unavailable');
   const allowedProviders = matching.filter(route => route.paymentMethods.some(method => method.method === input.paymentMethodType
     && input.amount >= method.minimumAmount && input.amount <= method.maximumAmount)).map(route => route.serviceProvider);
   if (!allowedProviders.length) throw new Error('wallet_funding_amount_unavailable');
+  // Cancellation can arrive after discovery resolves and before its caller resumes.
+  // Never start persistence for that cancelled operation; an already accepted
+  // database write remains immutable and must not be retried automatically.
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent(
-    ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType})`);
+    ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType},${input.sourceCurrencyCode})`);
   const row = oneRow(rows, intentRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
   return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const,
-    provider: 'reown' as const, status: 'initiated' as const, requestedAmount: input.amount, paymentMethodType: input.paymentMethodType, allowedProviders,
+    provider: 'reown' as const, status: 'initiated' as const, requestedAmount: input.amount, sourceCurrencyCode: input.sourceCurrencyCode,
+    paymentMethodType: input.paymentMethodType, allowedProviders,
     createdAt: row.created_at.toISOString() };
 }
 
@@ -323,7 +328,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
     await withFundingSignal(() => finishSandbox(database, owner, row.id, 'session_created', providerSession.id), deadline.signal);
     return { checkoutReference: row.id, walletKind: 'administrative' as const, environment: 'sandbox' as const,
       provider: 'meld' as const, status: 'session_created' as const, checkoutUrl,
-      requestedAmount: input.amount, createdAt: row.created_at.toISOString() };
+      requestedAmount: input.amount, sourceCurrencyCode: 'USD' as const, createdAt: row.created_at.toISOString() };
   } catch (error) {
     if (!outcomeWriteStarted && !deadline.signal.aborted) {
       await withFundingSignal(() => finishSandbox(database, owner, row.id, 'failed', null), deadline.signal);
@@ -338,24 +343,34 @@ const historyRow = z.object({
   id: z.string().uuid(), wallet_kind: fundingKindInput, environment: z.enum(['production', 'sandbox']),
   provider: z.enum(['reown', 'meld']), status: z.enum(['initiated', 'session_created', 'unavailable', 'failed']),
   wallet_address: addressInput, country_code: z.string().regex(/^[A-Z]{2}$/),
-  requested_amount: z.coerce.number().finite().min(50).max(25_000), created_at: z.coerce.date(),
+  requested_amount: z.coerce.number().finite().min(0.01).max(1_000_000_000), created_at: z.coerce.date(),
+  source_currency: z.enum(['USD', 'MXN']), payment_method: z.string().regex(/^[A-Z0-9_]{2,40}$/).nullable(),
 });
+
+function validPersistedFundingSource(row: z.infer<typeof historyRow>, personal: boolean) {
+  if (Math.abs(row.requested_amount * 100 - Math.round(row.requested_amount * 100)) > 0.000001) return false;
+  return row.source_currency === 'USD'
+    ? row.requested_amount >= (personal ? 20 : 50) && row.requested_amount <= 25_000
+    : personal && row.country_code === 'MX' && row.payment_method === 'SPEI';
+}
 
 export async function readWalletFundingHistory(database: FundingDatabase, subject: string, rawKind: unknown) {
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
-  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_history(${owner},${walletKind})`);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_history_v2(${owner},${walletKind})`);
   if (rows.length > 20) throw new Error('wallet_funding_unavailable');
   const items = rows.map(value => {
     const row = historyRow.parse(value);
     const personal = walletKind === 'personal';
     if (row.wallet_kind !== walletKind || row.environment !== (personal ? 'production' : 'sandbox')
-      || row.provider !== (personal ? 'reown' : 'meld') || (personal && row.status !== 'initiated')) {
+      || row.provider !== (personal ? 'reown' : 'meld') || (personal && row.status !== 'initiated')
+      || !validPersistedFundingSource(row, personal)) {
       throw new Error('wallet_funding_unavailable');
     }
     return { checkoutReference: row.id, provider: row.provider,
       status: row.status, country: row.country_code,
-      requestedAmount: row.requested_amount, createdAt: row.created_at.toISOString() };
+      requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency,
+      ...(row.payment_method ? { paymentMethodType: row.payment_method } : {}), createdAt: row.created_at.toISOString() };
   });
   return { walletKind, environment: walletKind === 'personal' ? 'production' as const : 'sandbox' as const,
     records: items, settlement: 'unconfirmed' as const };
@@ -366,15 +381,16 @@ export async function readWalletFundingStatus(database: FundingDatabase, subject
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
   const reference = checkoutReferenceInput.parse(rawReference);
-  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status(${owner},${walletKind},${reference}::uuid)`);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status_v2(${owner},${walletKind},${reference}::uuid)`);
   if (!rows.length) throw new Error('wallet_funding_not_found');
   const row = oneRow(rows, historyRow);
   const personal = walletKind === 'personal';
   if (row.id.toLowerCase() !== reference.toLowerCase() || row.wallet_kind !== walletKind
     || row.environment !== (personal ? 'production' : 'sandbox') || row.provider !== (personal ? 'reown' : 'meld')
-    || (personal && row.status !== 'initiated')) throw new Error('wallet_funding_unavailable');
+    || (personal && row.status !== 'initiated') || !validPersistedFundingSource(row, personal)) throw new Error('wallet_funding_unavailable');
   return { checkoutReference: row.id, walletKind, environment: row.environment, provider: row.provider,
-    requestedAmount: row.requested_amount, country: row.country_code, requestStatus: row.status,
+    requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency,
+    ...(row.payment_method ? { paymentMethodType: row.payment_method } : {}), country: row.country_code, requestStatus: row.status,
     destination: { address: row.wallet_address, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const },
     confirmation: { state: 'unconfirmed' as const, source: 'none' as const, testMode: !personal } };
 }

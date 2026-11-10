@@ -20,6 +20,8 @@ const bobId = '22222222-2222-4222-8222-222222222222';
 const migration = readFileSync(new URL('../_meta/migration/93_wallet_funding_isolation.sql', import.meta.url), 'utf8');
 const methodMigration = readFileSync(new URL('../_meta/migration/94_wallet_funding_payment_methods.sql', import.meta.url), 'utf8');
 const statusMigration = readFileSync(new URL('../_meta/migration/95_wallet_funding_status_reads.sql', import.meta.url), 'utf8');
+const usd20Migration = readFileSync(new URL('../_meta/migration/96_personal_usd20_membership_catalog.sql', import.meta.url), 'utf8');
+const mxnMigration = readFileSync(new URL('../_meta/migration/97_personal_mxn_spei_requests.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -74,7 +76,9 @@ try {
   assert.equal(started.status, 0, 'disposable PostgreSQL could not start');
   let ready = false;
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (docker(['exec', container, 'pg_isready', '-U', 'postgres', '-d', database]).status === 0) {
+    // The init-only temporary server has no TCP listener. Wait for the final
+    // postmaster, not its transient Unix socket, without exposing a host port.
+    if (docker(['exec', container, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres', '-d', database]).status === 0) {
       ready = true; break;
     }
     await delay(200);
@@ -250,8 +254,144 @@ try {
   assert.notEqual(duplicateStatusMigration.status, 0);
   assert.match(duplicateStatusMigration.stderr, /wallet_funding_status_requires_fresh_review/);
   probes++;
+
+  // USD20 is a new SKU: all legacy catalog facts and payment evidence survive.
+  psql(`CREATE TABLE mlm.package(id integer PRIMARY KEY,name text NOT NULL,amount_usd numeric(14,2) NOT NULL,
+    pv integer NOT NULL,type text NOT NULL,is_active boolean NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
+    INSERT INTO mlm.package(id,name,amount_usd,pv,type,is_active) VALUES
+      (1,'Pack 1',10,10,'11001',false),(2,'Pack 2',25,25,'11001',false),(3,'Pack 3',50,50,'11001',true),
+      (4,'Pack 4',100,100,'11001',true),(5,'Pack 5',250,250,'11001',true),(6,'Pack 6',500,500,'11001',true);
+    CREATE TABLE mlm.plan_config(id integer PRIMARY KEY,effective_from timestamptz NOT NULL,effective_to timestamptz,cd_lock_days integer NOT NULL);
+    INSERT INTO mlm.plan_config VALUES(1,now()-interval '1 day',NULL,365);
+    CREATE TABLE mlm.cd_roi_tier(id integer PRIMARY KEY,min_amount_usd numeric NOT NULL,max_amount_usd numeric,
+      base_annual_rate numeric NOT NULL,qualified_annual_rate numeric NOT NULL,active boolean NOT NULL);
+    INSERT INTO mlm.cd_roi_tier VALUES(1,0,501,0.25,0.30,true);`);
+  const oldCatalog = value('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p;',false);
+  const priorRequests = value(statusSnapshot,false);
+  const oldFunctionDigest = value(`SELECT md5(pg_get_functiondef('payments.create_reown_funding_intent(text,text,text,numeric,uuid,text)'::regprocedure));`,false);
+  assert.equal(oldFunctionDigest,'c8a003ee5488b84030c69224c4cd2aa5'); probes++;
+  const invalidMigration = (setup, restore, expected) => {
+    psql(setup);
+    const result=psql(usd20Migration,true);
+    assert.notEqual(result.status,0,'changed catalog or compensation unexpectedly migrated');
+    assert.match(result.stderr,new RegExp(expected)); probes++;
+    equal(`SELECT md5(pg_get_functiondef('payments.create_reown_funding_intent(text,text,text,numeric,uuid,text)'::regprocedure));`,oldFunctionDigest,false);
+    equal(`SELECT pg_get_constraintdef(oid) LIKE '%(50)::numeric%' FROM pg_constraint WHERE conrelid='payments.reown_funding_intent'::regclass AND conname='reown_funding_intent_requested_amount_check';`,'t',false);
+    equal(statusSnapshot,priorRequests,false);
+    psql(restore);
+  };
+  invalidMigration(`INSERT INTO mlm.package(id,name,amount_usd,pv,type,is_active) VALUES(17,'occupied',100,100,'11001',true);`,
+    'DELETE FROM mlm.package WHERE id=17;','usd20_existing_catalog_requires_review');
+  invalidMigration(`INSERT INTO mlm.package(id,name,amount_usd,pv,type,is_active) VALUES(18,'other20',20,20,'11001',true);`,
+    'DELETE FROM mlm.package WHERE id=18;','usd20_existing_catalog_requires_review');
+  invalidMigration('UPDATE mlm.package SET amount_usd=51 WHERE id=3;','UPDATE mlm.package SET amount_usd=50 WHERE id=3;','usd20_existing_catalog_requires_review');
+  invalidMigration('UPDATE mlm.package SET is_active=false WHERE id=3;','UPDATE mlm.package SET is_active=true WHERE id=3;','usd20_existing_catalog_requires_review');
+  invalidMigration('UPDATE mlm.plan_config SET cd_lock_days=30;','UPDATE mlm.plan_config SET cd_lock_days=365;','usd20_existing_compensation_requires_review');
+  invalidMigration(`INSERT INTO mlm.plan_config VALUES(2,now()-interval '1 day',NULL,365);`,'DELETE FROM mlm.plan_config WHERE id=2;','usd20_existing_compensation_requires_review');
+  invalidMigration('UPDATE mlm.cd_roi_tier SET min_amount_usd=21;','UPDATE mlm.cd_roi_tier SET min_amount_usd=0;','usd20_existing_compensation_requires_review');
+  invalidMigration('UPDATE mlm.cd_roi_tier SET base_annual_rate=0.40;','UPDATE mlm.cd_roi_tier SET base_annual_rate=0.25;','usd20_existing_compensation_requires_review');
+  invalidMigration('INSERT INTO mlm.cd_roi_tier VALUES(2,0,501,0.25,0.30,true);','DELETE FROM mlm.cd_roi_tier WHERE id=2;','usd20_existing_compensation_requires_review');
+  invalidMigration(`GRANT EXECUTE ON FUNCTION payments.create_reown_funding_intent(text,text,text,numeric,uuid) TO PUBLIC;`,
+    `REVOKE EXECUTE ON FUNCTION payments.create_reown_funding_intent(text,text,text,numeric,uuid) FROM PUBLIC;`,'personal_usd20_runtime_isolation_required');
+  const compensationSql="SELECT jsonb_build_object('plans',(SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM mlm.plan_config p),'tiers',(SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM mlm.cd_roi_tier p))::text;";
+  const compensationBefore=value(compensationSql,false);
+  psql(usd20Migration);
+  equal(statusSnapshot,priorRequests,false);
+  equal('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p WHERE id<>17;',oldCatalog,false);
+  equal(compensationSql,compensationBefore,false);
+  equal(`SELECT id||'|'||name||'|'||amount_usd||'|'||pv||'|'||type||'|'||is_active FROM mlm.package WHERE amount_usd=20;`,'17|Pack 20 USD|20.00|20|11001|true',false);
+  equal(`SELECT has_function_privilege('${role}','payments.create_reown_funding_intent(text,text,text,numeric,uuid,text)','EXECUTE') AND NOT has_function_privilege('${role}','payments.create_reown_funding_intent(text,text,text,numeric,uuid)','EXECUTE');`,'t',false);
+  psql(`INSERT INTO auth."user" VALUES('usd20-member',true);
+    INSERT INTO identity.wallet_binding VALUES('usd20-member','0x${'8'.repeat(40)}');
+    INSERT INTO identity.administrative_wallet_pool(ordinal,address) VALUES(4,'0x${'9'.repeat(40)}');
+    INSERT INTO identity.administrative_wallet_assignment VALUES('usd20-member',4);`);
+  const personal20Id=randomUUID();
+  const personal20=(amount='20',id=personal20Id,address=`0x${'8'.repeat(40)}`)=>`SELECT * FROM payments.create_reown_funding_intent('usd20-member','${address}','US',${amount},'${id}','CREDIT_DEBIT_CARD');`;
+  const accepted20=value(personal20());
+  assert.match(accepted20,new RegExp(`^${personal20Id}\\|`)); probes++;
+  equal(personal20(),accepted20);
+  rejects(personal20('19.99',randomUUID()),'wallet_funding_invalid_request');
+  rejects(personal20('20.001',randomUUID()),'wallet_funding_invalid_request');
+  rejects(personal20('25000.01',randomUUID()),'wallet_funding_invalid_request');
+  rejects(personal20("'NaN'::numeric",randomUUID()),'wallet_funding_invalid_request');
+  rejects(personal20('20',randomUUID(),`0x${'9'.repeat(40)}`),'wallet_funding_wallet_not_linked');
+  rejects(personal20('21'),'wallet_funding_request_already_used');
+  rejects(admin('usd20-member',`0x${'9'.repeat(40)}`,'20',randomUUID()),'wallet_funding_invalid_request');
+  rejects(admin('usd20-member',`0x${'9'.repeat(40)}`,'49.99',randomUUID()),'wallet_funding_invalid_request');
+  assert.match(value(admin('usd20-member',`0x${'9'.repeat(40)}`,'50',randomUUID())),/\|t\|initiated$/); probes++;
+  equal(`SELECT requested_amount::text FROM payments.read_wallet_funding_status('usd20-member','personal','${personal20Id}');`,'20.00');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('bob','personal','${personal20Id}');`,'0');
+  equal(`SELECT has_table_privilege('${role}','payments.reown_funding_intent','SELECT,INSERT,UPDATE,DELETE') OR has_table_privilege('${role}','payments.meld_sandbox_funding_attempt','SELECT,INSERT,UPDATE,DELETE');`,'f',false);
+  equal(`SELECT md5((SELECT json_agg(m ORDER BY id)::text FROM mlm.wallet_movement m)||(SELECT json_agg(a ORDER BY id)::text FROM payments.meld_onramp_attempt a));`,ledgerBefore,false);
+  const repeated20=psql(usd20Migration,true);
+  assert.notEqual(repeated20.status,0); assert.match(repeated20.stderr,/personal_usd20_requires_fresh_review/); probes++;
+
+
+  const beforeMxn=value(statusSnapshot,false);
+  const catalogBeforeMxn=value('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p;',false);
+  for(const [signature,modify] of [
+    ['payments.read_wallet_funding_history(text,text)',source=>source.replace('LIMIT 20','LIMIT 19')],
+    ['payments.read_wallet_funding_status(text,text,uuid)',source=>source.replace('IF p_reference IS NULL THEN','IF p_reference IS NULL OR false THEN')],
+  ]){
+    const original=value(`SELECT pg_get_functiondef('${signature}'::regprocedure);`,false);
+    const changed=modify(original);assert.notEqual(changed,original);probes++;
+    psql(changed);
+    const rejected=psql(mxnMigration,true);assert.notEqual(rejected.status,0);assert.match(rejected.stderr,/personal_mxn_requires_fresh_review/);probes++;
+    equal(`SELECT to_regprocedure('payments.create_reown_funding_intent(text,text,text,numeric,uuid,text,text)') IS NULL;`,'t',false);
+    equal(statusSnapshot,beforeMxn,false);
+    psql(original);
+  }
+  psql(mxnMigration);
+  equal(statusSnapshot,beforeMxn,false);
+  equal('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p;',catalogBeforeMxn,false);
+  const mxnId=randomUUID();
+  const localIntent=(amount='10',id=mxnId,country='MX',method='SPEI',currency='MXN',address=`0x${'8'.repeat(40)}`,subject='usd20-member')=>
+    `SELECT * FROM payments.create_reown_funding_intent('${subject}','${address}','${country}',${amount},'${id}','${method}','${currency}');`;
+  const localResult=value(localIntent());
+  assert.match(localResult,new RegExp(`^${mxnId}\\|`));probes++;
+  equal(localIntent(),localResult);
+  rejects(localIntent('10',randomUUID(),'US'),'wallet_funding_invalid_request');
+  rejects(localIntent('10',randomUUID(),'MX','CREDIT_DEBIT_CARD'),'wallet_funding_invalid_request');
+  rejects(localIntent('10',randomUUID(),'MX','SPEI','COP'),'wallet_funding_invalid_request');
+  rejects(localIntent('0',randomUUID()),'wallet_funding_invalid_request');
+  rejects(localIntent('-1',randomUUID()),'wallet_funding_invalid_request');
+  rejects(localIntent('10.001',randomUUID()),'wallet_funding_invalid_request');
+  rejects(localIntent('1000000000.01',randomUUID()),'wallet_funding_invalid_request');
+  rejects(localIntent("'NaN'::numeric",randomUUID()),'wallet_funding_invalid_request');
+  rejects(localIntent('10',randomUUID(),'MX','SPEI','USD'),'wallet_funding_invalid_request');
+  rejects(localIntent('10',randomUUID(),'MX','SPEI','MXN',`0x${'9'.repeat(40)}`),'wallet_funding_wallet_not_linked');
+  rejects(localIntent('10',randomUUID(),'MX','SPEI','MXN',`0x${'8'.repeat(40)}`,'blocked'),'wallet_funding_forbidden');
+  rejects(localIntent('11'),'wallet_funding_request_already_used');
+  const mxnSame20=randomUUID(); value(localIntent('20',mxnSame20));
+  rejects(`SELECT * FROM payments.create_reown_funding_intent('usd20-member','0x${'8'.repeat(40)}','MX',20,'${mxnSame20}','SPEI');`,'wallet_funding_request_already_used');
+  rejects(localIntent('20',personal20Id), 'wallet_funding_request_already_used');
+  // A valid existing USD request still replays through the warm six-argument API.
+  equal(personal20(),accepted20);
+  equal(`SELECT requested_amount||'|'||source_currency||'|'||payment_method FROM payments.read_wallet_funding_status_v2('usd20-member','personal','${mxnId}');`,'10.00|MXN|SPEI');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_history('usd20-member','personal') WHERE id='${mxnId}';`,'0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('usd20-member','personal','${mxnId}');`,'0');
+  equal(`SELECT source_currency FROM payments.read_wallet_funding_status_v2('usd20-member','personal','${personal20Id}');`,'USD');
+  equal(`SELECT source_currency||'|'||payment_method FROM payments.read_wallet_funding_history_v2('usd20-member','personal') WHERE id='${mxnId}';`,'MXN|SPEI');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status_v2('bob','personal','${mxnId}');`,'0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status_v2('usd20-member','administrative','${mxnId}');`,'0');
+  rejects(`SELECT * FROM payments.read_wallet_funding_status_v2('blocked','personal','${mxnId}');`,'wallet_funding_forbidden');
+  rejects(`SELECT * FROM payments.read_wallet_funding_status_v2('usd20-member','both','${mxnId}');`,'wallet_funding_invalid_kind');
+  equal(`SELECT bool_and(source_currency='USD' AND requested_amount>=50) FROM payments.read_wallet_funding_history_v2('usd20-member','administrative');`,'t');
+  for(const signature of ['payments.create_reown_funding_intent(text,text,text,numeric,uuid,text,text)','payments.read_wallet_funding_history_v2(text,text)','payments.read_wallet_funding_status_v2(text,text,uuid)']){
+    equal(`SELECT has_function_privilege('${role}','${signature}','EXECUTE') AND NOT has_function_privilege('app_read','${signature}','EXECUTE');`,'t',false);
+    equal(`SELECT prosecdef AND proconfig=ARRAY['search_path=pg_catalog']::text[] FROM pg_proc WHERE oid='${signature}'::regprocedure;`,'t',false);
+  }
+  equal(`SELECT has_table_privilege('${role}','payments.reown_funding_intent','SELECT,INSERT,UPDATE,DELETE') OR has_table_privilege('${role}','payments.meld_sandbox_funding_attempt','SELECT,INSERT,UPDATE,DELETE');`,'f',false);
+  equal(`SELECT md5((SELECT json_agg(m ORDER BY id)::text FROM mlm.wallet_movement m)||(SELECT json_agg(a ORDER BY id)::text FROM payments.meld_onramp_attempt a));`,ledgerBefore,false);
+  const mxnProfile=value(`SELECT json_build_object('writer6',md5(pg_get_functiondef('payments.create_reown_funding_intent(text,text,text,numeric,uuid,text)'::regprocedure)),
+    'writer7',md5(pg_get_functiondef('payments.create_reown_funding_intent(text,text,text,numeric,uuid,text,text)'::regprocedure)),
+    'historyV2',md5(pg_get_functiondef('payments.read_wallet_funding_history_v2(text,text)'::regprocedure)),
+    'statusV2',md5(pg_get_functiondef('payments.read_wallet_funding_status_v2(text,text,uuid)'::regprocedure)),
+    'amountCheck',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='payments.reown_funding_intent'::regclass AND conname='reown_funding_intent_requested_amount_check'))::text;`,false);
+  const duplicateMxn=psql(mxnMigration,true);assert.notEqual(duplicateMxn.status,0);assert.match(duplicateMxn.stderr,/personal_mxn_requires_fresh_review/);probes++;
+
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
-    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true }));
+    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, mxnProfile: JSON.parse(mxnProfile) }));
 } catch (error) {
   // This harness contains synthetic data only; avoid dumping whole SQL fixtures.
   console.error(JSON.stringify({ walletFundingSchema: 'failed', message: error.message }));

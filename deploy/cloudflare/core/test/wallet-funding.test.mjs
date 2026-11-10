@@ -34,7 +34,7 @@ test('funding admits only the native personal intent, independent sandbox sessio
 
 test('funding cannot select owners, environments, unsupported processors, aliases or arbitrary methods', async () => {
   const never = () => assert.fail('invalid funding request dispatched');
-  for (const change of [{ subject: 'other' }, { environment: 'production' }, { amount: 49 }, { amount: 50.001 },
+  for (const change of [{ subject: 'other' }, { environment: 'production' }, { amount: 19.99 }, { amount: 50.001 },
     { requestId: 'unbound' }, { country: 'CO&x=y' }, { paymentMethodType: undefined }, { paymentMethodType: 'other method' }]) {
     assert.equal((await dispatchCore(request(path, { ...input, ...change }), env, never)).status, 503);
   }
@@ -49,7 +49,7 @@ test('funding cannot select owners, environments, unsupported processors, aliase
   for (const headers of [{ origin: 'https://evil.example.test' }, { cookie: '' }, { 'x-vp-act-as': 'other' }]) {
     assert.equal((await dispatchCore(request(path, input, headers), env, never)).status, 503);
   }
-  for (const serviceProvider of ['BINANCECONNECT', 'TOPPER', 'SWAPPED', 'ONRAMPMONEY']) {
+  for (const serviceProvider of ['BINANCECONNECT', 'TOPPER', 'SWAPPED', 'MERCURYO', 'ONRAMPMONEY']) {
     assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
       ...input, serviceProvider }), env, never)).status, 503);
   }
@@ -93,9 +93,13 @@ test('currency discovery admits canonical selectors while duplicate and encoded 
   assert.equal((await dispatchCore(read(administrative + '?country=MX&serviceProvider=TRANSAK&sourceCurrencyCode=MXN'), env, never)).status, 503);
   assert.equal((await dispatchCore(read(administrative + '?country=MX&sourceCurrencyCode=MXN&serviceProvider=SWAPPED'), env, never)).status, 503);
   // Admission is not financial valuation: the API still rejects nonUSD writes until an independently verified provider valuation exists.
-  assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'MXN', amount: 1000 }), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, { ...input, country: 'MX', paymentMethodType: 'SPEI', sourceCurrencyCode: 'MXN', amount: 150 }), env, resolve)).status, 200);
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'mxn', amount: 1000 }), env, never)).status, 503);
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: null, amount: 1000 }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request(path, { ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount: 1000 }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', amount: 1000 }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
+    ...input, country: 'MX', paymentMethodType: 'SPEI', sourceCurrencyCode: 'MXN', amount: 1000, serviceProvider: 'BANXA' }), env, never)).status, 503);
 });
 
 test('personal country and payment exclusions do not restrict the separate administrative flow or historical owned status', async () => {
@@ -181,5 +185,18 @@ test('personal and administrative mutations cannot cross their explicitly separa
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   assert.equal((await dispatchCore(request(administrativePath, administrative), env, resolve)).status, 200);
   assert.equal((await dispatchCore(request(path, input, { origin: 'https://mindbliss-portal-rewon.devfidubit.workers.dev' }), env, resolve)).status, 200);
+  assert.equal(calls, 2);
+});
+
+test('Core admits the USD20 personal boundary while retaining the independent USD50 administrative boundary', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  const never = () => assert.fail('below minimum request dispatched');
+  assert.equal((await dispatchCore(request(path, { ...input, amount: 20 }), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, { ...input, amount: 19.99 }), env, never)).status, 503);
+  for (const amount of [20, 49.99]) assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
+    ...input, amount, serviceProvider: 'BANXA' }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
+    ...input, amount: 50, serviceProvider: 'BANXA' }), env, resolve)).status, 200);
   assert.equal(calls, 2);
 });

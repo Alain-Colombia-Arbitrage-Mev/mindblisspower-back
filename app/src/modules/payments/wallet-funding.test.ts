@@ -15,7 +15,7 @@ const environment = { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'syn
 const assignment = { status: 'assigned', address, address_family: 'EVM', asset: 'USDT', checkout_reference: customerReference, assigned_at: createdAt };
 const method = (name = 'CREDIT_DEBIT_CARD', min = 20, max = 15000) => ({ name, limits: { currencyCode: 'USD', min, max } });
 const route = (partner = 'TRANSAK', paymentMethods = [method()]) => ({ partner, source: 'USD', destination: 'USDT_POLYGON', paymentMethods });
-const productionFetch = (async () => Response.json([route('TOPPER')])) as unknown as typeof fetch;
+const productionFetch = (async () => Response.json([route('SWAPPED')])) as unknown as typeof fetch;
 
 function withSandboxOptions(widgetFetch: typeof fetch): typeof fetch {
   return (async (url, init) => String(url).includes('/supported/routes/')
@@ -39,21 +39,21 @@ test('personal requests persist an unconfirmed Reown intent without any Meld quo
   const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
   const result = await createPersonalFundingIntent(database, input, 'synthetic-owner', { fetchImpl: productionFetch });
   expect(result).toEqual({ checkoutReference: id, walletKind: 'personal', environment: 'production', provider: 'reown',
-    status: 'initiated', requestedAmount: 100, paymentMethodType: 'CREDIT_DEBIT_CARD', allowedProviders: ['TOPPER'], createdAt: createdAt.toISOString() });
+    status: 'initiated', requestedAmount: 100, sourceCurrencyCode: 'USD', paymentMethodType: 'CREDIT_DEBIT_CARD', allowedProviders: ['SWAPPED'], createdAt: createdAt.toISOString() });
   expect(queries).toHaveLength(1);
   expect(queries[0]!.sql).toContain('payments.create_reown_funding_intent');
-  expect(queries[0]!.params).toEqual(['synthetic-owner', address, 'US', 100, id, 'CREDIT_DEBIT_CARD']);
+  expect(queries[0]!.params).toEqual(['synthetic-owner', address, 'US', 100, id, 'CREDIT_DEBIT_CARD', 'USD']);
   expect(Object.keys(result)).not.toContain('commission');
   expect(Object.keys(result)).not.toContain('destinationAmount');
-  for (const bad of [{ ...input, amount: 49 }, { ...input, amount: 100.001 }, { ...input, walletKind: 'administrative' }]) {
+  for (const bad of [{ ...input, amount: 19.99 }, { ...input, amount: 100.001 }, { ...input, walletKind: 'administrative' }]) {
     await expect(createPersonalFundingIntent(database, bad, 'synthetic-owner')).rejects.toThrow();
   }
   expect(queries).toHaveLength(1);
 });
 
 test('personal intent revalidates its own production method and amount, then computes eligible providers server-side', async () => {
-  const routes = [route('TOPPER', [method('CREDIT_DEBIT_CARD', 10, 80)]), route('SWAPPED', [method('CREDIT_DEBIT_CARD', 20, 500), method('BANK_TRANSFER', 200, 1000)]),
-    route('TRANSAK', [method('CREDIT_DEBIT_CARD', 1, 10000)])];
+  const routes = [route('MERCURYO', [method('CREDIT_DEBIT_CARD', 10, 80)]), route('SWAPPED', [method('CREDIT_DEBIT_CARD', 20, 500), method('BANK_TRANSFER', 200, 1000)]),
+    route('TOPPER', [method('CREDIT_DEBIT_CARD', 1, 10000)]), route('TRANSAK', [method('CREDIT_DEBIT_CARD', 1, 10000)])];
   const fetchImpl = (async (url, init) => {
     expect(String(url)).toContain('https://api.meld.io/');
     expect(String(url)).not.toContain('api-sb');
@@ -73,6 +73,90 @@ test('personal intent revalidates its own production method and amount, then com
     expect(blocked.queries).toHaveLength(0);
   }
   await expect(createPersonalFundingIntent(queuedDatabase([]).database, { ...input, paymentMethodType: undefined }, 'owner', { fetchImpl })).rejects.toThrow();
+});
+
+test('personal USD20 minimum is independent of administrative USD50 and each provider can impose a higher minimum', async () => {
+  const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
+  const result = await createPersonalFundingIntent(database, { ...input, amount: 20 }, 'owner', {
+    fetchImpl: (async () => Response.json([route('SWAPPED', [method('CREDIT_DEBIT_CARD', 10, 1000)]),
+      route('MERCURYO', [method('CREDIT_DEBIT_CARD', 30, 1000)]), route('TOPPER', [method('CREDIT_DEBIT_CARD', 1, 1000)])])) as unknown as typeof fetch,
+  });
+  expect(result.requestedAmount).toBe(20);
+  expect(result.allowedProviders).toEqual(['SWAPPED']);
+  expect(queries[0]!.params).toEqual(['owner', address, 'US', 20, id, 'CREDIT_DEBIT_CARD', 'USD']);
+  const thirty = queuedDatabase([[{ id, created_at: createdAt }]]);
+  const both = await createPersonalFundingIntent(thirty.database, { ...input, amount: 30 }, 'owner', {
+    fetchImpl: (async () => Response.json([route('SWAPPED', [method('CREDIT_DEBIT_CARD', 10, 1000)]),
+      route('MERCURYO', [method('CREDIT_DEBIT_CARD', 30, 1000)])])) as unknown as typeof fetch,
+  });
+  expect(both.allowedProviders).toEqual(['SWAPPED', 'MERCURYO']);
+  const blocked = queuedDatabase([]);
+  await expect(createPersonalFundingIntent(blocked.database, { ...input, amount: 20 }, 'owner', {
+    fetchImpl: (async () => Response.json([route('MERCURYO', [method('CREDIT_DEBIT_CARD', 30, 1000)])])) as unknown as typeof fetch,
+  })).rejects.toThrow('wallet_funding_amount_unavailable');
+  for (const amount of [20, 49.99]) await expect(createAdministrativeSandboxSession(blocked.database, { ...adminInput, amount }, {
+    subject: 'owner', clientIp: '192.0.2.1', environment,
+    fetchImpl: (async () => { throw new Error('must not contact provider'); }) as unknown as typeof fetch,
+  })).rejects.toThrow('wallet_funding_amount_unavailable');
+  expect(blocked.queries).toHaveLength(0);
+  const administrative = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+  const adminResult = await createAdministrativeSandboxSession(administrative.database, { ...adminInput, amount: 50 }, {
+    subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl: withSandboxOptions((async (_url, init) => {
+      expect(JSON.parse(String(init?.body)).sessionData.sourceAmount).toBe('50.00');
+      return Response.json({ id: 'synthetic-session', widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic-token' });
+    }) as typeof fetch),
+  });
+  expect(adminResult.requestedAmount).toBe(50);
+});
+
+test('personal SPEI uses the actual MXN amount and provider limits without manufacturing a USD valuation', async () => {
+  const speiInput = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', amount: 148.66 };
+  const fetchImpl = (async (url, init) => {
+    expect(String(url)).toContain('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/MX/MXN/USDT_POLYGON');
+    expect(init?.method).toBe('GET');
+    expect(new Headers(init?.headers).get('authorization')).not.toContain(environment.MELD_API_SANDBOX);
+    return Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [
+      { name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212_370.61 } },
+      { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'MXN', min: 100, max: 500_000 } },
+    ] }, { partner: 'TOPPER', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [
+      { name: 'SPEI', limits: { currencyCode: 'MXN', min: 1, max: 500_000 } },
+    ] }]);
+  }) as typeof fetch;
+  const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
+  const result = await createPersonalFundingIntent(database, speiInput, 'owner', { fetchImpl });
+  expect(result).toMatchObject({ requestedAmount: 148.66, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', allowedProviders: ['SWAPPED'] });
+  expect(queries[0]!.params).toEqual(['owner', address, 'MX', 148.66, id, 'SPEI', 'MXN']);
+  for (const amount of [148.65, 212_370.62]) {
+    const blocked = queuedDatabase([]);
+    await expect(createPersonalFundingIntent(blocked.database, { ...speiInput, amount }, 'owner', { fetchImpl }))
+      .rejects.toThrow('wallet_funding_amount_unavailable');
+    expect(blocked.queries).toHaveLength(0);
+  }
+  for (const change of [{ country: 'US' }, { paymentMethodType: 'CREDIT_DEBIT_CARD' }, { sourceCurrencyCode: 'COP' }]) {
+    const blocked = queuedDatabase([]);
+    await expect(createPersonalFundingIntent(blocked.database, { ...speiInput, ...change }, 'owner', {
+      fetchImpl: (async () => { throw new Error('must not query an unsupported source'); }) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_valuation_unavailable');
+    expect(blocked.queries).toHaveLength(0);
+  }
+});
+
+test('personal cancellation at the final discovery boundary never starts intent persistence', async () => {
+  const controller = new AbortController();
+  const remove = controller.signal.removeEventListener.bind(controller.signal);
+  // The read completed successfully, but cancellation arrives while it releases
+  // its parent listener and before createPersonalFundingIntent resumes.
+  Object.defineProperty(controller.signal, 'removeEventListener', { value: (...args: Parameters<AbortSignal['removeEventListener']>) => {
+    remove(...args);
+    controller.abort();
+  } });
+  const { database, queries } = queuedDatabase([]);
+  let reads = 0;
+  await expect(createPersonalFundingIntent(database, input, 'owner', { signal: controller.signal,
+    fetchImpl: (async () => { reads++; return Response.json([route('SWAPPED')]); }) as unknown as typeof fetch,
+  })).rejects.toMatchObject({ name: 'AbortError' });
+  expect(reads).toBe(1);
+  expect(queries).toHaveLength(0);
 });
 
 test('personal country and method restrictions cannot be bypassed by forging an intent or another catalogue', async () => {
@@ -259,7 +343,7 @@ test('local fiat cannot be relabelled as a USD minimum before a verified provide
     })).rejects.toThrow('wallet_funding_valuation_unavailable');
     expect(queries).toHaveLength(0);
   }
-  for (const amount of [49.99, 25_000.01]) {
+  for (const amount of [19.99, 25_000.01]) {
     const { database, queries } = queuedDatabase([]);
     await expect(createPersonalFundingIntent(database, { ...input, amount }, 'owner', { fetchImpl: never }))
       .rejects.toThrow('wallet_funding_amount_unavailable');
@@ -428,11 +512,11 @@ test('sandbox cannot invent methods from labels, absent limits, wrong fiat or an
 
 test('history accepts only the requested wallet environment and strips every financial or private extra', async () => {
   const row = { id, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated',
-    wallet_address: address, country_code: 'US', requested_amount: '100.00', created_at: createdAt,
+    wallet_address: address, country_code: 'US', requested_amount: '100.00', source_currency: 'USD', payment_method: null, created_at: createdAt,
     token: 'private', commission: 20, subject: 'private-owner' };
   const { database, queries } = queuedDatabase([[row]]);
   expect(await readWalletFundingHistory(database, 'owner', 'personal')).toEqual({ walletKind: 'personal', environment: 'production',
-    records: [{ checkoutReference: id, provider: 'reown', status: 'initiated', country: 'US', requestedAmount: 100, createdAt: createdAt.toISOString() }],
+    records: [{ checkoutReference: id, provider: 'reown', status: 'initiated', country: 'US', requestedAmount: 100, sourceCurrencyCode: 'USD', createdAt: createdAt.toISOString() }],
     settlement: 'unconfirmed' });
   expect(queries[0]!.params).toEqual(['owner', 'personal']);
   for (const bad of [{ ...row, environment: 'sandbox' }, { ...row, wallet_kind: 'administrative' }, { ...row, status: 'complete' }]) {
@@ -441,16 +525,54 @@ test('history accepts only the requested wallet environment and strips every fin
   }
 });
 
+test('history and owned status accept personal USD20 while rejecting an administrative record below USD50', async () => {
+  const personal = { id, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated',
+    wallet_address: address, country_code: 'US', requested_amount: '20.00', source_currency: 'USD', payment_method: null, created_at: createdAt };
+  const history = await readWalletFundingHistory(queuedDatabase([[personal]]).database, 'owner', 'personal');
+  expect(history.records[0]!.requestedAmount).toBe(20);
+  const status = await readWalletFundingStatus(queuedDatabase([[personal]]).database, 'owner', 'personal', id);
+  expect(status.requestedAmount).toBe(20);
+  expect(status.confirmation).toEqual({ state: 'unconfirmed', source: 'none', testMode: false });
+  const administrative = { ...personal, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created' };
+  await expect(readWalletFundingHistory(queuedDatabase([[administrative]]).database, 'owner', 'administrative'))
+    .rejects.toThrow('wallet_funding_unavailable');
+  await expect(readWalletFundingStatus(queuedDatabase([[administrative]]).database, 'owner', 'administrative', id))
+    .rejects.toThrow('wallet_funding_unavailable');
+});
+
+test('V2 history and status expose explicit MXN/SPEI metadata and reject currency relabelling or crossed wallets', async () => {
+  const row = { id, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated',
+    wallet_address: address, country_code: 'MX', requested_amount: '148.66', source_currency: 'MXN', payment_method: 'SPEI', created_at: createdAt };
+  const history = queuedDatabase([[row]]);
+  const result = await readWalletFundingHistory(history.database, 'owner', 'personal');
+  expect(history.queries[0]!.sql).toContain('payments.read_wallet_funding_history_v2');
+  expect(result.records[0]).toMatchObject({ requestedAmount: 148.66, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI' });
+  const status = queuedDatabase([[row]]);
+  const snapshot = await readWalletFundingStatus(status.database, 'owner', 'personal', id);
+  expect(status.queries[0]!.sql).toContain('payments.read_wallet_funding_status_v2');
+  expect(snapshot).toMatchObject({ requestedAmount: 148.66, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', country: 'MX',
+    confirmation: { state: 'unconfirmed', source: 'none', testMode: false } });
+  for (const change of [{ source_currency: undefined }, { source_currency: 'COP' }, { country_code: 'US' },
+    { payment_method: null }, { payment_method: 'CREDIT_DEBIT_CARD' }, { requested_amount: '148.666' }]) {
+    await expect(readWalletFundingHistory(queuedDatabase([[{ ...row, ...change }]]).database, 'owner', 'personal')).rejects.toThrow();
+    await expect(readWalletFundingStatus(queuedDatabase([[{ ...row, ...change }]]).database, 'owner', 'personal', id)).rejects.toThrow();
+  }
+  const administrative = { ...row, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created' };
+  await expect(readWalletFundingHistory(queuedDatabase([[administrative]]).database, 'owner', 'administrative'))
+    .rejects.toThrow('wallet_funding_unavailable');
+});
+
 test('owned status returns the immutable stored destination and cannot turn checkout creation into payment confirmation', async () => {
   for (const walletKind of ['personal', 'administrative'] as const) {
     const personal = walletKind === 'personal';
     const row = { id, wallet_kind: walletKind, environment: personal ? 'production' : 'sandbox', provider: personal ? 'reown' : 'meld',
-      status: personal ? 'initiated' : 'session_created', wallet_address: address, country_code: 'CO', requested_amount: '100.00', created_at: createdAt,
+      status: personal ? 'initiated' : 'session_created', wallet_address: address, country_code: 'CO', requested_amount: '100.00',
+      source_currency: 'USD', payment_method: null, created_at: createdAt,
       confirmation: { state: 'confirmed' }, paid: true, token: 'private', subject: 'private-owner', checkout_url: 'https://sb.meldcrypto.com/?wt=private' };
     const { database, queries } = queuedDatabase([[row]]);
     expect(await readWalletFundingStatus(database, 'native-owner', walletKind, id)).toEqual({
       checkoutReference: id, walletKind, environment: personal ? 'production' : 'sandbox', provider: personal ? 'reown' : 'meld',
-      requestedAmount: 100, country: 'CO', requestStatus: personal ? 'initiated' : 'session_created',
+      requestedAmount: 100, sourceCurrencyCode: 'USD', country: 'CO', requestStatus: personal ? 'initiated' : 'session_created',
       destination: { address, asset: 'USDT', network: 'polygon', chainId: 137 },
       confirmation: { state: 'unconfirmed', source: 'none', testMode: !personal },
     });
@@ -463,7 +585,7 @@ test('owned status returns the immutable stored destination and cannot turn chec
 
 test('status fails closed on another wallet, wrong reference, duplicate rows or success-looking untrusted state', async () => {
   const row = { id, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated',
-    wallet_address: address, country_code: 'US', requested_amount: '100', created_at: createdAt };
+    wallet_address: address, country_code: 'US', requested_amount: '100', source_currency: 'USD', payment_method: null, created_at: createdAt };
   await expect(readWalletFundingStatus(queuedDatabase([[]]).database, 'owner', 'personal', id)).rejects.toThrow('wallet_funding_not_found');
   for (const rows of [[{ ...row, wallet_kind: 'administrative' }], [{ ...row, environment: 'sandbox' }], [{ ...row, provider: 'meld' }],
     [{ ...row, id: '11111111-1111-4111-8111-111111111111' }], [{ ...row, status: 'complete' }], [row, row]]) {
