@@ -4,6 +4,7 @@ import { NOWPAYMENTS_PURCHASE_MAX_BODY, nowpaymentsPurchaseRequest, purchasesNam
 import { REFERRAL_ATTRIBUTION_MAX_BODY, referralAttributionRequest, referralAttributionNamespace } from './referral-attribution.mjs';
 import { boundedBody as readBoundedBody, fetchWithDeadline } from './transport.mjs';
 import { authTraceEnabled } from './auth-trace-store.mjs';
+import { WALLET_FUNDING_MAX_BODY, walletFundingNamespace, walletFundingRequest } from './wallet-funding.mjs';
 export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
 
 export const SERVICES = Object.freeze({
@@ -292,6 +293,16 @@ export async function dispatchCore(request, env, resolve) {
   // Scheduled processing is generated inside this Worker only. Never forward
   // this namespace from a portal, admin, public HTTP or private fetch caller.
   if (checkoutPath.startsWith('/api/payments/internal')) return failure('not_found', 404);
+  const fundingPath = walletFundingNamespace(checkoutPath);
+  let fundingRequest = false;
+  if (fundingPath) {
+    if (request.method === 'POST') {
+      try { body = await boundedBody(request, WALLET_FUNDING_MAX_BODY); }
+      catch (error) { return bodyReadFailure(error); }
+    }
+    fundingRequest = walletFundingRequest(request, url, body, env, authReady(env));
+    if (!fundingRequest) return failure('wallet_funding_unavailable', 503);
+  }
   const referralPath = referralAttributionNamespace(checkoutPath);
   let referralRequest = false;
   if (referralPath) {
@@ -365,13 +376,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim' || walletLink || meldWebhook);
-  if (!read && !authWrite && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('financial_review_required', 503);
+  if (!read && !authWrite && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);

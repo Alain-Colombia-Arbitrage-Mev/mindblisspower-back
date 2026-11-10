@@ -122,6 +122,16 @@ export function containerEnvironment(service, env) {
         || /\s/.test(meldCredential)) throw new Error('Meld onramp configuration is invalid');
       values[meldSource] = meldCredential;
     }
+    values.MELD_ADMIN_SANDBOX_ENABLED = String(env.MELD_ADMIN_SANDBOX_ENABLED === 'true');
+    if (env.MELD_ADMIN_SANDBOX_ENABLED === 'true') {
+      const sandboxKey = env.MELD_API_SANDBOX;
+      if (typeof sandboxKey !== 'string' || !sandboxKey || sandboxKey.length > 2048 || /\s/.test(sandboxKey)) {
+        throw new Error('Meld sandbox configuration is invalid');
+      }
+      // This credential is consumed only by the separate sandbox session API.
+      // The production commission writer still requires the live credential.
+      values.MELD_API_SANDBOX = sandboxKey;
+    }
     if (env.MELD_WEBHOOK_ENABLED === 'true') {
       for (const key of ['MELD_WEBHOOK_SIGNING_KEY', 'MELD_ACCOUNT_ID', 'MELD_WEBHOOK_PROFILE_ID']) {
         if (typeof env[key] !== 'string' || !env[key].trim() || env[key].length > 512 || /[\r\n]/.test(env[key])) {

@@ -18,6 +18,8 @@
       "routes": [],
       "vars": {
         "CORE_ENV": "staging",
+        "WALLET_FUNDING_ENABLED": "false",
+        "MELD_ADMIN_SANDBOX_ENABLED": "false",
         "CORE_HTTP_EGRESS_STRICT_ENABLED": "false",
         "CORE_OBSERVABILITY_ENABLED": "false",
         "CORE_AUTH_TRACE_ENABLED": "false",
@@ -64,6 +66,8 @@
       "triggers": { "crons": ["*/5 * * * *"] },
       "vars": {
         "CORE_ENV": "production",
+        "WALLET_FUNDING_ENABLED": "true",
+        "MELD_ADMIN_SANDBOX_ENABLED": "true",
         "CORE_HTTP_EGRESS_STRICT_ENABLED": "false",
         "CORE_OBSERVABILITY_ENABLED": "false",
         "CORE_AUTH_TRACE_ENABLED": "true",

@@ -10,6 +10,8 @@ import { registerWalletLinkRoutes } from './http/wallet-link-routes';
 import { registerAdministrativeWalletRoutes } from './http/administrative-wallet-routes';
 import { registerMeldWebhookRoutes } from './http/meld-webhook-routes';
 import { registerMeldOnrampRoutes } from './http/meld-onramp-routes';
+import { registerWalletFundingRoutes } from './http/wallet-funding-routes';
+import { authDb } from './db/auth-client';
 import { MELD_WEBHOOK_MAX_BYTES, MELD_WEBHOOK_PATH } from './modules/payments/meld-webhook';
 import { authProxyContext } from './http/auth-proxy-context';
 import { OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy, registerOtpDiagnosticRoutes, registerOtpTraceReadiness } from './http/otp-diagnostic-routes';
@@ -49,6 +51,7 @@ registerIdentityRoutes(app);
 registerWalletLinkRoutes(app);
 registerAdministrativeWalletRoutes(app);
 registerMeldOnrampRoutes(app);
+registerWalletFundingRoutes(app, { database: authDb });
 registerOtpDiagnosticRoutes(app);
 
 app.get('/health', (c) => c.text('ok'));
