@@ -113,6 +113,15 @@ export function containerEnvironment(service, env) {
     }
     values.AUTH_OBSERVABILITY_ENABLED = String(env.CORE_OBSERVABILITY_ENABLED === 'true');
     values.AUTH_OTP_TRACE_ENABLED = String(env.CORE_AUTH_TRACE_ENABLED === 'true');
+    // The live portal must never fall back to the Meld sandbox. Forward one
+    // explicitly selected credential to the API container, and nothing else.
+    const meldSource = env.CORE_ENV === 'production' ? 'MELD_API_KEY' : 'MELD_API_SANDBOX';
+    const meldCredential = env[meldSource];
+    if (meldCredential !== undefined) {
+      if (typeof meldCredential !== 'string' || !meldCredential || meldCredential.length > 2048
+        || /\s/.test(meldCredential)) throw new Error('Meld onramp configuration is invalid');
+      values[meldSource] = meldCredential;
+    }
     if (env.MELD_WEBHOOK_ENABLED === 'true') {
       for (const key of ['MELD_WEBHOOK_SIGNING_KEY', 'MELD_ACCOUNT_ID', 'MELD_WEBHOOK_PROFILE_ID']) {
         if (typeof env[key] !== 'string' || !env[key].trim() || env[key].length > 512 || /[\r\n]/.test(env[key])) {

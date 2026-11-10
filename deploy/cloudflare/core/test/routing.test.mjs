@@ -296,6 +296,23 @@ test('Meld webhook secrets reach only the auth container when explicitly enabled
   assert.throws(() => containerEnvironment('api', { ...apiSecrets(), MELD_WEBHOOK_ENABLED: 'true' }));
 });
 
+test('Meld onramp forwards only the environment-appropriate credential to the auth container', () => {
+  const production = containerEnvironment('api', { ...apiSecrets(), CORE_ENV: 'production', MELD_API_KEY: 'live_synthetic_key',
+    MELD_API_SANDBOX: 'must-not-reach-production' });
+  assert.equal(production.MELD_API_KEY, 'live_synthetic_key');
+  assert.equal(production.MELD_API_SANDBOX, undefined);
+
+  const staging = containerEnvironment('api', { ...apiSecrets(), CORE_ENV: 'staging',
+    MELD_API_KEY: 'must-not-reach-staging', MELD_API_SANDBOX: 'sandbox_synthetic_key' });
+  assert.equal(staging.MELD_API_SANDBOX, 'sandbox_synthetic_key');
+  assert.equal(staging.MELD_API_KEY, undefined);
+
+  for (const value of ['', ' ', 'bad key', 'bad\r\nkey', 'a'.repeat(2049)]) {
+    assert.throws(() => containerEnvironment('api', { ...apiSecrets(), CORE_ENV: 'production', MELD_API_KEY: value }),
+      { message: 'Meld onramp configuration is invalid' });
+  }
+});
+
 test('opaque tunnel is reachable only from the API outbound binding at a fixed private endpoint', async () => {
   const input = new Request('http://engine-grpc.core.internal/v1/engine-tunnel', { headers: { upgrade: 'websocket', 'sec-websocket-protocol': TUNNEL_PROTOCOL } });
   assert.equal(isGrpcTunnelRequest(input), true);
@@ -403,7 +420,7 @@ test('versioned environments have no public ingress, broad financial scheduler, 
       assert.equal(env.vars[flag], name === 'production' ? 'true' : 'false');
     }
     if (name === 'production') {
-      assert.ok(env.containers.every(container => /^registry\.cloudflare\.com\/[a-f0-9]{32}\/[a-z0-9/_-]+@sha256:[a-f0-9]{64}$/.test(container.image)));
+      assert.ok(env.containers.every(container => /^registry\.cloudflare\.com\/[a-f0-9]{32}\/[a-z0-9/_-]+(?::[a-z0-9._-]+)?@sha256:[a-f0-9]{64}$/.test(container.image)));
       assert.deepEqual(env.containers.filter(container => container.rollout_kind !== 'none').map(container => container.name), ['core-api', 'core-payments']);
     }
     assert.ok(Object.keys(env.vars).every(key => !/SECRET|TOKEN|PASSWORD|DATABASE_URL/.test(key)));

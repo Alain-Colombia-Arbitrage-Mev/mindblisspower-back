@@ -5,7 +5,7 @@ export const MELD_ONRAMP_CRYPTO = 'USDT_POLYGON' as const;
 export const MELD_ONRAMP_NETWORK = 'POLYGON' as const;
 export const MELD_ONRAMP_MINIMUM_USD = 50;
 
-const BLOCKED_PROVIDERS = new Set(['BINANCECONNECT', 'BINANCEPAY']);
+const ALLOWED_PROVIDERS = new Set(['TOPPER', 'SWAPPED']);
 const countryInput = z.string().regex(/^[A-Z]{2}$/);
 const paymentMethodInput = z.string().regex(/^[A-Z0-9_]{2,40}$/);
 const providerInput = z.string().regex(/^[A-Z0-9_]{2,40}$/);
@@ -164,7 +164,7 @@ async function discoverMeldOnramp(
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const route = item as Record<string, unknown>;
     const parsedProvider = providerInput.safeParse(route.partner);
-    if (!parsedProvider.success || BLOCKED_PROVIDERS.has(parsedProvider.data)) continue;
+    if (!parsedProvider.success || !ALLOWED_PROVIDERS.has(parsedProvider.data)) continue;
     if (!providers.includes(parsedProvider.data)) providers.push(parsedProvider.data);
     if (!Array.isArray(route.paymentMethods)) continue;
     methods.push(...route.paymentMethods.flatMap(parseRouteMethod));
@@ -232,7 +232,7 @@ export async function createMeldOnrampQuote(
     const method = paymentMethodInput.safeParse(canonicalPaymentMethod(rawMethod));
     const sourceAmount = safeNumber(quote.sourceAmount);
     const destinationAmount = safeNumber(quote.destinationAmount);
-    if (!provider.success || !allowedProviders.has(provider.data) || BLOCKED_PROVIDERS.has(provider.data)
+    if (!provider.success || !allowedProviders.has(provider.data) || !ALLOWED_PROVIDERS.has(provider.data)
       || !method.success || !allowedMethods.has(method.data) || sourceAmount === null || destinationAmount === null
       || destinationAmount <= 0 || (typeof quote.destinationCurrencyCode === 'string' && quote.destinationCurrencyCode !== input.crypto)) return [];
     return [{

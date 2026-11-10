@@ -14,9 +14,15 @@ function discoveryFetch(quote?: (init?: RequestInit) => Response) {
     }
     if (url.includes('/supported/routes/')) {
       return Response.json([
-        { partner: 'BANXA', paymentMethods: [
+        { partner: 'TOPPER', paymentMethods: [
           { paymentType: 'CARD', name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } },
           { paymentType: 'MOBILE_WALLET', name: 'APPLE_PAY', limits: { min: 20, max: 500 } },
+        ] },
+        { partner: 'SWAPPED', paymentMethods: [
+          { paymentType: 'CARD', name: 'MASTERCARD', limits: { min: 30, max: 10000 } },
+        ] },
+        { partner: 'BANXA', paymentMethods: [
+          { paymentType: 'CARD', name: 'CREDIT_DEBIT_CARD', limits: { min: 1, max: 25000 } },
         ] },
         { partner: 'BINANCECONNECT', paymentMethods: [
           { paymentType: 'CARD', name: 'CREDIT_DEBIT_CARD', limits: { min: 1, max: 25000 } },
@@ -48,21 +54,21 @@ describe('Meld onramp preflight', () => {
     const { fetchImpl } = discoveryFetch(init => {
       sent = JSON.parse(String(init?.body));
       return Response.json({ quotes: [
-        { serviceProvider: 'BANXA', paymentMethodType: 'VISA', sourceAmount: 50, destinationAmount: 47,
+        { serviceProvider: 'TOPPER', paymentMethodType: 'VISA', sourceAmount: 50, destinationAmount: 47,
           totalFee: 3, transactionFee: 2, networkFee: 1, partnerFee: 0, destinationCurrencyCode: 'USDT_POLYGON',
           rampIntelligence: { rampScore: 70 } },
-        { serviceProvider: 'BANXA', paymentMethodType: 'APPLE_PAY', sourceAmount: 50, destinationAmount: 48,
+        { serviceProvider: 'TOPPER', paymentMethodType: 'APPLE_PAY', sourceAmount: 50, destinationAmount: 48,
           totalFee: 2, transactionFee: 2, networkFee: 0, partnerFee: 0, destinationCurrencyCode: 'USDT_POLYGON',
           rampIntelligence: { rampScore: 90 } },
       ] });
     });
     const result = await createMeldOnrampQuote({ ...request, amount: 50 }, { environment, fetchImpl });
-    expect(sent.serviceProviders).toEqual(['BANXA']);
+    expect(sent.serviceProviders).toEqual(['TOPPER', 'SWAPPED']);
     expect(sent).not.toHaveProperty('paymentMethodType');
     expect(sent.destinationCurrencyCode).toBe('USDT_POLYGON');
     expect(result.available).toBe(true);
     if (result.available) {
-      expect(result.quote.serviceProvider).toBe('BANXA');
+      expect(result.quote.serviceProvider).toBe('TOPPER');
       expect(result.quote.paymentMethodType).toBe('APPLE_PAY');
       expect(result.quotes.map(item => item.paymentMethodType)).toEqual(['APPLE_PAY', 'CREDIT_DEBIT_CARD']);
     }
