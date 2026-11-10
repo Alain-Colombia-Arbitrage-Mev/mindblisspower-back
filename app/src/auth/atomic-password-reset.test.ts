@@ -130,7 +130,8 @@ test('scoped options preserve the native hook while marking the credential mutat
   await expect(scoped.emailAndPassword!.onPasswordReset!({ user }, request())).rejects.toThrow('Synthetic late failure');
   expect(state.credentialChanged).toBe(true);
   for (const config of [{}, { emailAndPassword: { enabled: true } },
-    { ...options, secondaryStorage: { get: async () => null, set: async () => {}, delete: async () => {} } },
+    { ...options, secondaryStorage: { get: async () => null, getAndDelete: async () => null,
+      increment: async () => 1, set: async () => {}, delete: async () => {} } },
     { ...options, session: { cookieCache: { enabled: true } } }]) {
     expect(() => atomicPasswordResetOptions(config, { credentialChanged: false })).toThrow();
   }

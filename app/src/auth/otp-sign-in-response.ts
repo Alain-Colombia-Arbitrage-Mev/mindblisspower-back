@@ -2,13 +2,14 @@ const record = (value: unknown): value is Record<string, unknown> => value !== n
 const email = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
 const invalidProof = () => new Error('Authentication response could not be verified');
 
-/** Repair only Better Auth 1.6.22's stale first-OTP user snapshot, never auth state. */
+/** Validate every successful OTP session against one fresh canonical user read.
+ * Older releases also need the returned verified bit repaired; newer releases
+ * already return it as true, but still must not bypass this proof boundary. */
 export async function verifiedOtpSignInResponse(returned: unknown, newSession: unknown, recipient: unknown,
   readUser: (userId: string) => Promise<unknown>): Promise<Record<string, unknown> | undefined> {
-  // Errors, other response shapes and an already-verified response are untouched.
-  // A missing newSession can be an interrupted/2FA flow, not proof of a login.
+  // Errors and interrupted/2FA flows have no new session to validate.
   if (!record(returned) || returned instanceof Error || 'error' in returned || 'code' in returned
-    || !record(returned.user) || returned.user.emailVerified !== false || newSession == null) return;
+    || !record(returned.user) || ![true, false].includes(returned.user.emailVerified as boolean) || newSession == null) return;
   if (!record(newSession) || !record(newSession.session) || !record(newSession.user)) throw invalidProof();
   const { session, user } = newSession;
   const subject = session.userId;
@@ -19,7 +20,9 @@ export async function verifiedOtpSignInResponse(returned: unknown, newSession: u
   if (!record(canonical) || canonical.id !== subject || canonical.emailVerified !== true || !canonicalEmail
     || email(returned.user.email) !== canonicalEmail || email(user.email) !== canonicalEmail
     || email(recipient) !== canonicalEmail) throw invalidProof();
-  // Preserve the exact native payload and its projection; do not expose fields
-  // from the database, approve bindings or issue a token/session of our own.
-  return { ...returned, user: { ...returned.user, emailVerified: true } };
+  // Preserve a current native payload exactly. For older stale snapshots,
+  // change only the proven bit; never project private canonical fields.
+  return returned.user.emailVerified === false
+    ? { ...returned, user: { ...returned.user, emailVerified: true } }
+    : undefined;
 }

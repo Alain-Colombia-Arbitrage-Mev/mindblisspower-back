@@ -6,6 +6,7 @@ import { registerAffiliateRoutes } from './http/affiliate-routes';
 import { registerTransactionRoutes } from './http/transaction-routes';
 import { registerCommandCenterRoutes } from './http/command-center-routes';
 import { registerIdentityRoutes } from './http/identity-routes';
+import { registerWalletLinkRoutes } from './http/wallet-link-routes';
 import { authProxyContext } from './http/auth-proxy-context';
 import { OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy, registerOtpDiagnosticRoutes, registerOtpTraceReadiness } from './http/otp-diagnostic-routes';
 import type { ApiEnvironment } from './http/types';
@@ -37,6 +38,7 @@ registerAffiliateRoutes(app);
 registerTransactionRoutes(app);
 registerCommandCenterRoutes(app);
 registerIdentityRoutes(app);
+registerWalletLinkRoutes(app);
 registerOtpDiagnosticRoutes(app);
 
 app.get('/health', (c) => c.text('ok'));

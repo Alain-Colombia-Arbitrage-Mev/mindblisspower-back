@@ -1,7 +1,7 @@
 // Additive domain tables owned by _meta/migration/70_stable_identity_bindings.sql,
 // not by Better Auth's migrator. No snapshots or raw provider payloads live here.
 import { sql } from 'drizzle-orm';
-import { pgSchema, text, bigint, boolean, timestamp, uuid, primaryKey, unique, index, check } from 'drizzle-orm/pg-core';
+import { pgSchema, text, bigint, smallint, boolean, timestamp, uuid, primaryKey, unique, index, check } from 'drizzle-orm/pg-core';
 import { user } from './auth';
 import { person } from './mlm';
 
@@ -61,3 +61,33 @@ export const stripeCustomer = identitySchema.table('stripe_customer', {
   index('stripe_customer_actor_idx').on(table.linkedBySubject),
   check('stripe_account_id_format', sql`${table.accountId} ~ '^acct_[A-Za-z0-9]+$'`),
   check('stripe_customer_id_format', sql`${table.customerId} ~ '^cus_[A-Za-z0-9]+$'`)]);
+
+export const walletLinkChallenge = identitySchema.table('wallet_link_challenge', {
+  id: uuid('id').primaryKey(),
+  subject: text('subject').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  personId: bigint('person_id', { mode: 'bigint' }).notNull().references(() => person.id, { onDelete: 'restrict' }),
+  chainId: smallint('chain_id').notNull(),
+  address: text('address').notNull(),
+  nonceHash: text('nonce_hash').notNull().unique('wallet_link_challenge_nonce_hash_key'),
+  message: text('message').notNull(),
+  issuedAt: timestamp('issued_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  consumedAt: timestamp('consumed_at', { withTimezone: true }),
+}, table => [index('wallet_link_challenge_subject_issued_idx').on(table.subject, table.issuedAt),
+  index('wallet_link_challenge_open_expiry_idx').on(table.expiresAt).where(sql`${table.consumedAt} IS NULL`),
+  check('wallet_link_challenge_chain', sql`${table.chainId} = 1`),
+  check('wallet_link_challenge_address', sql`${table.address} ~ '^0x[0-9a-f]{40}$'`),
+  check('wallet_link_challenge_nonce_hash', sql`${table.nonceHash} ~ '^[0-9a-f]{64}$'`),
+  check('wallet_link_challenge_expiry', sql`${table.expiresAt} > ${table.issuedAt}`),
+  check('wallet_link_challenge_consumption', sql`${table.consumedAt} IS NULL OR ${table.consumedAt} >= ${table.issuedAt}`)]);
+
+export const walletBinding = identitySchema.table('wallet_binding', {
+  subject: text('subject').primaryKey().references(() => user.id, { onDelete: 'restrict' }),
+  personId: bigint('person_id', { mode: 'bigint' }).notNull().unique('wallet_binding_person_id_key').references(() => person.id, { onDelete: 'restrict' }),
+  chainId: smallint('chain_id').notNull(),
+  address: text('address').notNull(),
+  verifiedAt: timestamp('verified_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [unique('wallet_binding_chain_address_key').on(table.chainId, table.address),
+  check('wallet_binding_chain', sql`${table.chainId} = 1`),
+  check('wallet_binding_address', sql`${table.address} ~ '^0x[0-9a-f]{40}$'`)]);

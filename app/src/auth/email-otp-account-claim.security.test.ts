@@ -8,7 +8,7 @@ import type { AuthEnvironment, EmailMessage } from './delivery';
 
 // Synthetic local regression for the pre-account takeover class discussed in
 // Better Auth security/GHSA advisories. This is evidence about the INSTALLED
-// 1.6.22 verify-email handler, not an assertion that a particular GHSA covers it.
+// installed verify-email handler, not an assertion that a particular GHSA covers it.
 // No provider, production credential, database socket or real message is used.
 const email = 'synthetic-account-owner@example.test';
 const attackerPassword = 'Synthetic-Unproven-Attacker-Password-123';
@@ -95,7 +95,7 @@ test('control: native email OTP sign-in removes an unproven pre-created password
   expect(app.store.session).toHaveLength(1);
 });
 
-test('email proof invalidates standing unproven native session cookies but leaves another user and noncredential accounts intact', async () => {
+test('email proof strips every unproven owner account link while leaving another user intact', async () => {
   const app = fixture();
   expect((await app.signup(attackerPassword)).status).toBe(200);
   const owner = app.store.user![0]!;
@@ -127,7 +127,7 @@ test('email proof invalidates standing unproven native session cookies but leave
   const verification = await app.request('/email-otp/verify-email', { email, otp: app.code() });
   expect(verification.status).toBe(200);
   expect(app.store.session).toHaveLength(2);
-  expect(app.store.account!.filter(account => account.userId === owner.id)).toEqual([externalAccount]);
+  expect(app.store.account!.filter(account => account.userId === owner.id)).toEqual([]);
   for (const oldCookie of previous) expect(await (await app.request('/get-session', undefined, oldCookie)).json()).toBeNull();
   expect(await (await app.request('/get-session', undefined, otherCookie)).json()).toMatchObject({ user: { id: otherId } });
   expect(await (await app.request('/get-session', undefined, cookies(verification))).json())

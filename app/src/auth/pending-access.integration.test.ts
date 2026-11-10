@@ -203,7 +203,7 @@ test('wrong and expired codes cannot verify or provision a precreated pending ac
   app.unchanged();
 });
 
-test('already verified OTP login keeps its native response without an extra canonical lookup', async () => {
+test('already verified OTP login keeps its native response after one canonical lookup', async () => {
   const app = fixture();
   app.store.user![0]!.emailVerified = true;
   await app.request('/email-otp/send-verification-otp', { email, type: 'sign-in' });
@@ -211,7 +211,7 @@ test('already verified OTP login keeps its native response without an extra cano
   expect(response.status).toBe(200);
   expect((await response.clone().json() as { user: { emailVerified: boolean } }).user.emailVerified).toBe(true);
   expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
-  expect(app.canonicalReads()).toBe(0);
+  expect(app.canonicalReads()).toBe(1);
   app.unchanged(true);
 });
 

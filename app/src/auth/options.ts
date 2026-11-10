@@ -114,7 +114,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
       // Do not shadow the emailOTP plugin's override during Better Auth init.
       ...(emailEnabled ? { beforeEmailVerification: async user => {
         if (user.emailVerified !== false) return;
-        // The installed native handler calls this ONLY after consuming valid
+        // The native handler calls this ONLY after consuming valid
         // email proof, before flipping emailVerified or creating its session.
         // Reuse the public native helper used by OTP sign-in: an unverified
         // password/session may have been planted by somebody else beforehand.

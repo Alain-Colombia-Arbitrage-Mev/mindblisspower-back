@@ -31,6 +31,10 @@ const AUTH_ONLY_PATHS = Object.freeze({
     '/api/auth/sign-up/email', '/api/auth/email-otp/verify-email', '/api/auth/sign-in/email',
     '/api/auth/email-otp/request-password-reset', '/api/auth/email-otp/reset-password']),
 });
+const WALLET_LINK_PATHS = Object.freeze({
+  GET: new Set(['/api/member/wallet-link']),
+  POST: new Set(['/api/member/wallet-link/challenge', '/api/member/wallet-link/confirm']),
+});
 
 function failure(error, status) {
   return Response.json({ error }, { status, headers: { 'Cache-Control': 'private, no-store' } });
@@ -79,6 +83,15 @@ function reportOnlyRequest(request, url) {
 function authOnlyRequest(request, url) {
   return url.protocol === 'https:' && url.hostname === 'auth.core.internal' && !url.search
     && Boolean(AUTH_ONLY_PATHS[request.method]?.has(url.pathname));
+}
+
+function walletLinkRequest(request, url) {
+  if (url.protocol !== 'https:' || url.hostname !== 'auth.core.internal' || url.search
+    || !WALLET_LINK_PATHS[request.method]?.has(url.pathname)) return false;
+  if (request.method === 'GET') return true;
+  return !request.headers.has('content-encoding')
+    && /^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')
+    && typeof request.headers.get('origin') === 'string';
 }
 
 function blockedPhoneAuthPath(pathname) {
@@ -320,15 +333,16 @@ export async function dispatchCore(request, env, resolve) {
   // Exact auth routes can launch independently; this never starts Go, exposes a
   // business read, permits identity claims, or relaxes the financial write gate.
   const authOnly = !coreReady(env) && authReady(env) && authOnlyRequest(request, url);
+  const walletLink = authReady(env) && walletLinkRequest(request, url);
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !reportsOnly && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
-    && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim');
+    && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim' || walletLink);
   if (!read && !authWrite && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {

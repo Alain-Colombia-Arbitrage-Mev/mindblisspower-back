@@ -33,6 +33,32 @@ test('auth-only launch permits exact registration, email verification, login and
   }
 });
 
+test('verified wallet linking exposes only its exact private read and signed-proof writes', async () => {
+  const cases = [
+    ['GET', '/api/member/wallet-link', undefined],
+    ['POST', '/api/member/wallet-link/challenge', '{"address":"0x0000000000000000000000000000000000000001"}'],
+    ['POST', '/api/member/wallet-link/confirm', '{"challengeId":"d8a4c010-cc33-44da-a297-8b3c6440f491","signature":"0x' + 'a'.repeat(130) + '"}'],
+  ];
+  for (const [method, path, body] of cases) {
+    let calls = 0;
+    const response = await dispatchCore(request(path, { method, body,
+      headers: method === 'POST' ? { 'content-type': 'application/json', origin: 'https://app.mindblisspower.com', cookie: 'better-auth.session_token=synthetic' } : { cookie: 'better-auth.session_token=synthetic' } }),
+    authOnlyReady, service => { calls++; assert.equal(service, 'api'); return { fetch: async forwarded => {
+      assert.equal(forwarded.headers.get('cookie'), 'better-auth.session_token=synthetic');
+      return Response.json({ linked: method === 'GET' });
+    } }; });
+    assert.equal(response.status, 200, `${method} ${path}`); assert.equal(calls, 1);
+  }
+  for (const [method, path, init] of [
+    ['POST', '/api/member/wallet-link/challenge', { headers: { origin: 'https://app.mindblisspower.com' }, body: '{}' }],
+    ['POST', '/api/member/wallet-link/challenge?admin=true', { headers: { 'content-type': 'application/json', origin: 'https://app.mindblisspower.com' }, body: '{}' }],
+    ['PUT', '/api/member/wallet-link/confirm', { headers: { 'content-type': 'application/json', origin: 'https://app.mindblisspower.com' }, body: '{}' }],
+    ['GET', '/api/member/wallet-link/challenge', {}],
+  ]) {
+    assert.equal((await dispatchCore(request(path, { method, ...init }), authOnlyReady, () => assert.fail('wallet-link alias escaped'))).status, 503);
+  }
+});
+
 test('auth-only release remains closed with missing, malformed or incomplete auth gates', async () => {
   for (const key of ['AUTH_SERVICES_ENABLED', 'AUTH_CUTOVER_VERIFIED', 'CORE_DATA_ACCESS_VERIFIED']) {
     for (const value of [undefined, 'false', 'TRUE', '1', true]) {

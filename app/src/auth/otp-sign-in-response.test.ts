@@ -22,15 +22,26 @@ test('first OTP response changes only its stale verified bit after matching cano
   expect(JSON.stringify(result)).not.toContain('never project');
 });
 
-test('already verified, error, malformed and interrupted results never trigger a canonical read or fabricate proof', async () => {
+test('error, malformed and interrupted results never trigger a canonical read or fabricate proof', async () => {
   const app = fixture();
   const noRead = async () => { throw new Error('Unexpected canonical read'); };
   for (const returned of [undefined, null, [], new Error('native failure'), { error: 'denied', ...app.returned },
-    { code: 'INVALID_OTP', ...app.returned }, { ...app.returned, user: { ...app.returned.user, emailVerified: true } },
+    { code: 'INVALID_OTP', ...app.returned },
     { ...app.returned, user: { ...app.returned.user, emailVerified: undefined } }]) {
     expect(await verifiedOtpSignInResponse(returned, app.newSession, app.canonical.email, noRead)).toBeUndefined();
   }
   expect(await verifiedOtpSignInResponse(app.returned, null, app.canonical.email, noRead)).toBeUndefined();
+});
+
+test('a current already-verified success is still checked once and returned unchanged', async () => {
+  const app = fixture();
+  app.returned.user.emailVerified = true;
+  app.newSession.user.emailVerified = true;
+  let reads = 0;
+  expect(await verifiedOtpSignInResponse(app.returned, app.newSession, app.canonical.email, async () => {
+    reads++; return app.canonical;
+  })).toBeUndefined();
+  expect(reads).toBe(1);
 });
 
 test('mismatched native subject or token is rejected before reading another account', async () => {
