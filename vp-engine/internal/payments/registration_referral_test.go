@@ -18,3 +18,11 @@ func TestNormalizePreferredSide(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomaticPlacementSideIgnoresEveryClientHint(t *testing.T) {
+	for _, input := range []string{"", "L", "R", "left", "ROOT", "  r  "} {
+		if got := automaticPlacementSide(input); got != "" {
+			t.Fatalf("automaticPlacementSide(%q)=%q, want empty", input, got)
+		}
+	}
+}

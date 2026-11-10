@@ -414,7 +414,10 @@ func autoPlaceAffiliateWithEnrollment(ctx context.Context, tx pgx.Tx, personID, 
 		return 0, fmt.Errorf("advisory lock: %w", err)
 	}
 
-	preferred := normalizePreferredSide(requestedSide)
+	// Placement is an invariant of the binary engine, not a browser preference.
+	// Ignore legacy L/R hints and choose the weak leg at every level below the
+	// authoritative sponsor while the sponsor advisory lock is held.
+	preferred := automaticPlacementSide(requestedSide)
 
 	// Descenso SET-BASED: un solo CTE recursivo baja desde el sponsor. Con L/R
 	// explícito sigue esa misma pierna en cada nodo; sin preferencia elige la

@@ -12,6 +12,7 @@ import (
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -79,7 +80,7 @@ func (v *BetterAuthVerifier) VerifyEmail(ctx context.Context, raw string) (strin
 // a person, claim a legacy account or move a node in the network.
 type boundBetterAuthVerifier struct {
 	verifier *BetterAuthVerifier
-	db       *pgxpool.Pool
+	db       banQuerier
 }
 
 func (v *boundBetterAuthVerifier) VerifyEmail(ctx context.Context, raw string) (string, error) {
@@ -101,7 +102,10 @@ func (v *boundBetterAuthVerifier) VerifySubject(ctx context.Context, raw string)
 		WHERE b.provider='better_auth' AND b.subject=$1 AND p.user_id=b.subject
 		  AND u.email_verified=true AND lower(btrim(u.email))=lower(btrim(p.email::text))
 		  AND p.status::text IN ('pending','active') AND NOT COALESCE(p.blacklisted,false)`, identity.subject).Scan(&email, &publicID); err != nil {
-		return "", "", errors.New("Better Auth subject has no available verified MLM binding")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", errors.New("Better Auth subject has no available verified MLM binding")
+		}
+		return "", "", ErrAuthenticationUnavailable
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" || publicID == "" || email != identity.email {

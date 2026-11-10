@@ -67,8 +67,11 @@ func nowPurchaseOwner(ctx context.Context, tx pgx.Tx, subject, email string) (in
  WHERE b.subject=$1 AND b.provider='better_auth' AND u.email_verified AND lower(btrim(u.email))=$2 AND lower(btrim(p.email::text))=$2
  AND p.status::text IN('active','pending') AND NOT COALESCE(p.blacklisted,false)
  AND NOT EXISTS(SELECT 1 FROM mlm.person other WHERE other.id<>p.id AND lower(btrim(other.email::text))=$2)`, subject, strings.ToLower(strings.TrimSpace(email))).Scan(&person, &publicID)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, "", ErrCheckoutIdentityReview
+	}
+	if err != nil {
+		return 0, "", ErrAuthenticationUnavailable
 	}
 	return person, publicID, nil
 }

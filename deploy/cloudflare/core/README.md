@@ -4,6 +4,59 @@ Production exposes no public URL, `workers.dev`, previews or direct Go ports.
 The two public portal Workers reach this Worker using `CORE_API` service bindings.
 Chatwoot is not deployed or connected here.
 
+## Transport deadlines and optional HTTP egress policy
+
+The private gateway bounds streaming request uploads to ten seconds before it
+starts a Container. Its upstream wall-clock deadline also covers response body
+EOF/cancellation: 45 seconds for auth, 30 seconds for signed NOW IPNs, 65 seconds
+for checkout/reports (above Go's existing 60-second response window), and ten
+seconds for health/payment status. The provider NOW contract keeps twelve
+seconds. Failures are generic and **never trigger an automatic retry** or imply
+that a message, invoice or durable payment capture was not created. Scheduled
+NOW outbox processing retains its separate existing 50-second contract.
+
+`CORE_HTTP_EGRESS_STRICT_ENABLED=false` is explicit in both environments. Do not
+turn it on as part of an unrelated release. The prepared per-service policy
+allows the API's selected sender only (`api.resend.com` POST `/emails`, or the
+configured Cloudflare account's email sending POST), and retains the existing
+exact private Engine/observation/JWKS/NOW routing guards. Redirects, arbitrary
+hosts, HTTP downgrades, alternate credentials/providers and unreviewed endpoints
+are denied when enabled. No send, provider fallback, payment or probe is created
+by configuring the policy.
+
+This is an **HTTP/HTTPS interception policy, not a complete network firewall**.
+`enableInternet` intentionally stays true: PostgreSQL uses raw TCP/TLS and must
+not be disabled by an HTTP allowlist. The reviewed destination inventory is:
+
+| Service | HTTP/WebSocket destinations | Non-HTTP dependencies |
+| --- | --- | --- |
+| API | Selected Resend/Cloudflare email POST; private Engine health/opaque WebSocket tunnel; private email observation when enabled | Restricted business/auth PostgreSQL roles, verified TLS |
+| Payments | Private HTTPS auth JWKS; private Engine health; exact NOW payment lookup/invoice contracts | Separate restricted report/capture/operational PostgreSQL roles, verified TLS |
+| Withdrawals | Private HTTPS auth JWKS | Restricted report PostgreSQL role, verified TLS; withdrawals/BMP remain read-only/disabled |
+| Engine | No new general HTTP access; existing private transport only | PostgreSQL verified TLS; configured disabled loopback NATS dependency |
+
+SMS, SMTP, SES, OpenRouter and BMP legacy code paths do not receive credentials
+from this release and are not silently allowed. Operational monitoring provider
+reads originate in the Worker, not a Container; they are a separate policy.
+
+Before strict-mode activation, verify actual destinations, the selected sender,
+the SDK HTTPS interception CA (API adds `NODE_EXTRA_CA_CERTS`; Go keeps its system
+and injected CA roots), signed callback handling, PostgreSQL/TLS and rollback in
+staging/canary. The installed SDK persists interception configuration in DO
+storage, so even an instance restart is not a proven rollback. Recheck the actual
+runtime, not just the flag. See the [isolated canary procedure](HTTP-EGRESS-CANARY.md)
+and its offline pinned-Bun TLS fixture before considering activation.
+Raw TCP restriction requires a separately verified network control. Do not
+claim all-port egress is closed or disable database connectivity blindly.
+
+The Bun administrative gate now reads the same canonical primary identity
+authority used for JWT issuance, including verified ownership and live person,
+affiliate and blacklist restrictions. Administrative scope still requires an
+active `is_admin` person, including the existing bound superadmin. A separate
+global Origin/CSRF guard for legacy Bun mutations outside `/api/auth/*` remains
+a prerequisite before expanding their Core allowlist; those routes remain
+closed by this release. This is not permission to enable general Bun writes.
+
 The production release enables email authentication and read-only Go reports. `AUTH_SERVICES_ENABLED`,
 `AUTH_CUTOVER_VERIFIED` and `CORE_DATA_ACCESS_VERIFIED` allow an exact route list for
 OTP, session, token, public keys and internal API health. This does not assert Go

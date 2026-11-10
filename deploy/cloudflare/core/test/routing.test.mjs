@@ -59,6 +59,40 @@ test('verified wallet linking exposes only its exact private read and signed-pro
   }
 });
 
+test('administrative wallet allocation exposes only the member read and idempotent ensure command', async () => {
+  for (const [method, path, body] of [
+    ['GET', '/api/member/administrative-wallet', undefined],
+    ['POST', '/api/member/administrative-wallet/ensure', '{}'],
+  ]) {
+    let calls = 0;
+    const response = await dispatchCore(request(path, { method, body, headers: {
+      cookie: 'better-auth.session_token=synthetic', ...(method === 'POST' ? { origin: 'https://app.mindblisspower.com', 'content-type': 'application/json' } : {}),
+    } }), authOnlyReady, service => { calls++; assert.equal(service, 'api'); return { fetch: async () => Response.json({ status: 'assigned' }) }; });
+    assert.equal(response.status, 200); assert.equal(calls, 1);
+  }
+  for (const [path, init] of [
+    ['/api/member/administrative-wallet/ensure?retry=1', { method: 'POST', headers: { origin: 'https://app.mindblisspower.com' } }],
+    ['/api/member/administrative-wallet/ensure', { method: 'POST' }],
+    ['/api/member/administrative-wallet/ensure', { method: 'PUT', headers: { origin: 'https://app.mindblisspower.com' } }],
+  ]) assert.equal((await dispatchCore(request(path, init), authOnlyReady, () => assert.fail('administrative wallet alias escaped'))).status, 503);
+});
+
+test('Meld webhook ingress is exact, bounded and independently gated', async () => {
+  const enabled = { ...authOnlyReady, MELD_WEBHOOK_ENABLED: 'true' };
+  const headers = { 'content-type': 'application/json', 'meld-signature': 'a'.repeat(43) + '=',
+    'meld-signature-timestamp': '2026-11-10T15:00:00.000Z' };
+  let calls = 0;
+  const response = await dispatchCore(request('/api/webhooks/meld', { method: 'POST', headers, body: '{}' }), enabled,
+    service => { calls++; assert.equal(service, 'api'); return { fetch: async () => Response.json({ received: true }) }; });
+  assert.equal(response.status, 200); assert.equal(calls, 1);
+  for (const [path, init, env] of [
+    ['/api/webhooks/meld', { method: 'POST', headers, body: '{}' }, authOnlyReady],
+    ['/api/webhooks/meld?debug=1', { method: 'POST', headers, body: '{}' }, enabled],
+    ['/api/webhooks/meld', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, enabled],
+    ['/api/webhooks/meld', { method: 'GET', headers }, enabled],
+  ]) assert.equal((await dispatchCore(request(path, init), env, () => assert.fail('invalid Meld webhook forwarded'))).status, 503);
+});
+
 test('auth-only release remains closed with missing, malformed or incomplete auth gates', async () => {
   for (const key of ['AUTH_SERVICES_ENABLED', 'AUTH_CUTOVER_VERIFIED', 'CORE_DATA_ACCESS_VERIFIED']) {
     for (const value of [undefined, 'false', 'TRUE', '1', true]) {
@@ -250,6 +284,16 @@ test('each container receives only scoped secrets and fixed security settings', 
   assert.equal(env.VP_ENGINE_TUNNEL_URL, 'ws://engine-grpc.core.internal/v1/engine-tunnel');
   assert.equal(env.VP_ENGINE_HTTP_URL, 'http://engine.core.internal');
   assert.throws(() => containerEnvironment('chatwoot', apiSecrets()));
+});
+
+test('Meld webhook secrets reach only the auth container when explicitly enabled', () => {
+  const values = containerEnvironment('api', { ...apiSecrets(), MELD_WEBHOOK_ENABLED: 'true',
+    MELD_WEBHOOK_SIGNING_KEY: 's'.repeat(32), MELD_ACCOUNT_ID: 'account-fixture', MELD_WEBHOOK_PROFILE_ID: 'profile-fixture' });
+  assert.equal(values.MELD_WEBHOOK_SIGNING_KEY, 's'.repeat(32));
+  assert.equal(values.MELD_ACCOUNT_ID, 'account-fixture');
+  assert.equal(values.MELD_WEBHOOK_PROFILE_ID, 'profile-fixture');
+  assert.equal(values.MELD_WEBHOOK_PUBLIC_URL, 'https://app.mindblisspower.com/api/webhooks/meld');
+  assert.throws(() => containerEnvironment('api', { ...apiSecrets(), MELD_WEBHOOK_ENABLED: 'true' }));
 });
 
 test('opaque tunnel is reachable only from the API outbound binding at a fixed private endpoint', async () => {

@@ -84,6 +84,9 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		subject, email, err := verifier.VerifySubject(r.Context(), strings.TrimSpace(r.Header.Get(idTokenHeader)))
+		if writeAuthenticationUnavailable(w, err) {
+			return
+		}
 		if err != nil || strings.TrimSpace(subject) == "" || email != identity {
 			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
 			return
@@ -291,7 +294,9 @@ func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, bu
 			sid := registeredReferral.SponsorAffiliateID
 			sponsor = &sid
 			referralCodeForIntent = registeredReferral.Code
-			preferredSideForIntent = registeredReferral.PreferredSide
+			// A stored legacy side is not placement authority. Sponsor attribution
+			// survives across devices; the binary engine selects the weak leg.
+			preferredSideForIntent = automaticPlacementSide(registeredReferral.PreferredSide)
 		} else if referralCode != "" {
 			resolvedSponsor, err := h.store.resolveVerifiedCheckoutSponsor(ctx, referralCode)
 			if err != nil {
@@ -302,7 +307,9 @@ func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, bu
 			}
 			sponsor = resolvedSponsor
 			referralCodeForIntent = referralCode
-			preferredSideForIntent = normalizePreferredSide(requestedSide)
+			// Client-selected L/R placement was retired. Keep accepting the field
+			// during rollout, but never let it influence the binary tree.
+			preferredSideForIntent = automaticPlacementSide(requestedSide)
 		}
 	}
 

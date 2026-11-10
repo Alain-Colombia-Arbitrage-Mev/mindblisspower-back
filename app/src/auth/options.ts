@@ -21,6 +21,7 @@ export type BoundIdentity = { status: string; publicId?: string; email?: string 
 export type AuthIdentity = {
   provision: (userId: string) => Promise<BoundIdentity>;
   binding: (userId: string) => Promise<BoundIdentity>;
+  administrativeWallet?: (userId: string) => Promise<unknown>;
   registrationAllowed?: (candidate: RegistrationCandidate) => Promise<boolean>;
 };
 const messagePaths = new Set(['/sign-up/email', '/send-verification-email', '/request-password-reset',
@@ -261,7 +262,12 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
         // A verified email links only one eligible, unprivileged legacy person.
         // Ambiguous, blocked or privileged claims retain a limited session;
         // JWT issuance still requires a canonical persisted subject binding.
-        await identity.provision(user.id);
+        const provisioned = await identity.provision(user.id);
+        if (['created', 'existing'].includes(provisioned.status) && identity.administrativeWallet) {
+          // Allocation is idempotent and retried by the member endpoint. A
+          // transient wallet subsystem outage must not become an auth outage.
+          try { await identity.administrativeWallet(user.id); } catch { /* member GET/ensure exposes a safe retry state */ }
+        }
       } } },
     },
   };

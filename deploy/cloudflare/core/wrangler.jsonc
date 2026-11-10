@@ -26,6 +26,7 @@
         "NOWPAYMENTS_OPERATIONAL_ENABLED": "false",
         "NOWPAYMENTS_ENGINE_ENABLED": "false",
         "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "false",
+        "MELD_WEBHOOK_ENABLED": "false",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
@@ -72,6 +73,7 @@
         "NOWPAYMENTS_OPERATIONAL_ENABLED": "true",
         "NOWPAYMENTS_ENGINE_ENABLED": "true",
         "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "true",
+        "MELD_WEBHOOK_ENABLED": "false",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
@@ -95,7 +97,7 @@
         "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
       },
       "containers": [
-        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-rewon-20261109-6b73f0e@sha256:da319d60347467cf9580e685976509e3e799de59edaa5bca042a76c09f3488b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
+        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-admin-wallet-meld-20261110@sha256:1ce82a9fdce704496c4fa6482d169197ffc92d17676e0fe7426191d96dc032b1", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
         { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-manual-main-20261105@sha256:af2d54ba02a219219520044d59e26a7fbb5f78570ffa747d0375747114b82125", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }

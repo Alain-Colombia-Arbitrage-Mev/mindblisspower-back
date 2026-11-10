@@ -52,6 +52,9 @@ func (h *Handler) nowPurchaseIdentity(w http.ResponseWriter, r *http.Request, me
 		return nil, "", "", false
 	}
 	subject, email, err := verifier.VerifySubject(r.Context(), raw)
+	if writeAuthenticationUnavailable(w, err) {
+		return nil, "", "", false
+	}
 	if err != nil || subject == "" || email == "" {
 		writeErr(w, http.StatusUnauthorized, "invalid_id_token")
 		return nil, "", "", false
@@ -160,6 +163,9 @@ func (h *Handler) handleNOWPurchaseCancel(w http.ResponseWriter, r *http.Request
 }
 
 func writeNOWPurchaseError(w http.ResponseWriter, err error) {
+	if writeAuthenticationUnavailable(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, ErrNOWPaymentsAttemptNotFound), errors.Is(err, ErrCheckoutIdentityReview):
 		writeErr(w, http.StatusNotFound, "purchase_not_found")

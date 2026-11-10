@@ -5,6 +5,7 @@ import { db } from './db/client';
 import { postgresAuthAdapter } from './auth/postgres-auth-adapter';
 import { createAuthOptions } from './auth/options';
 import { getAuthPersonBinding, provisionAuthPerson } from './modules/identity';
+import { ensureAdministrativeWallet } from './modules/identity/administrative-wallet';
 import { registrationAllowed } from './auth/registration';
 import { atomicPasswordResetHandler, atomicPasswordResetOptions } from './auth/atomic-password-reset';
 import { secureSessionHandler } from './auth/secure-session-handler';
@@ -15,6 +16,7 @@ import { otpTraceHandler } from './auth/otp-trace';
 const identity = {
     provision: userId => provisionAuthPerson(authDb, { userId }),
     binding: userId => getAuthPersonBinding(authDb, { userId }),
+    administrativeWallet: userId => ensureAdministrativeWallet(authDb, { userId }),
     registrationAllowed: candidate => registrationAllowed(db, candidate),
 } satisfies Parameters<typeof createAuthOptions>[2];
 const native = betterAuth(createAuthOptions(process.env, postgresAuthAdapter(authDb), identity));

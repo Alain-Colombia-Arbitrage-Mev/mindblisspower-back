@@ -42,7 +42,7 @@ beforeAll(async () => {
   migration = await readFile(new URL('../../../../_meta/migration/70_stable_identity_bindings.sql', import.meta.url), 'utf8');
   await connection.unsafe(`CREATE EXTENSION citext; CREATE EXTENSION ltree; CREATE EXTENSION unaccent;
     CREATE ROLE app_read NOLOGIN; CREATE ROLE app_write NOLOGIN; CREATE ROLE app_admin NOLOGIN;
-    CREATE SCHEMA auth; CREATE SCHEMA mlm;
+    CREATE SCHEMA auth; CREATE SCHEMA mlm; CREATE SCHEMA payments;
     ALTER DEFAULT PRIVILEGES IN SCHEMA auth GRANT SELECT ON TABLES TO app_read;
     CREATE TABLE auth.user(id text PRIMARY KEY,email text NOT NULL UNIQUE,email_verified boolean NOT NULL DEFAULT false,name text,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TYPE mlm.person_status AS ENUM('pending','active','suspended','banned','deleted');
@@ -103,6 +103,9 @@ beforeAll(async () => {
     await verifiedEmailConnection.unsafe(verifiedEmailMigration);
   } catch (error) { await verifiedEmailConnection.unsafe('ROLLBACK'); throw error; }
   finally { verifiedEmailConnection.release(); }
+  const walletMigration = (await readFile(new URL('../../../../_meta/migration/92_administrative_wallets_meld.sql', import.meta.url), 'utf8'))
+    .replace("pg_catalog.current_database()<>'mindbliss_curated_20261025'", "pg_catalog.current_database()<>'identity_synthetic'");
+  await applyMigration(walletMigration);
   legacyPublicId = (await connection`SELECT public_id::text FROM mlm.person WHERE id=1`)[0]!.public_id;
   for (const [id, email, verified] of [['legacy-user', 'legacy@example.test', true], ['new-user', 'new@example.test', true], ['unverified-user', 'unverified@example.test', false], ['admin-user', 'operator@example.test', true], ['other-user', 'other@example.test', true]] as const) {
     await connection`INSERT INTO auth.user(id,email,email_verified,name) VALUES(${id},${email},${verified},'Synthetic Member')`;
@@ -123,6 +126,60 @@ integration('migration is repeatable, adds stable UUIDs and never rewrites netwo
     expect((await connection`SELECT has_column_privilege('app_write','identity.legacy_claim_grant',${column},'UPDATE') AS allowed`)[0]!.allowed).toBe(false);
   }
   expect((await connection`SELECT has_table_privilege('app_write','identity.legacy_claim_grant','INSERT') AS allowed`)[0]!.allowed).toBe(false);
+});
+
+integration('administrative wallet allocation is immutable, unique under concurrency and exhausts honestly', async () => {
+  await connection.unsafe(`INSERT INTO auth."user"(id,email,email_verified,name)
+    SELECT 'wallet-user-'||g,'wallet-user-'||g||'@example.test',true,'Wallet Member' FROM generate_series(1,29) g;
+    INSERT INTO mlm.person(user_id,first_name,last_name,email,phone_number,status)
+    SELECT 'wallet-user-'||g,'Wallet','Member','wallet-user-'||g||'@example.test',
+      (3000000000+g)::text,'active' FROM generate_series(1,29) g;
+    INSERT INTO identity.auth_binding(subject,person_id,link_method)
+    SELECT p.user_id,p.id,'new_registration' FROM mlm.person p WHERE p.user_id LIKE 'wallet-user-%';`);
+
+  const subjects = Array.from({ length: 28 }, (_, index) => `wallet-user-${index + 1}`);
+  const assignments = await Promise.all(subjects.map(async subject =>
+    (await connection`SELECT * FROM identity.ensure_administrative_wallet(${subject})`)[0]!));
+  expect(assignments.every(row => row.status === 'assigned')).toBe(true);
+  expect(new Set(assignments.map(row => row.address)).size).toBe(28);
+  const original = assignments[0]!;
+  const repeated = (await connection`SELECT * FROM identity.ensure_administrative_wallet('wallet-user-1')`)[0]!;
+  expect(repeated.address).toBe(original.address);
+  expect(repeated.checkout_reference).toBe(original.checkout_reference);
+  expect((await connection`SELECT * FROM identity.ensure_administrative_wallet('wallet-user-29')`)[0]!.status).toBe('exhausted');
+  expect((await connection`SELECT * FROM identity.administrative_wallet_inventory()`)[0]).toMatchObject({
+    total: 28, assigned: 28, remaining: 0, disabled: 0,
+  });
+
+  const attempt = (await connection`SELECT * FROM payments.create_meld_onramp_attempt(
+    'wallet-user-1','administrative',${original.address},'CO','BANXA','CREDIT_DEBIT_CARD',100,96,4)`)[0]!;
+  expect(Number(attempt.mindbliss_fee_usd)).toBe(1);
+
+  expect((await connection`SELECT payments.capture_meld_webhook_event(
+    'event-wallet-1','TRANSACTION_CRYPTO_PENDING',now(),'account-test','profile-test','2026-11-10'::date,
+    ${attempt.id}::uuid,${attempt.id}::uuid,'transaction-test','PENDING','CRYPTO_PURCHASE',${'a'.repeat(64)},
+    '{"eventId":"event-wallet-1"}'::jsonb) AS inserted`)[0]!.inserted).toBe(true);
+  expect((await connection`SELECT payments.capture_meld_webhook_event(
+    'event-wallet-1','TRANSACTION_CRYPTO_PENDING',now(),'account-test','profile-test','2026-11-10'::date,
+    ${attempt.id}::uuid,${attempt.id}::uuid,'transaction-test','PENDING','CRYPTO_PURCHASE',${'a'.repeat(64)},
+    '{"eventId":"event-wallet-1"}'::jsonb) AS inserted`)[0]!.inserted).toBe(false);
+  expect((await connection`SELECT matched_subject FROM payments.meld_webhook_event WHERE event_id='event-wallet-1'`)[0]!.matched_subject)
+    .toBe('wallet-user-1');
+  expect((await connection`SELECT status FROM payments.meld_onramp_attempt WHERE id=${attempt.id}::uuid`)[0]!.status).toBe('pending');
+  expect((await connection`SELECT payments.capture_meld_webhook_event(
+    'event-wallet-complete','TRANSACTION_CRYPTO_COMPLETE',now(),'account-test','profile-test','2026-11-10'::date,
+    ${attempt.id}::uuid,${attempt.id}::uuid,'transaction-test','COMPLETE','CRYPTO_PURCHASE',${'b'.repeat(64)},
+    '{"eventId":"event-wallet-complete"}'::jsonb) AS inserted`)[0]!.inserted).toBe(true);
+  expect((await connection`SELECT payments.capture_meld_webhook_event(
+    'event-wallet-late-pending','TRANSACTION_CRYPTO_PENDING',now(),'account-test','profile-test','2026-11-10'::date,
+    ${attempt.id}::uuid,${attempt.id}::uuid,'transaction-test','PENDING','CRYPTO_PURCHASE',${'c'.repeat(64)},
+    '{"eventId":"event-wallet-late-pending"}'::jsonb) AS inserted`)[0]!.inserted).toBe(true);
+  expect((await connection`SELECT status,commission_status FROM payments.meld_onramp_attempt WHERE id=${attempt.id}::uuid`)[0])
+    .toMatchObject({ status: 'complete', commission_status: 'calculated' });
+  await expect(connection`UPDATE payments.meld_webhook_event SET payment_status='COMPLETE' WHERE event_id='event-wallet-1'`).rejects.toBeDefined();
+  for (const table of ['identity.administrative_wallet_pool', 'identity.administrative_wallet_assignment', 'payments.meld_onramp_attempt', 'payments.meld_webhook_event']) {
+    expect((await connection`SELECT has_table_privilege('mindbliss_auth_core_v1',${table},'SELECT,INSERT,UPDATE,DELETE') AS allowed`)[0]!.allowed).toBe(false);
+  }
 });
 
 integration('eligibility migration requires explicit primary review and adds only the missing column SELECT grants', async () => {

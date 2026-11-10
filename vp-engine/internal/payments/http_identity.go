@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -65,20 +66,41 @@ func (h *Handler) svcAuth(w http.ResponseWriter, r *http.Request) bool {
 // está ausente o si la verificación falla (fail-closed cuando el header SÍ está
 // presente pero es inválido — el caller distingue ese caso con headerPresent).
 func (h *Handler) verifiedEmail(r *http.Request) (email string, ok bool) {
+	email, err := h.verifiedEmailResult(r)
+	return email, err == nil
+}
+
+// Preserve typed dependency errors for the HTTP gate while the rate limiter's
+// legacy bool helper remains fail-closed and never grants an anonymous fallback.
+func (h *Handler) verifiedEmailResult(r *http.Request) (string, error) {
 	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
 	if identity, exists := r.Context().Value(budgetIdentityKey{}).(verifiedBudgetIdentity); exists && raw != "" && identity.token == raw && strings.TrimSpace(identity.email) != "" {
-		return identity.email, true
+		return identity.email, nil
 	}
 	if raw == "" || h.verifier == nil {
-		return "", false
+		return "", errors.New("verified identity required")
 	}
 	v, err := h.verifier.VerifyEmail(r.Context(), raw)
 	if err != nil {
-		h.log.Warn().Err(err).Msg("id token verification failed")
-		return "", false
+		// Verifier errors may originate in storage/transport. Never log their
+		// raw message, parameters, token or connection details.
+		h.log.Warn().Msg("id token verification failed")
+		return "", err
 	}
-	email = strings.ToLower(strings.TrimSpace(v))
-	return email, email != ""
+	email := strings.ToLower(strings.TrimSpace(v))
+	if email == "" {
+		return "", errors.New("verified identity required")
+	}
+	return email, nil
+}
+
+func writeAuthenticationUnavailable(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, ErrAuthenticationUnavailable) {
+		return false
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeErr(w, http.StatusServiceUnavailable, "authentication_unavailable")
+	return true
 }
 
 // resolveIdentity deriva la identidad autoritativa de una request ya autenticada
@@ -101,8 +123,11 @@ func (h *Handler) resolveIdentity(w http.ResponseWriter, r *http.Request, claime
 
 	raw := strings.TrimSpace(r.Header.Get(idTokenHeader))
 	if raw != "" {
-		verified, ok := h.verifiedEmail(r)
-		if !ok {
+		verified, err := h.verifiedEmailResult(r)
+		if writeAuthenticationUnavailable(w, err) {
+			return "", false
+		}
+		if err != nil {
 			// Header presente pero no verifica ⇒ fail-closed.
 			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
 			return "", false

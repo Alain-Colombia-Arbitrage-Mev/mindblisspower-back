@@ -13,6 +13,7 @@ const smsMigration = fileURLToPath(new URL('../../../../_meta/migration/75_sms_a
 const contactMigration = fileURLToPath(new URL('../../../../_meta/migration/76_registration_contact_details.sql', import.meta.url));
 const verifiedEmailMigration = fileURLToPath(new URL('../../../../_meta/migration/78_verified_email_identity_binding.sql', import.meta.url));
 const eligibilityMigration = fileURLToPath(new URL('../../../../_meta/migration/90_auth_identity_eligibility_reads.sql', import.meta.url));
+const administrativeWalletMigration = fileURLToPath(new URL('../../../../_meta/migration/92_administrative_wallets_meld.sql', import.meta.url));
 const phoneLibrary = fileURLToPath(new URL('../../../node_modules/libphonenumber-js', import.meta.url));
 let created = false;
 const docker = args => {
@@ -37,6 +38,7 @@ try {
     '-v', `${contactMigration}:/_meta/migration/76_registration_contact_details.sql:ro`,
     '-v', `${verifiedEmailMigration}:/_meta/migration/78_verified_email_identity_binding.sql:ro`,
     '-v', `${eligibilityMigration}:/_meta/migration/90_auth_identity_eligibility_reads.sql:ro`,
+    '-v', `${administrativeWalletMigration}:/_meta/migration/92_administrative_wallets_meld.sql:ro`,
     '-v', `${phoneLibrary}:/app/node_modules/libphonenumber-js:ro`,
     '-e', 'IDENTITY_SYNTHETIC_DOCKER=1', '-e', `IDENTITY_TEST_DATABASE_URL=postgres://postgres:${password}@127.0.0.1:5432/identity_synthetic`,
     '--entrypoint', 'bun', 'mindbliss/api-test:auth-identity-20261025', '--no-env-file', 'test', 'src/modules/identity/model.test.ts', 'src/modules/identity/identity.integration.test.ts'];

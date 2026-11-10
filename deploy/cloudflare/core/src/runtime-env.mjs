@@ -113,6 +113,16 @@ export function containerEnvironment(service, env) {
     }
     values.AUTH_OBSERVABILITY_ENABLED = String(env.CORE_OBSERVABILITY_ENABLED === 'true');
     values.AUTH_OTP_TRACE_ENABLED = String(env.CORE_AUTH_TRACE_ENABLED === 'true');
+    if (env.MELD_WEBHOOK_ENABLED === 'true') {
+      for (const key of ['MELD_WEBHOOK_SIGNING_KEY', 'MELD_ACCOUNT_ID', 'MELD_WEBHOOK_PROFILE_ID']) {
+        if (typeof env[key] !== 'string' || !env[key].trim() || env[key].length > 512 || /[\r\n]/.test(env[key])) {
+          throw new Error('Meld webhook configuration is incomplete');
+        }
+      }
+      Object.assign(values, { MELD_WEBHOOK_SIGNING_KEY: env.MELD_WEBHOOK_SIGNING_KEY, MELD_ACCOUNT_ID: env.MELD_ACCOUNT_ID,
+        MELD_WEBHOOK_PROFILE_ID: env.MELD_WEBHOOK_PROFILE_ID,
+        MELD_WEBHOOK_PUBLIC_URL: 'https://app.mindblisspower.com/api/webhooks/meld' });
+    }
     // The SDK injects this ephemeral interception CA; Bun keeps its public CA
     // roots and adds this one for the fixed private HTTPS observation hostname.
     if (env.CORE_OBSERVABILITY_ENABLED === 'true' || env.CORE_AUTH_TRACE_ENABLED === 'true' || env.CORE_HTTP_EGRESS_STRICT_ENABLED === 'true') values.NODE_EXTRA_CA_CERTS = '/etc/cloudflare/certs/cloudflare-containers-ca.crt';

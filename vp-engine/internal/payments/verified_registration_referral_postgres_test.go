@@ -380,4 +380,73 @@ func TestVerifiedRegistrationReferralRestrictedPostgres(t *testing.T) {
 	if snapshot() != positionedBefore {
 		t.Fatal("positioned request mutated authoritative rows")
 	}
+	t.Run("positioned GET needs only canonical read privileges and retains every owner restriction", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `REVOKE EXECUTE ON FUNCTION payments.verified_registration_referral(text,text,text,text) FROM mindbliss_go_payments_reader_v1`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := pool.Exec(ctx, `GRANT EXECUTE ON FUNCTION payments.verified_registration_referral(text,text,text,text) TO mindbliss_go_payments_reader_v1`); err != nil {
+				t.Error(err)
+			}
+		}()
+		readConfig := reader.Config()
+		readConfig.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+		readPool, err := pgxpool.NewWithConfig(ctx, readConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer readPool.Close()
+		readStore := NewStore(readPool)
+		read := func() (VerifiedReferralAttribution, error) {
+			return readStore.VerifiedRegistrationReferral(ctx, "synthetic-referral-owner", "owner-referral@example.test", nil, "")
+		}
+		if err := readPool.QueryRow(ctx, `SELECT current_setting('transaction_read_only')='on'
+ AND NOT has_function_privilege(current_user,'payments.verified_registration_referral(text,text,text,text)','EXECUTE')`).Scan(&safe); err != nil || !safe {
+			t.Fatal("positioned fixture retained write/capability authority", safe, err)
+		}
+		if got, err := read(); err != nil || got != (VerifiedReferralAttribution{OK: true, Positioned: true}) {
+			t.Fatal("canonical positioned GET still depends on referral capability", got, err)
+		}
+		if _, err := readStore.VerifiedRegistrationReferral(ctx, "synthetic-referral-owner", "owner-referral@example.test", &first, "L"); err == nil {
+			t.Fatal("POST bypassed the unchanged capability boundary")
+		}
+		if snapshot() != positionedBefore {
+			t.Fatal("read-only confirmation or rejected POST changed people/tree/auth/purchases")
+		}
+		for _, tc := range []struct {
+			name, setup, restore string
+			want                 error
+		}{
+			{"unverified", `UPDATE auth.user SET email_verified=false WHERE id='synthetic-referral-owner'`, `UPDATE auth.user SET email_verified=true WHERE id='synthetic-referral-owner'`, ErrCheckoutIdentityReview},
+			{"person suspended", `UPDATE mlm.person SET status='suspended' WHERE id=9803`, `UPDATE mlm.person SET status='pending' WHERE id=9803`, errReferralBlocked},
+			{"explicit blacklist", `UPDATE mlm.person SET blacklisted=true WHERE id=9803`, `UPDATE mlm.person SET blacklisted=false WHERE id=9803`, errReferralBlocked},
+			{"affiliate suspended", `UPDATE mlm.affiliate SET status='suspended' WHERE id=9803`, `UPDATE mlm.affiliate SET status='active' WHERE id=9803`, errReferralBlocked},
+			{"listed email", `INSERT INTO mlm.blacklist(email_norm) VALUES('owner-referral@example.test')`, `DELETE FROM mlm.blacklist WHERE email_norm='owner-referral@example.test'`, errReferralBlocked},
+			{"duplicate canonical email", `INSERT INTO mlm.person(id,first_name,last_name,email,phone_number,status,blacklisted) OVERRIDING SYSTEM VALUE VALUES(9805,'Synthetic','Duplicate',' OWNER-REFERRAL@EXAMPLE.TEST ','0','active',false)`, `DELETE FROM mlm.person WHERE id=9805`, ErrCheckoutIdentityReview},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, err := pool.Exec(ctx, tc.setup); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if _, err := pool.Exec(ctx, tc.restore); err != nil {
+						t.Error(err)
+					}
+				}()
+				if got, err := read(); !errors.Is(err, tc.want) || got.OK || got.Positioned {
+					t.Fatal("read-only confirmation bypassed identity/restriction", got, err)
+				}
+			})
+		}
+		if got, err := readStore.VerifiedRegistrationReferral(ctx, "synthetic-referral-other", "owner-referral@example.test", nil, ""); !errors.Is(err, ErrCheckoutIdentityReview) || got.OK {
+			t.Fatal("a foreign subject read the positioned owner's state", got, err)
+		}
+		if got, err := read(); err != nil || !got.OK || !got.Positioned {
+			t.Fatal("restored canonical owner cannot confirm position", got, err)
+		}
+		var code, side string
+		if err := pool.QueryRow(ctx, `SELECT referral_code,preferred_side FROM payments.registration_referral WHERE email_norm='owner-referral@example.test'`).Scan(&code, &side); err != nil || code != second || side != "R" {
+			t.Fatal("position confirmation rewrote the stored referral", code, side, err)
+		}
+	})
 }

@@ -16,7 +16,9 @@ export const SERVICES = Object.freeze({
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const MAX_BODY = 256 * 1024;
 const MAX_NOWPAYMENTS_IPN_BODY = 128 * 1024;
+const MAX_MELD_WEBHOOK_BODY = 128 * 1024;
 const NOWPAYMENTS_IPN_PATH = '/api/webhooks/nowpayments';
+const MELD_WEBHOOK_PATH = '/api/webhooks/meld';
 const NOWPAYMENTS_STATUS_PATH = '/api/payments/nowpayments/status';
 const OTP_DIAGNOSTIC_PATH = '/api/admin/auth/otp-diagnostic';
 const NOW_CHECKOUT_ERRORS = new Set(['nowpayments-unavailable', 'nowpayments_financial_configuration_unavailable',
@@ -32,8 +34,9 @@ const AUTH_ONLY_PATHS = Object.freeze({
     '/api/auth/email-otp/request-password-reset', '/api/auth/email-otp/reset-password']),
 });
 const WALLET_LINK_PATHS = Object.freeze({
-  GET: new Set(['/api/member/wallet-link']),
-  POST: new Set(['/api/member/wallet-link/challenge', '/api/member/wallet-link/confirm']),
+  GET: new Set(['/api/member/wallet-link', '/api/member/administrative-wallet']),
+  POST: new Set(['/api/member/wallet-link/challenge', '/api/member/wallet-link/confirm',
+    '/api/member/administrative-wallet/ensure']),
 });
 
 function failure(error, status) {
@@ -89,9 +92,26 @@ function walletLinkRequest(request, url) {
   if (url.protocol !== 'https:' || url.hostname !== 'auth.core.internal' || url.search
     || !WALLET_LINK_PATHS[request.method]?.has(url.pathname)) return false;
   if (request.method === 'GET') return true;
+  if (url.pathname === '/api/member/administrative-wallet/ensure') {
+    return typeof request.headers.get('origin') === 'string' && !request.headers.has('content-encoding')
+      && /^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '');
+  }
   return !request.headers.has('content-encoding')
     && /^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')
     && typeof request.headers.get('origin') === 'string';
+}
+
+function meldWebhookRequest(request, url, env) {
+  return envMeldWebhookReady(env) && url.protocol === 'https:' && url.hostname === 'auth.core.internal'
+    && url.pathname === MELD_WEBHOOK_PATH && !url.search && request.method === 'POST'
+    && !request.headers.has('content-encoding')
+    && /^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')
+    && /^[A-Za-z0-9_-]{43}={0,1}$/.test(request.headers.get('meld-signature') || '')
+    && typeof request.headers.get('meld-signature-timestamp') === 'string';
+}
+
+function envMeldWebhookReady(env) {
+  return authReady(env) && env.MELD_WEBHOOK_ENABLED === 'true';
 }
 
 function blockedPhoneAuthPath(pathname) {
@@ -308,6 +328,14 @@ export async function dispatchCore(request, env, resolve) {
     catch (error) { return bodyReadFailure(error); }
     if (!body?.length) return failure('invalid_webhook_request', 400);
   }
+  const meldPath = checkoutPath === MELD_WEBHOOK_PATH;
+  const meldWebhook = meldPath && meldWebhookRequest(request, url, env);
+  if (meldPath && !meldWebhook) return failure('meld_webhook_unavailable', 503);
+  if (meldWebhook) {
+    try { body = await boundedBody(request, MAX_MELD_WEBHOOK_BODY); }
+    catch (error) { return bodyReadFailure(error); }
+    if (!body?.length) return failure('invalid_webhook_request', 400);
+  }
   if (env.STRIPE_CHECKOUT_ENABLED !== 'true' && serviceHostname(url.hostname)) {
     if (checkoutPath === '/api/payments/resume') return failure('stripe_checkout_disabled', 503);
     if (checkoutPath === '/api/payments/checkout' && request.method === 'POST') {
@@ -337,13 +365,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
-    && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim' || walletLink);
-  if (!read && !authWrite && !captureRequest && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('financial_review_required', 503);
+    && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim' || walletLink || meldWebhook);
+  if (!read && !authWrite && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);

@@ -16,6 +16,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -65,8 +66,34 @@ func (s *Store) resolveVerifiedCheckoutSponsor(ctx context.Context, code string)
 	return sponsor, nil
 }
 
-// Only the reviewed function receives EXECUTE. The runtime login still has no
-// INSERT/UPDATE on registration_referral, person, affiliate or financial tables.
+// A positioned owner needs no referral-writing capability to confirm that the
+// existing position is immutable. Keep the live canonical binding, verified
+// email, duplicate-email and account/affiliate restrictions on this read; the
+// caller separately checks the existing blacklist policy before reaching it.
+// No sponsor, stale browser hint or registration_referral row is consulted.
+const verifiedReferralPositionSQL = `SELECT a.id IS NOT NULL
+ FROM identity.auth_binding b JOIN auth.user u ON u.id=b.subject
+ JOIN mlm.person p ON p.id=b.person_id AND p.user_id=b.subject
+ LEFT JOIN mlm.affiliate a ON a.person_id=p.id
+ WHERE b.subject=$1 AND b.provider='better_auth' AND u.email_verified
+ AND lower(btrim(u.email))=$2 AND lower(btrim(p.email::text))=$2
+ AND p.status::text IN('active','pending') AND NOT COALESCE(p.blacklisted,false)
+ AND(a.id IS NULL OR a.status::text='active')
+ AND NOT EXISTS(SELECT 1 FROM mlm.person other
+ WHERE other.id<>p.id AND lower(btrim(other.email::text))=$2)`
+
+func verifiedReferralPosition(ctx context.Context, q banQuerier, subject, email string) (bool, error) {
+	var positioned bool
+	err := q.QueryRow(ctx, verifiedReferralPositionSQL, subject, email).Scan(&positioned)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrCheckoutIdentityReview
+	}
+	return positioned, err
+}
+
+// Only the reviewed function receives EXECUTE for metadata writes and reads of
+// an unpositioned owner's hint. Positioned GET uses SELECT only. Runtime still
+// has no INSERT/UPDATE on registration_referral, identities or financial tables.
 func (s *Store) VerifiedRegistrationReferral(ctx context.Context, subject, email string, ref *string, side string) (VerifiedReferralAttribution, error) {
 	decision, err := s.BanDecisionFor(ctx, BanCandidate{Email: email})
 	if err != nil {
@@ -75,7 +102,15 @@ func (s *Store) VerifiedRegistrationReferral(ctx context.Context, subject, email
 	if decision.Blocked {
 		return VerifiedReferralAttribution{}, errReferralBlocked
 	}
-	if _, err := s.resolveNOWBuyer(ctx, subject, email); err != nil {
+	if ref == nil {
+		positioned, err := verifiedReferralPosition(ctx, s.db, subject, email)
+		if err != nil {
+			return VerifiedReferralAttribution{}, err
+		}
+		if positioned {
+			return VerifiedReferralAttribution{OK: true, Positioned: true}, nil
+		}
+	} else if _, err := s.resolveNOWBuyer(ctx, subject, email); err != nil {
 		return VerifiedReferralAttribution{}, err
 	}
 	var out VerifiedReferralAttribution
@@ -171,6 +206,9 @@ func (h *Handler) handleVerifiedReferral(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	subject, email, err := verifier.VerifySubject(r.Context(), raw)
+	if writeAuthenticationUnavailable(w, err) {
+		return
+	}
 	if err != nil || strings.TrimSpace(subject) == "" || !validVerifiedReferralEmail(email) {
 		writeErr(w, http.StatusUnauthorized, "invalid_id_token")
 		return

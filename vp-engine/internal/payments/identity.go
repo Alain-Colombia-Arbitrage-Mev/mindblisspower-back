@@ -20,6 +20,10 @@ type IdentityVerifier interface {
 	VerifyEmail(ctx context.Context, rawToken string) (string, error)
 }
 
+// An identity dependency outage is not proof that a signed token or its owner
+// is invalid. Keep the error closed and free of SQL/connection/customer detail.
+var ErrAuthenticationUnavailable = errors.New("authentication unavailable")
+
 // cognitoVerifier implementa IdentityVerifier contra un user pool de Cognito.
 // El keyfunc mantiene un cache del JWKS (refresco automático), así que es un
 // singleton seguro para concurrencia.

@@ -113,6 +113,11 @@ func normalizePreferredSide(value string) string {
 	}
 }
 
+// automaticPlacementSide centralizes the public placement contract: a legacy
+// L/R hint may be accepted for rollout compatibility, but it has no authority
+// over the binary tree. The placement transaction chooses the weak leg.
+func automaticPlacementSide(string) string { return "" }
+
 func normalizeRegistrationReferralEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }

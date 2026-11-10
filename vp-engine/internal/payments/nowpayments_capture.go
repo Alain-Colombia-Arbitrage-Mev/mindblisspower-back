@@ -184,6 +184,9 @@ func (h *Handler) handleNOWPaymentsCaptureStatus(w http.ResponseWriter, r *http.
 		return
 	}
 	subject, email, err := verifier.VerifySubject(r.Context(), raw)
+	if writeAuthenticationUnavailable(w, err) {
+		return
+	}
 	if err != nil || subject == "" || email == "" {
 		writeErr(w, http.StatusUnauthorized, "invalid_id_token")
 		return
