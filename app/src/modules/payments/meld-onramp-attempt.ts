@@ -26,6 +26,11 @@ export async function createMeldOnrampAttempt(database: Pick<IdentityDatabase, '
   }) {
   if (!subject || subject.length > 255) throw new Error('meld_onramp_identity_unavailable');
   const intent = onrampIntentInput.parse(input);
+  // This writer feeds the production commission ledger. Sandbox quotes are
+  // useful for tests, but must never create payable production records.
+  if (environment.MELD_ENVIRONMENT === 'sandbox' || !environment.MELD_API_KEY?.trim()) {
+    throw new Error('meld_onramp_unconfigured');
+  }
   const verified = await createMeldOnrampQuote({
     country: intent.country, fiat: intent.fiat, crypto: intent.crypto, amount: intent.amount,
     paymentMethodType: intent.paymentMethodType, walletAddress: intent.walletAddress,
