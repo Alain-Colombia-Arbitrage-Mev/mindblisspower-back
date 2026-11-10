@@ -111,7 +111,7 @@ test('administrative options require a session and one exact country/provider wi
 test('personal options use one native-session country query without a sandbox credential or provider selector', async () => {
   const app = application();
   const path = '/api/member/wallet-funding/personal/options';
-  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other']) {
+  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other', '?country=CO', '?country=PA']) {
     expect((await app.request(path + query)).status).toBe(400);
   }
   expect((await application({ signedIn: false }).request(path + '?country=US')).status).toBe(401);

@@ -3,6 +3,8 @@
 // This is the public checkout key shipped by Reown, not a Mindbliss private API key.
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
 const PROVIDERS = ['TOPPER', 'SWAPPED'] as const;
+export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'ES'] as const;
+const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;
 const unavailable = () => new Error('wallet_funding_provider_unavailable');
@@ -38,6 +40,7 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
       if (!record(method) || typeof method.name !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(method.name)) {
         throw unavailable();
       }
+      if (EXCLUDED_PERSONAL_METHODS.has(method.name)) continue;
       // Without limits, the server cannot verify the selected amount for this rail.
       if (method.limits === null || method.limits === undefined) continue;
       if (!record(method.limits)) throw unavailable();
@@ -121,7 +124,9 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
 export async function readReownProductionOptions(country: string, {
   fetchImpl = fetch, signal, sourceCurrencyCode = 'USD',
 }: { fetchImpl?: typeof fetch; signal?: AbortSignal; sourceCurrencyCode?: string } = {}): Promise<ReownProductionOptions> {
-  if (typeof country !== 'string' || !/^[A-Z]{2}$/.test(country)) throw new Error('wallet_funding_invalid_country');
+  if (typeof country !== 'string' || !PERSONAL_FUNDING_COUNTRIES.some(allowed => allowed === country)) {
+    throw new Error('wallet_funding_invalid_country');
+  }
   if (typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw new Error('wallet_funding_invalid_currency');
   const controller = new AbortController();
   const abort = () => controller.abort();

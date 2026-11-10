@@ -9,9 +9,9 @@ const mockFetch = (handler: (url: string, init: RequestInit) => Response | Promi
 
 test('personal discovery is a read-only production request scoped to the public Reown merchant', async () => {
   let calls = 0;
-  const result = await readReownProductionOptions('CO', { fetchImpl: mockFetch((url, init) => {
+  const result = await readReownProductionOptions('US', { fetchImpl: mockFetch((url, init) => {
     calls++;
-    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/CO/USD/USDT_POLYGON?partners=TOPPER,SWAPPED');
+    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON?partners=TOPPER,SWAPPED');
     expect(init.method).toBe('GET');
     expect(init.redirect).toBe('error');
     expect(init.cache).toBe('no-store');
@@ -24,7 +24,7 @@ test('personal discovery is a read-only production request scoped to the public 
     ])]);
   }) });
   expect(calls).toBe(1);
-  expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'CO', sourceCurrencyCode: 'USD',
+  expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', sourceCurrencyCode: 'USD',
     paymentMethods: ['CREDIT_DEBIT_CARD', 'ASTROPAY'], routes: [
       { serviceProvider: 'TOPPER', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 10, maximumAmount: 30_000, minimumUsd: 10, maximumUsd: 30_000 }] },
       { serviceProvider: 'SWAPPED', paymentMethods: [
@@ -58,9 +58,25 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
   }
 });
 
+test('personal funding is limited to US, Mexico and Spain and removes Neteller and Skrill rails', async () => {
+  for (const country of ['US', 'MX', 'ES']) {
+    const result = await readReownProductionOptions(country, { fetchImpl: mockFetch((url) => {
+      expect(url).toContain(`/${country}/USD/USDT_POLYGON`);
+      return Response.json([route('SWAPPED', [
+        { name: 'NETELLER', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
+        { name: 'SKRILL', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
+        { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
+        { name: 'GOOGLE_PAY', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
+      ])]);
+    }) });
+    expect(result.paymentMethods).toEqual(['CREDIT_DEBIT_CARD', 'GOOGLE_PAY']);
+    expect(result.routes[0]!.paymentMethods.map(method => method.method)).toEqual(result.paymentMethods);
+  }
+});
+
 test('unavailable country routes and unknown limits never invent default rails', async () => {
   for (const data of [[], [route('BANXA')], [route('TOPPER', [{ name: 'CREDIT_DEBIT_CARD', limits: null }])]]) {
-    const result = await readReownProductionOptions('CO', { fetchImpl: mockFetch(() => Response.json(data)) });
+    const result = await readReownProductionOptions('US', { fetchImpl: mockFetch(() => Response.json(data)) });
     expect(result.paymentMethods).toEqual([]);
     expect(result.routes).toEqual([]);
   }
@@ -85,7 +101,7 @@ test('provider errors, redirects and oversized responses fail closed without exp
     Response.json([], { status: 503 }), new Response('[]', { status: 302, headers: { location: 'https://api-sb.meld.io/' } }),
     new Response('[]', { headers: { 'content-length': '65537' } }), new Response('x'.repeat(65_537)), new Response('not json')];
   for (const response of responses) {
-    await expect(readReownProductionOptions('CO', { fetchImpl: mockFetch(() => response) }))
+    await expect(readReownProductionOptions('US', { fetchImpl: mockFetch(() => response) }))
       .rejects.toThrow('wallet_funding_provider_unavailable');
   }
 });
@@ -93,14 +109,14 @@ test('provider errors, redirects and oversized responses fail closed without exp
 test('invalid input and cancelled country changes do not fetch or reuse stale options', async () => {
   let calls = 0;
   const fetchImpl = mockFetch(() => { calls++; return Response.json([route()]); });
-  for (const country of ['co', 'COL', 'CO/../US', '', 'US?country=CO']) {
+  for (const country of ['co', 'CO', 'PA', 'GB', 'COL', 'CO/../US', '', 'US?country=CO']) {
     await expect(readReownProductionOptions(country, { fetchImpl })).rejects.toThrow('wallet_funding_invalid_country');
   }
   const controller = new AbortController(); controller.abort();
-  await expect(readReownProductionOptions('CO', { fetchImpl, signal: controller.signal })).rejects.toHaveProperty('name', 'AbortError');
+  await expect(readReownProductionOptions('US', { fetchImpl, signal: controller.signal })).rejects.toHaveProperty('name', 'AbortError');
   expect(calls).toBe(0);
   const inFlight = new AbortController();
-  const cancelled = readReownProductionOptions('CO', { fetchImpl: (() => new Promise(() => {})) as unknown as typeof fetch,
+  const cancelled = readReownProductionOptions('US', { fetchImpl: (() => new Promise(() => {})) as unknown as typeof fetch,
     signal: inFlight.signal });
   inFlight.abort();
   await expect(cancelled).rejects.toHaveProperty('name', 'AbortError');
@@ -108,7 +124,7 @@ test('invalid input and cancelled country changes do not fetch or reuse stale op
 
 test('body streams that ignore abort cannot leave a country lookup pending', async () => {
   const controller = new AbortController();
-  const pending = readReownProductionOptions('CO', { signal: controller.signal,
+  const pending = readReownProductionOptions('US', { signal: controller.signal,
     fetchImpl: mockFetch(() => new Response(new ReadableStream({ pull: () => new Promise(() => {}) }))) });
   setTimeout(() => controller.abort(), 10);
   await expect(pending).rejects.toHaveProperty('name', 'AbortError');

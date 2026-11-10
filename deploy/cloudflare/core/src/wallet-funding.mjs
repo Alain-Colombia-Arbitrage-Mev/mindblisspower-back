@@ -2,6 +2,7 @@ export const WALLET_FUNDING_PREFIX = '/api/member/wallet-funding';
 export const WALLET_FUNDING_MAX_BODY = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'ES']);
 
 export function walletFundingNamespace(path) {
   return path === WALLET_FUNDING_PREFIX || path.startsWith(`${WALLET_FUNDING_PREFIX}/`);
@@ -22,7 +23,7 @@ export function walletFundingRequest(request, url, body, env, ready) {
     const sourceCurrencyCode = url.searchParams.get('sourceCurrencyCode');
     if (sourceCurrencyCode !== null && !/^[A-Z]{3}$/.test(sourceCurrencyCode)) return false;
     const currencyQuery = sourceCurrencyCode === null ? '' : `&sourceCurrencyCode=${sourceCurrencyCode}`;
-    if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return /^[A-Z]{2}$/.test(country || '')
+    if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return PERSONAL_COUNTRIES.has(country)
       && url.search === `?country=${country}${currencyQuery}`;
     const provider = url.searchParams.get('serviceProvider');
     return env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/options`
@@ -43,6 +44,7 @@ export function walletFundingRequest(request, url, body, env, ready) {
     const sourceCurrencyCode = input.sourceCurrencyCode === undefined ? 'USD' : input.sourceCurrencyCode;
     if (Object.keys(input).some(key => !allowed.includes(key)) || !UUID.test(input.requestId || '')
       || !/^0x[a-f0-9]{40}$/i.test(input.walletAddress || '') || !/^[A-Z]{2}$/.test(input.country || '')
+      || (personal && (!PERSONAL_COUNTRIES.has(input.country) || ['NETELLER', 'SKRILL'].includes(input.paymentMethodType)))
       || typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)
       || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? 50 : 0.01)
       || input.amount > (sourceCurrencyCode === 'USD' ? 25000 : 1_000_000_000)

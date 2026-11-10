@@ -6,7 +6,7 @@ import { containerEnvironment } from '../src/runtime-env.mjs';
 const env = { CORE_ENV: 'production', AUTH_SERVICES_ENABLED: 'true', CORE_DATA_ACCESS_VERIFIED: 'true',
   AUTH_CUTOVER_VERIFIED: 'true', CORE_SERVICES_ENABLED: 'false', CORE_NETWORK_VERIFIED: 'false',
   WALLET_FUNDING_ENABLED: 'true', MELD_ADMIN_SANDBOX_ENABLED: 'true' };
-const input = { requestId: '1d0f91dd-0d86-4ae2-a23e-c106ca6c360b', walletAddress: `0x${'1'.repeat(40)}`, country: 'CO', amount: 50, paymentMethodType: 'CREDIT_DEBIT_CARD' };
+const input = { requestId: '1d0f91dd-0d86-4ae2-a23e-c106ca6c360b', walletAddress: `0x${'1'.repeat(40)}`, country: 'US', amount: 50, paymentMethodType: 'CREDIT_DEBIT_CARD' };
 const path = '/api/member/wallet-funding/personal/intent';
 function request(route = path, body = input, extra = {}) {
   return new Request(`https://auth.core.internal${route}`, { method: 'POST', headers: {
@@ -26,7 +26,7 @@ test('funding admits only the native personal intent, independent sandbox sessio
     { headers: { cookie: 'better-auth.session_token=synthetic' } }), env, resolve)).status, 200);
   assert.equal((await dispatchCore(new Request('https://auth.core.internal/api/member/wallet-funding/administrative/options?country=US&serviceProvider=TRANSAK',
     { headers: { cookie: 'better-auth.session_token=synthetic' } }), env, resolve)).status, 200);
-  assert.equal((await dispatchCore(new Request('https://auth.core.internal/api/member/wallet-funding/personal/options?country=CO',
+  assert.equal((await dispatchCore(new Request('https://auth.core.internal/api/member/wallet-funding/personal/options?country=US',
     { headers: { cookie: 'better-auth.session_token=synthetic' } }), { ...env, MELD_ADMIN_SANDBOX_ENABLED: 'false' }, resolve)).status, 200);
   assert.equal(calls, 6);
 });
@@ -95,6 +95,24 @@ test('currency discovery admits canonical selectors while duplicate and encoded 
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'MXN', amount: 1000 }), env, resolve)).status, 200);
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'mxn', amount: 1000 }), env, never)).status, 503);
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: null, amount: 1000 }), env, never)).status, 503);
+});
+
+test('personal country and payment exclusions do not restrict the separate administrative flow or historical owned status', async () => {
+  const never = () => assert.fail('excluded personal funding dispatched');
+  for (const country of ['CO', 'PA', 'GB']) {
+    assert.equal((await dispatchCore(request(path, { ...input, country }), env, never)).status, 503);
+    assert.equal((await dispatchCore(new Request(`https://auth.core.internal/api/member/wallet-funding/personal/options?country=${country}`,
+      { headers: { cookie: 'better-auth.session_token=synthetic' } }), env, never)).status, 503);
+  }
+  for (const paymentMethodType of ['NETELLER', 'SKRILL']) {
+    assert.equal((await dispatchCore(request(path, { ...input, paymentMethodType }), env, never)).status, 503);
+  }
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
+    ...input, country: 'CO', serviceProvider: 'BANXA', paymentMethodType: 'SKRILL' }), env, resolve)).status, 200);
+  for (const country of ['US', 'MX', 'ES']) assert.equal((await dispatchCore(request(path, { ...input, country }), env, resolve)).status, 200);
+  assert.equal(calls, 4);
 });
 
 test('owned status reads are a separate exact native-session capability with no checkout or owner overrides', async () => {

@@ -75,6 +75,25 @@ test('personal intent revalidates its own production method and amount, then com
   await expect(createPersonalFundingIntent(queuedDatabase([]).database, { ...input, paymentMethodType: undefined }, 'owner', { fetchImpl })).rejects.toThrow();
 });
 
+test('personal country and method restrictions cannot be bypassed by forging an intent or another catalogue', async () => {
+  const blocked = queuedDatabase([]);
+  for (const country of ['CO', 'PA', 'GB']) {
+    await expect(createPersonalFundingIntent(blocked.database, { ...input, country }, 'owner', {
+      fetchImpl: (async () => { throw new Error('unsupported country must not fetch'); }) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_invalid_country');
+  }
+  for (const paymentMethodType of ['NETELLER', 'SKRILL']) {
+    await expect(createPersonalFundingIntent(blocked.database, { ...input, paymentMethodType }, 'owner', {
+      fetchImpl: (async () => Response.json([route('SWAPPED', [method(paymentMethodType)])])) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_method_unavailable');
+  }
+  expect(blocked.queries).toHaveLength(0);
+  const admin = await readAdministrativeSandboxOptions({ country: 'CO', serviceProvider: 'BANXA' }, { environment,
+    fetchImpl: (async () => Response.json([route('BANXA', [method('NETELLER'), method('SKRILL')])])) as unknown as typeof fetch });
+  expect(admin.country).toBe('CO');
+  expect(admin.paymentMethods).toEqual(['NETELLER', 'SKRILL']);
+});
+
 test('administrative sandbox binds the assigned address and records its session separately from production finances', async () => {
   const { database, queries } = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
   let calls = 0;
