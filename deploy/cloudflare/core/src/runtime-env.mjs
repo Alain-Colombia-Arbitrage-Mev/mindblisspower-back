@@ -105,7 +105,7 @@ export function containerEnvironment(service, env) {
     // Append explicit deployed origins without replacing the existing secret.
     if (env.API_AUTH_ADDITIONAL_ORIGINS !== undefined) {
       const additional = env.API_AUTH_ADDITIONAL_ORIGINS;
-      const allowed = new Set(['https://mindblisspower.com', 'https://admin.mindblisspower.com', 'https://app.mindblisspower.com',
+      const allowed = new Set(['https://mindblisspower.com', 'https://admin.mindblisspower.com', 'https://app.mindblisspower.com', 'https://wallet.mindblisspower.com',
         'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
       if (typeof additional !== 'string' || !additional || additional.length > 512
         || additional.split(',').some(origin => !allowed.has(origin))) throw new Error('Invalid additional authentication origins');
@@ -140,7 +140,7 @@ export function containerEnvironment(service, env) {
       }
       Object.assign(values, { MELD_WEBHOOK_SIGNING_KEY: env.MELD_WEBHOOK_SIGNING_KEY, MELD_ACCOUNT_ID: env.MELD_ACCOUNT_ID,
         MELD_WEBHOOK_PROFILE_ID: env.MELD_WEBHOOK_PROFILE_ID,
-        MELD_WEBHOOK_PUBLIC_URL: 'https://app.mindblisspower.com/api/webhooks/meld' });
+        MELD_WEBHOOK_PUBLIC_URL: 'https://wallet.mindblisspower.com/api/webhooks/meld' });
     }
     // The SDK injects this ephemeral interception CA; Bun keeps its public CA
     // roots and adds this one for the fixed private HTTPS observation hostname.

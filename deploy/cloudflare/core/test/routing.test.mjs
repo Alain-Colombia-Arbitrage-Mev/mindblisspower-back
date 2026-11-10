@@ -292,7 +292,7 @@ test('Meld webhook secrets reach only the auth container when explicitly enabled
   assert.equal(values.MELD_WEBHOOK_SIGNING_KEY, 's'.repeat(32));
   assert.equal(values.MELD_ACCOUNT_ID, 'account-fixture');
   assert.equal(values.MELD_WEBHOOK_PROFILE_ID, 'profile-fixture');
-  assert.equal(values.MELD_WEBHOOK_PUBLIC_URL, 'https://app.mindblisspower.com/api/webhooks/meld');
+  assert.equal(values.MELD_WEBHOOK_PUBLIC_URL, 'https://wallet.mindblisspower.com/api/webhooks/meld');
   assert.throws(() => containerEnvironment('api', { ...apiSecrets(), MELD_WEBHOOK_ENABLED: 'true' }));
 });
 

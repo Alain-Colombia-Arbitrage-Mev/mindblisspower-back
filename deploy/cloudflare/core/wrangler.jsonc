@@ -71,7 +71,7 @@
         "CORE_HTTP_EGRESS_STRICT_ENABLED": "false",
         "CORE_OBSERVABILITY_ENABLED": "false",
         "CORE_AUTH_TRACE_ENABLED": "true",
-        "API_AUTH_ADDITIONAL_ORIGINS": "https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev",
+        "API_AUTH_ADDITIONAL_ORIGINS": "https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev,https://wallet.mindblisspower.com",
         "STRIPE_CHECKOUT_ENABLED": "false",
         "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "true",
         "NOWPAYMENTS_OPERATIONAL_ENABLED": "true",

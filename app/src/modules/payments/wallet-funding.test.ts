@@ -77,7 +77,7 @@ test('personal intent revalidates its own production method and amount, then com
 
 test('personal country and method restrictions cannot be bypassed by forging an intent or another catalogue', async () => {
   const blocked = queuedDatabase([]);
-  for (const country of ['CO', 'PA', 'GB']) {
+  for (const country of ['CO', 'PA', 'GB', 'ES']) {
     await expect(createPersonalFundingIntent(blocked.database, { ...input, country }, 'owner', {
       fetchImpl: (async () => { throw new Error('unsupported country must not fetch'); }) as unknown as typeof fetch,
     })).rejects.toThrow('wallet_funding_invalid_country');

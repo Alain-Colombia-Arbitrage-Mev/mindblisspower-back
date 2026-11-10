@@ -58,8 +58,8 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
   }
 });
 
-test('personal funding is limited to US, Mexico and Spain and removes Neteller and Skrill rails', async () => {
-  for (const country of ['US', 'MX', 'ES']) {
+test('personal funding is limited to US and Mexico and removes Neteller and Skrill rails', async () => {
+  for (const country of ['US', 'MX']) {
     const result = await readReownProductionOptions(country, { fetchImpl: mockFetch((url) => {
       expect(url).toContain(`/${country}/USD/USDT_POLYGON`);
       return Response.json([route('SWAPPED', [
@@ -109,7 +109,7 @@ test('provider errors, redirects and oversized responses fail closed without exp
 test('invalid input and cancelled country changes do not fetch or reuse stale options', async () => {
   let calls = 0;
   const fetchImpl = mockFetch(() => { calls++; return Response.json([route()]); });
-  for (const country of ['co', 'CO', 'PA', 'GB', 'COL', 'CO/../US', '', 'US?country=CO']) {
+  for (const country of ['co', 'CO', 'PA', 'GB', 'ES', 'COL', 'CO/../US', '', 'US?country=CO']) {
     await expect(readReownProductionOptions(country, { fetchImpl })).rejects.toThrow('wallet_funding_invalid_country');
   }
   const controller = new AbortController(); controller.abort();

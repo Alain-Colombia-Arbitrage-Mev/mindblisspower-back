@@ -10,7 +10,11 @@ type Dependencies = { database: Pick<IdentityDatabase, 'execute'>;
   environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch };
 const noStore = { 'Cache-Control': 'private, no-store' };
 
-function allowedOrigin(value: string, environment: Record<string, string | undefined>) {
+const PERSONAL_FUNDING_ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const ADMINISTRATIVE_FUNDING_ORIGIN = 'https://wallet.mindblisspower.com';
+
+function allowedOrigin(kind: 'personal' | 'administrative', value: string, environment: Record<string, string | undefined>) {
+  if (kind === 'personal' ? !PERSONAL_FUNDING_ORIGINS.has(value) : value !== ADMINISTRATIVE_FUNDING_ORIGIN) return false;
   return [environment.BETTER_AUTH_URL, ...(environment.BETTER_AUTH_TRUSTED_ORIGINS || '').split(',')]
     .filter(Boolean).some(candidate => { try { return new URL(candidate!.trim()).origin === value; } catch { return false; } });
 }
@@ -49,7 +53,7 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
     }, async context => {
       const subject = context.get('session')?.user.id;
       if (!subject) return context.json({ error: 'unauthenticated' }, 401, noStore);
-      if (!allowedOrigin(context.req.header('origin') || '', environment)) return context.json({ error: 'invalid_origin' }, 403, noStore);
+      if (!allowedOrigin(kind, context.req.header('origin') || '', environment)) return context.json({ error: 'invalid_origin' }, 403, noStore);
       if (context.req.header('content-encoding') || !/^application\/json(?:\s*;|$)/i.test(context.req.header('content-type') || '')) {
         return context.json({ error: 'json_required' }, 415, noStore);
       }

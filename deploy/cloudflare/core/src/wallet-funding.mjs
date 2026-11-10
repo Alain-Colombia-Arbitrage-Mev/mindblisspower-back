@@ -1,8 +1,9 @@
 export const WALLET_FUNDING_PREFIX = '/api/member/wallet-funding';
 export const WALLET_FUNDING_MAX_BODY = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
-const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'ES']);
+const PERSONAL_ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const ADMINISTRATIVE_ORIGIN = 'https://wallet.mindblisspower.com';
+const PERSONAL_COUNTRIES = new Set(['US', 'MX']);
 
 export function walletFundingNamespace(path) {
   return path === WALLET_FUNDING_PREFIX || path.startsWith(`${WALLET_FUNDING_PREFIX}/`);
@@ -33,7 +34,8 @@ export function walletFundingRequest(request, url, body, env, ready) {
   const personal = url.pathname === `${WALLET_FUNDING_PREFIX}/personal/intent`;
   const administrative = url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/session`;
   if (request.method !== 'POST' || (!personal && !administrative) || url.search
-    || request.headers.has('content-encoding') || !ORIGINS.has(request.headers.get('origin'))
+    || request.headers.has('content-encoding')
+    || (personal ? !PERSONAL_ORIGINS.has(request.headers.get('origin')) : request.headers.get('origin') !== ADMINISTRATIVE_ORIGIN)
     || !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')
     || !body?.length || body.length > WALLET_FUNDING_MAX_BODY) return false;
   if (administrative && env.MELD_ADMIN_SANDBOX_ENABLED !== 'true') return false;

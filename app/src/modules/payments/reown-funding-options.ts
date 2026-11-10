@@ -3,7 +3,7 @@
 // This is the public checkout key shipped by Reown, not a Mindbliss private API key.
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
 const PROVIDERS = ['TOPPER', 'SWAPPED'] as const;
-export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'ES'] as const;
+export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX'] as const;
 const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;

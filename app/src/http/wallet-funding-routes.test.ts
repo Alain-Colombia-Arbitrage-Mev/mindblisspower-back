@@ -5,7 +5,8 @@ import type { ApiEnvironment } from './types';
 import type { IdentityDatabase } from '../modules/identity/model';
 import { createHash, createHmac } from 'node:crypto';
 
-const origin = 'https://app.example.test';
+const origin = 'https://app.mindblisspower.com';
+const administrativeOrigin = 'https://wallet.mindblisspower.com';
 const personalPath = '/api/member/wallet-funding/personal/intent';
 const administrativePath = '/api/member/wallet-funding/administrative/session';
 const input = { requestId: '6d492c47-80be-4e14-bc5f-54afaa56fc23', walletAddress: `0x${'2'.repeat(40)}`, country: 'US', amount: 100, paymentMethodType: 'CREDIT_DEBIT_CARD' };
@@ -17,7 +18,7 @@ function signedRequest(path: string, body: string, extraHeaders: Record<string, 
   const cookie = 'better-auth.session_token=synthetic';
   const hash = (value: string) => createHash('sha256').update(value).digest('hex');
   const signature = createHmac('sha256', secret).update(['POST', path, timestamp, ip, hash(cookie), hash(body)].join('\n')).digest('hex');
-  return { method: 'POST', headers: { origin, 'content-type': 'application/json', cookie,
+  return { method: 'POST', headers: { origin: path === administrativePath ? administrativeOrigin : origin, 'content-type': 'application/json', cookie,
     'x-vp-auth-client-ip': ip, 'x-vp-auth-timestamp': timestamp, 'x-vp-auth-signature': signature, ...extraHeaders }, body };
 }
 
@@ -28,7 +29,8 @@ function application({ signedIn = true, execute = async () => [] }: { signedIn?:
     await next();
   });
   registerWalletFundingRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
-    environment: { BETTER_AUTH_URL: origin, AUTH_BFF_SHARED_SECRET: secret },
+    environment: { BETTER_AUTH_URL: origin,
+      BETTER_AUTH_TRUSTED_ORIGINS: `${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
     fetchImpl: (async url => {
       expect(String(url)).toStartWith('https://api.meld.io/');
       return Response.json([{ partner: 'TOPPER', source: 'USD', destination: 'USDT_POLYGON',
@@ -65,6 +67,34 @@ test('personal funding returns an uncached initiated acknowledgement while sandb
   const sandbox = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'TRANSAK' })));
   expect(sandbox.status).toBe(503);
   expect(await sandbox.json()).toEqual({ error: 'wallet_funding_unconfigured' });
+});
+
+test('funding mutations are isolated by exact portal origin even when both hosts trust the same native auth service', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });
+  for (const untrusted of [administrativeOrigin, 'https://wallet.mindblisspower.com.evil.test', 'https://mindblisspower.com']) {
+    const rejected = await app.request(personalPath, { method: 'POST', headers: { origin: untrusted, 'content-type': 'application/json' },
+      body: JSON.stringify(input) });
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toEqual({ error: 'invalid_origin' });
+  }
+  for (const untrusted of [origin, 'https://mindbliss-portal-rewon.devfidubit.workers.dev', 'https://wallet.mindblisspower.com.evil.test',
+    'http://wallet.mindblisspower.com', 'https://wallet.mindblisspower.com:443', 'https://wallet.mindblisspower.com/']) {
+    const rejected = await app.request(administrativePath, signedRequest(administrativePath,
+      JSON.stringify({ ...input, serviceProvider: 'BANXA' }), { origin: untrusted }));
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toEqual({ error: 'invalid_origin' });
+  }
+  expect(calls).toBe(0);
+  const personal = await app.request(personalPath, { method: 'POST', headers: {
+    origin: 'https://mindbliss-portal-rewon.devfidubit.workers.dev', 'content-type': 'application/json' }, body: JSON.stringify(input) });
+  expect(personal.status).toBe(201);
+  expect(calls).toBe(1);
+  const administrative = await app.request(administrativePath, signedRequest(administrativePath,
+    JSON.stringify({ ...input, serviceProvider: 'BANXA' })));
+  expect(administrative.status).toBe(503);
+  expect(await administrative.json()).toEqual({ error: 'wallet_funding_unconfigured' });
+  expect(calls).toBe(1);
 });
 
 test('the administrative provider IP must come from a signed proxy envelope bound to path, cookie and body', async () => {
@@ -111,7 +141,7 @@ test('administrative options require a session and one exact country/provider wi
 test('personal options use one native-session country query without a sandbox credential or provider selector', async () => {
   const app = application();
   const path = '/api/member/wallet-funding/personal/options';
-  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other', '?country=CO', '?country=PA']) {
+  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other', '?country=CO', '?country=PA', '?country=ES']) {
     expect((await app.request(path + query)).status).toBe(400);
   }
   expect((await application({ signedIn: false }).request(path + '?country=US')).status).toBe(401);

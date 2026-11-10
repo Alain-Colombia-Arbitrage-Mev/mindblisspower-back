@@ -96,7 +96,10 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
   return {
     database, baseURL: env.BETTER_AUTH_URL, secret: env.BETTER_AUTH_SECRET,
     trustedOrigins: (env.BETTER_AUTH_TRUSTED_ORIGINS || '').split(',').map(origin => origin.trim()).filter(Boolean),
-    ...(env.AUTH_BFF_SHARED_SECRET ? { advanced: { ipAddress: { ipAddressHeaders: ['x-vp-auth-client-ip'] } } } : {}),
+    // Each portal proxies this same backend on its own host. Authentication
+    // trust does not share browser cookies between the personal and admin sites.
+    advanced: { crossSubDomainCookies: { enabled: false },
+      ...(env.AUTH_BFF_SHARED_SECRET ? { ipAddress: { ipAddressHeaders: ['x-vp-auth-client-ip'] } } : {}) },
     logger: { disabled: true }, plugins,
     // better-call logs unhandled errors even when Better Auth's logger is off.
     // Replace unexpected DB/provider errors before that outer fallback sees

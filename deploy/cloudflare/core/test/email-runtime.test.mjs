@@ -19,7 +19,7 @@ const unreadable = (env, keys) => {
 
 test('branch portals append exact trusted origins without changing credentials, issuer or existing origins', () => {
   const env = { ...fixture(), API_AUTH_ORIGINS: 'https://mindblisspower.com,https://admin.mindblisspower.com',
-    API_AUTH_ADDITIONAL_ORIGINS: 'https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev' };
+    API_AUTH_ADDITIONAL_ORIGINS: 'https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev,https://wallet.mindblisspower.com' };
   const values = containerEnvironment('api', env);
   assert.equal(values.BETTER_AUTH_TRUSTED_ORIGINS, `${env.API_AUTH_ORIGINS},${env.API_AUTH_ADDITIONAL_ORIGINS}`);
   assert.equal(values.BETTER_AUTH_URL, env.API_AUTH_URL);
@@ -41,7 +41,10 @@ test('additional auth origins reject wildcards, lookalikes, insecure hosts and m
     'http://mindbliss-portal-rewon.devfidubit.workers.dev',
     'https://mindbliss-portal-rewon.devfidubit.workers.dev/',
     'https://mindbliss-portal-rewon.devfidubit.workers.dev:443',
-    'https://MINDBLISS-PORTAL-REWON.devfidubit.workers.dev']) {
+    'https://MINDBLISS-PORTAL-REWON.devfidubit.workers.dev',
+    'https://wallet.mindblisspower.com.evil.test', 'http://wallet.mindblisspower.com',
+    'https://wallet.mindblisspower.com/', 'https://wallet.mindblisspower.com:443',
+    'https://wallet.mindblisspower.com?x=1', 'https://WALLET.mindblisspower.com']) {
     assert.throws(() => containerEnvironment('api', { ...fixture(), API_AUTH_ADDITIONAL_ORIGINS: origin }),
       { message: 'Invalid additional authentication origins' });
   }

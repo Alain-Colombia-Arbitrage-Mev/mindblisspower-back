@@ -10,7 +10,8 @@ const input = { requestId: '1d0f91dd-0d86-4ae2-a23e-c106ca6c360b', walletAddress
 const path = '/api/member/wallet-funding/personal/intent';
 function request(route = path, body = input, extra = {}) {
   return new Request(`https://auth.core.internal${route}`, { method: 'POST', headers: {
-    cookie: '__Secure-better-auth.session_token=synthetic', origin: 'https://app.mindblisspower.com',
+    cookie: '__Secure-better-auth.session_token=synthetic', origin: route === '/api/member/wallet-funding/administrative/session'
+      ? 'https://wallet.mindblisspower.com' : 'https://app.mindblisspower.com',
     'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
 }
 
@@ -99,7 +100,7 @@ test('currency discovery admits canonical selectors while duplicate and encoded 
 
 test('personal country and payment exclusions do not restrict the separate administrative flow or historical owned status', async () => {
   const never = () => assert.fail('excluded personal funding dispatched');
-  for (const country of ['CO', 'PA', 'GB']) {
+  for (const country of ['CO', 'PA', 'GB', 'ES']) {
     assert.equal((await dispatchCore(request(path, { ...input, country }), env, never)).status, 503);
     assert.equal((await dispatchCore(new Request(`https://auth.core.internal/api/member/wallet-funding/personal/options?country=${country}`,
       { headers: { cookie: 'better-auth.session_token=synthetic' } }), env, never)).status, 503);
@@ -111,8 +112,8 @@ test('personal country and payment exclusions do not restrict the separate admin
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
     ...input, country: 'CO', serviceProvider: 'BANXA', paymentMethodType: 'SKRILL' }), env, resolve)).status, 200);
-  for (const country of ['US', 'MX', 'ES']) assert.equal((await dispatchCore(request(path, { ...input, country }), env, resolve)).status, 200);
-  assert.equal(calls, 4);
+  for (const country of ['US', 'MX']) assert.equal((await dispatchCore(request(path, { ...input, country }), env, resolve)).status, 200);
+  assert.equal(calls, 3);
 });
 
 test('owned status reads are a separate exact native-session capability with no checkout or owner overrides', async () => {
@@ -164,4 +165,21 @@ test('funding failures preserve reviewed actionable enums through the real Core 
   const personal = await dispatchCore(request(), env, () => ({ fetch: async () => Response.json({
     error: 'wallet_funding_provider_authentication_unavailable' }, { status: 503 }) }));
   assert.deepEqual(await personal.json(), { error: 'upstream_unavailable' });
+});
+
+test('personal and administrative mutations cannot cross their explicitly separate portal origins', async () => {
+  const administrativePath = '/api/member/wallet-funding/administrative/session';
+  const administrative = { ...input, country: 'CO', serviceProvider: 'BANXA' };
+  const never = () => assert.fail('cross-portal financial request dispatched');
+  assert.equal((await dispatchCore(request(path, input, { origin: 'https://wallet.mindblisspower.com' }), env, never)).status, 503);
+  for (const origin of ['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev',
+    'https://wallet.mindblisspower.com.evil.test', 'http://wallet.mindblisspower.com', 'https://wallet.mindblisspower.com:443',
+    'https://wallet.mindblisspower.com/', 'https://WALLET.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request(administrativePath, administrative, { origin }), env, never)).status, 503);
+  }
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  assert.equal((await dispatchCore(request(administrativePath, administrative), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, input, { origin: 'https://mindbliss-portal-rewon.devfidubit.workers.dev' }), env, resolve)).status, 200);
+  assert.equal(calls, 2);
 });
