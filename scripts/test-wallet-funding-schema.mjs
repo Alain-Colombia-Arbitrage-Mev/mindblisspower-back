@@ -18,6 +18,7 @@ const bobAdminAddress = `0x${'4'.repeat(40)}`;
 const requestId = '11111111-1111-4111-8111-111111111111';
 const bobId = '22222222-2222-4222-8222-222222222222';
 const migration = readFileSync(new URL('../_meta/migration/93_wallet_funding_isolation.sql', import.meta.url), 'utf8');
+const methodMigration = readFileSync(new URL('../_meta/migration/94_wallet_funding_payment_methods.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -185,6 +186,33 @@ try {
   const duplicateMigration = psql(migration, true);
   assert.notEqual(duplicateMigration.status, 0);
   assert.match(duplicateMigration.stderr, /wallet_funding_requires_fresh_review/);
+  probes++;
+  const legacyPersonalRows = value('SELECT count(*) FROM payments.reown_funding_intent;', false);
+  psql(methodMigration);
+  equal('SELECT count(*) FROM payments.reown_funding_intent WHERE payment_method IS NULL;', legacyPersonalRows, false);
+  equal(`SELECT has_function_privilege('${role}','payments.create_reown_funding_intent(text,text,text,numeric,uuid)','EXECUTE');`, 'f', false);
+  equal(`SELECT has_function_privilege('${role}','payments.create_reown_funding_intent(text,text,text,numeric,uuid,text)','EXECUTE');`, 't', false);
+  rejects(personal('bob', bobPersonalAddress, '100', randomUUID()), 'permission denied');
+  const methodId = randomUUID();
+  const withMethod = (method = "'CREDIT_DEBIT_CARD'", address = bobPersonalAddress, id = methodId, subject = 'bob') =>
+    `SELECT * FROM payments.create_reown_funding_intent('${subject}','${address}','CO',100,'${id}',${method});`;
+  const withMethodResult = value(withMethod());
+  assert.match(withMethodResult, new RegExp(`^${methodId}\\|`)); probes++;
+  equal(withMethod(), withMethodResult);
+  equal(`SELECT payment_method FROM payments.reown_funding_intent WHERE id='${methodId}';`, 'CREDIT_DEBIT_CARD', false);
+  rejects(withMethod("'APPLE_PAY'"), 'wallet_funding_request_already_used');
+  rejects(withMethod('NULL', bobPersonalAddress, randomUUID()), 'wallet_funding_invalid_request');
+  rejects(withMethod("'invalid method'", bobPersonalAddress, randomUUID()), 'wallet_funding_invalid_request');
+  rejects(withMethod("'CREDIT_DEBIT_CARD'", bobAdminAddress, randomUUID()), 'wallet_funding_wallet_not_linked');
+  rejects(withMethod("'CREDIT_DEBIT_CARD'", personalAddress, randomUUID()), 'wallet_funding_wallet_not_linked');
+  rejects(withMethod("'CREDIT_DEBIT_CARD'", bobPersonalAddress, randomUUID(), 'blocked'), 'wallet_funding_forbidden');
+  equal(`SELECT md5((SELECT json_agg(m ORDER BY id)::text FROM mlm.wallet_movement m)||
+    (SELECT json_agg(a ORDER BY id)::text FROM payments.meld_onramp_attempt a));`, ledgerBefore, false);
+  rejects('SELECT * FROM payments.reown_funding_intent;', 'permission denied');
+  equal(`SELECT has_function_privilege('app_read','payments.create_reown_funding_intent(text,text,text,numeric,uuid,text)','EXECUTE');`, 'f', false);
+  const duplicateMethodMigration = psql(methodMigration, true);
+  assert.notEqual(duplicateMethodMigration.status, 0);
+  assert.match(duplicateMethodMigration.stderr, /wallet_funding_method_requires_fresh_review/);
   probes++;
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
     externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true }));

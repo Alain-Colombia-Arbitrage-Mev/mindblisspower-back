@@ -48,7 +48,7 @@ registerAffiliateRoutes(app);
 registerTransactionRoutes(app);
 registerCommandCenterRoutes(app);
 registerIdentityRoutes(app);
-registerWalletLinkRoutes(app);
+registerWalletLinkRoutes(app, { database: authDb });
 registerAdministrativeWalletRoutes(app);
 registerMeldOnrampRoutes(app);
 registerWalletFundingRoutes(app, { database: authDb });

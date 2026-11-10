@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { Wallet } from 'ethers';
-import { canonicalWalletAddress, verifyWalletLinkProof, walletLinkMessage } from './wallet-link';
+import { canonicalWalletAddress, confirmWalletLink, verifyWalletLinkProof, walletLinkMessage } from './wallet-link';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+import type { IdentityDatabase } from './model';
 
 const challenge = {
   origin: 'https://app.mindblisspower.com',
@@ -34,4 +37,44 @@ describe('wallet link proof', () => {
     expect(() => walletLinkMessage({ ...challenge, origin: 'http://app.mindblisspower.com', address: '0x0000000000000000000000000000000000000001' }))
       .toThrow('invalid_wallet_origin');
   });
+});
+
+test('wallet confirmation rejects another subject, expired or consumed proofs before any transaction', async () => {
+  const wallet = Wallet.createRandom();
+  const message = walletLinkMessage({ ...challenge, address: wallet.address });
+  const signature = await wallet.signMessage(message);
+  const now = new Date('2026-11-09T12:01:00Z');
+  const preview = { address: wallet.address.toLowerCase(), message, expires_at: challenge.expiresAt, consumed_at: null };
+  for (const rows of [[], [{ ...preview, consumed_at: now }], [{ ...preview, expires_at: new Date('2026-11-09T12:00:00Z') }]]) {
+    let calls = 0;
+    const database = { execute: async (query: SQL) => {
+      calls++;
+      const parsed = new PgDialect().sqlToQuery(query);
+      expect(parsed.sql).toContain('AND subject=');
+      expect(parsed.params).toEqual([challenge.challengeId, 'different-subject']);
+      return rows;
+    }, transaction: async () => { throw new Error('transaction must not start'); } } as unknown as IdentityDatabase;
+    await expect(confirmWalletLink(database, { userId: 'different-subject', challengeId: challenge.challengeId, signature }, now)).rejects.toThrow('wallet_challenge_invalid');
+    expect(calls).toBe(1);
+  }
+});
+
+test('a valid signature still cannot reuse a challenge consumed while waiting for its lock', async () => {
+  const wallet = Wallet.createRandom();
+  const message = walletLinkMessage({ ...challenge, address: wallet.address });
+  const signature = await wallet.signMessage(message);
+  const now = new Date('2026-11-09T12:01:00Z');
+  const preview = { address: wallet.address.toLowerCase(), message, expires_at: challenge.expiresAt, consumed_at: null };
+  const results: unknown[][] = [[preview], [{ id: 'member' }], [{ subject: 'member', auth_email: 'synthetic@example.invalid', email_verified: true,
+    person_id: '1', public_id: 'synthetic', person_email: 'synthetic@example.invalid', person_status: 'active', blacklisted: false,
+    user_id: 'member', access_restricted: false }], [{ ...preview, person_id: '1', consumed_at: now }]];
+  const queries: string[] = [];
+  const database = { execute: async (query: SQL) => {
+    queries.push(new PgDialect().sqlToQuery(query).sql);
+    if (!results.length) throw new Error('unexpected write');
+    return results.shift();
+  }, transaction: async (callback: (value: unknown) => unknown) => callback(database) } as unknown as IdentityDatabase;
+  await expect(confirmWalletLink(database, { userId: 'member', challengeId: challenge.challengeId, signature }, now)).rejects.toThrow('wallet_challenge_invalid');
+  expect(queries).toHaveLength(4);
+  expect(queries.join(' ')).not.toContain('INSERT INTO');
 });

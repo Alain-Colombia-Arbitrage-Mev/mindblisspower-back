@@ -15,6 +15,8 @@ export function walletFundingRequest(request, url, body, env, ready) {
   if (request.method === 'GET') {
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/history`) return ['?walletKind=personal', '?walletKind=administrative'].includes(url.search);
     const country = url.searchParams.get('country');
+    if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return /^[A-Z]{2}$/.test(country || '')
+      && url.search === `?country=${country}`;
     const provider = url.searchParams.get('serviceProvider');
     return env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/options`
       && /^[A-Z]{2}$/.test(country || '') && ['TRANSAK', 'BANXA'].includes(provider)
@@ -30,12 +32,12 @@ export function walletFundingRequest(request, url, body, env, ready) {
   try {
     const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
-    const allowed = ['requestId', 'walletAddress', 'country', 'amount', ...(administrative ? ['serviceProvider', 'paymentMethodType'] : [])];
+    const allowed = ['requestId', 'walletAddress', 'country', 'amount', 'paymentMethodType', ...(administrative ? ['serviceProvider'] : [])];
     if (Object.keys(input).some(key => !allowed.includes(key)) || !UUID.test(input.requestId || '')
       || !/^0x[a-f0-9]{40}$/i.test(input.walletAddress || '') || !/^[A-Z]{2}$/.test(input.country || '')
       || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < 50 || input.amount > 25000
-      || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001) return false;
-    return !administrative || (['TRANSAK', 'BANXA'].includes(input.serviceProvider)
-      && (input.paymentMethodType === undefined || /^[A-Z0-9_]{2,40}$/.test(input.paymentMethodType)));
+      || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001
+      || typeof input.paymentMethodType !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(input.paymentMethodType)) return false;
+    return !administrative || ['TRANSAK', 'BANXA'].includes(input.serviceProvider);
   } catch { return false; }
 }

@@ -4,6 +4,7 @@ import { createAdministrativeSandboxSession, createPersonalFundingIntent, fundin
 import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiApplication } from './types';
 import { authProxyContext } from './auth-proxy-context';
+import { readReownProductionOptions } from '../modules/payments/reown-funding-options';
 
 type Dependencies = { database: Pick<IdentityDatabase, 'execute'>;
   environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch };
@@ -17,13 +18,15 @@ function allowedOrigin(value: string, environment: Record<string, string | undef
 function failure(error: unknown) {
   if (error instanceof z.ZodError || error instanceof SyntaxError) return { error: 'invalid_request', status: 400 as const };
   const code = error instanceof Error ? error.message : '';
+  if (code === 'wallet_funding_invalid_country') return { error: 'invalid_request', status: 400 as const };
   if (['wallet_funding_forbidden', 'wallet_funding_wallet_not_linked', 'wallet_funding_wallet_not_assigned'].includes(code)) {
     return { error: 'wallet_funding_forbidden', status: 403 as const };
   }
   if (code === 'wallet_funding_request_already_used') return { error: code, status: 409 as const };
   if (code === 'wallet_funding_rate_limited') return { error: code, status: 429 as const };
   if (code === 'wallet_funding_unconfigured') return { error: code, status: 503 as const };
-  if (code === 'wallet_funding_method_unavailable') return { error: 'wallet_funding_provider_unavailable', status: 409 as const };
+  if (code === 'wallet_funding_method_unavailable') return { error: code, status: 409 as const };
+  if (code === 'wallet_funding_amount_unavailable') return { error: code, status: 409 as const };
   if (code === 'wallet_funding_provider_unavailable') return { error: code, status: 503 as const };
   return { error: 'wallet_funding_unavailable', status: 503 as const };
 }
@@ -54,14 +57,26 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         const raw = await context.req.text();
         if (Buffer.byteLength(raw, 'utf8') > 4096) return context.json({ error: 'request_too_large' }, 413, noStore);
         const input: unknown = JSON.parse(raw);
-        const result = kind === 'personal' ? await createPersonalFundingIntent(database, input, subject)
+        const result = kind === 'personal' ? await createPersonalFundingIntent(database, input, subject, { fetchImpl, signal: context.req.raw.signal })
           : await createAdministrativeSandboxSession(database, input, {
-            subject, clientIp: context.req.header('x-vp-auth-client-ip') || '', environment, fetchImpl,
+            subject, clientIp: context.req.header('x-vp-auth-client-ip') || '', environment, fetchImpl, signal: context.req.raw.signal,
           });
         return context.json(result, 201, noStore);
       } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
     });
   }
+
+  app.get('/api/member/wallet-funding/personal/options', async context => {
+    if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
+    try {
+      const query = new URL(context.req.url).searchParams;
+      const country = query.get('country');
+      if ([...query.keys()].length !== 1 || query.getAll('country').length !== 1 || !/^[A-Z]{2}$/.test(country || '')) {
+        return context.json({ error: 'invalid_request' }, 400, noStore);
+      }
+      return context.json(await readReownProductionOptions(country!, { fetchImpl, signal: context.req.raw.signal }), 200, noStore);
+    } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
+  });
 
   app.get('/api/member/wallet-funding/administrative/options', async context => {
     if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
@@ -70,7 +85,7 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
       if ([...query.keys()].length !== 2 || query.getAll('country').length !== 1 || query.getAll('serviceProvider').length !== 1) {
         return context.json({ error: 'invalid_request' }, 400, noStore);
       }
-      const result = await readAdministrativeSandboxOptions({ country: query.get('country'), serviceProvider: query.get('serviceProvider') }, { environment, fetchImpl });
+      const result = await readAdministrativeSandboxOptions({ country: query.get('country'), serviceProvider: query.get('serviceProvider') }, { environment, fetchImpl, signal: context.req.raw.signal });
       return context.json(result, 200, noStore);
     } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
   });

@@ -8,7 +8,7 @@ import { createHash, createHmac } from 'node:crypto';
 const origin = 'https://app.example.test';
 const personalPath = '/api/member/wallet-funding/personal/intent';
 const administrativePath = '/api/member/wallet-funding/administrative/session';
-const input = { requestId: '6d492c47-80be-4e14-bc5f-54afaa56fc23', walletAddress: `0x${'2'.repeat(40)}`, country: 'US', amount: 100 };
+const input = { requestId: '6d492c47-80be-4e14-bc5f-54afaa56fc23', walletAddress: `0x${'2'.repeat(40)}`, country: 'US', amount: 100, paymentMethodType: 'CREDIT_DEBIT_CARD' };
 const secret = 's'.repeat(48);
 
 function signedRequest(path: string, body: string, extraHeaders: Record<string, string> = {}) {
@@ -29,7 +29,11 @@ function application({ signedIn = true, execute = async () => [] }: { signedIn?:
   });
   registerWalletFundingRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
     environment: { BETTER_AUTH_URL: origin, AUTH_BFF_SHARED_SECRET: secret },
-    fetchImpl: (async () => { throw new Error('unexpected provider call'); }) as unknown as typeof fetch });
+    fetchImpl: (async url => {
+      expect(String(url)).toStartWith('https://api.meld.io/');
+      return Response.json([{ partner: 'TOPPER', source: 'USD', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
+    }) as typeof fetch });
   return app;
 }
 
@@ -53,6 +57,11 @@ test('personal funding returns an uncached initiated acknowledgement while sandb
   expect(response.status).toBe(201);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect((await response.json() as { environment: string }).environment).toBe('production');
+  for (const [change, code] of [[{ paymentMethodType: 'ACH' }, 'wallet_funding_method_unavailable'], [{ amount: 20000 }, 'wallet_funding_amount_unavailable']] as const) {
+    const unavailable = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...input, ...change }) });
+    expect(unavailable.status).toBe(409);
+    expect(await unavailable.json()).toEqual({ error: code });
+  }
   const sandbox = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'TRANSAK' })));
   expect(sandbox.status).toBe(503);
   expect(await sandbox.json()).toEqual({ error: 'wallet_funding_unconfigured' });
@@ -97,4 +106,17 @@ test('administrative options require a session and one exact country/provider wi
   expect(response.status).toBe(503);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.json()).toEqual({ error: 'wallet_funding_unconfigured' });
+});
+
+test('personal options use one native-session country query without a sandbox credential or provider selector', async () => {
+  const app = application();
+  const path = '/api/member/wallet-funding/personal/options';
+  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other']) {
+    expect((await app.request(path + query)).status).toBe(400);
+  }
+  expect((await application({ signedIn: false }).request(path + '?country=US')).status).toBe(401);
+  const response = await app.request(path + '?country=US');
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(await response.json()).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', paymentMethods: ['CREDIT_DEBIT_CARD'] });
 });
