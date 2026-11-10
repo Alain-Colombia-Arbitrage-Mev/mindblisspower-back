@@ -79,17 +79,19 @@ export async function createWalletLinkChallenge(database: IdentityDatabase, inpu
       if (existing[0].address !== address) throw new Error('wallet_already_linked');
       return { linked: true, address: getAddress(address), chainId: CHAIN_ID };
     }
+    // Raw sql parameters have no timestamp column encoder. postgres-js needs
+    // ISO strings here; Date objects fail before the challenge can be inserted.
     const recent = await transaction.execute<{ count: number }>(sql`
       SELECT count(*)::int AS count FROM identity.wallet_link_challenge
-      WHERE subject=${userId} AND issued_at >= ${new Date(issuedAt.getTime() - CHALLENGE_WINDOW_MS)}`);
+      WHERE subject=${userId} AND issued_at >= ${new Date(issuedAt.getTime() - CHALLENGE_WINDOW_MS).toISOString()}`);
     if ((recent[0]?.count ?? 0) >= CHALLENGE_LIMIT) throw new Error('wallet_link_rate_limited');
     await transaction.execute(sql`
-      UPDATE identity.wallet_link_challenge SET consumed_at=${issuedAt}
+      UPDATE identity.wallet_link_challenge SET consumed_at=${issuedAt.toISOString()}
       WHERE subject=${userId} AND consumed_at IS NULL`);
     await transaction.execute(sql`
       INSERT INTO identity.wallet_link_challenge
         (id,subject,person_id,chain_id,address,nonce_hash,message,issued_at,expires_at)
-      VALUES(${challengeId}::uuid,${userId},${personId}::bigint,${CHAIN_ID},${address},${nonceHash},${message},${issuedAt},${expiresAt})`);
+      VALUES(${challengeId}::uuid,${userId},${personId}::bigint,${CHAIN_ID},${address},${nonceHash},${message},${issuedAt.toISOString()},${expiresAt.toISOString()})`);
     return { linked: false, challengeId, message, address: getAddress(address), chainId: CHAIN_ID, expiresAt: expiresAt.toISOString() };
   });
 }
@@ -129,10 +131,10 @@ export async function confirmWalletLink(database: IdentityDatabase, input: {
     if (!current) {
       await transaction.execute(sql`
         INSERT INTO identity.wallet_binding(subject,person_id,chain_id,address,verified_at,created_at)
-        VALUES(${userId},${personId}::bigint,${CHAIN_ID},${challenge.address},${now},${now})`);
+        VALUES(${userId},${personId}::bigint,${CHAIN_ID},${challenge.address},${now.toISOString()},${now.toISOString()})`);
     }
     await transaction.execute(sql`
-      UPDATE identity.wallet_link_challenge SET consumed_at=${now}
+      UPDATE identity.wallet_link_challenge SET consumed_at=${now.toISOString()}
       WHERE id=${challengeId}::uuid AND consumed_at IS NULL`);
     return { linked: true, address: getAddress(challenge.address), chainId: CHAIN_ID, verifiedAt: now.toISOString() };
   });

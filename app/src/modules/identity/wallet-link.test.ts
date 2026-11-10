@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { Wallet } from 'ethers';
-import { canonicalWalletAddress, confirmWalletLink, verifyWalletLinkProof, walletLinkMessage } from './wallet-link';
+import { canonicalWalletAddress, confirmWalletLink, createWalletLinkChallenge, verifyWalletLinkProof, walletLinkMessage } from './wallet-link';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { IdentityDatabase } from './model';
@@ -12,6 +12,18 @@ const challenge = {
   issuedAt: new Date('2026-11-09T12:00:00.000Z'),
   expiresAt: new Date('2026-11-09T12:05:00.000Z'),
 };
+const principal = { subject: 'member', auth_email: 'synthetic@example.invalid', email_verified: true,
+  person_id: '1', public_id: 'synthetic', person_email: 'synthetic@example.invalid', person_status: 'active', blacklisted: false,
+  user_id: 'member', access_restricted: false };
+function queuedIdentityDatabase(results: unknown[][]) {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const database = { execute: async (query: SQL) => {
+    queries.push(new PgDialect().sqlToQuery(query));
+    if (!results.length) throw new Error('unexpected synthetic database call');
+    return results.shift();
+  }, transaction: async (callback: (value: unknown) => unknown) => callback(database) } as unknown as IdentityDatabase;
+  return { database, queries };
+}
 
 describe('wallet link proof', () => {
   test('accepts only canonical EVM addresses and a signature from that address', async () => {
@@ -77,4 +89,34 @@ test('a valid signature still cannot reuse a challenge consumed while waiting fo
   await expect(confirmWalletLink(database, { userId: 'member', challengeId: challenge.challengeId, signature }, now)).rejects.toThrow('wallet_challenge_invalid');
   expect(queries).toHaveLength(4);
   expect(queries.join(' ')).not.toContain('INSERT INTO');
+});
+
+test('challenge timestamps cross the raw postgres-js boundary as ISO strings instead of unsupported Date objects', async () => {
+  const wallet = Wallet.createRandom();
+  const { database, queries } = queuedIdentityDatabase([[{ id: 'member' }], [principal], [], [{ count: 0 }], [], []]);
+  const result = await createWalletLinkChallenge(database, { userId: 'member', address: wallet.address, origin: challenge.origin }, {
+    now: () => challenge.issuedAt, id: () => challenge.challengeId, nonce: () => challenge.nonce,
+  });
+  expect(result).toMatchObject({ linked: false, challengeId: challenge.challengeId, expiresAt: challenge.expiresAt.toISOString() });
+  expect(queries).toHaveLength(6);
+  expect(queries.flatMap(query => query.params).some(value => value instanceof Date)).toBe(false);
+  expect(queries[3]!.params).toEqual(['member', new Date(challenge.issuedAt.getTime() - 10 * 60_000).toISOString()]);
+  expect(queries[4]!.params[0]).toBe(challenge.issuedAt.toISOString());
+  expect(queries[5]!.params.slice(-2)).toEqual([challenge.issuedAt.toISOString(), challenge.expiresAt.toISOString()]);
+});
+
+test('verified binding creation and proof consumption also serialize their raw SQL timestamps', async () => {
+  const wallet = Wallet.createRandom();
+  const message = walletLinkMessage({ ...challenge, address: wallet.address });
+  const signature = await wallet.signMessage(message);
+  const now = new Date('2026-11-09T12:01:00Z');
+  const preview = { address: wallet.address.toLowerCase(), message, expires_at: challenge.expiresAt, consumed_at: null };
+  const { database, queries } = queuedIdentityDatabase([[preview], [{ id: 'member' }], [principal], [{ ...preview, person_id: '1' }], [], [], [], []]);
+  expect(await confirmWalletLink(database, { userId: 'member', challengeId: challenge.challengeId, signature }, now))
+    .toMatchObject({ linked: true, address: wallet.address, verifiedAt: now.toISOString() });
+  expect(queries).toHaveLength(8);
+  expect(queries.flatMap(query => query.params).some(value => value instanceof Date)).toBe(false);
+  expect(queries[6]!.sql).toContain('INSERT INTO identity.wallet_binding');
+  expect(queries[6]!.params.slice(-2)).toEqual([now.toISOString(), now.toISOString()]);
+  expect(queries[7]!.params[0]).toBe(now.toISOString());
 });
