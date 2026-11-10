@@ -121,6 +121,28 @@ test('personal options use one native-session country query without a sandbox cr
   expect(await response.json()).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', paymentMethods: ['CREDIT_DEBIT_CARD'] });
 });
 
+test('currency selectors are strict and non-USD mutations expose no unverified USD acknowledgement', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; throw new Error('must not write'); } });
+  for (const kind of ['personal', 'administrative']) {
+    const optionsPath = `/api/member/wallet-funding/${kind}/options`;
+    const provider = kind === 'administrative' ? '&serviceProvider=TRANSAK' : '';
+    for (const query of ['?country=MX&sourceCurrencyCode=mxn', '?country=MX&sourceCurrencyCode=MXN&sourceCurrencyCode=USD',
+      '?country=MX&sourceCurrencyCode=MXN&currency=USD']) {
+      expect((await app.request(optionsPath + query + provider)).status).toBe(400);
+    }
+  }
+  const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ...input, country: 'MX', sourceCurrencyCode: 'MXN' }) });
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
+  const administrative = await app.request(administrativePath, signedRequest(administrativePath,
+    JSON.stringify({ ...input, serviceProvider: 'TRANSAK', sourceCurrencyCode: 'MXN' })));
+  expect(administrative.status).toBe(503);
+  expect(await administrative.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
+  expect(calls).toBe(0);
+});
+
 test('status requires native ownership, an exact reference query and uncached indistinguishable not-found responses', async () => {
   let calls = 0;
   const app = application({ execute: async () => { calls++; return []; } });

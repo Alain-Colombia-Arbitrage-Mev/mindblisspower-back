@@ -24,15 +24,38 @@ test('personal discovery is a read-only production request scoped to the public 
     ])]);
   }) });
   expect(calls).toBe(1);
-  expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'CO',
+  expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'CO', sourceCurrencyCode: 'USD',
     paymentMethods: ['CREDIT_DEBIT_CARD', 'ASTROPAY'], routes: [
-      { serviceProvider: 'TOPPER', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', minimumUsd: 10, maximumUsd: 30_000 }] },
+      { serviceProvider: 'TOPPER', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 10, maximumAmount: 30_000, minimumUsd: 10, maximumUsd: 30_000 }] },
       { serviceProvider: 'SWAPPED', paymentMethods: [
-        { method: 'CREDIT_DEBIT_CARD', minimumUsd: 7.81, maximumUsd: 111_530 },
-        { method: 'ASTROPAY', minimumUsd: 7.81, maximumUsd: 20_633.05 },
+        { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 7.81, maximumAmount: 111_530, minimumUsd: 7.81, maximumUsd: 111_530 },
+        { method: 'ASTROPAY', currencyCode: 'USD', minimumAmount: 7.81, maximumAmount: 20_633.05, minimumUsd: 7.81, maximumUsd: 20_633.05 },
       ] },
     ] });
   expect(JSON.stringify(result)).not.toContain('WXETMu');
+});
+
+test('MXN SPEI discovery keeps provider currency and limits distinct from USD', async () => {
+  const speiRoute = { partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
+    paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } }] };
+  const result = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch((url, init) => {
+    expect(url).toContain('/MX/MXN/USDT_POLYGON');
+    expect(url).not.toContain('api-sb');
+    expect(init.method).toBe('GET');
+    return Response.json([speiRoute]);
+  }) });
+  expect(result.sourceCurrencyCode).toBe('MXN');
+  expect(result.routes).toEqual([{ serviceProvider: 'SWAPPED', paymentMethods: [
+    { method: 'SPEI', currencyCode: 'MXN', minimumAmount: 148.66, maximumAmount: 212370.61 },
+  ] }]);
+  expect(JSON.stringify(result)).not.toContain('minimumUsd');
+  expect(() => normalizeReownProductionRoutes([speiRoute], 'USD')).toThrow();
+  expect(() => normalizeReownProductionRoutes([{ ...speiRoute,
+    paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'USD', min: 50, max: 1000 } }] }], 'MXN')).toThrow();
+  for (const sourceCurrencyCode of ['mxn', 'MXN/USD', 'US', 'MXN?x=y']) {
+    await expect(readReownProductionOptions('MX', { sourceCurrencyCode, fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }) }))
+      .rejects.toThrow('wallet_funding_invalid_currency');
+  }
 });
 
 test('unavailable country routes and unknown limits never invent default rails', async () => {

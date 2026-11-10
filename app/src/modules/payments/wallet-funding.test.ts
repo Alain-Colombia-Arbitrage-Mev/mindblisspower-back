@@ -198,12 +198,72 @@ test('sandbox methods are resolved with its own key and selected provider withou
       return Response.json([route('TRANSAK', [method(), method('APPLE_PAY')]), route('BANXA', [method('BANK_TRANSFER')])]);
     }) as typeof fetch });
   expect(calls).toEqual(['https://api-sb.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON']);
-  expect(options).toEqual({ walletKind: 'administrative', environment: 'sandbox', provider: 'meld', country: 'US',
+  expect(options).toEqual({ walletKind: 'administrative', environment: 'sandbox', provider: 'meld', country: 'US', sourceCurrencyCode: 'USD',
     serviceProvider: 'TRANSAK', paymentMethods: ['CREDIT_DEBIT_CARD', 'APPLE_PAY'], routes: [{ serviceProvider: 'TRANSAK', paymentMethods: [
-      { method: 'CREDIT_DEBIT_CARD', minimumUsd: 20, maximumUsd: 15000 }, { method: 'APPLE_PAY', minimumUsd: 20, maximumUsd: 15000 }] }] });
+      { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 20, maximumAmount: 15000, minimumUsd: 20, maximumUsd: 15000 },
+      { method: 'APPLE_PAY', currencyCode: 'USD', minimumAmount: 20, maximumAmount: 15000, minimumUsd: 20, maximumUsd: 15000 }] }] });
   const missing = await readAdministrativeSandboxOptions({ country: 'CO', serviceProvider: 'TRANSAK' }, { environment,
     fetchImpl: (async () => Response.json([route('BANXA')])) as unknown as typeof fetch });
   expect(missing.paymentMethods).toEqual([]);
+});
+
+test('administrative MXN methods belong to the sandbox account and selected provider only', async () => {
+  const result = await readAdministrativeSandboxOptions({ country: 'MX', sourceCurrencyCode: 'MXN', serviceProvider: 'TRANSAK' }, {
+    environment, fetchImpl: (async (url, init) => {
+      expect(String(url)).toBe('https://api-sb.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/MX/MXN/USDT_POLYGON');
+      expect(new Headers(init!.headers).get('authorization')).toBe('BASIC synthetic-sandbox-key');
+      return Response.json([{ partner: 'TRANSAK', source: 'MXN', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 150, max: 200_000 } }] },
+      { partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'NETELLER', limits: { currencyCode: 'MXN', min: 100, max: 250_000 } }] }]);
+    }) as typeof fetch,
+  });
+  expect(result).toMatchObject({ walletKind: 'administrative', environment: 'sandbox', provider: 'meld', country: 'MX',
+    sourceCurrencyCode: 'MXN', paymentMethods: ['SPEI'], routes: [{ serviceProvider: 'TRANSAK', paymentMethods: [
+      { method: 'SPEI', currencyCode: 'MXN', minimumAmount: 150, maximumAmount: 200_000 },
+    ] }] });
+  expect(JSON.stringify(result)).not.toContain('minimumUsd');
+  const bad = await readAdministrativeSandboxOptions({ country: 'MX', sourceCurrencyCode: 'MXN', serviceProvider: 'BANXA' }, {
+    environment, fetchImpl: (async () => Response.json([{ partner: 'BANXA', source: 'USD', destination: 'USDT_POLYGON', paymentMethods: [method()] }])) as unknown as typeof fetch,
+  }).then(() => null, error => error);
+  expect(bad?.message).toBe('wallet_funding_provider_unavailable');
+});
+
+test('local fiat cannot be relabelled as a USD minimum before a verified provider valuation exists', async () => {
+  const never = (async () => { throw new Error('must not contact provider'); }) as unknown as typeof fetch;
+  for (const sourceCurrencyCode of ['MXN', 'COP']) {
+    const { database, queries } = queuedDatabase([]);
+    await expect(createPersonalFundingIntent(database, { ...input, country: 'MX', sourceCurrencyCode }, 'owner', { fetchImpl: never }))
+      .rejects.toThrow('wallet_funding_valuation_unavailable');
+    await expect(createAdministrativeSandboxSession(database, { ...adminInput, sourceCurrencyCode }, {
+      subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl: never,
+    })).rejects.toThrow('wallet_funding_valuation_unavailable');
+    expect(queries).toHaveLength(0);
+  }
+  for (const amount of [49.99, 25_000.01]) {
+    const { database, queries } = queuedDatabase([]);
+    await expect(createPersonalFundingIntent(database, { ...input, amount }, 'owner', { fetchImpl: never }))
+      .rejects.toThrow('wallet_funding_amount_unavailable');
+    await expect(createAdministrativeSandboxSession(database, { ...adminInput, amount }, {
+      subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl: never,
+    })).rejects.toThrow('wallet_funding_amount_unavailable');
+    expect(queries).toHaveLength(0);
+  }
+});
+
+test('the shared Banxa sandbox authentication failure is actionable without exposing provider messages', async () => {
+  const diagnostics: unknown[] = [];
+  const { database, queries } = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+  await expect(createAdministrativeSandboxSession(database, { ...adminInput, serviceProvider: 'BANXA', country: 'CO' }, {
+    subject: 'owner', clientIp: '192.0.2.1', environment, diagnostic: event => diagnostics.push(event),
+    fetchImpl: (async url => String(url).includes('/supported/routes/') ? Response.json([route('BANXA')])
+      : Response.json({ code: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION', message: 'private provider message with secret',
+        serviceProviderDetails: { address, token: 'private-token' } }, { status: 401 })) as typeof fetch,
+  })).rejects.toThrow('wallet_funding_provider_authentication_unavailable');
+  expect(queries[2]!.params).toEqual(['owner', id, 'unavailable', null]);
+  expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'session', status: 401,
+    requestId: id, code: 'UPSTREAM_REJECTED', providerCode: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION' }]);
+  expect(JSON.stringify(diagnostics)).not.toMatch(/private|secret|0x|token/);
 });
 
 test('a method not returned by the selected sandbox route never opens a widget and records unavailable', async () => {

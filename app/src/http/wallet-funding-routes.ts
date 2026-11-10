@@ -18,7 +18,7 @@ function allowedOrigin(value: string, environment: Record<string, string | undef
 function failure(error: unknown) {
   if (error instanceof z.ZodError || error instanceof SyntaxError) return { error: 'invalid_request', status: 400 as const };
   const code = error instanceof Error ? error.message : '';
-  if (code === 'wallet_funding_invalid_country') return { error: 'invalid_request', status: 400 as const };
+  if (['wallet_funding_invalid_country', 'wallet_funding_invalid_currency'].includes(code)) return { error: 'invalid_request', status: 400 as const };
   if (code === 'wallet_funding_not_found') return { error: code, status: 404 as const };
   if (['wallet_funding_forbidden', 'wallet_funding_wallet_not_linked', 'wallet_funding_wallet_not_assigned'].includes(code)) {
     return { error: 'wallet_funding_forbidden', status: 403 as const };
@@ -29,6 +29,7 @@ function failure(error: unknown) {
   if (code === 'wallet_funding_method_unavailable') return { error: code, status: 409 as const };
   if (code === 'wallet_funding_amount_unavailable') return { error: code, status: 409 as const };
   if (code === 'wallet_funding_provider_unavailable') return { error: code, status: 503 as const };
+  if (['wallet_funding_provider_authentication_unavailable', 'wallet_funding_valuation_unavailable'].includes(code)) return { error: code, status: 503 as const };
   return { error: 'wallet_funding_unavailable', status: 503 as const };
 }
 
@@ -72,10 +73,13 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
     try {
       const query = new URL(context.req.url).searchParams;
       const country = query.get('country');
-      if ([...query.keys()].length !== 1 || query.getAll('country').length !== 1 || !/^[A-Z]{2}$/.test(country || '')) {
+      const sourceCurrencyCode = query.get('sourceCurrencyCode') ?? 'USD';
+      if ([...query.keys()].some(key => !['country', 'sourceCurrencyCode'].includes(key))
+        || query.getAll('country').length !== 1 || query.getAll('sourceCurrencyCode').length > 1
+        || !/^[A-Z]{2}$/.test(country || '') || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) {
         return context.json({ error: 'invalid_request' }, 400, noStore);
       }
-      return context.json(await readReownProductionOptions(country!, { fetchImpl, signal: context.req.raw.signal }), 200, noStore);
+      return context.json(await readReownProductionOptions(country!, { fetchImpl, signal: context.req.raw.signal, sourceCurrencyCode }), 200, noStore);
     } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
   });
 
@@ -83,10 +87,12 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
     if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
     try {
       const query = new URL(context.req.url).searchParams;
-      if ([...query.keys()].length !== 2 || query.getAll('country').length !== 1 || query.getAll('serviceProvider').length !== 1) {
+      if ([...query.keys()].some(key => !['country', 'sourceCurrencyCode', 'serviceProvider'].includes(key))
+        || query.getAll('country').length !== 1 || query.getAll('serviceProvider').length !== 1 || query.getAll('sourceCurrencyCode').length > 1) {
         return context.json({ error: 'invalid_request' }, 400, noStore);
       }
-      const result = await readAdministrativeSandboxOptions({ country: query.get('country'), serviceProvider: query.get('serviceProvider') }, { environment, fetchImpl, signal: context.req.raw.signal });
+      const result = await readAdministrativeSandboxOptions({ country: query.get('country'), serviceProvider: query.get('serviceProvider'),
+        sourceCurrencyCode: query.get('sourceCurrencyCode') ?? 'USD' }, { environment, fetchImpl, signal: context.req.raw.signal });
       return context.json(result, 200, noStore);
     } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
   });

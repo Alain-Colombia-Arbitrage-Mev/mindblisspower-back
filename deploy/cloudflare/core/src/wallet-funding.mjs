@@ -19,12 +19,15 @@ export function walletFundingRequest(request, url, body, env, ready) {
       return UUID.test(reference || '') && url.search === `?checkoutReference=${reference}`;
     }
     const country = url.searchParams.get('country');
+    const sourceCurrencyCode = url.searchParams.get('sourceCurrencyCode');
+    if (sourceCurrencyCode !== null && !/^[A-Z]{3}$/.test(sourceCurrencyCode)) return false;
+    const currencyQuery = sourceCurrencyCode === null ? '' : `&sourceCurrencyCode=${sourceCurrencyCode}`;
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return /^[A-Z]{2}$/.test(country || '')
-      && url.search === `?country=${country}`;
+      && url.search === `?country=${country}${currencyQuery}`;
     const provider = url.searchParams.get('serviceProvider');
     return env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/options`
       && /^[A-Z]{2}$/.test(country || '') && ['TRANSAK', 'BANXA'].includes(provider)
-      && url.search === `?country=${country}&serviceProvider=${provider}`;
+      && url.search === `?country=${country}${currencyQuery}&serviceProvider=${provider}`;
   }
   const personal = url.pathname === `${WALLET_FUNDING_PREFIX}/personal/intent`;
   const administrative = url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/session`;
@@ -36,10 +39,13 @@ export function walletFundingRequest(request, url, body, env, ready) {
   try {
     const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
-    const allowed = ['requestId', 'walletAddress', 'country', 'amount', 'paymentMethodType', ...(administrative ? ['serviceProvider'] : [])];
+    const allowed = ['requestId', 'walletAddress', 'country', 'amount', 'sourceCurrencyCode', 'paymentMethodType', ...(administrative ? ['serviceProvider'] : [])];
+    const sourceCurrencyCode = input.sourceCurrencyCode === undefined ? 'USD' : input.sourceCurrencyCode;
     if (Object.keys(input).some(key => !allowed.includes(key)) || !UUID.test(input.requestId || '')
       || !/^0x[a-f0-9]{40}$/i.test(input.walletAddress || '') || !/^[A-Z]{2}$/.test(input.country || '')
-      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < 50 || input.amount > 25000
+      || typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)
+      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? 50 : 0.01)
+      || input.amount > (sourceCurrencyCode === 'USD' ? 25000 : 1_000_000_000)
       || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001
       || typeof input.paymentMethodType !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(input.paymentMethodType)) return false;
     return !administrative || ['TRANSAK', 'BANXA'].includes(input.serviceProvider);

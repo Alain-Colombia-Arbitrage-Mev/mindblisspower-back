@@ -7,13 +7,14 @@ const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;
 const unavailable = () => new Error('wallet_funding_provider_unavailable');
 
-export type ReownFundingMethod = { method: string; minimumUsd: number; maximumUsd: number };
+export type ReownFundingMethod = { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number;
+  minimumUsd?: number; maximumUsd?: number };
 export type ReownFundingRoute = {
   serviceProvider: typeof PROVIDERS[number];
   paymentMethods: ReownFundingMethod[];
 };
 export type ReownProductionOptions = {
-  walletKind: 'personal'; environment: 'production'; provider: 'reown'; country: string;
+  walletKind: 'personal'; environment: 'production'; provider: 'reown'; country: string; sourceCurrencyCode: string;
   paymentMethods: string[]; routes: ReownFundingRoute[];
 };
 
@@ -21,14 +22,15 @@ function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Canonical IDs and USD limits only; provider labels and unverified defaults are not payment methods. */
-export function normalizeReownProductionRoutes(data: unknown): ReownFundingRoute[] {
+/** Canonical IDs and limits in the requested fiat; labels and guessed rails are never accepted. */
+export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode = 'USD'): ReownFundingRoute[] {
+  if (!/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw unavailable();
   if (!Array.isArray(data) || data.length > 100) throw unavailable();
   const routes = new Map<ReownFundingRoute['serviceProvider'], Map<string, ReownFundingMethod>>();
   for (const route of data) {
     if (!record(route) || typeof route.partner !== 'string') throw unavailable();
     if (!PROVIDERS.some(provider => provider === route.partner)) continue;
-    if (route.source !== 'USD' || route.destination !== 'USDT_POLYGON'
+    if (route.source !== sourceCurrencyCode || route.destination !== 'USDT_POLYGON'
       || !Array.isArray(route.paymentMethods) || route.paymentMethods.length > 64) throw unavailable();
     const provider = route.partner as ReownFundingRoute['serviceProvider'];
     const methods = routes.get(provider) ?? new Map<string, ReownFundingMethod>();
@@ -40,13 +42,14 @@ export function normalizeReownProductionRoutes(data: unknown): ReownFundingRoute
       if (method.limits === null || method.limits === undefined) continue;
       if (!record(method.limits)) throw unavailable();
       const { currencyCode, min, max } = method.limits;
-      if (currencyCode !== 'USD' || typeof min !== 'number' || typeof max !== 'number'
+      if (currencyCode !== sourceCurrencyCode || typeof min !== 'number' || typeof max !== 'number'
         || !Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < min || max > 1_000_000_000) {
         throw unavailable();
       }
       const prior = methods.get(method.name);
-      if (prior && (prior.minimumUsd !== min || prior.maximumUsd !== max)) throw unavailable();
-      methods.set(method.name, { method: method.name, minimumUsd: min, maximumUsd: max });
+      if (prior && (prior.minimumAmount !== min || prior.maximumAmount !== max)) throw unavailable();
+      methods.set(method.name, { method: method.name, currencyCode: sourceCurrencyCode, minimumAmount: min, maximumAmount: max,
+        ...(sourceCurrencyCode === 'USD' ? { minimumUsd: min, maximumUsd: max } : {}) });
     }
     if (methods.size) routes.set(provider, methods);
   }
@@ -116,24 +119,25 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
 
 /** Exactly one read-only request, scoped with Reown's public merchant key; never reads administrative env. */
 export async function readReownProductionOptions(country: string, {
-  fetchImpl = fetch, signal,
-}: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {}): Promise<ReownProductionOptions> {
+  fetchImpl = fetch, signal, sourceCurrencyCode = 'USD',
+}: { fetchImpl?: typeof fetch; signal?: AbortSignal; sourceCurrencyCode?: string } = {}): Promise<ReownProductionOptions> {
   if (typeof country !== 'string' || !/^[A-Z]{2}$/.test(country)) throw new Error('wallet_funding_invalid_country');
+  if (typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw new Error('wallet_funding_invalid_currency');
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(abort, TIMEOUT_MS);
   try {
-    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/USD/USDT_POLYGON?partners=TOPPER,SWAPPED`;
+    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT_POLYGON?partners=TOPPER,SWAPPED`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       headers: { Authorization: `BASIC ${REOWN_MELD_PUBLIC_KEY}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },
     }), controller.signal, response => disposeBody(response.body));
     if (!response.ok || response.redirected) { disposeBody(response.body); throw unavailable(); }
-    const routes = normalizeReownProductionRoutes(await boundedJson(response, controller.signal));
+    const routes = normalizeReownProductionRoutes(await boundedJson(response, controller.signal), sourceCurrencyCode);
     const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
-    return { walletKind: 'personal', environment: 'production', provider: 'reown', country, paymentMethods, routes };
+    return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode, paymentMethods, routes };
   } catch {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     throw unavailable();

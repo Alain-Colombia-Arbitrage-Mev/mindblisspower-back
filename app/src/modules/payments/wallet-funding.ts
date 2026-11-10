@@ -9,13 +9,15 @@ type FundingDatabase = Pick<IdentityDatabase, 'execute'>;
 type FundingEnvironment = Record<string, string | undefined>;
 const subjectInput = z.string().min(1).max(255);
 const addressInput = z.string().regex(/^0x[0-9a-f]{40}$/i);
-const amountInput = z.number().finite().min(50).max(25_000)
+const currencyInput = z.string().regex(/^[A-Z]{3}$/);
+const amountInput = z.number().finite().min(0.01).max(1_000_000_000)
   .refine(value => Math.abs(value * 100 - Math.round(value * 100)) < 0.000001);
 export const fundingKindInput = z.enum(['personal', 'administrative']);
 const checkoutReferenceInput = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 export const personalFundingInput = z.object({
   requestId: z.string().uuid(), walletAddress: addressInput,
   country: z.string().regex(/^[A-Z]{2}$/), amount: amountInput,
+  sourceCurrencyCode: currencyInput.default('USD'),
   paymentMethodType: z.string().regex(/^[A-Z0-9_]{2,40}$/),
 }).strict();
 export const administrativeFundingInput = personalFundingInput.extend({
@@ -23,6 +25,7 @@ export const administrativeFundingInput = personalFundingInput.extend({
 }).strict();
 export const administrativeOptionsInput = z.object({
   country: z.string().regex(/^[A-Z]{2}$/), serviceProvider: z.enum(['TRANSAK', 'BANXA']),
+  sourceCurrencyCode: currencyInput.default('USD'),
 }).strict();
 
 const intentRow = z.object({ id: z.string().uuid(), created_at: z.coerce.date() });
@@ -39,11 +42,14 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
 }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {}) {
   const owner = subjectInput.parse(subject);
   const input = personalFundingInput.parse(rawInput);
-  const options = await readReownProductionOptions(input.country, { fetchImpl, signal });
+  // Local-fiat requests must supply verified provider valuation before writing a USD reference.
+  if (input.sourceCurrencyCode !== 'USD') throw new Error('wallet_funding_valuation_unavailable');
+  if (input.amount < 50 || input.amount > 25_000) throw new Error('wallet_funding_amount_unavailable');
+  const options = await readReownProductionOptions(input.country, { fetchImpl, signal, sourceCurrencyCode: input.sourceCurrencyCode });
   const matching = options.routes.filter(route => route.paymentMethods.some(method => method.method === input.paymentMethodType));
   if (!matching.length) throw new Error('wallet_funding_method_unavailable');
   const allowedProviders = matching.filter(route => route.paymentMethods.some(method => method.method === input.paymentMethodType
-    && input.amount >= method.minimumUsd && input.amount <= method.maximumUsd)).map(route => route.serviceProvider);
+    && input.amount >= method.minimumAmount && input.amount <= method.maximumAmount)).map(route => route.serviceProvider);
   if (!allowedProviders.length) throw new Error('wallet_funding_amount_unavailable');
   const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType})`);
@@ -117,16 +123,18 @@ function withFundingSignal<T>(operation: () => Promise<T>, signal: AbortSignal, 
   });
 }
 
-type AdministrativeRoute = { serviceProvider: 'TRANSAK' | 'BANXA';
-  paymentMethods: { method: string; minimumUsd: number; maximumUsd: number }[] };
-export function normalizeAdministrativeSandboxRoutes(data: unknown, serviceProvider: 'TRANSAK' | 'BANXA'): AdministrativeRoute[] {
+type AdministrativeMethod = { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number;
+  minimumUsd?: number; maximumUsd?: number };
+type AdministrativeRoute = { serviceProvider: 'TRANSAK' | 'BANXA'; paymentMethods: AdministrativeMethod[] };
+export function normalizeAdministrativeSandboxRoutes(data: unknown, serviceProvider: 'TRANSAK' | 'BANXA', sourceCurrencyCode = 'USD'): AdministrativeRoute[] {
+  if (!/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw new Error('wallet_funding_provider_unavailable');
   if (!Array.isArray(data) || data.length > 100) throw new Error('wallet_funding_provider_unavailable');
-  const methods = new Map<string, { method: string; minimumUsd: number; maximumUsd: number }>();
+  const methods = new Map<string, AdministrativeMethod>();
   for (const value of data) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('wallet_funding_provider_unavailable');
     const route = value as Record<string, unknown>;
     if (route.partner !== serviceProvider) continue;
-    if (route.source !== 'USD' || route.destination !== 'USDT_POLYGON' || !Array.isArray(route.paymentMethods)
+    if (route.source !== sourceCurrencyCode || route.destination !== 'USDT_POLYGON' || !Array.isArray(route.paymentMethods)
       || route.paymentMethods.length > 64) throw new Error('wallet_funding_provider_unavailable');
     for (const value of route.paymentMethods) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('wallet_funding_provider_unavailable');
@@ -135,11 +143,12 @@ export function normalizeAdministrativeSandboxRoutes(data: unknown, serviceProvi
       if (entry.limits === null || entry.limits === undefined) continue;
       if (!entry.limits || typeof entry.limits !== 'object' || Array.isArray(entry.limits)) throw new Error('wallet_funding_provider_unavailable');
       const { currencyCode, min, max } = entry.limits as Record<string, unknown>;
-      if (currencyCode !== 'USD' || typeof min !== 'number' || typeof max !== 'number'
+      if (currencyCode !== sourceCurrencyCode || typeof min !== 'number' || typeof max !== 'number'
         || !Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < min || max > 1_000_000_000) throw new Error('wallet_funding_provider_unavailable');
       const prior = methods.get(entry.name);
-      if (prior && (prior.minimumUsd !== min || prior.maximumUsd !== max)) throw new Error('wallet_funding_provider_unavailable');
-      methods.set(entry.name, { method: entry.name, minimumUsd: min, maximumUsd: max });
+      if (prior && (prior.minimumAmount !== min || prior.maximumAmount !== max)) throw new Error('wallet_funding_provider_unavailable');
+      methods.set(entry.name, { method: entry.name, currencyCode: sourceCurrencyCode, minimumAmount: min, maximumAmount: max,
+        ...(sourceCurrencyCode === 'USD' ? { minimumUsd: min, maximumUsd: max } : {}) });
     }
   }
   return methods.size ? [{ serviceProvider, paymentMethods: [...methods.values()] }] : [];
@@ -198,7 +207,7 @@ export async function readAdministrativeSandboxOptions(rawInput: unknown, {
   const deadline = fundingDeadline(signal, 8_000);
   try {
   let response: Response;
-  try { response = await withFundingSignal(() => fetchImpl(`https://api-sb.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/USD/USDT_POLYGON`, {
+  try { response = await withFundingSignal(() => fetchImpl(`https://api-sb.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/USDT_POLYGON`, {
     method: 'GET', redirect: 'error', signal: deadline.signal,
     headers: { Authorization: `BASIC ${key}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },
   }), deadline.signal, value => cancelBody(value.body)); } catch {
@@ -208,7 +217,7 @@ export async function readAdministrativeSandboxOptions(rawInput: unknown, {
   if ([400, 404].includes(response.status)) {
     void response.body?.cancel().catch(() => {});
     return { walletKind: 'administrative' as const, environment: 'sandbox' as const, provider: 'meld' as const,
-      country: input.country, serviceProvider: input.serviceProvider, paymentMethods: [] as string[], routes: [] as AdministrativeRoute[] };
+      country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, serviceProvider: input.serviceProvider, paymentMethods: [] as string[], routes: [] as AdministrativeRoute[] };
   }
   if (!response.ok) {
     let metadata = {};
@@ -217,14 +226,14 @@ export async function readAdministrativeSandboxOptions(rawInput: unknown, {
     throw new Error('wallet_funding_provider_unavailable');
   }
   let routes: AdministrativeRoute[];
-  try { routes = normalizeAdministrativeSandboxRoutes(await boundedProviderJson(response, deadline.signal), input.serviceProvider); }
+  try { routes = normalizeAdministrativeSandboxRoutes(await boundedProviderJson(response, deadline.signal), input.serviceProvider, input.sourceCurrencyCode); }
   catch {
     diagnose(diagnostic, { phase: 'options', status: response.status, requestId, code: 'INVALID_RESPONSE' });
     throw new Error('wallet_funding_provider_unavailable');
   }
   const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
   return { walletKind: 'administrative' as const, environment: 'sandbox' as const, provider: 'meld' as const,
-    country: input.country, serviceProvider: input.serviceProvider, paymentMethods, routes };
+    country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, serviceProvider: input.serviceProvider, paymentMethods, routes };
   } finally { deadline.dispose(); }
 }
 
@@ -246,6 +255,8 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
   try { return await withFundingSignal(async () => {
   const owner = subjectInput.parse(subject);
   const input = administrativeFundingInput.parse(rawInput);
+  if (input.sourceCurrencyCode !== 'USD') throw new Error('wallet_funding_valuation_unavailable');
+  if (input.amount < 50 || input.amount > 25_000) throw new Error('wallet_funding_amount_unavailable');
   const key = sandboxCredential(environment);
   if (!isIP(clientIp)) throw new Error('wallet_funding_unconfigured');
   const wallet = await withFundingSignal(() => readAdministrativeWallet(database, { userId: owner }), deadline.signal);
@@ -265,7 +276,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
   if (!row.created) throw new Error('wallet_funding_request_already_used');
   let outcomeWriteStarted = false;
   try {
-    const options = await readAdministrativeSandboxOptions({ country: input.country, serviceProvider: input.serviceProvider }, { environment, fetchImpl, diagnostic, requestId: row.id, signal: deadline.signal });
+    const options = await readAdministrativeSandboxOptions({ country: input.country, serviceProvider: input.serviceProvider, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, diagnostic, requestId: row.id, signal: deadline.signal });
     if (!options.paymentMethods.includes(paymentMethod)) {
       outcomeWriteStarted = true;
       await withFundingSignal(() => finishSandbox(database, owner, row.id, 'unavailable', null), deadline.signal);
@@ -273,7 +284,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
       throw new Error('wallet_funding_method_unavailable');
     }
     if (!options.routes.some(route => route.paymentMethods.some(method => method.method === paymentMethod
-      && input.amount >= method.minimumUsd && input.amount <= method.maximumUsd))) {
+      && input.amount >= method.minimumAmount && input.amount <= method.maximumAmount))) {
       outcomeWriteStarted = true;
       await withFundingSignal(() => finishSandbox(database, owner, row.id, 'unavailable', null), deadline.signal);
       diagnose(diagnostic, { phase: 'session', status: null, requestId: row.id, code: 'AMOUNT_OUTSIDE_ROUTE_LIMITS' });
@@ -285,7 +296,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
         'Meld-Version': '2026-02-03' },
       body: JSON.stringify({ sessionType: 'BUY', externalCustomerId: customerReference.data, externalSessionId: row.id,
         sessionData: { serviceProvider: input.serviceProvider, countryCode: input.country, clientIpAddress: clientIp,
-          sourceCurrencyCode: 'USD', sourceAmount: input.amount.toFixed(2), destinationCurrencyCode: 'USDT_POLYGON',
+          sourceCurrencyCode: input.sourceCurrencyCode, sourceAmount: input.amount.toFixed(2), destinationCurrencyCode: 'USDT_POLYGON',
           walletAddress: wallet.address,
           paymentMethodType: paymentMethod,
           lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'],
@@ -295,7 +306,11 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
     if (!response.ok) {
       outcomeWriteStarted = true;
       await withFundingSignal(() => finishSandbox(database, owner, row.id, 'unavailable', null), deadline.signal);
-      diagnose(diagnostic, { phase: 'session', status: response.status, requestId: row.id, code: 'UPSTREAM_REJECTED', ...providerMetadata(data) });
+      const metadata = providerMetadata(data);
+      diagnose(diagnostic, { phase: 'session', status: response.status, requestId: row.id, code: 'UPSTREAM_REJECTED', ...metadata });
+      if (metadata.providerCode === 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION') {
+        throw new Error('wallet_funding_provider_authentication_unavailable');
+      }
       throw new Error('wallet_funding_provider_unavailable');
     }
     const providerSession = sessionInput.parse(data);

@@ -75,6 +75,28 @@ test('sandbox credential forwarding is explicit and separate from the live finan
   assert.throws(() => containerEnvironment('api', { ...secrets, MELD_API_SANDBOX: '' }));
 });
 
+test('currency discovery admits canonical selectors while duplicate and encoded currency selectors remain denied', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  const read = path => new Request(`https://auth.core.internal${path}`, { headers: { cookie: 'better-auth.session_token=synthetic' } });
+  const personal = '/api/member/wallet-funding/personal/options';
+  const administrative = '/api/member/wallet-funding/administrative/options';
+  assert.equal((await dispatchCore(read(personal + '?country=MX&sourceCurrencyCode=MXN'), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(read(administrative + '?country=MX&sourceCurrencyCode=MXN&serviceProvider=TRANSAK'), env, resolve)).status, 200);
+  assert.equal(calls, 2);
+  const never = () => assert.fail('malformed currency discovery dispatched');
+  for (const query of ['?country=MX&sourceCurrencyCode=mxn', '?country=MX&sourceCurrencyCode=MXN&sourceCurrencyCode=USD',
+    '?country=MX&sourceCurrencyCode=%4dXN', '?country=MX&sourceCurrencyCode=MXN&subject=other', '?sourceCurrencyCode=MXN&country=MX']) {
+    assert.equal((await dispatchCore(read(personal + query), env, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(read(administrative + '?country=MX&serviceProvider=TRANSAK&sourceCurrencyCode=MXN'), env, never)).status, 503);
+  assert.equal((await dispatchCore(read(administrative + '?country=MX&sourceCurrencyCode=MXN&serviceProvider=SWAPPED'), env, never)).status, 503);
+  // Admission is not financial valuation: the API still rejects nonUSD writes until an independently verified provider valuation exists.
+  assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'MXN', amount: 1000 }), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'mxn', amount: 1000 }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: null, amount: 1000 }), env, never)).status, 503);
+});
+
 test('owned status reads are a separate exact native-session capability with no checkout or owner overrides', async () => {
   let calls = 0;
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
