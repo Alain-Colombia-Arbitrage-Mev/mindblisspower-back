@@ -14,6 +14,10 @@ export function walletFundingRequest(request, url, body, env, ready) {
     || !/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=[^;\s,]+(?:;|$)/.test(request.headers.get('cookie') || '')) return false;
   if (request.method === 'GET') {
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/history`) return ['?walletKind=personal', '?walletKind=administrative'].includes(url.search);
+    if ([`${WALLET_FUNDING_PREFIX}/personal/status`, `${WALLET_FUNDING_PREFIX}/administrative/status`].includes(url.pathname)) {
+      const reference = url.searchParams.get('checkoutReference');
+      return UUID.test(reference || '') && url.search === `?checkoutReference=${reference}`;
+    }
     const country = url.searchParams.get('country');
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return /^[A-Z]{2}$/.test(country || '')
       && url.search === `?country=${country}`;

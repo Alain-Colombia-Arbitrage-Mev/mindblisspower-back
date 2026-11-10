@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { createAdministrativeSandboxSession, createPersonalFundingIntent, fundingKindInput,
-  readAdministrativeSandboxOptions, readWalletFundingHistory } from '../modules/payments/wallet-funding';
+  readAdministrativeSandboxOptions, readWalletFundingHistory, readWalletFundingStatus } from '../modules/payments/wallet-funding';
 import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiApplication } from './types';
 import { authProxyContext } from './auth-proxy-context';
@@ -19,6 +19,7 @@ function failure(error: unknown) {
   if (error instanceof z.ZodError || error instanceof SyntaxError) return { error: 'invalid_request', status: 400 as const };
   const code = error instanceof Error ? error.message : '';
   if (code === 'wallet_funding_invalid_country') return { error: 'invalid_request', status: 400 as const };
+  if (code === 'wallet_funding_not_found') return { error: code, status: 404 as const };
   if (['wallet_funding_forbidden', 'wallet_funding_wallet_not_linked', 'wallet_funding_wallet_not_assigned'].includes(code)) {
     return { error: 'wallet_funding_forbidden', status: 403 as const };
   }
@@ -100,4 +101,18 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
       return context.json(await readWalletFundingHistory(database, subject, walletKind), 200, noStore);
     } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
   });
+
+  for (const walletKind of ['personal', 'administrative'] as const) {
+    app.get(`/api/member/wallet-funding/${walletKind}/status`, async context => {
+      const subject = context.get('session')?.user.id;
+      if (!subject) return context.json({ error: 'unauthenticated' }, 401, noStore);
+      try {
+        const query = new URL(context.req.url).searchParams;
+        if ([...query.keys()].length !== 1 || query.getAll('checkoutReference').length !== 1) {
+          return context.json({ error: 'invalid_request' }, 400, noStore);
+        }
+        return context.json(await readWalletFundingStatus(database, subject, walletKind, query.get('checkoutReference')), 200, noStore);
+      } catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+    });
+  }
 }

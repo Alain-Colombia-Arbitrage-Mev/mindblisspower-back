@@ -12,6 +12,7 @@ const addressInput = z.string().regex(/^0x[0-9a-f]{40}$/i);
 const amountInput = z.number().finite().min(50).max(25_000)
   .refine(value => Math.abs(value * 100 - Math.round(value * 100)) < 0.000001);
 export const fundingKindInput = z.enum(['personal', 'administrative']);
+const checkoutReferenceInput = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 export const personalFundingInput = z.object({
   requestId: z.string().uuid(), walletAddress: addressInput,
   country: z.string().regex(/^[A-Z]{2}$/), amount: amountInput,
@@ -251,6 +252,10 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
   if (wallet.status !== 'assigned' || wallet.address?.toLowerCase() !== input.walletAddress.toLowerCase()) {
     throw new Error('wallet_funding_forbidden');
   }
+  const customerReference = checkoutReferenceInput.safeParse(wallet.checkoutReference);
+  if (!customerReference.success || customerReference.data !== customerReference.data.toLowerCase()) {
+    throw new Error('wallet_funding_unconfigured');
+  }
   const paymentMethod = input.paymentMethodType;
   const rows = await withFundingSignal(() => database.execute(sql`SELECT * FROM payments.create_meld_sandbox_funding_attempt(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,
@@ -278,7 +283,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
       method: 'POST', redirect: 'error', signal: deadline.signal,
       headers: { Authorization: `BASIC ${key}`, 'Content-Type': 'application/json', Accept: 'application/json',
         'Meld-Version': '2026-02-03' },
-      body: JSON.stringify({ sessionType: 'BUY', externalCustomerId: row.id, externalSessionId: row.id,
+      body: JSON.stringify({ sessionType: 'BUY', externalCustomerId: customerReference.data, externalSessionId: row.id,
         sessionData: { serviceProvider: input.serviceProvider, countryCode: input.country, clientIpAddress: clientIp,
           sourceCurrencyCode: 'USD', sourceAmount: input.amount.toFixed(2), destinationCurrencyCode: 'USDT_POLYGON',
           walletAddress: wallet.address,
@@ -295,7 +300,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
     }
     const providerSession = sessionInput.parse(data);
     if ((providerSession.externalSessionId && providerSession.externalSessionId !== row.id)
-      || (providerSession.externalCustomerId && providerSession.externalCustomerId !== row.id)) {
+      || (providerSession.externalCustomerId && providerSession.externalCustomerId !== customerReference.data)) {
       throw new Error('wallet_funding_invalid_provider');
     }
     const checkoutUrl = sandboxWidgetUrl(providerSession.widgetUrl);
@@ -339,4 +344,22 @@ export async function readWalletFundingHistory(database: FundingDatabase, subjec
   });
   return { walletKind, environment: walletKind === 'personal' ? 'production' as const : 'sandbox' as const,
     records: items, settlement: 'unconfirmed' as const };
+}
+
+/** An owned request snapshot. Checkout creation and return URLs prove no settlement. */
+export async function readWalletFundingStatus(database: FundingDatabase, subject: string, rawKind: unknown, rawReference: unknown) {
+  const owner = subjectInput.parse(subject);
+  const walletKind = fundingKindInput.parse(rawKind);
+  const reference = checkoutReferenceInput.parse(rawReference);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status(${owner},${walletKind},${reference}::uuid)`);
+  if (!rows.length) throw new Error('wallet_funding_not_found');
+  const row = oneRow(rows, historyRow);
+  const personal = walletKind === 'personal';
+  if (row.id.toLowerCase() !== reference.toLowerCase() || row.wallet_kind !== walletKind
+    || row.environment !== (personal ? 'production' : 'sandbox') || row.provider !== (personal ? 'reown' : 'meld')
+    || (personal && row.status !== 'initiated')) throw new Error('wallet_funding_unavailable');
+  return { checkoutReference: row.id, walletKind, environment: row.environment, provider: row.provider,
+    requestedAmount: row.requested_amount, country: row.country_code, requestStatus: row.status,
+    destination: { address: row.wallet_address, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const },
+    confirmation: { state: 'unconfirmed' as const, source: 'none' as const, testMode: !personal } };
 }

@@ -2,16 +2,17 @@ import { expect, spyOn, test } from 'bun:test';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { createAdministrativeSandboxSession, createPersonalFundingIntent, readAdministrativeSandboxOptions, readWalletFundingHistory,
-  sandboxWidgetUrl } from './wallet-funding';
+  readWalletFundingStatus, sandboxWidgetUrl } from './wallet-funding';
 import type { IdentityDatabase } from '../identity/model';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
+const customerReference = 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44';
 const address = `0x${'2'.repeat(40)}`;
 const createdAt = new Date('2026-11-10T20:00:00.000Z');
 const input = { requestId: id, walletAddress: address, country: 'US', amount: 100, paymentMethodType: 'CREDIT_DEBIT_CARD' };
 const adminInput = { ...input, serviceProvider: 'TRANSAK', paymentMethodType: 'CREDIT_DEBIT_CARD' };
 const environment = { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key' };
-const assignment = { status: 'assigned', address, address_family: 'EVM', asset: 'USDT', checkout_reference: id, assigned_at: createdAt };
+const assignment = { status: 'assigned', address, address_family: 'EVM', asset: 'USDT', checkout_reference: customerReference, assigned_at: createdAt };
 const method = (name = 'CREDIT_DEBIT_CARD', min = 20, max = 15000) => ({ name, limits: { currencyCode: 'USD', min, max } });
 const route = (partner = 'TRANSAK', paymentMethods = [method()]) => ({ partner, source: 'USD', destination: 'USDT_POLYGON', paymentMethods });
 const productionFetch = (async () => Response.json([route('TOPPER')])) as unknown as typeof fetch;
@@ -84,12 +85,12 @@ test('administrative sandbox binds the assigned address and records its session 
       expect(init!.redirect).toBe('error');
       expect(new Headers(init!.headers).get('authorization')).toBe('BASIC synthetic-sandbox-key');
       const body = JSON.parse(init!.body as string);
-      expect(body).toEqual({ sessionType: 'BUY', externalCustomerId: id, externalSessionId: id,
+      expect(body).toEqual({ sessionType: 'BUY', externalCustomerId: customerReference, externalSessionId: id,
         sessionData: { serviceProvider: 'TRANSAK', countryCode: 'US', clientIpAddress: '192.0.2.1', sourceCurrencyCode: 'USD', sourceAmount: '100.00',
           destinationCurrencyCode: 'USDT_POLYGON', walletAddress: address, paymentMethodType: 'CREDIT_DEBIT_CARD',
           lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } });
       return Response.json({ id: 'provider-session', widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic-token',
-        externalSessionId: id, externalCustomerId: id, token: 'must-not-be-exposed', customerId: 'must-not-be-exposed' });
+        externalSessionId: id, externalCustomerId: customerReference, token: 'must-not-be-exposed', customerId: 'must-not-be-exposed' });
     }) as typeof fetch) });
   expect(calls).toBe(1);
   expect(result.environment).toBe('sandbox');
@@ -98,6 +99,46 @@ test('administrative sandbox binds the assigned address and records its session 
   expect(queries[2]!.params).toEqual(['synthetic-owner', id, 'session_created', 'provider-session']);
   expect(JSON.stringify(queries)).not.toContain('synthetic-token');
   expect(Object.keys(result)).not.toContain('token');
+});
+
+test('administrative retries keep one trusted customer identity while each attempt has a unique session reference', async () => {
+  const requestIds = [id, '11111111-1111-4111-8111-111111111111'];
+  const seen: { customer: string; session: string }[] = [];
+  for (const requestId of requestIds) {
+    const { database } = queuedDatabase([[assignment], [{ id: requestId, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+    const result = await createAdministrativeSandboxSession(database, { ...adminInput, requestId }, {
+      subject: 'owner', clientIp: '192.0.2.1', environment: { ...environment, MELD_API_KEY: 'unused-live-key' },
+      fetchImpl: withSandboxOptions((async (url, init) => {
+        expect(url).toBe('https://api-sb.meld.io/crypto/session/widget');
+        expect(new Headers(init!.headers).get('authorization')).toBe('BASIC synthetic-sandbox-key');
+        const body = JSON.parse(init!.body as string);
+        seen.push({ customer: body.externalCustomerId, session: body.externalSessionId });
+        return Response.json({ id: `provider-${requestId}`, widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic',
+          externalCustomerId: body.externalCustomerId, externalSessionId: body.externalSessionId });
+      }) as typeof fetch),
+    });
+    expect(result.checkoutReference).toBe(requestId);
+  }
+  expect(seen.map(value => value.customer)).toEqual([customerReference, customerReference]);
+  expect(seen.map(value => value.session)).toEqual(requestIds);
+  expect(new Set(seen.map(value => value.session)).size).toBe(2);
+});
+
+test('invalid assignment customer identities stop before persistence or provider calls, and mismatched echoes fail closed', async () => {
+  let calls = 0;
+  const neverFetch = (async () => { calls++; throw new Error('unexpected provider call'); }) as unknown as typeof fetch;
+  for (const checkout_reference of [customerReference.toUpperCase(), '12345678-1234-7123-8123-123456789abc']) {
+    const bad = queuedDatabase([[{ ...assignment, checkout_reference }]]);
+    await expect(createAdministrativeSandboxSession(bad.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+      fetchImpl: neverFetch })).rejects.toThrow('wallet_funding_unconfigured');
+    expect(bad.queries).toHaveLength(1);
+  }
+  expect(calls).toBe(0);
+  const badEcho = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+  await expect(createAdministrativeSandboxSession(badEcho.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+    diagnostic: () => {}, fetchImpl: withSandboxOptions((async () => Response.json({ id: 'provider-id', widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic',
+      externalCustomerId: id, externalSessionId: id })) as unknown as typeof fetch) })).rejects.toThrow('wallet_funding_invalid_provider');
+  expect(badEcho.queries[2]!.params[2]).toBe('failed');
 });
 
 test('disabled sandbox, a live-only key, another assigned address and reused requests never reach Meld', async () => {
@@ -319,4 +360,39 @@ test('history accepts only the requested wallet environment and strips every fin
     const queued = queuedDatabase([[bad]]);
     await expect(readWalletFundingHistory(queued.database, 'owner', 'personal')).rejects.toThrow();
   }
+});
+
+test('owned status returns the immutable stored destination and cannot turn checkout creation into payment confirmation', async () => {
+  for (const walletKind of ['personal', 'administrative'] as const) {
+    const personal = walletKind === 'personal';
+    const row = { id, wallet_kind: walletKind, environment: personal ? 'production' : 'sandbox', provider: personal ? 'reown' : 'meld',
+      status: personal ? 'initiated' : 'session_created', wallet_address: address, country_code: 'CO', requested_amount: '100.00', created_at: createdAt,
+      confirmation: { state: 'confirmed' }, paid: true, token: 'private', subject: 'private-owner', checkout_url: 'https://sb.meldcrypto.com/?wt=private' };
+    const { database, queries } = queuedDatabase([[row]]);
+    expect(await readWalletFundingStatus(database, 'native-owner', walletKind, id)).toEqual({
+      checkoutReference: id, walletKind, environment: personal ? 'production' : 'sandbox', provider: personal ? 'reown' : 'meld',
+      requestedAmount: 100, country: 'CO', requestStatus: personal ? 'initiated' : 'session_created',
+      destination: { address, asset: 'USDT', network: 'polygon', chainId: 137 },
+      confirmation: { state: 'unconfirmed', source: 'none', testMode: !personal },
+    });
+    expect(queries).toHaveLength(1);
+    expect(queries[0]!.sql).toContain('payments.read_wallet_funding_status');
+    expect(queries[0]!.params).toEqual(['native-owner', walletKind, id]);
+    expect(queries[0]!.sql).not.toContain('wallet_binding');
+  }
+});
+
+test('status fails closed on another wallet, wrong reference, duplicate rows or success-looking untrusted state', async () => {
+  const row = { id, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated',
+    wallet_address: address, country_code: 'US', requested_amount: '100', created_at: createdAt };
+  await expect(readWalletFundingStatus(queuedDatabase([[]]).database, 'owner', 'personal', id)).rejects.toThrow('wallet_funding_not_found');
+  for (const rows of [[{ ...row, wallet_kind: 'administrative' }], [{ ...row, environment: 'sandbox' }], [{ ...row, provider: 'meld' }],
+    [{ ...row, id: '11111111-1111-4111-8111-111111111111' }], [{ ...row, status: 'complete' }], [row, row]]) {
+    await expect(readWalletFundingStatus(queuedDatabase([rows]).database, 'owner', 'personal', id)).rejects.toThrow();
+  }
+  const invalid = queuedDatabase([]);
+  for (const reference of ['not-a-uuid', `${id}' OR true`, { checkoutReference: id }, null]) {
+    await expect(readWalletFundingStatus(invalid.database, 'owner', 'personal', reference)).rejects.toThrow();
+  }
+  expect(invalid.queries).toHaveLength(0);
 });

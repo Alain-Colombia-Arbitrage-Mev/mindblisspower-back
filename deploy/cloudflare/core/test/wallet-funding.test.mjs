@@ -74,3 +74,20 @@ test('sandbox credential forwarding is explicit and separate from the live finan
   assert.equal(containerEnvironment('api', { ...secrets, MELD_ADMIN_SANDBOX_ENABLED: 'false' }).MELD_API_SANDBOX, undefined);
   assert.throws(() => containerEnvironment('api', { ...secrets, MELD_API_SANDBOX: '' }));
 });
+
+test('owned status reads are a separate exact native-session capability with no checkout or owner overrides', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  for (const kind of ['personal', 'administrative']) {
+    const path = `/api/member/wallet-funding/${kind}/status`;
+    const read = (suffix, cookie = 'better-auth.session_token=synthetic') => new Request(`https://auth.core.internal${path}${suffix}`, { headers: { cookie } });
+    assert.equal((await dispatchCore(read(`?checkoutReference=${input.requestId}`), { ...env, MELD_ADMIN_SANDBOX_ENABLED: 'false' }, resolve)).status, 200);
+    const never = () => assert.fail('invalid owned-status request was dispatched');
+    for (const query of ['', '?checkoutReference=invalid', `?checkoutReference=${input.requestId}&subject=other`,
+      `?checkoutReference=${input.requestId}&checkoutReference=${input.requestId}`, `?walletKind=${kind}&checkoutReference=${input.requestId}`]) {
+      assert.equal((await dispatchCore(read(query), env, never)).status, 503);
+    }
+    assert.equal((await dispatchCore(read(`?checkoutReference=${input.requestId}`, ''), env, never)).status, 503);
+  }
+  assert.equal(calls, 2);
+});

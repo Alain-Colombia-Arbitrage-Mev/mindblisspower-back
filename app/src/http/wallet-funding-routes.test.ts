@@ -120,3 +120,22 @@ test('personal options use one native-session country query without a sandbox cr
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.json()).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', paymentMethods: ['CREDIT_DEBIT_CARD'] });
 });
+
+test('status requires native ownership, an exact reference query and uncached indistinguishable not-found responses', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; return []; } });
+  for (const kind of ['personal', 'administrative']) {
+    const path = `/api/member/wallet-funding/${kind}/status`;
+    for (const query of ['', '?checkoutReference=bad', `?checkoutReference=${input.requestId}&subject=other`,
+      `?checkoutReference=${input.requestId}&checkoutReference=${input.requestId}`, `?checkoutReference=${input.requestId}&walletKind=personal`]) {
+      expect((await app.request(path + query)).status).toBe(400);
+    }
+    expect(calls).toBe(0);
+    expect((await application({ signedIn: false }).request(path + `?checkoutReference=${input.requestId}`)).status).toBe(401);
+    const response = await app.request(path + `?checkoutReference=${input.requestId}`);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({ error: 'wallet_funding_not_found' });
+    calls = 0;
+  }
+});

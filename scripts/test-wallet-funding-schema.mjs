@@ -19,6 +19,7 @@ const requestId = '11111111-1111-4111-8111-111111111111';
 const bobId = '22222222-2222-4222-8222-222222222222';
 const migration = readFileSync(new URL('../_meta/migration/93_wallet_funding_isolation.sql', import.meta.url), 'utf8');
 const methodMigration = readFileSync(new URL('../_meta/migration/94_wallet_funding_payment_methods.sql', import.meta.url), 'utf8');
+const statusMigration = readFileSync(new URL('../_meta/migration/95_wallet_funding_status_reads.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -213,6 +214,41 @@ try {
   const duplicateMethodMigration = psql(methodMigration, true);
   assert.notEqual(duplicateMethodMigration.status, 0);
   assert.match(duplicateMethodMigration.stderr, /wallet_funding_method_requires_fresh_review/);
+  probes++;
+  const statusSnapshot = `SELECT jsonb_build_object('personal',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM payments.reown_funding_intent r),
+    'sandbox',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM payments.meld_sandbox_funding_attempt r),
+    'legacy',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM payments.meld_onramp_attempt r),
+    'movements',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM mlm.wallet_movement r))::text;`;
+  const statusBefore = value(statusSnapshot, false);
+  psql(statusMigration);
+  equal(statusSnapshot, statusBefore, false);
+  equal(`SELECT has_function_privilege('${role}','payments.read_wallet_funding_status(text,text,uuid)','EXECUTE');`, 't', false);
+  equal(`SELECT has_function_privilege('app_read','payments.read_wallet_funding_status(text,text,uuid)','EXECUTE');`, 'f', false);
+  equal(`SELECT bool_and(p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]) FROM pg_proc p
+    WHERE p.oid='payments.read_wallet_funding_status(text,text,uuid)'::regprocedure;`, 't', false);
+  equal(`SELECT has_table_privilege('${role}','payments.reown_funding_intent','SELECT,INSERT,UPDATE,DELETE')
+    OR has_table_privilege('${role}','payments.meld_sandbox_funding_attempt','SELECT,INSERT,UPDATE,DELETE');`, 'f', false);
+  const oldPersonalId = value(`SELECT id FROM payments.reown_funding_intent WHERE subject='alice' AND created_at<now()-interval '12 hours' ORDER BY created_at,id LIMIT 1;`, false);
+  psql(`UPDATE auth."user" SET eligible=true WHERE id='alice';`);
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_history('alice','personal') WHERE id='${oldPersonalId}';`, '0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('alice','personal','${oldPersonalId}');`, '1');
+  equal(`SELECT wallet_address FROM payments.read_wallet_funding_status('alice','personal','${oldPersonalId}');`, personalAddress);
+  // Status is the historical destination, even if a later operator changes a binding.
+  psql(`UPDATE identity.wallet_binding SET address='0x${'7'.repeat(40)}' WHERE subject='alice';`);
+  equal(`SELECT wallet_address FROM payments.read_wallet_funding_status('alice','personal','${oldPersonalId}');`, personalAddress);
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('bob','personal','${oldPersonalId}');`, '0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('bob','administrative','${methodId}');`, '0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('bob','personal','${randomUUID()}');`, '0');
+  equal(`SELECT wallet_kind||'|'||environment||'|'||provider||'|'||status FROM payments.read_wallet_funding_status('bob','personal','${methodId}');`, 'personal|production|reown|initiated');
+  equal(`SELECT wallet_kind||'|'||environment||'|'||provider||'|'||status FROM payments.read_wallet_funding_status('alice','administrative','${requestId}');`, 'administrative|sandbox|meld|session_created');
+  rejects(`SELECT * FROM payments.read_wallet_funding_status('blocked','personal','${oldPersonalId}');`, 'wallet_funding_forbidden');
+  rejects(`SELECT * FROM payments.read_wallet_funding_status('alice','both','${oldPersonalId}');`, 'wallet_funding_invalid_kind');
+  rejects(`SELECT * FROM payments.read_wallet_funding_status('alice','personal',NULL);`, 'wallet_funding_invalid_reference');
+  equal(`SELECT md5((SELECT json_agg(m ORDER BY id)::text FROM mlm.wallet_movement m)||
+    (SELECT json_agg(a ORDER BY id)::text FROM payments.meld_onramp_attempt a));`, ledgerBefore, false);
+  const duplicateStatusMigration = psql(statusMigration, true);
+  assert.notEqual(duplicateStatusMigration.status, 0);
+  assert.match(duplicateStatusMigration.stderr, /wallet_funding_status_requires_fresh_review/);
   probes++;
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
     externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true }));
