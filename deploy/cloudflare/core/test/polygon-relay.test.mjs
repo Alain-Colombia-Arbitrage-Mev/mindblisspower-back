@@ -80,6 +80,29 @@ test('Core admits exact root and app relay origins while rejecting forged origin
   assert.equal(calls, 4);
 });
 
+test('post-review relay actions cannot replace the owner, source wallet or approved amount at the gateway', async () => {
+  const broad = { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
+  const actions = [
+    ['authorize', { paymentId: id, signature }],
+    ...['submit', 'verify', 'abandon'].map(action => [action, { paymentId: id }]),
+  ];
+  for (const [action, input] of actions) {
+    for (const [key, value] of Object.entries({ amountAtomic: '999999999', amount: 999,
+      userId: 'another-user', subject: 'another-user', owner: 'another-user', walletAddress: `0x${'8'.repeat(40)}`,
+      from: `0x${'8'.repeat(40)}`, authorizationNonce: '99' })) {
+      assert.equal((await dispatchCore(request(action, { ...input, [key]: value }), broad, never)).status, 503,
+        `${action} must not accept a caller-selected ${key}`);
+    }
+    assert.equal((await dispatchCore(request(action, input, { 'x-vp-act-as': 'another-user' }), broad, never)).status, 503);
+  }
+  // Even a syntactically valid foreign wallet must never reach prepare: only
+  // the authenticated API may resolve the sender from its verified binding.
+  for (const field of ['walletAddress', 'from', 'subject', 'owner', 'userId']) {
+    assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1000000',
+      [field]: field === 'walletAddress' || field === 'from' ? `0x${'8'.repeat(40)}` : 'another-user' }), broad, never)).status, 503);
+  }
+});
+
 test('relay namespace aliases, extra queries, unsupported methods and oversized bodies cannot fall through the gateway', async () => {
   const broad = { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
   for (const action of ['%70repare', '%2570repare', '/prepare', 'prepare/', 'prepare/extra', 'prepare?subject=foreign']) {
