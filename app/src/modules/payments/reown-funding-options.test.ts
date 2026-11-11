@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { normalizeReownProductionRoutes, readReownProductionOptions } from './reown-funding-options';
 
 const route = (partner = 'SWAPPED', methods: unknown[] = [
@@ -131,4 +131,42 @@ test('body streams that ignore abort cannot leave a country lookup pending', asy
     fetchImpl: mockFetch(() => new Response(new ReadableStream({ pull: () => new Promise(() => {}) }))) });
   setTimeout(() => controller.abort(), 10);
   await expect(pending).rejects.toHaveProperty('name', 'AbortError');
+});
+
+test('discovery diagnostics identify only bounded failure phase, status and category without provider details', async () => {
+  const cases = [
+    { fetchImpl: mockFetch(() => { throw new Error('private transport URL and credentials'); }), phase: 'fetch', status: null, code: 'TRANSPORT_FAILURE' },
+    { fetchImpl: mockFetch(() => Response.json({ secret: 'provider diagnostics' }, { status: 429 })), phase: 'response', status: 429, code: 'HTTP_REJECTED' },
+    { fetchImpl: mockFetch(() => new Response('private invalid JSON body')), phase: 'body', status: 200, code: 'INVALID_RESPONSE' },
+    { fetchImpl: mockFetch(() => Response.json([{ ...route(), source: 'MXN', secret: 'provider diagnostics' }])), phase: 'normalization', status: 200, code: 'INVALID_RESPONSE' },
+  ];
+  for (const item of cases) {
+    const events: unknown[] = [];
+    await expect(readReownProductionOptions('US', { fetchImpl: item.fetchImpl, diagnostic: event => events.push(event) }))
+      .rejects.toThrow('wallet_funding_provider_unavailable');
+    expect(events).toEqual([{ event: 'personal_funding_discovery_failure', phase: item.phase, status: item.status,
+      code: item.code, country: 'US', sourceCurrencyCode: 'USD' }]);
+    expect(JSON.stringify(events)).not.toMatch(/private|credentials|secret|provider diagnostics|https?:|WXETMu/);
+  }
+  await expect(readReownProductionOptions('US', { fetchImpl: cases[0]!.fetchImpl, diagnostic() { throw Error('logger failed'); } }))
+    .rejects.toThrow('wallet_funding_provider_unavailable');
+});
+
+test('discovery records its own deadline once while normal caller cancellation and successful lookups stay quiet', async () => {
+  const events: unknown[] = [];
+  const original = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementationOnce(((callback: () => void) => original(callback, 5)) as typeof setTimeout);
+  try {
+    await expect(readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN',
+      fetchImpl: (() => new Promise(() => {})) as unknown as typeof fetch, diagnostic: event => events.push(event) }))
+      .rejects.toThrow('wallet_funding_provider_unavailable');
+  } finally { timer.mockRestore(); }
+  expect(events).toEqual([{ event: 'personal_funding_discovery_failure', phase: 'fetch', status: null,
+    code: 'TIMEOUT', country: 'MX', sourceCurrencyCode: 'MXN' }]);
+  events.length = 0;
+  const controller = new AbortController(); controller.abort();
+  await expect(readReownProductionOptions('US', { signal: controller.signal, diagnostic: event => events.push(event) }))
+    .rejects.toHaveProperty('name', 'AbortError');
+  await readReownProductionOptions('US', { fetchImpl: mockFetch(() => Response.json([route()])), diagnostic: event => events.push(event) });
+  expect(events).toEqual([]);
 });

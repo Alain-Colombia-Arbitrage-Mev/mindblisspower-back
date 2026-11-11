@@ -22,6 +22,7 @@ const methodMigration = readFileSync(new URL('../_meta/migration/94_wallet_fundi
 const statusMigration = readFileSync(new URL('../_meta/migration/95_wallet_funding_status_reads.sql', import.meta.url), 'utf8');
 const usd20Migration = readFileSync(new URL('../_meta/migration/96_personal_usd20_membership_catalog.sql', import.meta.url), 'utf8');
 const mxnMigration = readFileSync(new URL('../_meta/migration/97_personal_mxn_spei_requests.sql', import.meta.url), 'utf8');
+const companyMigration = readFileSync(new URL('../_meta/migration/98_personal_company_payments.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -390,8 +391,160 @@ try {
     'amountCheck',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='payments.reown_funding_intent'::regclass AND conname='reown_funding_intent_requested_amount_check'))::text;`,false);
   const duplicateMxn=psql(mxnMigration,true);assert.notEqual(duplicateMxn.status,0);assert.match(duplicateMxn.stderr,/personal_mxn_requires_fresh_review/);probes++;
 
+  // A company transfer is a separate receipt registry, never a funding/ledger
+  // entry or an automatic membership allocation. All addresses/data are synthetic.
+  const beforeCompany=value(statusSnapshot,false);
+  const companyCatalog=value('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p;',false);
+  psql(`INSERT INTO auth."user" VALUES('company-owner',true),('company-other',true),('company-rate',true),('company-race',true),('company-race-a',true),('company-race-b',true),('company-abandon',true),('company-abandon-race',true);
+    INSERT INTO identity.wallet_binding VALUES('company-owner','0x${'a'.repeat(40)}'),('company-other','0x${'b'.repeat(40)}'),
+    ('company-rate','0x${'c'.repeat(40)}'),('company-race','0x${'d'.repeat(40)}'),('company-race-a','0x${'e'.repeat(40)}'),('company-race-b','0x${'f'.repeat(40)}'),
+    ('company-abandon','0x${'12'.repeat(20)}'),('company-abandon-race','0x${'34'.repeat(20)}');
+    ALTER DEFAULT PRIVILEGES IN SCHEMA payments GRANT EXECUTE ON FUNCTIONS TO app_read;`);
+  psql(companyMigration);
+  equal(statusSnapshot,beforeCompany,false);
+  equal('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p;',companyCatalog,false);
+  const companyId=randomUUID(),otherCompanyId=randomUUID();
+  const companyHash=`0x${'a'.repeat(64)}`,otherHash=`0x${'b'.repeat(64)}`,blockHash=`0x${'c'.repeat(64)}`;
+  const maxUint='115792089237316195423570985008687907853269984665640564039457584007913129639935';
+  const companyPrepare=(amount='123456789',id=companyId,subject='company-owner',address=`0x${'a'.repeat(40)}`)=>
+    `SELECT status FROM payments.prepare_personal_company_payment('${subject}','${address}',${amount===null?'NULL':`'${amount}'`},'${id}');`;
+  const companySubmit=(id=companyId,hash=companyHash,subject='company-owner')=>
+    `SELECT status FROM payments.submit_personal_company_payment('${subject}','${id}','${hash}');`;
+  const companyVerify=(id=companyId,hash=companyHash,block='80000000',blockValue=blockHash,confirmations='12',subject='company-owner')=>
+    `SELECT status FROM payments.verify_personal_company_payment('${subject}','${id}','${hash}',${block===null?'NULL':`'${block}'`},'${blockValue}',${confirmations});`;
+  const companyReject=(id=companyId,hash=companyHash,reason='transaction_reverted',subject='company-owner')=>
+    `SELECT status FROM payments.reject_personal_company_payment('${subject}','${id}','${hash}','${reason}');`;
+  const companyAbandon=(id,subject='company-abandon')=>`SELECT abandoned_at IS NOT NULL FROM payments.abandon_personal_company_payment('${subject}','${id}');`;
+  for(const bad of [null,'0','-1','01','1.0',' 1','1e6','NaN','Infinity','9'.repeat(79),'115792089237316195423570985008687907853269984665640564039457584007913129639936']) {
+    rejects(companyPrepare(bad),'company_payment_invalid_request');
+  }
+  rejects(companyPrepare('1',randomUUID(),'blocked'),'company_payment_forbidden');
+  rejects(companyPrepare('1',randomUUID(),'company-owner',`0x${'b'.repeat(40)}`),'company_payment_forbidden');
+  equal(companyPrepare(),'prepared');
+  equal(companyPrepare(),'prepared');
+  equal(`SELECT amount_atomic||'|'||purpose||'|'||chain_id||'|'||token_address||'|'||token_decimals||'|'||recipient_address FROM payments.personal_company_payment WHERE id='${companyId}';`,
+    '123456789|company_payment|137|0xc2132d05d31c914a87c6611c10748aeb04b58e8f|6|0x0a600b03ef5f8e7f3e182b83440c6d292033db0e',false);
+  equal(`SELECT expires_at-created_at=interval '15 minutes' FROM payments.read_personal_company_payment('company-owner','${companyId}');`,'t');
+  rejects(companyPrepare('123456790'),'company_payment_request_already_used');
+  rejects(companyPrepare('123456789',companyId,'company-other',`0x${'b'.repeat(40)}`),'company_payment_request_already_used');
+  rejects(companyPrepare('1',randomUUID()),'company_payment_pending_exists');
+  equal(`SELECT count(*) FROM payments.read_personal_company_payment('company-other','${companyId}');`,'0');
+  rejects(`SELECT * FROM payments.read_personal_company_payment('blocked','${companyId}');`,'company_payment_forbidden');
+  rejects(`SELECT * FROM payments.read_personal_company_payment('company-owner',NULL);`,'company_payment_invalid_request');
+  rejects(companyVerify(),'company_payment_confirmation_conflict');
+  rejects(companySubmit(companyId,companyHash,'company-other'),'company_payment_not_found');
+  rejects(companySubmit(companyId,'0xA'+ 'a'.repeat(63)),'company_payment_invalid_request');
+  equal(companySubmit(),'submitted');
+  equal(companySubmit(),'submitted');
+  rejects(companySubmit(companyId,otherHash),'company_payment_request_already_used');
+  rejects(companyPrepare('1',randomUUID()),'company_payment_pending_exists');
+  for(const args of [[companyId,otherHash],[companyId,companyHash,'0'],[companyId,companyHash,'80000000',blockHash,'11'],
+    [companyId,companyHash,'80000000',blockHash,'NULL'],[companyId,companyHash,null],
+    [companyId,companyHash,'9223372036854775808'],[companyId,companyHash,'080000000'],[companyId,companyHash,'NaN']]) {
+    rejects(companyVerify(...args),args[1]===otherHash?'company_payment_confirmation_conflict':'company_payment_verification_invalid');
+  }
+  equal(companyVerify(),'confirmed');
+  equal(companyVerify(companyId,companyHash,'80000000',blockHash,'20'),'confirmed');
+  equal(`SELECT confirmations FROM payments.read_personal_company_payment('company-owner','${companyId}');`,'12');
+  equal(companyPrepare(),'confirmed');
+  rejects(companyVerify(companyId,companyHash,'80000001'),'company_payment_confirmation_conflict');
+  rejects(companyVerify(companyId,companyHash,'80000000',otherHash),'company_payment_confirmation_conflict');
+  rejects(companyReject(),'company_payment_invalid_transition');
+  equal(companyPrepare(maxUint,otherCompanyId,'company-other',`0x${'b'.repeat(40)}`),'prepared');
+  rejects(companySubmit(otherCompanyId,companyHash,'company-other'),'company_payment_hash_reused');
+  equal(companySubmit(otherCompanyId,otherHash,'company-other'),'submitted');
+  rejects(companyReject(otherCompanyId,otherHash,'rpc_timeout','company-other'),'company_payment_invalid_request');
+  equal(companyReject(otherCompanyId,otherHash,'transaction_reverted','company-other'),'failed');
+  equal(companyReject(otherCompanyId,otherHash,'transaction_reverted','company-other'),'failed');
+  rejects(companyReject(otherCompanyId,otherHash,'transaction_mismatch','company-other'),'company_payment_invalid_transition');
+  rejects(companyVerify(otherCompanyId,otherHash,'80000000',blockHash,'12','company-other'),'company_payment_invalid_transition');
+  equal(`SELECT amount_atomic FROM payments.read_personal_company_payment('company-other','${otherCompanyId}');`,maxUint);
+  const immutable=(statement,pattern)=>{const result=psql(statement,true);assert.notEqual(result.status,0);assert.match(result.stderr,new RegExp(pattern));probes++;};
+  immutable(`UPDATE payments.personal_company_payment SET amount_atomic='1' WHERE id='${companyId}';`,'company_payment_snapshot_immutable');
+  immutable(`UPDATE payments.personal_company_payment SET recipient_address='0x${'1'.repeat(40)}' WHERE id='${companyId}';`,'company_payment_snapshot_immutable');
+  immutable(`UPDATE payments.personal_company_payment SET transaction_hash='0x${'9'.repeat(64)}' WHERE id='${companyId}';`,'company_payment_snapshot_immutable');
+  immutable(`UPDATE payments.personal_company_payment SET confirmations=20 WHERE id='${companyId}';`,'company_payment_invalid_transition');
+  immutable(`DELETE FROM payments.personal_company_payment WHERE id='${companyId}';`,'company_payment_delete_forbidden');
+  rejects('SELECT * FROM payments.personal_company_payment;','permission denied');
+  equal(`SELECT has_table_privilege('app_read','payments.personal_company_payment','SELECT');`,'f',false);
+  psql(`GRANT SELECT ON payments.personal_company_payment TO ${role};`);
+  equal('SELECT count(*) FROM payments.personal_company_payment;','0');
+  psql(`REVOKE SELECT ON payments.personal_company_payment FROM ${role};`);
+  const expiredCompanyId=randomUUID(),expiredHash=`0x${'d'.repeat(64)}`;
+  psql(`INSERT INTO payments.personal_company_payment(id,subject,wallet_address,amount_atomic,created_at,expires_at)
+    VALUES('${expiredCompanyId}','company-owner','0x${'a'.repeat(40)}','1',now()-interval '16 minutes',now()-interval '1 minute');`);
+  equal(companySubmit(expiredCompanyId,expiredHash),'submitted');
+  equal(companyReject(expiredCompanyId,expiredHash,'transaction_mismatch'),'failed');
+  for(let n=1;n<=5;n++){
+    const id=randomUUID(),hash=`0x${String(n).padStart(64,'0')}`;
+    equal(companyPrepare('1',id,'company-rate',`0x${'c'.repeat(40)}`),'prepared');
+    equal(companySubmit(id,hash,'company-rate'),'submitted');
+    equal(companyReject(id,hash,'transaction_reverted','company-rate'),'failed');
+  }
+  rejects(companyPrepare('1',randomUUID(),'company-rate',`0x${'c'.repeat(40)}`),'company_payment_rate_limited');
+  const companyRace=await Promise.all([parallelPsql(companyPrepare('1',randomUUID(),'company-race',`0x${'d'.repeat(40)}`)),
+    parallelPsql(companyPrepare('1',randomUUID(),'company-race',`0x${'d'.repeat(40)}`))]);
+  assert.equal(companyRace.filter(item=>item.status===0).length,1);probes++;
+  assert.match(companyRace.find(item=>item.status!==0).stderr,/company_payment_pending_exists/);probes++;
+  const raceA=randomUUID(),raceB=randomUUID(),raceHash=`0x${'e'.repeat(64)}`;
+  equal(companyPrepare('1',raceA,'company-race-a',`0x${'e'.repeat(40)}`),'prepared');
+  equal(companyPrepare('1',raceB,'company-race-b',`0x${'f'.repeat(40)}`),'prepared');
+  const hashRace=await Promise.all([parallelPsql(companySubmit(raceA,raceHash,'company-race-a')),parallelPsql(companySubmit(raceB,raceHash,'company-race-b'))]);
+  assert.equal(hashRace.filter(item=>item.status===0).length,1);probes++;
+  assert.match(hashRace.find(item=>item.status!==0).stderr,/company_payment_hash_reused/);probes++;
+  psql(`INSERT INTO payments.personal_company_payment(id,subject,wallet_address,amount_atomic,status,transaction_hash,submitted_at,failed_at,failure_reason,created_at,expires_at)
+    SELECT gen_random_uuid(),'company-other','0x${'b'.repeat(40)}','1','failed','0x'||lpad((100+g)::text,64,'0'),now()-g*interval '1 day',now()-g*interval '1 day',
+      'transaction_reverted',now()-g*interval '1 day',now()-g*interval '1 day'+interval '15 minutes' FROM generate_series(1,21) g;`);
+  equal(`SELECT count(*) FROM payments.read_personal_company_payment_history('company-other');`,'20');
+  equal(`SELECT bool_and(wallet_address='0x${'b'.repeat(40)}') FROM payments.read_personal_company_payment_history('company-other');`,'t');
+  rejects(`SELECT * FROM payments.read_personal_company_payment_history('blocked');`,'company_payment_forbidden');
+  const abandonedId=randomUUID(),nextDraftId=randomUUID(),thirdDraftId=randomUUID(),lateHash=`0x${'8'.repeat(64)}`;
+  equal(companyPrepare('10',abandonedId,'company-abandon',`0x${'12'.repeat(20)}`),'prepared');
+  const unsignedSnapshot=value(`SELECT (to_jsonb(r)-'abandoned_at')::text FROM payments.personal_company_payment r WHERE id='${abandonedId}';`,false);
+  rejects(companyAbandon(abandonedId,'company-other'),'company_payment_not_found');
+  equal(companyAbandon(abandonedId),'t');
+  const abandonedAt=value(`SELECT abandoned_at FROM payments.read_personal_company_payment('company-abandon','${abandonedId}');`);
+  equal(companyAbandon(abandonedId),'t');
+  equal(`SELECT abandoned_at FROM payments.read_personal_company_payment('company-abandon','${abandonedId}');`,abandonedAt);
+  equal(`SELECT (to_jsonb(r)-'abandoned_at')::text FROM payments.personal_company_payment r WHERE id='${abandonedId}';`,unsignedSnapshot,false);
+  equal(companyPrepare('10',abandonedId,'company-abandon',`0x${'12'.repeat(20)}`),'prepared');
+  equal(`SELECT abandoned_at IS NOT NULL FROM payments.prepare_personal_company_payment('company-abandon','0x${'12'.repeat(20)}','10','${abandonedId}');`,'t');
+  equal(companyPrepare('20',nextDraftId,'company-abandon',`0x${'12'.repeat(20)}`),'prepared');
+  equal(companySubmit(abandonedId,lateHash,'company-abandon'),'submitted');
+  equal(`SELECT abandoned_at FROM payments.read_personal_company_payment('company-abandon','${abandonedId}');`,abandonedAt);
+  rejects(companyPrepare('30',thirdDraftId,'company-abandon',`0x${'12'.repeat(20)}`),'company_payment_pending_exists');
+  rejects(companyAbandon(abandonedId),'company_payment_invalid_transition');
+  equal(companyVerify(abandonedId,lateHash,'80000000',blockHash,'12','company-abandon'),'confirmed');
+  equal(`SELECT abandoned_at FROM payments.read_personal_company_payment('company-abandon','${abandonedId}');`,abandonedAt);
+  rejects(companyAbandon(abandonedId),'company_payment_invalid_transition');
+  immutable(`UPDATE payments.personal_company_payment SET abandoned_at=NULL WHERE id='${abandonedId}';`,'company_payment_snapshot_immutable');
+  equal(companyAbandon(nextDraftId),'t');
+  equal(companyPrepare('30',thirdDraftId,'company-abandon',`0x${'12'.repeat(20)}`),'prepared');
+  equal(`SELECT count(*) FROM payments.read_personal_company_payment_history('company-abandon') WHERE abandoned_at IS NOT NULL;`,'2');
+  const abandonRaceId=randomUUID(),abandonRaceHash=`0x${'7'.repeat(64)}`;
+  equal(companyPrepare('1',abandonRaceId,'company-abandon-race',`0x${'34'.repeat(20)}`),'prepared');
+  const abandonRace=await Promise.all([parallelPsql(companyAbandon(abandonRaceId,'company-abandon-race')),
+    parallelPsql(companySubmit(abandonRaceId,abandonRaceHash,'company-abandon-race'))]);
+  assert.equal(abandonRace[1].status,0,'a concurrent abandon must never discard a real broadcast hash');probes++;
+  if(abandonRace[0].status!==0)assert.match(abandonRace[0].stderr,/company_payment_invalid_transition/);probes++;
+  equal(`SELECT status||'|'||transaction_hash||'|'||amount_atomic FROM payments.read_personal_company_payment('company-abandon-race','${abandonRaceId}');`,
+    `submitted|${abandonRaceHash}|1`);
+  for(const signature of ['payments.read_personal_company_payment(text,uuid)','payments.read_personal_company_payment_history(text)',
+    'payments.prepare_personal_company_payment(text,text,text,uuid)','payments.submit_personal_company_payment(text,uuid,text)',
+    'payments.verify_personal_company_payment(text,uuid,text,text,text,integer)','payments.reject_personal_company_payment(text,uuid,text,text)',
+    'payments.abandon_personal_company_payment(text,uuid)']){
+    equal(`SELECT has_function_privilege('${role}','${signature}','EXECUTE') AND NOT has_function_privilege('app_read','${signature}','EXECUTE');`,'t',false);
+    equal(`SELECT prosecdef AND proconfig=ARRAY['search_path=pg_catalog']::text[] FROM pg_proc WHERE oid='${signature}'::regprocedure;`,'t',false);
+  }
+  equal(`SELECT has_function_privilege('${role}','payments.assert_personal_company_payment_owner(text,text)','EXECUTE');`,'f',false);
+  equal(statusSnapshot,beforeCompany,false);
+  equal('SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY id)::text) FROM mlm.package p;',companyCatalog,false);
+  const companyProfile=JSON.parse(value(`SELECT jsonb_object_agg(p.proname,md5(pg_get_functiondef(p.oid)) ORDER BY p.proname) FROM pg_proc p
+    WHERE p.pronamespace='payments'::regnamespace AND p.proname LIKE '%personal_company_payment%';`,false));
+  const duplicateCompany=psql(companyMigration,true);assert.notEqual(duplicateCompany.status,0);assert.match(duplicateCompany.stderr,/company_payment_fresh_prerequisites_required/);probes++;
+
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
-    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, mxnProfile: JSON.parse(mxnProfile) }));
+    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, mxnProfile: JSON.parse(mxnProfile) }));
 } catch (error) {
   // This harness contains synthetic data only; avoid dumping whole SQL fixtures.
   console.error(JSON.stringify({ walletFundingSchema: 'failed', message: error.message }));

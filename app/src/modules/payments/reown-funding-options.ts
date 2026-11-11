@@ -8,6 +8,8 @@ const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;
 const unavailable = () => new Error('wallet_funding_provider_unavailable');
+type DiscoveryDiagnostic = { event: 'personal_funding_discovery_failure'; phase: 'fetch' | 'response' | 'body' | 'normalization';
+  status: number | null; code: 'TRANSPORT_FAILURE' | 'HTTP_REJECTED' | 'INVALID_RESPONSE' | 'TIMEOUT'; country: string; sourceCurrencyCode: string };
 
 export type ReownFundingMethod = { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number;
   minimumUsd?: number; maximumUsd?: number };
@@ -125,8 +127,9 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
 
 /** Exactly one read-only request, scoped with Reown's public merchant key; never reads administrative env. */
 export async function readReownProductionOptions(country: string, {
-  fetchImpl = fetch, signal, sourceCurrencyCode = 'USD',
-}: { fetchImpl?: typeof fetch; signal?: AbortSignal; sourceCurrencyCode?: string } = {}): Promise<ReownProductionOptions> {
+  fetchImpl = fetch, signal, sourceCurrencyCode = 'USD', diagnostic = (event: DiscoveryDiagnostic) => console.warn(JSON.stringify(event)),
+}: { fetchImpl?: typeof fetch; signal?: AbortSignal; sourceCurrencyCode?: string;
+  diagnostic?: (event: DiscoveryDiagnostic) => void } = {}): Promise<ReownProductionOptions> {
   if (typeof country !== 'string' || !PERSONAL_FUNDING_COUNTRIES.some(allowed => allowed === country)) {
     throw new Error('wallet_funding_invalid_country');
   }
@@ -139,19 +142,30 @@ export async function readReownProductionOptions(country: string, {
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(abort, TIMEOUT_MS);
+  let phase: DiscoveryDiagnostic['phase'] = 'fetch';
+  let status: number | null = null;
   try {
     const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT_POLYGON?partners=SWAPPED,MERCURYO`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       headers: { Authorization: `BASIC ${REOWN_MELD_PUBLIC_KEY}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },
     }), controller.signal, response => disposeBody(response.body));
+    phase = 'response'; status = response.status;
     if (!response.ok || response.redirected) { disposeBody(response.body); throw unavailable(); }
-    const routes = normalizeReownProductionRoutes(await boundedJson(response, controller.signal), sourceCurrencyCode);
+    phase = 'body';
+    const body = await boundedJson(response, controller.signal);
+    phase = 'normalization';
+    const routes = normalizeReownProductionRoutes(body, sourceCurrencyCode);
     const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
     if (controller.signal.aborted) throw unavailable();
     return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode, paymentMethods, routes };
   } catch {
+    // Caller-driven cancellation is normal when a user changes country. Never
+    // record upstream body text, request headers, credentials, URLs or identity.
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    try { diagnostic({ event: 'personal_funding_discovery_failure', phase, status, country, sourceCurrencyCode,
+      code: controller.signal.aborted ? 'TIMEOUT' : phase === 'fetch' ? 'TRANSPORT_FAILURE'
+        : phase === 'response' ? 'HTTP_REJECTED' : 'INVALID_RESPONSE' }); } catch { /* diagnostics cannot change availability */ }
     throw unavailable();
   } finally {
     clearTimeout(timer);

@@ -11,6 +11,7 @@ import { registerAdministrativeWalletRoutes } from './http/administrative-wallet
 import { registerMeldWebhookRoutes } from './http/meld-webhook-routes';
 import { registerMeldOnrampRoutes } from './http/meld-onramp-routes';
 import { registerWalletFundingRoutes } from './http/wallet-funding-routes';
+import { registerPersonalCompanyPaymentRoutes } from './http/personal-company-payment-routes';
 import { authDb } from './db/auth-client';
 import { MELD_WEBHOOK_MAX_BYTES, MELD_WEBHOOK_PATH } from './modules/payments/meld-webhook';
 import { authProxyContext } from './http/auth-proxy-context';
@@ -52,6 +53,7 @@ registerWalletLinkRoutes(app, { database: authDb });
 registerAdministrativeWalletRoutes(app);
 registerMeldOnrampRoutes(app);
 registerWalletFundingRoutes(app, { database: authDb });
+registerPersonalCompanyPaymentRoutes(app, { database: authDb });
 registerOtpDiagnosticRoutes(app);
 
 app.get('/health', (c) => c.text('ok'));

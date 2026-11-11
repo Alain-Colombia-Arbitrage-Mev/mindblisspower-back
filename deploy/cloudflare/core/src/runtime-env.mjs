@@ -101,6 +101,15 @@ export function containerEnvironment(service, env) {
     }
   }
   if (service === 'api') {
+    values.PERSONAL_COMPANY_PAYMENTS_ENABLED = String(env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true');
+    if (env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true') {
+      if (typeof env.API_REOWN_PROJECT_ID !== 'string' || !/^[a-f0-9]{32}$/i.test(env.API_REOWN_PROJECT_ID)) {
+        throw new Error('Personal company payment RPC configuration is incomplete');
+      }
+      // Reown project IDs are public. Only the API receives this fixed-chain
+      // RPC capability; no wallet/private signing keys are stored server-side.
+      values.REOWN_PROJECT_ID = env.API_REOWN_PROJECT_ID;
+    }
     // Branch portals share the auth service, not browser cookies or JWT issuers.
     // Append explicit deployed origins without replacing the existing secret.
     if (env.API_AUTH_ADDITIONAL_ORIGINS !== undefined) {
