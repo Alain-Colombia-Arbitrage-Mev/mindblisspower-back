@@ -66,11 +66,14 @@ network-disabled PostgreSQL fixture; it does not use a production database URL.
   a 10-second deadline and cold imports exceeded Bun's 5-second default. No
   existing assertion or subprocess deadline was changed.
 - Core gateway: 214 passing tests.
-- Additional PostgreSQL ownership probes: syntax checked, execution pending
-  because the local Docker Engine did not respond. Migrations 105 and 106 remain
-  unchanged. Source review found the ownership checks and immutable snapshots
-  already enforced by those migrations; this is not a claim that the new SQL
-  probe completed successfully.
+- PostgreSQL: 74 additional ownership/amount probes and 102 existing relay
+  probes passed after restoring the local Docker Engine. Two synthetic subjects
+  exercised stolen UUIDs, foreign authorizations and receipts, wallet-binding
+  drift, approved amount changes, retries and terminal replays. Accepted
+  authorizations and unrelated financial rows remained unchanged.
+- These SQL checks used a disposable, network-disabled database, with zero
+  production connections, real transfers or charges. The temporary container
+  was removed after execution. Migrations 105 and 106 remain unchanged.
 
 Changing local HTML can falsify the display but does not change the intent the
 server authorizes. These controls apply to Mindbliss operations; a user still
