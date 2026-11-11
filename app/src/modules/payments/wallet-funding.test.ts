@@ -178,7 +178,7 @@ test('personal cancellation at the final discovery boundary never starts intent 
 
 test('personal country and method restrictions cannot be bypassed by forging an intent or another catalogue', async () => {
   const blocked = queuedDatabase([]);
-  for (const country of ['CO', 'PA', 'GB', 'ES']) {
+  for (const country of ['PA', 'GB', 'ES']) {
     await expect(createPersonalFundingIntent(blocked.database, { ...input, country }, 'owner', {
       fetchImpl: (async () => { throw new Error('unsupported country must not fetch'); }) as unknown as typeof fetch,
     })).rejects.toThrow('wallet_funding_invalid_country');
@@ -193,6 +193,27 @@ test('personal country and method restrictions cannot be bypassed by forging an 
     fetchImpl: (async () => Response.json([route('BANXA', [method('NETELLER'), method('SKRILL')])])) as unknown as typeof fetch });
   expect(admin.country).toBe('CO');
   expect(admin.paymentMethods).toEqual(['NETELLER', 'SKRILL']);
+});
+
+test('Colombia personal funding records USD30 through its production routes and rejects local-currency substitutions before a write', async () => {
+  const captured = queuedDatabase([[{ id, created_at: createdAt }]]);
+  const result = await createPersonalFundingIntent(captured.database, { ...input, country: 'CO', amount: 30 }, 'owner', {
+    fetchImpl: (async (url, init) => {
+      expect(String(url)).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/CO/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO');
+      expect(init?.method).toBe('GET');
+      expect(new Headers(init?.headers).get('authorization')).not.toContain(environment.MELD_API_SANDBOX);
+      return Response.json([route('SWAPPED'), route('MERCURYO')]);
+    }) as typeof fetch,
+  });
+  expect(result).toMatchObject({ requestedAmount: 30, sourceCurrencyCode: 'USD', walletKind: 'personal',
+    environment: 'production', allowedProviders: ['SWAPPED', 'MERCURYO'] });
+  expect(captured.queries[0]!.params).toEqual(['owner', address, 'CO', 30, id, 'CREDIT_DEBIT_CARD', 'USD']);
+  const blocked = queuedDatabase([]);
+  for (const sourceCurrencyCode of ['COP', 'MXN']) await expect(createPersonalFundingIntent(blocked.database,
+    { ...input, country: 'CO', sourceCurrencyCode, paymentMethodType: 'SPEI', amount: 931 }, 'owner', {
+      fetchImpl: (async () => { throw new Error('invalid currency must not fetch'); }) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_valuation_unavailable');
+  expect(blocked.queries).toHaveLength(0);
 });
 
 test('administrative sandbox binds the assigned address and records its session separately from production finances', async () => {

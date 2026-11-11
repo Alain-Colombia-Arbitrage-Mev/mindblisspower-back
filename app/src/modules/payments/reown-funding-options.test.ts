@@ -72,8 +72,9 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
     await expect(readReownProductionOptions('MX', { sourceCurrencyCode, fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }) }))
       .rejects.toThrow('wallet_funding_invalid_currency');
   }
-  await expect(readReownProductionOptions('US', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }) }))
-    .rejects.toThrow('wallet_funding_invalid_currency');
+  for (const country of ['US', 'CO']) await expect(readReownProductionOptions(country, {
+    sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }),
+  })).rejects.toThrow('wallet_funding_invalid_currency');
 });
 
 test('personal MXN discovery applies the fixed 931 floor, preserves higher provider minima and omits routes that cannot meet it', async () => {
@@ -91,8 +92,8 @@ test('personal MXN discovery applies the fixed 931 floor, preserves higher provi
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|exchangeRate|fiatAmountInUsd/);
 });
 
-test('personal funding is limited to US and Mexico and removes Neteller and Skrill rails', async () => {
-  for (const country of ['US', 'MX']) {
+test('personal funding admits US, Mexico and Colombia in USD and removes Neteller and Skrill rails', async () => {
+  for (const country of ['US', 'MX', 'CO']) {
     const result = await readReownProductionOptions(country, { fetchImpl: mockFetch((url) => {
       expect(url).toContain(`/${country}/USD/USDT_POLYGON`);
       return Response.json([route('SWAPPED', [
@@ -142,7 +143,7 @@ test('provider errors, redirects and oversized responses fail closed without exp
 test('invalid input and cancelled country changes do not fetch or reuse stale options', async () => {
   let calls = 0;
   const fetchImpl = mockFetch(() => { calls++; return Response.json([route()]); });
-  for (const country of ['co', 'CO', 'PA', 'GB', 'ES', 'COL', 'CO/../US', '', 'US?country=CO']) {
+  for (const country of ['co', 'PA', 'GB', 'ES', 'COL', 'CO/../US', '', 'US?country=CO']) {
     await expect(readReownProductionOptions(country, { fetchImpl })).rejects.toThrow('wallet_funding_invalid_country');
   }
   const controller = new AbortController(); controller.abort();

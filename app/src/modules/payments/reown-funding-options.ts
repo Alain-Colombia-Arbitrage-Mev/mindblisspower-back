@@ -3,7 +3,7 @@
 // This is the public checkout key shipped by Reown, not a Mindbliss private API key.
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
 const PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
-export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX'] as const;
+export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'CO'] as const;
 export const PERSONAL_FUNDING_MINIMUM_USD = 30;
 export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
 export const PERSONAL_FUNDING_MINIMUM_MXN = 931;

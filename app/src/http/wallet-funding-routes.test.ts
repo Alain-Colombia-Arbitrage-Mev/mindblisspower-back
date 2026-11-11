@@ -173,7 +173,7 @@ test('administrative options require a session and one exact country/provider wi
 test('personal options use one native-session country query without a sandbox credential or provider selector', async () => {
   const app = application();
   const path = '/api/member/wallet-funding/personal/options';
-  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other', '?country=CO', '?country=PA', '?country=ES']) {
+  for (const query of ['', '?country=US&country=CO', '?country=US&serviceProvider=TRANSAK', '?country=us', '?country=US&subject=other', '?country=PA', '?country=ES']) {
     expect((await app.request(path + query)).status).toBe(400);
   }
   expect((await application({ signedIn: false }).request(path + '?country=US')).status).toBe(401);
@@ -181,6 +181,27 @@ test('personal options use one native-session country query without a sandbox cr
   expect(response.status).toBe(200);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.json()).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', paymentMethods: ['CREDIT_DEBIT_CARD'] });
+});
+
+test('HTTP Colombia personal discovery and intent stay production USD only', async () => {
+  let writes = 0;
+  const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });
+  const options = await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=USD');
+  expect(options.status).toBe(200);
+  expect(await options.json()).toMatchObject({ country: 'CO', sourceCurrencyCode: 'USD', environment: 'production',
+    routes: [{ serviceProvider: 'SWAPPED', paymentMethods: [{ minimumAmount: 30, maximumAmount: 15000, minimumUsd: 30, maximumUsd: 15000 }] }] });
+  const accepted = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ...input, country: 'CO', amount: 30 }) });
+  expect(accepted.status).toBe(201);
+  expect(await accepted.json()).toMatchObject({ sourceCurrencyCode: 'USD', requestedAmount: 30, environment: 'production' });
+  for (const sourceCurrencyCode of ['COP', 'MXN']) {
+    expect((await app.request(`/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=${sourceCurrencyCode}`)).status).toBe(400);
+    const rejected = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...input, country: 'CO', sourceCurrencyCode, amount: 931, paymentMethodType: 'SPEI' }) });
+    expect(rejected.status).toBe(503);
+    expect(await rejected.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
+  }
+  expect(writes).toBe(1);
 });
 
 test('currency selectors are strict and non-USD mutations expose no unverified USD acknowledgement', async () => {

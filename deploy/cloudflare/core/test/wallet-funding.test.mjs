@@ -105,7 +105,7 @@ test('currency discovery admits canonical selectors while duplicate and encoded 
 
 test('personal country and payment exclusions do not restrict the separate administrative flow or historical owned status', async () => {
   const never = () => assert.fail('excluded personal funding dispatched');
-  for (const country of ['CO', 'PA', 'GB', 'ES']) {
+  for (const country of ['PA', 'GB', 'ES']) {
     assert.equal((await dispatchCore(request(path, { ...input, country }), env, never)).status, 503);
     assert.equal((await dispatchCore(new Request(`https://auth.core.internal/api/member/wallet-funding/personal/options?country=${country}`,
       { headers: { cookie: 'better-auth.session_token=synthetic' } }), env, never)).status, 503);
@@ -117,8 +117,23 @@ test('personal country and payment exclusions do not restrict the separate admin
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
     ...input, country: 'CO', serviceProvider: 'BANXA', paymentMethodType: 'SKRILL' }), env, resolve)).status, 200);
-  for (const country of ['US', 'MX']) assert.equal((await dispatchCore(request(path, { ...input, country }), env, resolve)).status, 200);
-  assert.equal(calls, 3);
+  for (const country of ['US', 'MX', 'CO']) assert.equal((await dispatchCore(request(path, { ...input, country }), env, resolve)).status, 200);
+  assert.equal(calls, 4);
+});
+
+test('Colombia personal admission permits only USD discovery and intents, preserving Mexico-only MXN SPEI', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  const read = currency => new Request(`https://auth.core.internal/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=${currency}`,
+    { headers: { cookie: 'better-auth.session_token=synthetic' } });
+  assert.equal((await dispatchCore(read('USD'), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, { ...input, country: 'CO', sourceCurrencyCode: 'USD', amount: 30 }), env, resolve)).status, 200);
+  const never = () => assert.fail('Colombia local-currency request dispatched');
+  for (const sourceCurrencyCode of ['COP', 'MXN']) {
+    assert.equal((await dispatchCore(read(sourceCurrencyCode), env, never)).status, 503);
+    assert.equal((await dispatchCore(request(path, { ...input, country: 'CO', sourceCurrencyCode, paymentMethodType: 'SPEI', amount: 931 }), env, never)).status, 503);
+  }
+  assert.equal(calls, 2);
 });
 
 test('owned status reads are a separate exact native-session capability with no checkout or owner overrides', async () => {
