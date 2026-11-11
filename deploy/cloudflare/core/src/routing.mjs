@@ -6,6 +6,7 @@ import { boundedBody as readBoundedBody, fetchWithDeadline } from './transport.m
 import { authTraceEnabled } from './auth-trace-store.mjs';
 import { WALLET_FUNDING_MAX_BODY, walletFundingNamespace, walletFundingRequest } from './wallet-funding.mjs';
 import { COMPANY_PAYMENT_MAX_BODY, companyPaymentNamespace, companyPaymentRequest } from './company-payments.mjs';
+import { POLYGON_RELAY_MAX_BODY, polygonRelayNamespace, polygonRelayRequest } from './polygon-relay.mjs';
 export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
 
 export const SERVICES = Object.freeze({
@@ -29,6 +30,10 @@ const FUNDING_SERVICE_ERRORS = new Set(['wallet_funding_unconfigured', 'wallet_f
   'wallet_funding_valuation_unavailable', 'wallet_funding_unavailable']);
 const ADMINISTRATIVE_FUNDING_SERVICE_ERRORS = new Set([...FUNDING_SERVICE_ERRORS, 'wallet_funding_provider_authentication_unavailable']);
 const COMPANY_PAYMENT_SERVICE_ERRORS = new Set(['company_payment_unconfigured', 'company_payment_rpc_unavailable', 'company_payment_unavailable']);
+const POLYGON_RELAY_SERVICE_ERRORS = new Set(['polygon_relay_unconfigured', 'polygon_relay_unavailable',
+  'polygon_relay_provider_unavailable', 'polygon_relay_sponsorship_rejected', 'polygon_relay_budget_unavailable',
+  'polygon_relay_authorization_unavailable', 'polygon_relay_fee_unavailable', 'polygon_relay_broadcast_ambiguous',
+  'polygon_relay_proof_unavailable', 'polygon_relay_contract_changed', 'polygon_relay_broadcast_disabled', 'company_payment_rpc_unavailable']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const GRPC_TUNNEL_HOST = 'engine-grpc.core.internal';
 export const GRPC_TUNNEL_PATH = '/v1/engine-tunnel';
@@ -318,6 +323,16 @@ export async function dispatchCore(request, env, resolve) {
     companyRequest = companyPaymentRequest(request, url, body, env, authReady(env));
     if (!companyRequest) return failure('company_payment_unavailable', 503);
   }
+  const relayPath = polygonRelayNamespace(checkoutPath);
+  let relayRequest = false;
+  if (relayPath) {
+    if (request.method === 'POST') {
+      try { body = await boundedBody(request, POLYGON_RELAY_MAX_BODY); }
+      catch (error) { return bodyReadFailure(error); }
+    }
+    relayRequest = polygonRelayRequest(request, url, body, env, authReady(env));
+    if (!relayRequest) return failure('polygon_relay_unavailable', 503);
+  }
   const referralPath = referralAttributionNamespace(checkoutPath);
   let referralRequest = false;
   if (referralPath) {
@@ -391,13 +406,13 @@ export async function dispatchCore(request, env, resolve) {
   // Go's SERVICE_READ_ONLY router performs a second, exact endpoint allowlist.
   // The Worker release never permits methods that could mutate money or identity.
   const reportsOnly = !coreReady(env) && reportsReady(env) && reportOnlyRequest(request, url);
-  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest && !companyRequest) return failure('core_not_ready', 503);
+  if (!coreReady(env) && !authOnly && !walletLink && !reportsOnly && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest && !companyRequest && !relayRequest) return failure('core_not_ready', 503);
   const service = SERVICES[url.hostname];
   // Infrastructure approval is not authorization to resume financial/business writes.
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
   const authWrite = service === 'api' && request.method === 'POST'
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim' || walletLink || meldWebhook);
-  if (!read && !authWrite && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest && !companyRequest) return failure('financial_review_required', 503);
+  if (!read && !authWrite && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest && !companyRequest && !relayRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
   try {
     body = read ? undefined : body ?? await boundedBody(request);
@@ -412,6 +427,7 @@ export async function dispatchCore(request, env, resolve) {
     const container = resolve(service, 'singleton');
     const response = await fetchWithDeadline(forwarded, input => container.fetch(input));
     if (response.status >= 500) {
+      if (relayRequest) return reviewedUpstreamFailure(response, POLYGON_RELAY_SERVICE_ERRORS);
       if (companyRequest) return reviewedUpstreamFailure(response, COMPANY_PAYMENT_SERVICE_ERRORS);
       if (operationalCheckout) return reviewedUpstreamFailure(response, NOW_CHECKOUT_ERRORS);
       if (fundingRequest) return reviewedUpstreamFailure(response,

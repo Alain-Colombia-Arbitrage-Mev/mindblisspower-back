@@ -102,13 +102,35 @@ export function containerEnvironment(service, env) {
   }
   if (service === 'api') {
     values.PERSONAL_COMPANY_PAYMENTS_ENABLED = String(env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true');
-    if (env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true') {
+    const polygonRelayEnabled = env.PERSONAL_POLYGON_RELAY_ENABLED === 'true';
+    values.PERSONAL_POLYGON_RELAY_ENABLED = String(polygonRelayEnabled);
+    values.PERSONAL_POLYGON_RELAY_BROADCAST_ENABLED = String(polygonRelayEnabled && env.PERSONAL_POLYGON_RELAY_BROADCAST_ENABLED === 'true');
+    if (env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true' || polygonRelayEnabled) {
       if (typeof env.API_REOWN_PROJECT_ID !== 'string' || !/^[a-f0-9]{32}$/i.test(env.API_REOWN_PROJECT_ID)) {
         throw new Error('Personal company payment RPC configuration is incomplete');
       }
-      // Reown project IDs are public. Only the API receives this fixed-chain
-      // RPC capability; no wallet/private signing keys are stored server-side.
+      // Reown project IDs are public; only the API gets the fixed-chain RPC.
       values.REOWN_PROJECT_ID = env.API_REOWN_PROJECT_ID;
+    }
+    if (polygonRelayEnabled) {
+      const sponsor = env.API_PIMLICO_API_KEY, owner = env.API_POLYGON_RELAYER_PRIVATE_KEY, encryption = env.API_POLYGON_RELAY_ENCRYPTION_KEY;
+      if (typeof sponsor !== 'string' || sponsor.length < 16 || sponsor.length > 512 || !/^[\x21-\x7e]+$/.test(sponsor)
+        || typeof owner !== 'string' || !/^0x[0-9a-f]{64}$/i.test(owner) || BigInt(owner) === 0n
+        || BigInt(owner) >= 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
+        || typeof encryption !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(encryption) || btoa(atob(encryption)) !== encryption) {
+        throw new Error('Polygon relay configuration is incomplete');
+      }
+      Object.assign(values, { PIMLICO_API_KEY: sponsor, POLYGON_RELAYER_PRIVATE_KEY: owner, POLYGON_RELAY_ENCRYPTION_KEY: encryption });
+      const keyId = env.POLYGON_RELAY_ENCRYPTION_KEY_ID ?? 'v1';
+      const maximum = env.PERSONAL_POLYGON_RELAY_MAX_FEE_WEI ?? '1000000000000000000';
+      const perOwner = env.PERSONAL_POLYGON_RELAY_OWNER_DAILY_BUDGET_WEI ?? '2000000000000000000';
+      const global = env.PERSONAL_POLYGON_RELAY_DAILY_BUDGET_WEI ?? '10000000000000000000';
+      if (typeof keyId !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(keyId)
+        || ![maximum, perOwner, global].every(value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value))
+        || BigInt(maximum) > 10n ** 18n || BigInt(perOwner) < BigInt(maximum) || BigInt(perOwner) > 2n * 10n ** 18n
+        || BigInt(global) < BigInt(perOwner) || BigInt(global) > 10n ** 19n) throw new Error('Polygon relay budget configuration is invalid');
+      Object.assign(values, { POLYGON_RELAY_ENCRYPTION_KEY_ID: keyId, PERSONAL_POLYGON_RELAY_MAX_FEE_WEI: maximum,
+        PERSONAL_POLYGON_RELAY_OWNER_DAILY_BUDGET_WEI: perOwner, PERSONAL_POLYGON_RELAY_DAILY_BUDGET_WEI: global });
     }
     // Branch portals share the auth service, not browser cookies or JWT issuers.
     // Append explicit deployed origins without replacing the existing secret.

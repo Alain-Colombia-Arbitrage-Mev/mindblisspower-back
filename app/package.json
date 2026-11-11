@@ -22,12 +22,17 @@
     "@bufbuild/protobuf": "^2.12.0",
     "@connectrpc/connect": "^2.1.1",
     "@connectrpc/connect-node": "^2.1.1",
+    "@noble/curves": "1.9.7",
+    "@solana/spl-token": "0.4.15",
+    "@solana/web3.js": "1.98.4",
     "better-auth": "1.7.7",
     "drizzle-orm": "^0.45.4",
     "ethers": "^6.17.0",
     "hono": "^4.13.13",
     "libphonenumber-js": "1.13.15",
+    "permissionless": "0.5.2",
     "postgres": "^3.4.5",
+    "viem": "2.57.17",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -36,6 +41,8 @@
     "typescript": "^5.6.0"
   },
   "overrides": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "bigint-buffer": "npm:@exodus/bigint-buffer@1.1.5-exodus.1",
+    "jayson": "5.0.0"
   }
 }

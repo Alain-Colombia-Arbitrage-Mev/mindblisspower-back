@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash, createHmac } from 'node:crypto';
+import { Hono } from 'hono';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
@@ -7,6 +8,10 @@ import { readReownProductionOptions } from './reown-funding-options';
 import { createPersonalFundingIntent, readWalletFundingHistory, readWalletFundingStatus } from './wallet-funding';
 import { preparePersonalCompanyPayment, submitPersonalCompanyPayment, verifyPersonalCompanyPayment, readPersonalCompanyPaymentHistory } from './personal-company-payment';
 import { COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC, companyPaymentCalldata } from './personal-company-rpc';
+import { registerPersonalCompanyPaymentRoutes } from '../../http/personal-company-payment-routes';
+import type { ApiEnvironment } from '../../http/types';
+import type { readPersonalCompanyPaymentActivity } from './personal-company-events';
+type ActivityPage = Awaited<ReturnType<typeof readPersonalCompanyPaymentActivity>>;
 
 // Opt-in only: the Docker-only runner supplies this dedicated role and a marked
 // disposable database. Never inherit DATABASE_URL, AUTH_DATABASE_URL or .env.
@@ -25,6 +30,48 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
   const database = drizzle(client), previousFetch = globalThis.fetch;
   let blockedExternalCalls = 0;
   const environment = { PERSONAL_COMPANY_PAYMENTS_ENABLED: 'true', REOWN_PROJECT_ID: 'a'.repeat(32) };
+  async function assertOwnedApiJournal(owner: string, otherOwner: string, paymentId: string, transactionHash: string, chainId: 1 | 137) {
+    const secret = 'synthetic-journal-bff-secret'.repeat(2), eventId = randomUUID(), attemptId = randomUUID();
+    const application = (subject: string) => {
+      const app = new Hono<ApiEnvironment>();
+      app.use('*', async (context, next) => { context.set('session', { user: { id: subject } } as never); await next(); });
+      registerPersonalCompanyPaymentRoutes(app, { database, environment: { ...environment, AUTH_BFF_SHARED_SECRET: secret },
+        fetchImpl: (async () => { throw Error('activity API cannot contact a provider'); }) as unknown as typeof fetch });
+      return app;
+    };
+    const app = application(owner), foreign = application(otherOwner), prefix = '/api/member/company-payments';
+    const request = (path: string, body?: unknown) => {
+      const raw = body === undefined ? '' : JSON.stringify(body), method = body === undefined ? 'GET' : 'POST';
+      const timestamp = String(Math.floor(Date.now() / 1000)), ip = '192.0.2.1', cookie = 'better-auth.session_token=synthetic';
+      const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+      return { method, headers: { origin: 'https://app.mindblisspower.com', cookie, 'content-type': 'application/json',
+        'x-vp-auth-client-ip': ip, 'x-vp-auth-timestamp': timestamp,
+        'x-vp-auth-signature': createHmac('sha256', secret).update([method, path.split('?')[0], timestamp, ip, digest(cookie), digest(raw)].join('\n')).digest('hex') },
+      ...(body === undefined ? {} : { body: raw }) };
+    };
+    const eventPath = `${prefix}/events`, payload = { eventId, paymentId, attemptId, event: 'broadcast_observed', transactionHash };
+    const first = await app.request(eventPath, request(eventPath, payload)); expect(first.status).toBe(200);
+    const acknowledgement = await first.json();
+    expect(acknowledgement).toMatchObject({ eventId, paymentId, attemptId, source: 'client_reported', event: 'broadcast_observed' });
+    const replay = await app.request(eventPath, request(eventPath, payload)); expect(replay.status).toBe(200); expect(await replay.json()).toEqual(acknowledgement);
+    expect((await app.request(eventPath, request(eventPath, { ...payload, event: 'confirmed' }))).status).toBe(400);
+    expect((await foreign.request(eventPath, request(eventPath, { ...payload, eventId: randomUUID() }))).status).toBe(404);
+    const firstPagePath = `${eventPath}?paymentId=${paymentId}&limit=2`;
+    expect((await foreign.request(firstPagePath, request(firstPagePath))).status).toBe(404);
+    const listed = await app.request(firstPagePath, request(firstPagePath)); expect(listed.status).toBe(200);
+    expect(listed.headers.get('cache-control')).toBe('private, no-store');
+    const page = await listed.json() as ActivityPage; expect(page.events).toHaveLength(2); expect(page.nextCursor).toBe(page.events[1]!.eventId);
+    const nextPath = `${firstPagePath}&cursor=${page.nextCursor}`, next = await app.request(nextPath, request(nextPath)); expect(next.status).toBe(200);
+    const secondPage = await next.json() as ActivityPage; expect(secondPage.events).toHaveLength(2); expect(secondPage.nextCursor).toBeNull();
+    const all = [...page.events, ...secondPage.events]; expect(new Set(all.map(value => value.eventId)).size).toBe(4);
+    expect(all.filter(value => value.source === 'canonical').map(value => value.event)).toEqual(['confirmed', 'submitted', 'prepared']);
+    expect(all.every(value => value.paymentId === paymentId && value.chainId === chainId && value.tokenDecimals === 6)).toBe(true);
+    expect(all.find(value => value.eventId === eventId)).toMatchObject({ source: 'client_reported', canonicalStatus: null, transactionHash });
+    const globalPath = `${prefix}/activity?limit=50`, activity = await app.request(globalPath, request(globalPath)); expect(activity.status).toBe(200);
+    expect((await activity.json() as ActivityPage).events.some(value => value.eventId === eventId)).toBe(true);
+    const foreignActivity = await foreign.request(globalPath, request(globalPath)); expect(foreignActivity.status).toBe(200);
+    expect((await foreignActivity.json() as ActivityPage).events.every(value => value.paymentId !== paymentId)).toBe(true);
+  }
   beforeAll(async () => {
     expect(Bun.version).toBe('1.4.4');
     globalThis.fetch = (() => { blockedExternalCalls++; throw Error('Synthetic wallet flow forbids real provider calls'); }) as unknown as typeof fetch;
@@ -128,6 +175,7 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     expect(balance).toBe(0n);
     const written = await database.execute(sql`SELECT * FROM payments.read_personal_company_payment(${scenario.owner},${paymentId}::uuid)`);
     expect(written).toHaveLength(1);
+    await assertOwnedApiJournal(scenario.owner, scenario.owner === 'flow-card' ? 'flow-spei' : 'flow-card', paymentId, scenario.hash, 1);
   }, 20_000);
 
   test('an independently prefunded Polygon wallet transfers its own MAX without relabelling Ethereum onramp funds', async () => {
@@ -176,6 +224,7 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     const fundingAfter = await readWalletFundingHistory(database, owner, 'personal');
     expect(fundingAfter).toEqual(fundingBefore);
     expect(methods.every(method => ['eth_chainId', 'eth_call', 'eth_getTransactionByHash', 'eth_getTransactionReceipt', 'eth_blockNumber', 'eth_getBlockByNumber'].includes(method))).toBe(true);
+    await assertOwnedApiJournal(owner, 'flow-spei', paymentId, transactionHash, 137);
   }, 20_000);
 
 });

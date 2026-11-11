@@ -28,6 +28,7 @@ const mxnMigration = readFileSync(new URL('../_meta/migration/97_personal_mxn_sp
 const companyMigration = readFileSync(new URL('../_meta/migration/98_personal_company_payments.sql', import.meta.url), 'utf8');
 const ethereumMigration = readFileSync(new URL('../_meta/migration/99_personal_ethereum_only.sql', import.meta.url), 'utf8');
 const multichainMigration = readFileSync(new URL('../_meta/migration/100_personal_multichain_payments.sql', import.meta.url), 'utf8');
+const journalMigration = readFileSync(new URL('../_meta/migration/101_personal_company_payment_events.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -702,6 +703,163 @@ try {
   assert.match(duplicateMultichain.stderr,/personal_multichain_requires_fresh_review/);probes++;
   const multichainProfile=value(`SELECT md5(pg_get_functiondef('${multiSignature}'::regprocedure));`,false);
 
+  // An append-only journal is additional evidence, never a financial-state
+  // writer. Historical rows/functions remain byte-for-byte unchanged.
+  const journalNames=['guard_personal_company_payment_event','capture_personal_company_payment_event',
+    'record_personal_company_payment_event','read_personal_company_payment_activity'];
+  const oldFunctionSnapshot=`SELECT md5(jsonb_agg(jsonb_build_array(p.oid,pg_get_functiondef(p.oid),p.proacl::text) ORDER BY p.oid)::text)
+    FROM pg_proc p WHERE p.pronamespace='payments'::regnamespace AND p.prokind='f'
+      AND p.proname NOT IN(${journalNames.map(name=>`'${name}'`).join(',')});`;
+  const beforeJournalFunctions=value(oldFunctionSnapshot,false),beforeJournalRows=value(cutoverSnapshot,false),beforeJournalFunding=value(statusSnapshot,false);
+  const beforeJournalCount=value('SELECT count(*) FROM payments.personal_company_payment;',false);
+  const beforeJournalClock=value('SELECT clock_timestamp()::text;',false);
+  psql(journalMigration);
+  equal(cutoverSnapshot,beforeJournalRows,false);
+  equal(statusSnapshot,beforeJournalFunding,false);
+  equal(oldFunctionSnapshot,beforeJournalFunctions,false);
+  equal(multiPolicySnapshot,priorConstraints,false);
+  equal('SELECT count(*) FROM payments.personal_company_payment_event;',beforeJournalCount,false);
+  equal(`SELECT bool_and(e.source='canonical' AND e.event='snapshot' AND e.attempt_id IS NULL AND e.code IS NULL
+    AND e.created_at>='${beforeJournalClock}'::timestamptz AND e.canonical_status=p.status
+    AND ROW(e.subject,e.chain_id,e.token_address,e.token_decimals,e.wallet_address,e.recipient_address,e.amount_atomic,e.transaction_hash)
+      IS NOT DISTINCT FROM ROW(p.subject,p.chain_id,p.token_address,p.token_decimals,p.wallet_address,p.recipient_address,p.amount_atomic,p.transaction_hash))
+    FROM payments.personal_company_payment_event e JOIN payments.personal_company_payment p ON p.id=e.payment_id;`,'t',false);
+  equal(`WITH snapshots AS(SELECT p.id,md5('mindbliss-personal-payment-snapshot-v1:'||p.id::text) digest FROM payments.personal_company_payment p)
+    SELECT bool_and(e.event_id=(substr(s.digest,1,12)||'3'||substr(s.digest,14,3)||'a'||substr(s.digest,18,15))::uuid)
+    FROM snapshots s JOIN payments.personal_company_payment_event e ON e.payment_id=s.id;`,'t',false);
+  equal(`SELECT relrowsecurity AND NOT has_table_privilege('${role}',oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
+    AND NOT has_table_privilege('app_read',oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE') FROM pg_class WHERE oid='payments.personal_company_payment_event'::regclass;`,'t',false);
+  equal(`SELECT NOT has_sequence_privilege('${role}',pg_get_serial_sequence('payments.personal_company_payment_event','seq'),'USAGE,SELECT,UPDATE')
+    AND NOT has_sequence_privilege('app_read',pg_get_serial_sequence('payments.personal_company_payment_event','seq'),'USAGE,SELECT,UPDATE');`,'t',false);
+  for(const [name,signature] of [['record_personal_company_payment_event','text,uuid,uuid,uuid,text,text,text'],
+    ['read_personal_company_payment_activity','text,uuid,uuid,integer']]) {
+    equal(`SELECT has_function_privilege('${role}','payments.${name}(${signature})','EXECUTE')
+      AND NOT has_function_privilege('app_read','payments.${name}(${signature})','EXECUTE');`,'t',false);
+  }
+  equal(`SELECT NOT EXISTS(SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a
+    WHERE p.pronamespace='payments'::regnamespace AND p.proname IN(${journalNames.map(name=>`'${name}'`).join(',')})
+      AND (a.grantee=0 OR (p.proname IN('guard_personal_company_payment_event','capture_personal_company_payment_event') AND a.grantee<>p.proowner)));`,'t',false);
+  rejects('SELECT * FROM payments.personal_company_payment_event;','permission denied');
+  rejects(`SELECT nextval('payments.personal_company_payment_event_seq_seq');`,'permission denied');
+  immutable(`UPDATE payments.personal_company_payment_event SET code='unknown';`,'company_payment_event_append_only');
+  immutable('DELETE FROM payments.personal_company_payment_event;','company_payment_event_append_only');
+  immutable('TRUNCATE payments.personal_company_payment_event;','company_payment_event_append_only');
+
+  const journalOwners=['journal-owner','journal-other','journal-race-a','journal-race-b','journal-rate','journal-rollback'];
+  const journalAddresses=journalOwners.map((_,index)=>`0x${(0xc0+index).toString(16).repeat(20)}`);
+  psql(`INSERT INTO auth."user" VALUES${journalOwners.map(owner=>`('${owner}',true)`).join(',')};
+    INSERT INTO identity.wallet_binding VALUES${journalOwners.map((owner,index)=>`('${owner}','${journalAddresses[index]}')`).join(',')};`);
+  const journalId=randomUUID(),otherJournalId=randomUUID(),journalAttempt=randomUUID();
+  const journalPrepare=(id=journalId,owner=journalOwners[0],chain='1')=>multiPrepare(chain,'123456789',id,owner,journalAddresses[journalOwners.indexOf(owner)]);
+  const sqlNullable=value=>value===null?'NULL':`'${value}'`;
+  const recordEvent=(event='wallet_prompt_opened',id=randomUUID(),attempt=journalAttempt,payment=journalId,owner=journalOwners[0],hash=null,code=null)=>
+    `SELECT event_id||'|'||source||'|'||event||'|'||coalesce(canonical_status,'') FROM payments.record_personal_company_payment_event(
+      '${owner}',${sqlNullable(payment)},${sqlNullable(id)},${sqlNullable(attempt)},${sqlNullable(event)},${sqlNullable(hash)},${sqlNullable(code)});`;
+  const readEvents=(owner=journalOwners[0],payment=null,cursor=null,limit='51')=>
+    `SELECT * FROM payments.read_personal_company_payment_activity('${owner}',${sqlNullable(payment)},${sqlNullable(cursor)},${limit})`;
+  equal(journalPrepare(),multiExpected(1,ethereumToken,'123456789'));
+  equal(journalPrepare(otherJournalId,journalOwners[1],'137'),multiExpected(137,polygonToken,'123456789'));
+  equal(`SELECT event||'|'||source||'|'||canonical_status FROM payments.personal_company_payment_event WHERE payment_id='${journalId}';`,'prepared|canonical|prepared',false);
+  const journalEvent=randomUUID();
+  equal(recordEvent('wallet_prompt_opened',journalEvent),`${journalEvent}|client_reported|wallet_prompt_opened|`);
+  const eventBeforeReplay=value(`SELECT to_jsonb(e)::text FROM payments.personal_company_payment_event e WHERE event_id='${journalEvent}';`,false);
+  equal(recordEvent('wallet_prompt_opened',journalEvent),`${journalEvent}|client_reported|wallet_prompt_opened|`);
+  equal(`SELECT to_jsonb(e)::text FROM payments.personal_company_payment_event e WHERE event_id='${journalEvent}';`,eventBeforeReplay,false);
+  rejects(recordEvent('wallet_rejected',journalEvent),'company_payment_event_conflict');
+  rejects(recordEvent('wallet_prompt_opened',journalEvent,randomUUID()),'company_payment_event_conflict');
+  rejects(recordEvent('wallet_prompt_opened',journalEvent,journalAttempt,journalId,journalOwners[0],null,'unknown'),'company_payment_event_conflict');
+  rejects(recordEvent('wallet_prompt_opened',randomUUID(),journalAttempt,otherJournalId,journalOwners[1]),'company_payment_event_conflict');
+  rejects(recordEvent('wallet_prompt_opened',journalEvent,null,otherJournalId,journalOwners[1]),'company_payment_event_conflict');
+  rejects(recordEvent('wallet_prompt_opened',randomUUID(),null,otherJournalId),'company_payment_not_found');
+  const canonicalEvent=value(`SELECT event_id FROM payments.personal_company_payment_event WHERE payment_id='${journalId}' AND source='canonical';`,false);
+  rejects(recordEvent('wallet_prompt_opened',canonicalEvent),'company_payment_event_conflict');
+  for(const event of ['prepared','submitted','confirmed','failed','abandoned','snapshot','<script>','',null]) rejects(recordEvent(event),'company_payment_invalid_request');
+  rejects(recordEvent('wallet_failed',null),'company_payment_invalid_request');
+  rejects(recordEvent('wallet_failed','00000000-0000-0000-0000-000000000000'),'company_payment_invalid_request');
+  rejects(recordEvent('wallet_failed',randomUUID(),'00000000-0000-0000-0000-000000000000'),'company_payment_invalid_request');
+  rejects(recordEvent('wallet_failed',randomUUID(),journalAttempt,journalId,journalOwners[0],null,'private-provider-error'),'company_payment_invalid_request');
+  rejects(recordEvent('broadcast_observed'),'company_payment_invalid_request');
+  const journalHash=`0x${'c7'.repeat(32)}`;
+  rejects(recordEvent('wallet_failed',randomUUID(),journalAttempt,journalId,journalOwners[0],journalHash),'company_payment_invalid_request');
+  rejects(recordEvent('broadcast_observed',randomUUID(),journalAttempt,journalId,journalOwners[0],'0xABC'),'company_payment_invalid_request');
+  const rejectedEvent=randomUUID(),broadcastEvent=randomUUID();
+  equal(recordEvent('wallet_rejected',rejectedEvent,journalAttempt,journalId,journalOwners[0],null,'user_rejected'),`${rejectedEvent}|client_reported|wallet_rejected|`);
+  equal(recordEvent('broadcast_observed',broadcastEvent,journalAttempt,journalId,journalOwners[0],journalHash),`${broadcastEvent}|client_reported|broadcast_observed|`);
+  equal(`SELECT status||'|'||coalesce(transaction_hash,'') FROM payments.read_personal_company_payment('${journalOwners[0]}','${journalId}');`,'prepared|');
+  const legacyRecovery=randomUUID();
+  equal(recordEvent('recovery_detected',legacyRecovery,null,journalId,journalOwners[0],journalHash),`${legacyRecovery}|client_reported|recovery_detected|`);
+  for(const event of ['wallet_failed','broadcast_uncertain','registration_failed','verification_requested','verification_failed']) {
+    const id=randomUUID(),hash=['registration_failed','verification_requested','verification_failed'].includes(event)?journalHash:null;
+    equal(recordEvent(event,id,journalAttempt,journalId,journalOwners[0],hash,'unknown'),`${id}|client_reported|${event}|`);
+  }
+  // Fill the client quota in one transaction; canonical transitions do not use it.
+  value(`DO $test$ DECLARE i integer; BEGIN FOR i IN 1..21 LOOP PERFORM payments.record_personal_company_payment_event(
+    '${journalOwners[0]}','${journalId}',gen_random_uuid(),'${journalAttempt}','wallet_failed',NULL,'unknown'); END LOOP; END $test$;`);
+  equal(`SELECT count(*) FROM payments.personal_company_payment_event WHERE subject='${journalOwners[0]}' AND source='client_reported';`,'30',false);
+  rejects(recordEvent('wallet_failed'),'company_payment_rate_limited');
+  equal(recordEvent('wallet_prompt_opened',journalEvent),`${journalEvent}|client_reported|wallet_prompt_opened|`);
+  equal(companySubmit(journalId,journalHash,journalOwners[0]),'submitted');
+  equal(companySubmit(journalId,journalHash,journalOwners[0]),'submitted');
+  equal(companyVerify(journalId,journalHash,'80000004',blockHash,'12',journalOwners[0]),'confirmed');
+  equal(companyVerify(journalId,journalHash,'80000004',blockHash,'20',journalOwners[0]),'confirmed');
+  equal(`SELECT string_agg(event,',' ORDER BY seq) FROM payments.personal_company_payment_event WHERE payment_id='${journalId}' AND source='canonical';`,'prepared,submitted,confirmed',false);
+  equal(`SELECT bool_and(canonical_status IS NULL) FROM payments.personal_company_payment_event WHERE source='client_reported';`,'t',false);
+  equal(`SELECT bool_and(attempt_id IS NULL AND code IS NULL AND canonical_status=event) FROM payments.personal_company_payment_event WHERE payment_id='${journalId}' AND source='canonical';`,'t',false);
+  const secondJournalId=randomUUID(),secondJournalHash=`0x${'c8'.repeat(32)}`;
+  equal(journalPrepare(secondJournalId,journalOwners[0],'137'),multiExpected(137,polygonToken,'123456789'));
+  rejects(recordEvent('wallet_prompt_opened',randomUUID(),journalAttempt,secondJournalId),'company_payment_event_conflict');
+  equal(companySubmit(secondJournalId,secondJournalHash,journalOwners[0]),'submitted');
+  equal(`SELECT status FROM payments.reject_personal_company_payment('${journalOwners[0]}','${secondJournalId}','${secondJournalHash}','transaction_reverted');`,'failed');
+  equal(`SELECT string_agg(event,',' ORDER BY seq) FROM payments.personal_company_payment_event WHERE payment_id='${secondJournalId}' AND source='canonical';`,'prepared,submitted,failed',false);
+  const abandonedJournalId=randomUUID();
+  equal(journalPrepare(abandonedJournalId),multiExpected(1,ethereumToken,'123456789'));
+  equal(companyAbandon(abandonedJournalId,journalOwners[0]),'t');
+  equal(companyAbandon(abandonedJournalId,journalOwners[0]),'t');
+  equal(`SELECT string_agg(event||':'||canonical_status,',' ORDER BY seq) FROM payments.personal_company_payment_event WHERE payment_id='${abandonedJournalId}';`,'prepared:prepared,abandoned:prepared',false);
+
+  const rollbackId=randomUUID();
+  value(`BEGIN;${journalPrepare(rollbackId,journalOwners[5])}ROLLBACK;`);
+  equal(`SELECT count(*) FROM payments.personal_company_payment WHERE id='${rollbackId}';`,'0',false);
+  equal(`SELECT count(*) FROM payments.personal_company_payment_event WHERE payment_id='${rollbackId}';`,'0',false);
+  const sharedRaceAttempt=randomUUID(),raceIds=[randomUUID(),randomUUID()];
+  for(let index=0;index<2;index++) equal(journalPrepare(raceIds[index],journalOwners[index+2]),multiExpected(1,ethereumToken,'123456789'));
+  const attemptRace=await Promise.all(raceIds.map((id,index)=>parallelPsql(recordEvent('wallet_prompt_opened',randomUUID(),sharedRaceAttempt,id,journalOwners[index+2]))));
+  assert.equal(attemptRace.filter(result=>result.status===0).length,1);
+  assert.equal(attemptRace.filter(result=>result.status!==0&&/company_payment_event_conflict/.test(result.stderr)).length,1);probes++;
+  const rateJournalId=randomUUID();
+  equal(journalPrepare(rateJournalId,journalOwners[4]),multiExpected(1,ethereumToken,'123456789'));
+  value(`DO $test$ DECLARE i integer; BEGIN FOR i IN 1..29 LOOP PERFORM payments.record_personal_company_payment_event(
+    '${journalOwners[4]}','${rateJournalId}',gen_random_uuid(),NULL,'wallet_failed',NULL,'unknown'); END LOOP; END $test$;`);
+  const clientRateRace=await Promise.all([0,1].map(()=>parallelPsql(recordEvent('wallet_failed',randomUUID(),null,rateJournalId,journalOwners[4]))));
+  assert.equal(clientRateRace.filter(result=>result.status===0).length,1);
+  assert.equal(clientRateRace.filter(result=>result.status!==0&&/company_payment_rate_limited/.test(result.stderr)).length,1);probes++;
+
+  // Seek pagination traverses every event beyond 20 without mixing another
+  // user's records, and cursors cannot cross a payment filter or owner.
+  const journalTotal=Number(value(`SELECT count(*) FROM (${readEvents()}) e;`));
+  assert.ok(journalTotal>20);probes++;
+  const pageIds=[];let pageCursor=null;
+  while(true) {
+    const page=value(`SELECT coalesce(jsonb_agg(e.event_id),'[]'::jsonb)::text FROM (${readEvents(journalOwners[0],null,pageCursor,'7')}) e;`);
+    const ids=JSON.parse(page);pageIds.push(...ids);if(ids.length<7) break;pageCursor=ids.at(-1);
+  }
+  assert.equal(pageIds.length,journalTotal);assert.equal(new Set(pageIds).size,journalTotal);probes++;
+  equal(`SELECT jsonb_agg(e.event_id)::text FROM (${readEvents()}) e;`,JSON.stringify(pageIds).replaceAll(',',', '));
+  equal(`SELECT bool_and(e.payment_id='${journalId}'::uuid) FROM (${readEvents(journalOwners[0],journalId)}) e;`,'t');
+  rejects(`${readEvents(journalOwners[0],null,randomUUID())};`,'company_payment_invalid_cursor');
+  rejects(`${readEvents(journalOwners[1],null,journalEvent)};`,'company_payment_invalid_cursor');
+  rejects(`${readEvents(journalOwners[0],secondJournalId,journalEvent)};`,'company_payment_invalid_cursor');
+  rejects(`${readEvents(journalOwners[1],journalId)};`,'company_payment_not_found');
+  rejects(`${readEvents('blocked')};`,'company_payment_forbidden');
+  for(const limit of ['NULL','0','52','-1']) rejects(`${readEvents(journalOwners[0],null,null,limit)};`,'company_payment_invalid_request');
+  equal(statusSnapshot,beforeJournalFunding,false);
+  equal(oldFunctionSnapshot,beforeJournalFunctions,false);
+  equal(multiPolicySnapshot,priorConstraints,false);
+  const duplicateJournal=psql(journalMigration,true);assert.notEqual(duplicateJournal.status,0);
+  assert.match(duplicateJournal.stderr,/company_payment_event_requires_fresh_review/);probes++;
+  const journalProfile=JSON.parse(value(`SELECT jsonb_object_agg(p.proname,md5(pg_get_functiondef(p.oid)) ORDER BY p.proname)
+    FROM pg_proc p WHERE p.pronamespace='payments'::regnamespace AND p.proname IN(${journalNames.map(name=>`'${name}'`).join(',')});`,false));
+
   if (personalFlow) {
     // Extend only this disposable fixture with the minimal registered-person
     // columns queried by the real API. No production DSN or host port exists.
@@ -747,12 +905,18 @@ try {
     equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed';`, '3', false);
     equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=1;`, '2', false);
     equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=137;`, '1', false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment_event WHERE subject IN('flow-card','flow-spei') AND source='canonical';`, '9', false);
+    equal(`SELECT bool_and(e.event IN('prepared','submitted','confirmed') AND e.canonical_status=e.event
+      AND ROW(e.chain_id,e.token_address,e.wallet_address,e.recipient_address,e.amount_atomic)
+        IS NOT DISTINCT FROM ROW(p.chain_id,p.token_address,p.wallet_address,p.recipient_address,p.amount_atomic))
+      FROM payments.personal_company_payment_event e JOIN payments.personal_company_payment p ON p.id=e.payment_id
+      WHERE e.subject IN('flow-card','flow-spei') AND e.source='canonical';`, 't', false);
     equal(`SELECT bool_and(status='initiated') FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, 't', false);
     equal(`SELECT count(*) FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, '2', false);
   }
 
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
-    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, ethereumProfile, multichainProfile, mxnProfile: JSON.parse(mxnProfile) }));
+    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, ethereumProfile, multichainProfile, journalProfile, mxnProfile: JSON.parse(mxnProfile) }));
 } catch (error) {
   // This harness contains synthetic data only; avoid dumping whole SQL fixtures.
   console.error(JSON.stringify({ walletFundingSchema: 'failed', message: error.message }));

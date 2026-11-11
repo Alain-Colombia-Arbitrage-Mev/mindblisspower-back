@@ -99,3 +99,30 @@ test('Core preparation admits only the two reviewed networks and legacy Ethereum
     assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1', ...extra }), env, never)).status, 503);
   }
 });
+
+test('Core journal capability admits narrow client reports and owner-only seek reads without granting confirmation writes', async () => {
+  const eventId = '22222222-2222-4222-8222-222222222222', attemptId = '33333333-3333-4333-8333-333333333333';
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  for (const input of [{ eventId, paymentId: id, event: 'wallet_rejected', code: 'user_rejected' },
+    { eventId, paymentId: id, attemptId, event: 'broadcast_observed', transactionHash: hash }]) {
+    assert.equal((await dispatchCore(request('events', input), env, resolve)).status, 200);
+  }
+  for (const path of ['activity', `activity?limit=50&cursor=${eventId}`, `events?paymentId=${id}`, `events?paymentId=${id}&limit=20&cursor=${eventId}`]) {
+    assert.equal((await dispatchCore(new Request(`https://auth.core.internal${prefix}/${path}`, { headers: request().headers }), env, resolve)).status, 200);
+  }
+  assert.equal(calls, 6);
+  const never = () => assert.fail('unapproved journal statement reached a container');
+  for (const extra of [{ event: 'confirmed' }, { event: 'prepared' }, { event: 'broadcast_observed' }, { source: 'canonical' },
+    { canonicalStatus: 'confirmed' }, { chainId: 137 }, { subject: 'other' }, { walletAddress: '0x' + '2'.repeat(40) },
+    { code: 'raw provider error' }, { recordedAt: '2026-11-11T04:00:00Z' }, { signature: 'private' }, { attemptId: null }, { transactionHash: hash }]) {
+    assert.equal((await dispatchCore(request('events', { eventId, paymentId: id, event: 'wallet_failed', ...extra }), env, never)).status, 503);
+  }
+  for (const path of ['events', `events?paymentId=${id}&subject=other`, `events?paymentId=${id}&paymentId=${id}`,
+    `events?paymentId=%31${id.slice(1)}`, `events?limit=20&paymentId=${id}`, `activity?paymentId=${id}`, 'activity?limit=0',
+    'activity?limit=51', 'activity?limit=01', `activity?cursor=${eventId}&limit=20`, 'activity?cursor=invalid']) {
+    assert.equal((await dispatchCore(new Request(`https://auth.core.internal${prefix}/${path}`, { headers: request().headers }), env, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(request('events', { eventId, paymentId: id, event: 'wallet_failed' }, { origin: 'https://wallet.mindblisspower.com' }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request('activity', {}), env, never)).status, 503);
+});
