@@ -71,14 +71,14 @@ test('personal funding returns an uncached initiated acknowledgement while sandb
   expect(await sandbox.json()).toEqual({ error: 'wallet_funding_unconfigured' });
 });
 
-test('HTTP personal funding accepts USD20 and rejects USD19.99 while administrative funding still rejects USD20', async () => {
+test('HTTP public personal funding accepts USD100 while USD20 and99.99 are rejected without changing administrative bounds', async () => {
   let calls = 0;
   const app = application({ execute: async () => { calls++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });
-  for (const [amount, status] of [[19.99, 409], [20, 201]] as const) {
+  for (const [amount, status] of [[20, 409], [99.99, 409], [100, 201]] as const) {
     const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
       body: JSON.stringify({ ...input, amount }) });
     expect(response.status).toBe(status);
-    if (amount === 20) expect(await response.json()).toMatchObject({ requestedAmount: 20, allowedProviders: ['SWAPPED'] });
+    if (amount === 100) expect(await response.json()).toMatchObject({ requestedAmount: 100, allowedProviders: ['SWAPPED'] });
   }
   const administrative = await app.request(administrativePath, signedRequest(administrativePath,
     JSON.stringify({ ...input, amount: 20, serviceProvider: 'TRANSAK' })));

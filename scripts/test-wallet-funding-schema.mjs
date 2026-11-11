@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 // No host ports, shared database URLs or mounted files are used. The database
 // lives only in a uniquely labelled, disposable container with networking off.
 const container = `mb-wallet-funding-test-${randomUUID()}`;
 const label = 'mindbliss.synthetic=wallet-funding-schema';
+const personalFlow = process.argv.length === 3 && process.argv[2] === '--personal-flow';
+assert.ok(process.argv.length === 2 || personalFlow, 'Only the explicit --personal-flow test mode is supported');
 const database = 'mindbliss_curated_20261025';
 const image = 'postgres:18.6-alpine3.23@sha256:dec395d8c09c45609d6deb5c2388a07882d64fa59b1d98c1895792e085f57888';
 const role = 'mindbliss_auth_core_v1';
@@ -542,6 +545,53 @@ try {
   const companyProfile=JSON.parse(value(`SELECT jsonb_object_agg(p.proname,md5(pg_get_functiondef(p.oid)) ORDER BY p.proname) FROM pg_proc p
     WHERE p.pronamespace='payments'::regnamespace AND p.proname LIKE '%personal_company_payment%';`,false));
   const duplicateCompany=psql(companyMigration,true);assert.notEqual(duplicateCompany.status,0);assert.match(duplicateCompany.stderr,/company_payment_fresh_prerequisites_required/);probes++;
+
+  if (personalFlow) {
+    // Extend only this disposable fixture with the minimal registered-person
+    // columns queried by the real API. No production DSN or host port exists.
+    psql(`ALTER TABLE auth."user" ADD COLUMN email text,ADD COLUMN email_verified boolean NOT NULL DEFAULT true,ADD COLUMN name text;
+      ALTER TABLE identity.wallet_binding ADD COLUMN chain_id integer NOT NULL DEFAULT 1,ADD COLUMN verified_at timestamptz NOT NULL DEFAULT now();
+      CREATE TABLE identity.auth_binding(subject text PRIMARY KEY,provider text NOT NULL,person_id bigint NOT NULL);
+      CREATE TABLE mlm.person(id bigint PRIMARY KEY,public_id bigint NOT NULL,email text,status text,blacklisted boolean,user_id text,is_admin boolean,
+        phone_number text,first_name text,last_name text,birthday date);
+      CREATE TABLE mlm.affiliate(person_id bigint,status text);
+      CREATE TABLE mlm.blacklist(email_norm text,phone_last10 text,name_norm text,birthdate date);
+      CREATE FUNCTION mlm.norm_email(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT lower(trim($1))';
+      CREATE FUNCTION mlm.norm_phone10(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT right($1,10)';
+      CREATE FUNCTION mlm.norm_name(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT lower(trim($1))';
+      INSERT INTO auth."user"(id,eligible,email,email_verified,name) VALUES
+        ('flow-card',true,'flow-card@example.invalid',true,'Synthetic Card'),('flow-spei',true,'flow-spei@example.invalid',true,'Synthetic SPEI');
+      INSERT INTO identity.wallet_binding(subject,address) VALUES('flow-card','0x${'56'.repeat(20)}'),('flow-spei','0x${'78'.repeat(20)}');
+      INSERT INTO identity.auth_binding VALUES('flow-card','better_auth',1001),('flow-spei','better_auth',1002);
+      INSERT INTO mlm.person(id,public_id,email,status,blacklisted,user_id,is_admin,first_name,last_name) VALUES
+        (1001,1001,'flow-card@example.invalid','active',false,'flow-card',false,'Synthetic','Card'),
+        (1002,1002,'flow-spei@example.invalid','active',false,'flow-spei',false,'Synthetic','SPEI');
+      CREATE ROLE personal_flow_fixture LOGIN INHERIT;
+      GRANT ${role} TO personal_flow_fixture;
+      GRANT USAGE ON SCHEMA auth,identity,mlm,payments TO personal_flow_fixture;
+      GRANT SELECT ON auth."user",identity.wallet_binding,identity.auth_binding,mlm.person,mlm.affiliate,mlm.blacklist TO personal_flow_fixture;
+      ALTER DATABASE ${database} SET mindbliss.personal_wallet_flow_fixture='isolated-v1';`);
+    const isolatedSnapshot = `SELECT md5((SELECT jsonb_agg(m ORDER BY id)::text FROM mlm.wallet_movement m)||
+      (SELECT jsonb_agg(a ORDER BY id)::text FROM payments.meld_onramp_attempt a)||
+      (SELECT jsonb_agg(a ORDER BY id)::text FROM payments.meld_sandbox_funding_attempt a)||
+      (SELECT jsonb_agg(p ORDER BY id)::text FROM mlm.package p));`;
+    const beforeFlow = value(isolatedSnapshot, false);
+    const source = fileURLToPath(new URL('../app/src', import.meta.url));
+    const joined = docker(['run', '--rm', '--pull', 'never', '--network', `container:${container}`,
+      '--mount', `type=bind,source=${source},target=/app/src,readonly`,
+      '-e', 'PERSONAL_WALLET_FLOW_SYNTHETIC_DOCKER=1',
+      '-e', `PERSONAL_WALLET_FLOW_DATABASE_URL=postgres://personal_flow_fixture@127.0.0.1:5432/${database}`,
+      'mindbliss-company-payment-tests:20261111', 'bun', 'test', 'src/modules/payments/personal-wallet-flow.integration.test.ts']);
+    if (joined.status !== 0) throw new Error(`Isolated joined flow failed: ${joined.stderr || joined.error?.message || 'test unavailable'}`);
+    console.log(JSON.stringify({ personalWalletJoinedFlow: 'passed', scenarios: ['USD100-card', 'MXN931-SPEI'],
+      providerPurchases: 'mocked', tokenDeposits: 'mocked', database: 'real-disposable-postgres', realTransfers: 0,
+      hostPorts: 0, externalNetwork: 'disabled', apiScenariosPassed: Number(joined.stderr.match(/(\d+) pass\b/)?.[1] || 0),
+      apiAssertions: Number(joined.stderr.match(/(\d+) expect\(\) calls/)?.[1] || 0) }));
+    equal(isolatedSnapshot, beforeFlow, false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed';`, '2', false);
+    equal(`SELECT bool_and(status='initiated') FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, 't', false);
+    equal(`SELECT count(*) FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, '2', false);
+  }
 
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
     externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, mxnProfile: JSON.parse(mxnProfile) }));

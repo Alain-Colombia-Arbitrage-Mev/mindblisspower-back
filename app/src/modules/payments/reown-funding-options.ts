@@ -4,6 +4,8 @@
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
 const PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
 export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX'] as const;
+export const PERSONAL_FUNDING_MINIMUM_USD = 100;
+export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
 export const PERSONAL_FUNDING_MINIMUM_MXN = 931;
 const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
@@ -159,10 +161,12 @@ export async function readReownProductionOptions(country: string, {
     const normalized = normalizeReownProductionRoutes(body, sourceCurrencyCode);
     // This is a fixed MXN business minimum, not a USD exchange-rate quote.
     // A provider can require more, and a route whose maximum is lower is absent.
-    const routes = sourceCurrencyCode === 'MXN' ? normalized.map(route => ({ ...route,
-      paymentMethods: route.paymentMethods.filter(method => method.maximumAmount >= PERSONAL_FUNDING_MINIMUM_MXN)
-        .map(method => ({ ...method, minimumAmount: Math.max(PERSONAL_FUNDING_MINIMUM_MXN, method.minimumAmount) })),
-    })).filter(route => route.paymentMethods.length > 0) : normalized;
+    const routes = normalized.map(route => ({ ...route, paymentMethods: route.paymentMethods.flatMap(method => {
+      const minimumAmount = Math.max(sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : PERSONAL_FUNDING_MINIMUM_MXN, method.minimumAmount);
+      const maximumAmount = sourceCurrencyCode === 'USD' ? Math.min(PERSONAL_FUNDING_MAXIMUM_USD, method.maximumAmount) : method.maximumAmount;
+      return minimumAmount > maximumAmount ? [] : [{ ...method, minimumAmount, maximumAmount,
+        ...(sourceCurrencyCode === 'USD' ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) }];
+    }) })).filter(route => route.paymentMethods.length > 0);
     const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
     if (controller.signal.aborted) throw unavailable();
     return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode, paymentMethods, routes };

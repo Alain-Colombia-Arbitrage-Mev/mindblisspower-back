@@ -6,7 +6,7 @@ import { containerEnvironment } from '../src/runtime-env.mjs';
 const env = { CORE_ENV: 'production', AUTH_SERVICES_ENABLED: 'true', CORE_DATA_ACCESS_VERIFIED: 'true',
   AUTH_CUTOVER_VERIFIED: 'true', CORE_SERVICES_ENABLED: 'false', CORE_NETWORK_VERIFIED: 'false',
   WALLET_FUNDING_ENABLED: 'true', MELD_ADMIN_SANDBOX_ENABLED: 'true' };
-const input = { requestId: '1d0f91dd-0d86-4ae2-a23e-c106ca6c360b', walletAddress: `0x${'1'.repeat(40)}`, country: 'US', amount: 50, paymentMethodType: 'CREDIT_DEBIT_CARD' };
+const input = { requestId: '1d0f91dd-0d86-4ae2-a23e-c106ca6c360b', walletAddress: `0x${'1'.repeat(40)}`, country: 'US', amount: 100, paymentMethodType: 'CREDIT_DEBIT_CARD' };
 const path = '/api/member/wallet-funding/personal/intent';
 function request(route = path, body = input, extra = {}) {
   return new Request(`https://auth.core.internal${route}`, { method: 'POST', headers: {
@@ -189,15 +189,17 @@ test('personal and administrative mutations cannot cross their explicitly separa
   assert.equal(calls, 2);
 });
 
-test('Core admits the USD20 personal boundary while retaining the independent USD50 administrative boundary', async () => {
+test('Core admits only public personal USD100 to 15000 while retaining administrative USD50 to25000', async () => {
   let calls = 0;
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   const never = () => assert.fail('below minimum request dispatched');
-  assert.equal((await dispatchCore(request(path, { ...input, amount: 20 }), env, resolve)).status, 200);
-  assert.equal((await dispatchCore(request(path, { ...input, amount: 19.99 }), env, never)).status, 503);
+  for (const amount of [100, 15000]) assert.equal((await dispatchCore(request(path, { ...input, amount }), env, resolve)).status, 200);
+  for (const amount of [20, 50, 99.99, 15000.01]) assert.equal((await dispatchCore(request(path, { ...input, amount }), env, never)).status, 503);
   for (const amount of [20, 49.99]) assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
     ...input, amount, serviceProvider: 'BANXA' }), env, never)).status, 503);
   assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
     ...input, amount: 50, serviceProvider: 'BANXA' }), env, resolve)).status, 200);
-  assert.equal(calls, 2);
+  assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
+    ...input, amount: 25000, serviceProvider: 'BANXA' }), env, resolve)).status, 200);
+  assert.equal(calls, 4);
 });

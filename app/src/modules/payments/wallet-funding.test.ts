@@ -75,25 +75,30 @@ test('personal intent revalidates its own production method and amount, then com
   await expect(createPersonalFundingIntent(queuedDatabase([]).database, { ...input, paymentMethodType: undefined }, 'owner', { fetchImpl })).rejects.toThrow();
 });
 
-test('personal USD20 minimum is independent of administrative USD50 and each provider can impose a higher minimum', async () => {
+test('public personal USD100 to 15000 is independent of administrative USD50 and each provider can impose a higher minimum', async () => {
   const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
-  const result = await createPersonalFundingIntent(database, { ...input, amount: 20 }, 'owner', {
+  const result = await createPersonalFundingIntent(database, { ...input, amount: 100 }, 'owner', {
     fetchImpl: (async () => Response.json([route('SWAPPED', [method('CREDIT_DEBIT_CARD', 10, 1000)]),
-      route('MERCURYO', [method('CREDIT_DEBIT_CARD', 30, 1000)]), route('TOPPER', [method('CREDIT_DEBIT_CARD', 1, 1000)])])) as unknown as typeof fetch,
+      route('MERCURYO', [method('CREDIT_DEBIT_CARD', 150, 1000)]), route('TOPPER', [method('CREDIT_DEBIT_CARD', 1, 1000)])])) as unknown as typeof fetch,
   });
-  expect(result.requestedAmount).toBe(20);
+  expect(result.requestedAmount).toBe(100);
   expect(result.allowedProviders).toEqual(['SWAPPED']);
-  expect(queries[0]!.params).toEqual(['owner', address, 'US', 20, id, 'CREDIT_DEBIT_CARD', 'USD']);
+  expect(queries[0]!.params).toEqual(['owner', address, 'US', 100, id, 'CREDIT_DEBIT_CARD', 'USD']);
   const thirty = queuedDatabase([[{ id, created_at: createdAt }]]);
-  const both = await createPersonalFundingIntent(thirty.database, { ...input, amount: 30 }, 'owner', {
+  const both = await createPersonalFundingIntent(thirty.database, { ...input, amount: 200 }, 'owner', {
     fetchImpl: (async () => Response.json([route('SWAPPED', [method('CREDIT_DEBIT_CARD', 10, 1000)]),
-      route('MERCURYO', [method('CREDIT_DEBIT_CARD', 30, 1000)])])) as unknown as typeof fetch,
+      route('MERCURYO', [method('CREDIT_DEBIT_CARD', 150, 1000)])])) as unknown as typeof fetch,
   });
   expect(both.allowedProviders).toEqual(['SWAPPED', 'MERCURYO']);
   const blocked = queuedDatabase([]);
-  await expect(createPersonalFundingIntent(blocked.database, { ...input, amount: 20 }, 'owner', {
-    fetchImpl: (async () => Response.json([route('MERCURYO', [method('CREDIT_DEBIT_CARD', 30, 1000)])])) as unknown as typeof fetch,
+  await expect(createPersonalFundingIntent(blocked.database, { ...input, amount: 100 }, 'owner', {
+    fetchImpl: (async () => Response.json([route('MERCURYO', [method('CREDIT_DEBIT_CARD', 150, 1000)])])) as unknown as typeof fetch,
   })).rejects.toThrow('wallet_funding_amount_unavailable');
+  for (const amount of [20, 50, 99.99, 15000.01]) await expect(createPersonalFundingIntent(blocked.database, { ...input, amount }, 'owner', {
+    fetchImpl: (async () => { throw new Error('outside public bounds must not query providers'); }) as unknown as typeof fetch,
+  })).rejects.toThrow('wallet_funding_amount_unavailable');
+  const maximum = queuedDatabase([[{ id, created_at: createdAt }]]);
+  expect((await createPersonalFundingIntent(maximum.database, { ...input, amount: 15000 }, 'owner', { fetchImpl: productionFetch })).requestedAmount).toBe(15000);
   for (const amount of [20, 49.99]) await expect(createAdministrativeSandboxSession(blocked.database, { ...adminInput, amount }, {
     subject: 'owner', clientIp: '192.0.2.1', environment,
     fetchImpl: (async () => { throw new Error('must not contact provider'); }) as unknown as typeof fetch,
@@ -545,6 +550,11 @@ test('history and owned status accept personal USD20 while rejecting an administ
   const status = await readWalletFundingStatus(queuedDatabase([[personal]]).database, 'owner', 'personal', id);
   expect(status.requestedAmount).toBe(20);
   expect(status.confirmation).toEqual({ state: 'unconfirmed', source: 'none', testMode: false });
+  for (const amount of ['50.00', '25000.00']) {
+    const legacy = { ...personal, requested_amount: amount };
+    expect((await readWalletFundingHistory(queuedDatabase([[legacy]]).database, 'owner', 'personal')).records[0]!.requestedAmount).toBe(Number(amount));
+    expect((await readWalletFundingStatus(queuedDatabase([[legacy]]).database, 'owner', 'personal', id)).requestedAmount).toBe(Number(amount));
+  }
   const administrative = { ...personal, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created' };
   await expect(readWalletFundingHistory(queuedDatabase([[administrative]]).database, 'owner', 'administrative'))
     .rejects.toThrow('wallet_funding_unavailable');

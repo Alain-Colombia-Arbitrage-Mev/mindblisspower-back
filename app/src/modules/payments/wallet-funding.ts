@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { z } from 'zod';
 import { readAdministrativeWallet } from '../identity/administrative-wallet';
 import type { IdentityDatabase } from '../identity/model';
-import { PERSONAL_FUNDING_MINIMUM_MXN, readReownProductionOptions } from './reown-funding-options';
+import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, readReownProductionOptions } from './reown-funding-options';
 
 type FundingDatabase = Pick<IdentityDatabase, 'execute'>;
 type FundingEnvironment = Record<string, string | undefined>;
@@ -44,7 +44,9 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   const input = personalFundingInput.parse(rawInput);
   const localSpei = input.country === 'MX' && input.sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
   if (input.sourceCurrencyCode !== 'USD' && !localSpei) throw new Error('wallet_funding_valuation_unavailable');
-  if (input.sourceCurrencyCode === 'USD' && (input.amount < 20 || input.amount > 25_000)) throw new Error('wallet_funding_amount_unavailable');
+  if (input.sourceCurrencyCode === 'USD' && (input.amount < PERSONAL_FUNDING_MINIMUM_USD || input.amount > PERSONAL_FUNDING_MAXIMUM_USD)) {
+    throw new Error('wallet_funding_amount_unavailable');
+  }
   if (localSpei && input.amount < PERSONAL_FUNDING_MINIMUM_MXN) throw new Error('wallet_funding_amount_unavailable');
   const options = await readReownProductionOptions(input.country, { fetchImpl, signal, sourceCurrencyCode: input.sourceCurrencyCode });
   const matching = options.routes.filter(route => route.paymentMethods.some(method => method.method === input.paymentMethodType));
