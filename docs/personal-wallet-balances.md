@@ -2,14 +2,15 @@
 
 The personal wallet displays USDT on Ethereum mainnet and Polygon separately
 for the same verified EVM address. Reading these balances does not require an
-active Reown SDK connection. Signing and every new payment preparation remain
-restricted to Ethereum mainnet; displaying Polygon does not enable new Polygon
-transfers. The administrative wallet and its sandbox provider remain separate.
+active Reown SDK connection. New payments select Ethereum mainnet or Polygon
+explicitly and spend only that network's balance. The fixed company destination
+is identical on both networks; see [personal-multichain-payments.md](personal-multichain-payments.md).
+The administrative wallet and its sandbox provider remain separate.
 
 | Owned read endpoint | Result |
 | --- | --- |
-| `GET /api/member/company-payments/balance` | Ethereum USDT and native ETH snapshot used by the transfer form and Maximum. |
-| `GET /api/member/company-payments/balances` | Two independent snapshots, ordered Ethereum (`1`) then Polygon (`137`), used for display. |
+| `GET /api/member/company-payments/balance` | Backward-compatible Ethereum USDT and native ETH snapshot; it remains Ethereum-only. |
+| `GET /api/member/company-payments/balances` | Two independent snapshots, ordered Ethereum (`1`) then Polygon (`137`), used for display and the selected-network transfer/MAX amount. |
 
 Both endpoints require the existing native session, signed BFF envelope and
 allowed personal-portal origin. They accept no query parameters, client wallet
@@ -34,7 +35,7 @@ Responses use `Cache-Control: private, no-store` and `Vary: Cookie`. The fronten
 memory cache is scoped by session subject and normalized email, refreshes after
 returning from checkout and does not establish authentication, ownership or
 permission to sign. Authentication still comes from the server session, and a
-new payment independently checks the authoritative Ethereum balance.
+new payment independently checks the authoritative balance on its selected network.
 
 These endpoints perform identity/binding SELECTs and read-only RPC methods.
 They create no payment or funding intent, broadcast no transaction, request no
@@ -46,5 +47,5 @@ their original network under the existing
 Validation for this release: 436 API tests pass with 38 explicit opt-in tests
 skipped; 201 Core tests pass. Coverage includes zero and uint256 precision,
 network/token separation, partial failure, cancellation, owner isolation,
-selector rejection and the Ethereum-only transfer balance. The pinned Bun
+selector rejection and the backward-compatible Ethereum-only single-balance read. The pinned Bun
 1.4.4 Docker build passes type checking. Tests make no real payment.

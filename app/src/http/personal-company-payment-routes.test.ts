@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 import type { ApiEnvironment } from './types';
 import type { IdentityDatabase } from '../modules/identity/model';
 import { registerPersonalCompanyPaymentRoutes } from './personal-company-payment-routes';
-import { COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN } from '../modules/payments/personal-company-rpc';
+import { COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN } from '../modules/payments/personal-company-rpc';
 const PREFIX = '/api/member/company-payments', id = '11111111-1111-4111-8111-111111111111', secret = 's'.repeat(48);
 const address = `0x${'2'.repeat(40)}`, hash = `0x${'3'.repeat(64)}`;
 const row = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 1,
@@ -46,7 +46,7 @@ test('only the personal portal may mutate a payment and all input selectors are 
   for (const origin of ['https://wallet.mindblisspower.com', 'https://mindblisspower.com', 'https://app.mindblisspower.com.evil.test']) {
     expect((await app.request(path, signed(path, 'POST', body, { origin }))).status).toBe(403);
   }
-  for (const extra of [{ recipientAddress: address }, { walletAddress: address }, { subject: 'other' }, { chainId: 1 }, { amountAtomic: '01' }]) {
+  for (const extra of [{ recipientAddress: address }, { walletAddress: address }, { subject: 'other' }, { chainId: 56 }, { amountAtomic: '01' }]) {
     const raw = JSON.stringify({ ...input, ...extra });
     expect((await app.request(path, signed(path, 'POST', raw))).status).toBe(400);
   }
@@ -153,4 +153,35 @@ test('dual balances retain native owner isolation, reject selectors and keep hea
   expect((await blocked.request(path, signed(path, 'POST', '{}'))).status).toBe(404);
   expect((await blocked.request(path, signed(path, 'GET', '', { 'content-encoding': 'gzip' }))).status).toBe(400);
   expect(reads).toBe(0);
+});
+
+
+test('HTTP preparation accepts only Ethereum or Polygon, with omitted chain defaulting to Ethereum and server-derived policy', async () => {
+  const path = `${PREFIX}/prepare`, created = new Date('2026-11-10T20:00:00Z');
+  const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
+    person_email: 'synthetic@example.invalid', person_status: 'active', user_id: 'owner', blacklisted: false, access_restricted: false };
+  for (const selector of [undefined, 1, 137]) {
+    const chainId = selector ?? 1, token = chainId === 1 ? COMPANY_PAYMENT_TOKEN : LEGACY_POLYGON_TOKEN;
+    const rows: unknown[][] = [[], [principal], [{ address, chain_id: 1, verified_at: created }], [{ ...row, chain_id: chainId, token_address: token }]];
+    const app = application({ execute: async () => { if (!rows.length) throw Error('unexpected write'); return rows.shift()!; },
+      fetchImpl: (async (target, init) => {
+        expect(new URL(String(target)).searchParams.get('chainId')).toBe(`eip155:${chainId}`);
+        const request = JSON.parse(String(init?.body));
+        if (request.method === 'eth_call') expect(request.params[0].to).toBe(token);
+        const result = request.method === 'eth_chainId' ? (chainId === 1 ? '0x1' : '0x89')
+          : `0x${(request.params[0].data === '0x313ce567' ? '6' : '1312d00').padStart(64, '0')}`;
+        return Response.json({ jsonrpc: '2.0', id: request.id, result });
+      }) as typeof fetch });
+    const body = JSON.stringify({ requestId: id, amountAtomic: row.amount_atomic, ...(selector === undefined ? {} : { chainId: selector }) });
+    const response = await app.request(path, signed(path, 'POST', body));
+    expect(response.status).toBe(201); expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toMatchObject({ chainId, tokenAddress: token, recipientAddress: COMPANY_PAYMENT_RECIPIENT, amountAtomic: row.amount_atomic });
+  }
+  let calls = 0;
+  const blocked = application({ execute: async () => { calls++; throw Error('invalid policy reached database'); } });
+  for (const extra of [{ chainId: null }, { chainId: '1' }, { chainId: 56 }, { chainId: 137, tokenAddress: COMPANY_PAYMENT_TOKEN }, { chainId: 137, rpcUrl: 'https://evil.invalid' }]) {
+    const body = JSON.stringify({ requestId: id, amountAtomic: row.amount_atomic, ...extra });
+    expect((await blocked.request(path, signed(path, 'POST', body))).status).toBe(400);
+  }
+  expect(calls).toBe(0);
 });

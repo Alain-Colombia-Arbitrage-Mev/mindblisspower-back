@@ -23,8 +23,12 @@ export function companyPaymentRequest(request, url, body, env, ready) {
   try {
     const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
-    if (url.pathname === `${COMPANY_PAYMENT_PREFIX}/prepare`) return Object.keys(input).length === 2 && UUID.test(input.requestId || '')
-      && typeof input.amountAtomic === 'string' && /^[1-9][0-9]{0,77}$/.test(input.amountAtomic) && BigInt(input.amountAtomic) < (1n << 256n);
+    if (url.pathname === `${COMPANY_PAYMENT_PREFIX}/prepare`) {
+      const keys = Object.keys(input);
+      return [2, 3].includes(keys.length) && keys.every(key => ['requestId', 'amountAtomic', 'chainId'].includes(key))
+        && (input.chainId === undefined || input.chainId === 1 || input.chainId === 137) && UUID.test(input.requestId || '')
+        && typeof input.amountAtomic === 'string' && /^[1-9][0-9]{0,77}$/.test(input.amountAtomic) && BigInt(input.amountAtomic) < (1n << 256n);
+    }
     if (url.pathname === `${COMPANY_PAYMENT_PREFIX}/submit`) return Object.keys(input).length === 2 && UUID.test(input.paymentId || '') && HASH.test(input.transactionHash || '');
     return ['verify', 'abandon'].some(action => url.pathname === `${COMPANY_PAYMENT_PREFIX}/${action}`)
       && Object.keys(input).length === 1 && UUID.test(input.paymentId || '');

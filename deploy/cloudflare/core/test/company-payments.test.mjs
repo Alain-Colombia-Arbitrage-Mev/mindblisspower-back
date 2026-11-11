@@ -75,11 +75,27 @@ test('Core balance capability is read-only, owner-scoped and cannot select a wal
 });
 
 
-test('Core dual display capability permits only exact GET balances without granting Polygon transfer selectors', async () => {
+test('Core dual display capability permits only exact GET balances without granting arbitrary transfer selectors', async () => {
   const headers = request().headers, never = () => assert.fail('unapproved dual balance request reached a container');
   for (const query of ['?chainId=137', '?network=polygon', '?walletAddress=0x' + '2'.repeat(40), '?subject=other', '?tokenAddress=0x' + '3'.repeat(40)]) {
     assert.equal((await dispatchCore(new Request(`https://auth.core.internal${prefix}/balances${query}`, { headers }), env, never)).status, 503);
   }
   for (const action of ['balances', 'balances/extra', '%62alances']) assert.equal((await dispatchCore(request(action, {}), env, never)).status, 503);
-  assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1', chainId: 137 }), env, never)).status, 503);
+  assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1', chainId: 56 }), env, never)).status, 503);
+});
+
+
+test('Core preparation admits only the two reviewed networks and legacy Ethereum default with no token, receiver or RPC override', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  for (const input of [{ requestId: id, amountAtomic: '1' }, { requestId: id, amountAtomic: '1', chainId: 1 }, { requestId: id, amountAtomic: '1', chainId: 137 }]) {
+    assert.equal((await dispatchCore(request('prepare', input), env, resolve)).status, 200);
+  }
+  assert.equal(calls, 3);
+  const never = () => assert.fail('unapproved preparation reached a container');
+  for (const extra of [{ chainId: 56 }, { chainId: '137' }, { chainId: null }, { chainId: 0 }, { chainId: 1.5 },
+    { chainId: 137, tokenAddress: '0x' + '2'.repeat(40) }, { chainId: 1, recipientAddress: '0x' + '2'.repeat(40) },
+    { rpcUrl: 'https://evil.invalid' }, { chainId: 137, walletAddress: '0x' + '2'.repeat(40) }]) {
+    assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1', ...extra }), env, never)).status, 503);
+  }
 });

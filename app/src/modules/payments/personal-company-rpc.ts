@@ -1,8 +1,8 @@
-/** Fixed personal-wallet payment policy. No browser-supplied RPC, chain or destination. */
+/** Two approved USDT payment networks. The browser cannot select a token, RPC or destination. */
 export const COMPANY_PAYMENT_CHAIN_ID = 1;
 export const COMPANY_PAYMENT_TOKEN = '0xdac17f958d2ee523a2206206994597c13d831ec7';
 export const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
-/** Legacy networks are read/receipt recovery only; every new preparation uses Ethereum. */
+/** Exact chain/token pairs apply to preparations, balance reads and immutable receipt recovery. */
 export function companyPaymentNetwork(chainId: unknown, tokenAddress: unknown) {
   if (chainId === COMPANY_PAYMENT_CHAIN_ID && tokenAddress === COMPANY_PAYMENT_TOKEN) return Object.freeze({ chainId: 1 as const, tokenAddress: COMPANY_PAYMENT_TOKEN });
   if (chainId === 137 && tokenAddress === LEGACY_POLYGON_TOKEN) return Object.freeze({ chainId: 137 as const, tokenAddress: LEGACY_POLYGON_TOKEN });
@@ -118,7 +118,7 @@ export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amou
     || typeof balance !== 'string' || !WORD.test(balance)) throw unavailable();
   if (BigInt(balance) < BigInt(amountAtomic)) throw new Error('company_payment_insufficient_balance');
 }
-// Display-only reads may include the legacy Polygon balance. New payments stay Ethereum-only.
+// Network snapshots remain separate; selecting a payment network never combines their balances.
 export async function readPersonalWalletNetworkBalances(rpc: Rpc, address: string) {
   if (!companyPaymentNetwork(rpc.policy.chainId, rpc.policy.tokenAddress) || !ADDRESS.test(address)) throw unavailable();
   await checkCompanyPaymentChain(rpc);
@@ -132,7 +132,7 @@ export async function readPersonalWalletNetworkBalances(rpc: Rpc, address: strin
   return { balanceAtomic: BigInt(balance).toString(), nativeBalanceAtomic: hexQuantity(nativeBalance).toString() };
 }
 
-/** Transfer/MAX balance remains Ethereum-only even when the wallet displays both networks. */
+/** Backward-compatible single-balance endpoint remains Ethereum-only; selected-network reads use the dual snapshot. */
 export async function readCompanyPaymentBalances(rpc: Rpc, address: string) {
   if (rpc.policy.chainId !== COMPANY_PAYMENT_CHAIN_ID || rpc.policy.tokenAddress !== COMPANY_PAYMENT_TOKEN) throw unavailable();
   return readPersonalWalletNetworkBalances(rpc, address);

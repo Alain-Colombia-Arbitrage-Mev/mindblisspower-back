@@ -1,5 +1,15 @@
 # Personal wallet Ethereum network cutover
 
+Later policy: the user subsequently requested new transfers on both Ethereum
+and Polygon. Prepared migration 100 adds that explicit selection without
+changing migration 99's recorded history or the independent Ethereum onramp.
+See [personal-multichain-payments.md](personal-multichain-payments.md).
+
+This document records the historical migration 99 cutover. The subsequent
+[multichain payment policy](personal-multichain-payments.md) permits new transfers
+on Ethereum and Polygon through migration 100. New onramp funding remains
+Ethereum-only; historical records keep their original network.
+
 Status: migration 99 was applied to the curated primary on 2026-11-10 after
 388 isolated SQL probes and 225 joined API assertions. The reviewed operator
 verified a round-trip-readable encrypted metadata/catalogue backup and identical

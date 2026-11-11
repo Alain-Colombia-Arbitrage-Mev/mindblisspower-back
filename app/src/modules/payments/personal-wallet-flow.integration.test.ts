@@ -6,7 +6,7 @@ import { sql } from 'drizzle-orm';
 import { readReownProductionOptions } from './reown-funding-options';
 import { createPersonalFundingIntent, readWalletFundingHistory, readWalletFundingStatus } from './wallet-funding';
 import { preparePersonalCompanyPayment, submitPersonalCompanyPayment, verifyPersonalCompanyPayment, readPersonalCompanyPaymentHistory } from './personal-company-payment';
-import { COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC, companyPaymentCalldata } from './personal-company-rpc';
+import { COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC, companyPaymentCalldata } from './personal-company-rpc';
 
 // Opt-in only: the Docker-only runner supplies this dedicated role and a marked
 // disposable database. Never inherit DATABASE_URL, AUTH_DATABASE_URL or .env.
@@ -129,4 +129,53 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     const written = await database.execute(sql`SELECT * FROM payments.read_personal_company_payment(${scenario.owner},${paymentId}::uuid)`);
     expect(written).toHaveLength(1);
   }, 20_000);
+
+  test('an independently prefunded Polygon wallet transfers its own MAX without relabelling Ethereum onramp funds', async () => {
+    const owner = 'flow-card', sender = `0x${'56'.repeat(20)}`, paymentId = randomUUID();
+    const transactionHash = `0x${'d4'.repeat(32)}`, blockHash = `0x${'e5'.repeat(32)}`, amountAtomic = '42500001';
+    const before = await readPersonalCompanyPaymentHistory(database, owner);
+    expect(before.records).toHaveLength(1); expect(before.records[0]!.chainId).toBe(1);
+    const fundingBefore = await readWalletFundingHistory(database, owner, 'personal');
+    expect(fundingBefore.records).toHaveLength(1); expect(fundingBefore.records[0]!.destination.chainId).toBe(1);
+    let dispatched = false, head = '0xd2';
+    const methods: string[] = [], word = (value: string) => `0x${value.replace(/^0x/, '').padStart(64, '0')}`;
+    const fetchImpl = (async (target, init) => {
+      const url = new URL(String(target));
+      expect(url.origin + url.pathname).toBe('https://rpc.walletconnect.org/v1');
+      expect(url.searchParams.get('chainId')).toBe('eip155:137');
+      const request = JSON.parse(String(init?.body)); methods.push(request.method);
+      const transaction = { hash: transactionHash, from: sender, to: LEGACY_POLYGON_TOKEN, input: companyPaymentCalldata(amountAtomic),
+        value: '0x0', chainId: '0x89', blockNumber: '0xc8', blockHash };
+      const values: Record<string, unknown> = { eth_chainId: '0x89', eth_getTransactionByHash: dispatched ? transaction : null,
+        eth_getTransactionReceipt: dispatched ? { transactionHash, from: sender, to: LEGACY_POLYGON_TOKEN,
+          blockNumber: '0xc8', blockHash, status: '0x1', logs: [{ address: LEGACY_POLYGON_TOKEN,
+            topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(sender), word(COMPANY_PAYMENT_RECIPIENT)], data: word(BigInt(amountAtomic).toString(16)), removed: false }] } : null,
+        eth_blockNumber: head, eth_getBlockByNumber: { number: '0xc8', hash: blockHash } };
+      if (request.method === 'eth_call') {
+        expect(request.params[0].to).toBe(LEGACY_POLYGON_TOKEN);
+        const data = request.params[0].data;
+        expect(['0x313ce567', `0x70a08231${sender.slice(2).padStart(64, '0')}`]).toContain(data);
+        return Response.json({ jsonrpc: '2.0', id: request.id, result: word(data === '0x313ce567' ? '6' : (dispatched ? '0' : BigInt(amountAtomic).toString(16))) });
+      }
+      expect(Object.hasOwn(values, request.method)).toBe(true);
+      return Response.json({ jsonrpc: '2.0', id: request.id, result: values[request.method] });
+    }) as typeof fetch;
+    const options = { environment, fetchImpl }, input = { requestId: paymentId, amountAtomic, chainId: 137 };
+    const prepared = await preparePersonalCompanyPayment(database, input, owner, options);
+    expect(prepared).toMatchObject({ chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, walletAddress: sender, amountAtomic, membershipAssignment: 'pending' });
+    await expect(preparePersonalCompanyPayment(database, { ...input, chainId: 1 }, owner, options)).rejects.toThrow('company_payment_request_already_used');
+    await expect(submitPersonalCompanyPayment(database, { paymentId, transactionHash }, owner, options)).rejects.toThrow('company_payment_transaction_pending');
+    dispatched = true;
+    expect((await submitPersonalCompanyPayment(database, { paymentId, transactionHash }, owner, options)).chainId).toBe(137);
+    expect((await verifyPersonalCompanyPayment(database, { paymentId }, owner, options)).confirmations).toBe(11);
+    head = '0xd3';
+    expect(await verifyPersonalCompanyPayment(database, { paymentId }, owner, options)).toMatchObject({ status: 'confirmed', chainId: 137,
+      tokenAddress: LEGACY_POLYGON_TOKEN, amountAtomic, confirmations: 12, membershipAssignment: 'pending' });
+    const history = await readPersonalCompanyPaymentHistory(database, owner);
+    expect(history.records).toHaveLength(2); expect(new Set(history.records.map(record => record.chainId))).toEqual(new Set([1, 137]));
+    const fundingAfter = await readWalletFundingHistory(database, owner, 'personal');
+    expect(fundingAfter).toEqual(fundingBefore);
+    expect(methods.every(method => ['eth_chainId', 'eth_call', 'eth_getTransactionByHash', 'eth_getTransactionReceipt', 'eth_blockNumber', 'eth_getBlockByNumber'].includes(method))).toBe(true);
+  }, 20_000);
+
 });

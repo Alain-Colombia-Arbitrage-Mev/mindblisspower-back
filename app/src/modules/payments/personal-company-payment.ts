@@ -13,11 +13,12 @@ const subject = z.string().min(1).max(255);
 const address = z.string().regex(/^0x[0-9a-f]{40}$/);
 const hash = z.string().regex(/^0x[0-9a-f]{64}$/);
 const atomic = z.string().refine(companyPaymentAtomic);
-export const prepareCompanyPaymentInput = z.object({ requestId: uuid, amountAtomic: atomic }).strict();
+const paymentChainId = z.union([z.literal(1), z.literal(137)]);
+export const prepareCompanyPaymentInput = z.object({ requestId: uuid, amountAtomic: atomic, chainId: paymentChainId.default(1) }).strict();
 export const submitCompanyPaymentInput = z.object({ paymentId: uuid, transactionHash: hash }).strict();
 export const verifyCompanyPaymentInput = z.object({ paymentId: uuid }).strict();
 const rowSchema = z.object({ id: uuid, wallet_address: address, recipient_address: z.literal(COMPANY_PAYMENT_RECIPIENT),
-  chain_id: z.union([z.literal(1), z.literal(137)]), token_address: address, token_decimals: z.literal(COMPANY_PAYMENT_DECIMALS),
+  chain_id: paymentChainId, token_address: address, token_decimals: z.literal(COMPANY_PAYMENT_DECIMALS),
   amount_atomic: atomic, status: z.enum(['prepared', 'submitted', 'confirmed', 'failed']), expires_at: z.coerce.date(), created_at: z.coerce.date(),
   transaction_hash: hash.nullable(), block_number: z.string().regex(/^[1-9][0-9]{0,18}$/).nullable(), block_hash: hash.nullable(),
   abandoned_at: z.coerce.date().nullable(),
@@ -105,15 +106,14 @@ export async function preparePersonalCompanyPayment(database: Database, raw: unk
   environment = process.env, fetchImpl = fetch, signal,
 }: Options = {}) {
   const owner = subject.parse(userId), input = prepareCompanyPaymentInput.parse(raw);
-  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal);
+  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal, input.chainId);
   try {
     active(signal);
     let previous: PaymentRow | undefined;
     try { previous = await readRow(database, owner, input.requestId); }
     catch (error) { if (!(error instanceof Error) || error.message !== 'company_payment_not_found') throw error; }
     if (previous) {
-      if (previous.amount_atomic !== input.amountAtomic) throw new Error('company_payment_request_already_used');
-      if (previous.status === 'prepared' && previous.chain_id !== COMPANY_PAYMENT_CHAIN_ID) throw new Error('company_payment_network_retired');
+      if (previous.amount_atomic !== input.amountAtomic || previous.chain_id !== input.chainId) throw new Error('company_payment_request_already_used');
       if (previous.status === 'prepared' && previous.abandoned_at === null) await checkCompanyPaymentBalance(rpc, previous.wallet_address, previous.amount_atomic);
       active(rpc.signal);
       return view(previous);
@@ -123,9 +123,9 @@ export async function preparePersonalCompanyPayment(database: Database, raw: unk
     const sender = binding.address.toLowerCase();
     await checkCompanyPaymentBalance(rpc, sender, input.amountAtomic);
     active(rpc.signal);
-    const row = one(await database.execute(sql`SELECT * FROM payments.prepare_personal_company_payment_v2(
-      ${owner},${sender},${input.amountAtomic},${input.requestId}::uuid)`), input.requestId);
-    if (row.chain_id !== COMPANY_PAYMENT_CHAIN_ID || row.token_address !== COMPANY_PAYMENT_TOKEN || row.wallet_address !== sender || row.amount_atomic !== input.amountAtomic) throw new Error('company_payment_unavailable');
+    const row = one(await database.execute(sql`SELECT * FROM payments.prepare_personal_company_payment_v3(
+      ${owner},${sender},${input.amountAtomic},${input.requestId}::uuid,${input.chainId})`), input.requestId);
+    if (row.chain_id !== input.chainId || row.token_address !== rpc.policy.tokenAddress || row.wallet_address !== sender || row.amount_atomic !== input.amountAtomic) throw new Error('company_payment_unavailable');
     return view(row);
   } finally { rpc.dispose(); }
 }

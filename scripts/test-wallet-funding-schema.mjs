@@ -27,6 +27,7 @@ const usd20Migration = readFileSync(new URL('../_meta/migration/96_personal_usd2
 const mxnMigration = readFileSync(new URL('../_meta/migration/97_personal_mxn_spei_requests.sql', import.meta.url), 'utf8');
 const companyMigration = readFileSync(new URL('../_meta/migration/98_personal_company_payments.sql', import.meta.url), 'utf8');
 const ethereumMigration = readFileSync(new URL('../_meta/migration/99_personal_ethereum_only.sql', import.meta.url), 'utf8');
+const multichainMigration = readFileSync(new URL('../_meta/migration/100_personal_multichain_payments.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -627,6 +628,80 @@ try {
     FROM pg_proc p WHERE p.pronamespace='payments'::regnamespace AND p.proname IN('prepare_personal_company_payment_v2',
      'create_reown_funding_intent_v3','read_wallet_funding_history_v3','read_wallet_funding_status_v3');`,false));
 
+  // Multichain creation is additive: one explicit chain per immutable request.
+  // Old Ethereum-only creation and every historical record retain their policy.
+  const multiAddress=`0x${'ad'.repeat(20)}`,multiRateAddress=`0x${'ae'.repeat(20)}`,multiRaceAddress=`0x${'af'.repeat(20)}`;
+  psql(`INSERT INTO auth."user" VALUES('multichain-owner',true),('multichain-rate',true),('multichain-race',true);
+    INSERT INTO identity.wallet_binding VALUES('multichain-owner','${multiAddress}'),('multichain-rate','${multiRateAddress}'),('multichain-race','${multiRaceAddress}');`);
+  const beforeMultichain=value(cutoverSnapshot,false);
+  const priorFunctionSnapshot=`SELECT md5(jsonb_agg(jsonb_build_array(p.oid,pg_get_functiondef(p.oid),p.proacl::text) ORDER BY p.oid)::text)
+    FROM pg_proc p WHERE p.pronamespace='payments'::regnamespace AND p.prokind='f' AND p.proname<>'prepare_personal_company_payment_v3';`;
+  const priorFunctions=value(priorFunctionSnapshot,false);
+  const multiPolicySnapshot=`SELECT md5(jsonb_agg(jsonb_build_array(c.oid,pg_get_constraintdef(c.oid),c.convalidated) ORDER BY c.oid)::text)
+    FROM pg_constraint c WHERE c.conrelid IN('payments.personal_company_payment'::regclass,'payments.reown_funding_intent'::regclass,
+    'payments.meld_sandbox_funding_attempt'::regclass);`;
+  const priorConstraints=value(multiPolicySnapshot,false);
+  psql(multichainMigration);
+  equal(cutoverSnapshot,beforeMultichain,false);
+  equal(priorFunctionSnapshot,priorFunctions,false);
+  equal(multiPolicySnapshot,priorConstraints,false);
+  const multiPrepare=(chain='1',amount='123456789',id=randomUUID(),owner='multichain-owner',sender=multiAddress)=>
+    `SELECT chain_id||'|'||token_address||'|'||recipient_address||'|'||token_decimals||'|'||amount_atomic||'|'||status FROM payments.prepare_personal_company_payment_v3(
+      '${owner}','${sender}',${amount===null?'NULL':`'${amount}'`},'${id}',${chain});`;
+  const companyRecipient='0x0a600b03ef5f8e7f3e182b83440c6d292033db0e',polygonToken='0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
+  for(const chain of ['NULL','0','10','56','8453','42161']) rejects(multiPrepare(chain),'company_payment_invalid_request');
+  for(const bad of [null,'0','-1','01','1.0',' 1','1e6','NaN','Infinity','9'.repeat(79),
+    '115792089237316195423570985008687907853269984665640564039457584007913129639936']) rejects(multiPrepare('137',bad),'company_payment_invalid_request');
+  rejects(multiPrepare('137','1',randomUUID(),'blocked',multiAddress),'company_payment_forbidden');
+  rejects(multiPrepare('1','1',randomUUID(),'bob',multiAddress),'company_payment_forbidden');
+  const multiEthId=randomUUID(),multiPolygonId=randomUUID();
+  const multiExpected=(chain,token,amount,status='prepared')=>`${chain}|${token}|${companyRecipient}|6|${amount}|${status}`;
+  equal(multiPrepare('1','123456789',multiEthId),multiExpected(1,ethereumToken,'123456789'));
+  equal(multiPrepare('1','123456789',multiEthId),multiExpected(1,ethereumToken,'123456789'));
+  rejects(multiPrepare('137','123456789',multiEthId),'company_payment_request_already_used');
+  rejects(multiPrepare('1','123456788',multiEthId),'company_payment_request_already_used');
+  rejects(multiPrepare('137','123456789',multiPolygonId),'company_payment_pending_exists');
+  // This SQL probe namespace must not reserve the joined API fixtures' a1/a2
+  // transaction hashes in the same disposable, globally unique receipt table.
+  const multiEthHash=`0x${'91'.repeat(32)}`,multiPolygonHash=`0x${'92'.repeat(32)}`;
+  equal(companySubmit(multiEthId,multiEthHash,'multichain-owner'),'submitted');
+  rejects(multiPrepare('137','123456789',multiPolygonId),'company_payment_pending_exists');
+  equal(companyVerify(multiEthId,multiEthHash,'80000002',blockHash,'12','multichain-owner'),'confirmed');
+  const multiEthTerminal=value(`SELECT to_jsonb(p)::text FROM payments.personal_company_payment p WHERE id='${multiEthId}';`,false);
+  equal(multiPrepare('1','123456789',multiEthId),multiExpected(1,ethereumToken,'123456789','confirmed'));
+  equal(`SELECT to_jsonb(p)::text FROM payments.personal_company_payment p WHERE id='${multiEthId}';`,multiEthTerminal,false);
+  equal(multiPrepare('137','28433366',multiPolygonId),multiExpected(137,polygonToken,'28433366'));
+  equal(multiPrepare('137','28433366',multiPolygonId),multiExpected(137,polygonToken,'28433366'));
+  rejects(multiPrepare('1','28433366',multiPolygonId),'company_payment_request_already_used');
+  rejects(ethereumPrepare('28433366',multiPolygonId,'multichain-owner',multiAddress),'company_payment_request_already_used');
+  rejects(companyPrepare('1',randomUUID(),'multichain-owner',multiAddress),'company_payment_network_changed');
+  equal(companySubmit(multiPolygonId,multiPolygonHash,'multichain-owner'),'submitted');
+  equal(companyVerify(multiPolygonId,multiPolygonHash,'80000003',blockHash,'12','multichain-owner'),'confirmed');
+  const multiPolygonTerminal=value(`SELECT to_jsonb(p)::text FROM payments.personal_company_payment p WHERE id='${multiPolygonId}';`,false);
+  equal(multiPrepare('137','28433366',multiPolygonId),multiExpected(137,polygonToken,'28433366','confirmed'));
+  equal(`SELECT to_jsonb(p)::text FROM payments.personal_company_payment p WHERE id='${multiPolygonId}';`,multiPolygonTerminal,false);
+  equal(`SELECT string_agg(chain_id::text,',' ORDER BY chain_id) FROM payments.read_personal_company_payment_history('multichain-owner');`,'1,137');
+  immutable(`UPDATE payments.personal_company_payment SET chain_id=1,token_address='${ethereumToken}' WHERE id='${multiPolygonId}';`,'company_payment_snapshot_immutable');
+  for(let index=0;index<5;index++) {
+    const id=randomUUID(),chain=index%2?'137':'1',token=chain==='1'?ethereumToken:polygonToken;
+    equal(multiPrepare(chain,'1',id,'multichain-rate',multiRateAddress),multiExpected(Number(chain),token,'1'));
+    equal(`SELECT abandoned_at IS NOT NULL FROM payments.abandon_personal_company_payment('multichain-rate','${id}');`,'t');
+  }
+  rejects(multiPrepare('137','1',randomUUID(),'multichain-rate',multiRateAddress),'company_payment_rate_limited');
+  const crossChainRace=await Promise.all(['1','137'].map(chain=>parallelPsql(multiPrepare(chain,'1',randomUUID(),'multichain-race',multiRaceAddress))));
+  assert.equal(crossChainRace.filter(result=>result.status===0).length,1);
+  assert.equal(crossChainRace.filter(result=>result.status!==0&&/company_payment_pending_exists/.test(result.stderr)).length,1);probes++;
+  equal(`SELECT count(*) FROM payments.read_personal_company_payment_history('multichain-race');`,'1');
+  const multiSignature='payments.prepare_personal_company_payment_v3(text,text,text,uuid,integer)';
+  equal(`SELECT has_function_privilege('${role}','${multiSignature}','EXECUTE') AND NOT has_function_privilege('app_read','${multiSignature}','EXECUTE');`,'t',false);
+  equal(`SELECT prosecdef AND proconfig=ARRAY['search_path=pg_catalog']::text[] FROM pg_proc WHERE oid='${multiSignature}'::regprocedure;`,'t',false);
+  equal(`SELECT has_table_privilege('${role}','payments.personal_company_payment','SELECT,INSERT,UPDATE,DELETE');`,'f',false);
+  equal(priorFunctionSnapshot,priorFunctions,false);
+  equal(multiPolicySnapshot,priorConstraints,false);
+  const duplicateMultichain=psql(multichainMigration,true);assert.notEqual(duplicateMultichain.status,0);
+  assert.match(duplicateMultichain.stderr,/personal_multichain_requires_fresh_review/);probes++;
+  const multichainProfile=value(`SELECT md5(pg_get_functiondef('${multiSignature}'::regprocedure));`,false);
+
   if (personalFlow) {
     // Extend only this disposable fixture with the minimal registered-person
     // columns queried by the real API. No production DSN or host port exists.
@@ -664,18 +739,20 @@ try {
       '-e', `PERSONAL_WALLET_FLOW_DATABASE_URL=postgres://personal_flow_fixture@127.0.0.1:5432/${database}`,
       'mindbliss-company-payment-tests:20261111', 'bun', 'test', 'src/modules/payments/personal-wallet-flow.integration.test.ts']);
     if (joined.status !== 0) throw new Error(`Isolated joined flow failed: ${joined.stderr || joined.error?.message || 'test unavailable'}`);
-    console.log(JSON.stringify({ personalWalletJoinedFlow: 'passed', scenarios: ['USD100-card', 'MXN931-SPEI'],
+    console.log(JSON.stringify({ personalWalletJoinedFlow: 'passed', scenarios: ['USD100-card-Ethereum', 'MXN931-SPEI-Ethereum', 'prefunded-Polygon-card-owner'],
       providerPurchases: 'mocked', tokenDeposits: 'mocked', database: 'real-disposable-postgres', realTransfers: 0,
       hostPorts: 0, externalNetwork: 'disabled', apiScenariosPassed: Number(joined.stderr.match(/(\d+) pass\b/)?.[1] || 0),
       apiAssertions: Number(joined.stderr.match(/(\d+) expect\(\) calls/)?.[1] || 0) }));
     equal(isolatedSnapshot, beforeFlow, false);
-    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed';`, '2', false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed';`, '3', false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=1;`, '2', false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=137;`, '1', false);
     equal(`SELECT bool_and(status='initiated') FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, 't', false);
     equal(`SELECT count(*) FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, '2', false);
   }
 
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
-    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, ethereumProfile, mxnProfile: JSON.parse(mxnProfile) }));
+    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, ethereumProfile, multichainProfile, mxnProfile: JSON.parse(mxnProfile) }));
 } catch (error) {
   // This harness contains synthetic data only; avoid dumping whole SQL fixtures.
   console.error(JSON.stringify({ walletFundingSchema: 'failed', message: error.message }));

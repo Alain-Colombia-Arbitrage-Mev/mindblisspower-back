@@ -42,7 +42,7 @@ test('preparation derives its verified sender and stores only a fixed personal p
   const result = await preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount }, 'owner', { environment, fetchImpl: rpcFetch({}, seen) });
   expect(result).toMatchObject({ paymentId: id, walletKind: 'personal', walletAddress: address, recipientAddress: COMPANY_PAYMENT_RECIPIENT,
     chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: 6, amountAtomic: amount, status: 'prepared', membershipAssignment: 'pending' });
-  expect(db.queries.at(-1)!.params).toEqual(['owner', address, amount, id]);
+  expect(db.queries.at(-1)!.params).toEqual(['owner', address, amount, id, 1]);
   expect(db.queries.at(-1)!.sql).toContain('prepare_personal_company_payment');
   expect(seen.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId']);
   expect(db.queries.map(row => row.sql).join(' ')).not.toMatch(/administrative|commission|membership|INSERT INTO.*ledger/i);
@@ -58,7 +58,7 @@ test('preparation replays preserve one immutable intent and refresh balance only
     fetchImpl: (async () => { throw Error('replay tried to prepare another transfer'); }) as unknown as typeof fetch })).status).toBe('submitted');
 });
 test('forged owners, destinations, amounts and unverified identities cannot create a payment', async () => {
-  for (const extra of [{ walletAddress: address }, { recipientAddress: address }, { chainId: 1 }, { tokenAddress: address }, { subject: 'other' }]) {
+  for (const extra of [{ walletAddress: address }, { recipientAddress: address }, { chainId: 56 }, { tokenAddress: address }, { subject: 'other' }]) {
     const db = queued([]);
     await expect(preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount, ...extra }, 'owner', { environment })).rejects.toThrow();
     expect(db.queries).toHaveLength(0);
@@ -142,14 +142,14 @@ test('abandonment dismisses only the owned prepared draft idempotently and prese
 });
 
 
-test('Ethereum is the only new preparation policy while legacy Polygon receipts retain their original proof network', async () => {
+test('stored network identity is immutable and a Polygon replay requires explicit Polygon selection', async () => {
   const legacy = { ...base, chain_id: 137, token_address: '0xc2132d05d31c914a87c6611c10748aeb04b58e8f' };
   const history = await readPersonalCompanyPaymentHistory(queued([[base, { ...legacy, id: '22222222-2222-4222-8222-222222222222' }]]).database, 'owner');
   expect(history.records.map(row => [row.chainId, row.tokenAddress])).toEqual([[1, COMPANY_PAYMENT_TOKEN], [137, legacy.token_address]]);
   const retired = queued([[legacy]]);
   await expect(preparePersonalCompanyPayment(retired.database, { requestId: id, amountAtomic: amount }, 'owner', {
-    environment, fetchImpl: (async () => { throw Error('retired draft must not query a balance or prepare a transfer'); }) as unknown as typeof fetch,
-  })).rejects.toThrow('company_payment_network_retired');
+    environment, fetchImpl: (async () => { throw Error('cross-network replay must not query a balance or prepare a transfer'); }) as unknown as typeof fetch,
+  })).rejects.toThrow('company_payment_request_already_used');
   expect(retired.queries).toHaveLength(1);
   const submitted = { ...legacy, status: 'submitted', transaction_hash: hash };
   const registration = queued([[legacy], [submitted]]);
@@ -251,4 +251,58 @@ test('cancelling a display refresh rejects the entire stale result instead of pu
     fetchImpl: (async () => { controller.abort(); throw Error('aborted fixture'); }) as unknown as typeof fetch,
   })).rejects.toHaveProperty('name', 'AbortError');
   expect(db.queries).toHaveLength(2);
+});
+
+
+test('new preparations independently check the selected Ethereum or Polygon balance and persist its fixed token and recipient', async () => {
+  for (const chainId of [1, 137] as const) {
+    const token = chainId === 1 ? COMPANY_PAYMENT_TOKEN : LEGACY_POLYGON_TOKEN;
+    const prepared = { ...base, chain_id: chainId, token_address: token };
+    const db = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [prepared]]), seen: string[] = [];
+    const result = await preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount, chainId }, 'owner', {
+      environment, fetchImpl: rpcFetch({}, seen, chainId),
+    });
+    expect(result).toMatchObject({ chainId, tokenAddress: token, recipientAddress: COMPANY_PAYMENT_RECIPIENT, amountAtomic: amount, tokenDecimals: 6 });
+    expect(db.queries.at(-1)!.sql).toContain('payments.prepare_personal_company_payment_v3');
+    expect(db.queries.at(-1)!.params).toEqual(['owner', address, amount, id, chainId]);
+    expect(seen.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId']);
+    const replay = queued([[prepared]]);
+    expect((await preparePersonalCompanyPayment(replay.database, { requestId: id, amountAtomic: amount, chainId }, 'owner', {
+      environment, fetchImpl: rpcFetch({}, [], chainId),
+    })).chainId).toBe(chainId);
+    expect(replay.queries).toHaveLength(1);
+    const wrongNetwork = queued([[prepared]]);
+    await expect(preparePersonalCompanyPayment(wrongNetwork.database, { requestId: id, amountAtomic: amount, chainId: chainId === 1 ? 137 : 1 }, 'owner', {
+      environment, fetchImpl: (async () => { throw Error('cross-network UUID reuse reached RPC'); }) as unknown as typeof fetch,
+    })).rejects.toThrow('company_payment_request_already_used');
+    expect(wrongNetwork.queries).toHaveLength(1);
+  }
+});
+
+test('unsupported chains and client token, destination or RPC overrides fail before RPC or database work', async () => {
+  for (const extra of [{ chainId: 0 }, { chainId: 56 }, { chainId: '137' }, { chainId: null }, { chainId: 1.5 }, { chainId: 137, tokenAddress: COMPANY_PAYMENT_TOKEN },
+    { chainId: 137, recipientAddress: address }, { chainId: 1, rpcUrl: 'https://evil.invalid' }]) {
+    const db = queued([]);
+    await expect(preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount, ...extra }, 'owner', {
+      environment, fetchImpl: (async () => { throw Error('invalid policy reached RPC'); }) as unknown as typeof fetch,
+    })).rejects.toThrow();
+    expect(db.queries).toHaveLength(0);
+  }
+  const wrongRpc = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }]]);
+  await expect(preparePersonalCompanyPayment(wrongRpc.database, { requestId: id, amountAtomic: amount, chainId: 137 }, 'owner', {
+    environment, fetchImpl: rpcFetch({ eth_chainId: '0x1' }, [], 137),
+  })).rejects.toThrow('company_payment_rpc_unavailable');
+  expect(wrongRpc.queries).toHaveLength(3);
+  for (const message of ['company_payment_pending_exists', 'company_payment_rate_limited']) {
+    const limited = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }]]);
+    const execute = limited.database.execute.bind(limited.database);
+    limited.database.execute = (async (query: unknown) => {
+      const compiled = new PgDialect().sqlToQuery(query as SQL);
+      if (compiled.sql.includes('payments.prepare_personal_company_payment_v3')) throw Error(message);
+      return execute(query as never);
+    }) as unknown as typeof limited.database.execute;
+    await expect(preparePersonalCompanyPayment(limited.database, { requestId: id, amountAtomic: amount, chainId: 137 }, 'owner', {
+      environment, fetchImpl: rpcFetch({}, [], 137),
+    })).rejects.toThrow(message);
+  }
 });

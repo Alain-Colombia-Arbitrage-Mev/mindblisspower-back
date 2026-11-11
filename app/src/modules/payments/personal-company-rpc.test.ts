@@ -34,7 +34,7 @@ async function withRpc<T>(perform: (rpc: ReturnType<typeof createCompanyPaymentR
   const rpc = createCompanyPaymentRpc(companyEnvironment, companyFetch(fixture, extra));
   try { return await perform(rpc); } finally { rpc.dispose(); }
 }
-test('fixed Ethereum USDT preparation supports all six-decimal balance without approving or sending funds', async () => {
+test('default Ethereum USDT preparation supports all six-decimal balance without approving or sending funds', async () => {
   const methods: string[] = [];
   const rpc = createCompanyPaymentRpc(companyEnvironment, companyFetch(companyRpcFixture(), {}, methods));
   try {
@@ -160,7 +160,7 @@ test('read-only Ethereum balances preserve zero and exact uint256 values without
   }
 });
 
-test('balance reads reject legacy networks, invalid address, wrong chain, token decimals and malformed native quantities', async () => {
+test('the backward-compatible single-balance read rejects Polygon, invalid address, wrong chain, token decimals and malformed native quantities', async () => {
   for (const [chain, owner] of [[137, companyFixture.sender], [1, 'not-an-address']] as const) {
     const rpc = createCompanyPaymentRpc(companyEnvironment, (async () => { throw Error('unapproved balance read reached RPC'); }) as unknown as typeof fetch, undefined, chain);
     try { await expect(readCompanyPaymentBalances(rpc, owner)).rejects.toThrow('company_payment_rpc_unavailable'); }
@@ -181,7 +181,7 @@ test('balance reads reject legacy networks, invalid address, wrong chain, token 
 });
 
 
-test('display-only Polygon reads use its own authentic USDT token and native quantity while transfer balance remains Ethereum-only', async () => {
+test('display-only Polygon reads use its own authentic USDT token and native quantity while the backward-compatible single-balance helper stays Ethereum-only', async () => {
   const seen: string[] = [];
   const rpc = createCompanyPaymentRpc(companyEnvironment, (async (url, init) => {
     expect(String(url)).toContain('chainId=eip155:137&');

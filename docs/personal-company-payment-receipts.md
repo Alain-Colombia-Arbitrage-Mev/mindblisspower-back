@@ -1,5 +1,9 @@
 # Personal USDT company-payment receipts
 
+Current new-transfer policy: [personal-multichain-payments.md](personal-multichain-payments.md)
+adds explicit Ethereum/Polygon selection under migration 100. The migration
+98/99 descriptions below retain their historical context.
+
 Status: migration 98 was applied on 2026-11-10 after encrypted schema/catalog
 backups and 329 disposable-database probes. The reviewed release transaction
 proved the protected existing records unchanged and the new receipt register
