@@ -861,6 +861,9 @@ try {
     FROM pg_proc p WHERE p.pronamespace='payments'::regnamespace AND p.proname IN(${journalNames.map(name=>`'${name}'`).join(',')});`,false));
 
   if (personalFlow) {
+    // New funding policy is applied only after the historical migration probes.
+    // Existing Ethereum fixture rows retain their network and recovery checks.
+    psql(readFileSync(new URL('../_meta/migration/106_personal_polygon_funding.sql', import.meta.url), 'utf8'));
     // Extend only this disposable fixture with the minimal registered-person
     // columns queried by the real API. No production DSN or host port exists.
     psql(`ALTER TABLE auth."user" ADD COLUMN email text,ADD COLUMN email_verified boolean NOT NULL DEFAULT true,ADD COLUMN name text;
@@ -897,14 +900,18 @@ try {
       '-e', `PERSONAL_WALLET_FLOW_DATABASE_URL=postgres://personal_flow_fixture@127.0.0.1:5432/${database}`,
       'mindbliss-company-payment-tests:20261111', 'bun', 'test', 'src/modules/payments/personal-wallet-flow.integration.test.ts']);
     if (joined.status !== 0) throw new Error(`Isolated joined flow failed: ${joined.stderr || joined.error?.message || 'test unavailable'}`);
-    console.log(JSON.stringify({ personalWalletJoinedFlow: 'passed', scenarios: ['USD100-card-Ethereum', 'MXN931-SPEI-Ethereum', 'prefunded-Polygon-card-owner'],
+    assert.equal(Number(joined.stderr.match(/(\d+) pass\b/)?.[1]), 3);
+    assert.equal(Number(joined.stderr.match(/(\d+) fail\b/)?.[1]), 0);
+    assert.ok(Number(joined.stderr.match(/(\d+) expect\(\) calls/)?.[1]) >= 300);
+    assert.ok(!/\b[1-9]\d* skip\b/.test(joined.stderr));
+    console.log(JSON.stringify({ personalWalletJoinedFlow: 'passed', scenarios: ['USD100-card-Polygon', 'MXN931-SPEI-Polygon', 'prefunded-Polygon-card-owner'],
       providerPurchases: 'mocked', tokenDeposits: 'mocked', database: 'real-disposable-postgres', realTransfers: 0,
       hostPorts: 0, externalNetwork: 'disabled', apiScenariosPassed: Number(joined.stderr.match(/(\d+) pass\b/)?.[1] || 0),
       apiAssertions: Number(joined.stderr.match(/(\d+) expect\(\) calls/)?.[1] || 0) }));
     equal(isolatedSnapshot, beforeFlow, false);
     equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed';`, '3', false);
-    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=1;`, '2', false);
-    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=137;`, '1', false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=1;`, '0', false);
+    equal(`SELECT count(*) FROM payments.personal_company_payment WHERE subject IN('flow-card','flow-spei') AND status='confirmed' AND chain_id=137;`, '3', false);
     equal(`SELECT count(*) FROM payments.personal_company_payment_event WHERE subject IN('flow-card','flow-spei') AND source='canonical';`, '9', false);
     equal(`SELECT bool_and(e.event IN('prepared','submitted','confirmed') AND e.canonical_status=e.event
       AND ROW(e.chain_id,e.token_address,e.wallet_address,e.recipient_address,e.amount_atomic)
@@ -913,6 +920,7 @@ try {
       WHERE e.subject IN('flow-card','flow-spei') AND e.source='canonical';`, 't', false);
     equal(`SELECT bool_and(status='initiated') FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, 't', false);
     equal(`SELECT count(*) FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, '2', false);
+    equal(`SELECT bool_and(destination_currency='USDT_POLYGON') FROM payments.reown_funding_intent WHERE subject IN('flow-card','flow-spei');`, 't', false);
   }
 
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',

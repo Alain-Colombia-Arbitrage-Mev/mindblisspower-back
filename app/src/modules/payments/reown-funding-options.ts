@@ -7,6 +7,7 @@ export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'CO'] as const;
 export const PERSONAL_FUNDING_MINIMUM_USD = 30;
 export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
 export const PERSONAL_FUNDING_MINIMUM_MXN = 931;
+export const PERSONAL_FUNDING_DESTINATION = 'USDT_POLYGON' as const;
 const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;
@@ -22,6 +23,7 @@ export type ReownFundingRoute = {
 };
 export type ReownProductionOptions = {
   walletKind: 'personal'; environment: 'production'; provider: 'reown'; country: string; sourceCurrencyCode: string;
+  destinationCurrencyCode: typeof PERSONAL_FUNDING_DESTINATION; network: 'polygon'; chainId: 137;
   paymentMethods: string[]; routes: ReownFundingRoute[];
 };
 
@@ -37,7 +39,7 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
   for (const route of data) {
     if (!record(route) || typeof route.partner !== 'string') throw unavailable();
     if (!PROVIDERS.some(provider => provider === route.partner)) continue;
-    if (route.source !== sourceCurrencyCode || route.destination !== 'USDT'
+    if (route.source !== sourceCurrencyCode || route.destination !== PERSONAL_FUNDING_DESTINATION
       || !Array.isArray(route.paymentMethods) || route.paymentMethods.length > 64) throw unavailable();
     const provider = route.partner as ReownFundingRoute['serviceProvider'];
     const methods = routes.get(provider) ?? new Map<string, ReownFundingMethod>();
@@ -148,7 +150,7 @@ export async function readReownProductionOptions(country: string, {
   let phase: DiscoveryDiagnostic['phase'] = 'fetch';
   let status: number | null = null;
   try {
-    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT?partners=SWAPPED,MERCURYO`;
+    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/${PERSONAL_FUNDING_DESTINATION}?partners=SWAPPED,MERCURYO`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       headers: { Authorization: `BASIC ${REOWN_MELD_PUBLIC_KEY}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },
@@ -169,7 +171,8 @@ export async function readReownProductionOptions(country: string, {
     }) })).filter(route => route.paymentMethods.length > 0);
     const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
     if (controller.signal.aborted) throw unavailable();
-    return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode, paymentMethods, routes };
+    return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode,
+      destinationCurrencyCode: PERSONAL_FUNDING_DESTINATION, network: 'polygon', chainId: 137, paymentMethods, routes };
   } catch {
     // Caller-driven cancellation is normal when a user changes country. Never
     // record upstream body text, request headers, credentials, URLs or identity.

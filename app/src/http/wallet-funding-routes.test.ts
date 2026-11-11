@@ -32,10 +32,10 @@ function application({ signedIn = true, execute = async () => [], fetchImpl }: {
   });
   registerWalletFundingRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
     environment: { BETTER_AUTH_URL: origin,
-      BETTER_AUTH_TRUSTED_ORIGINS: `${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
+      BETTER_AUTH_TRUSTED_ORIGINS: `https://mindblisspower.com,${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
     fetchImpl: fetchImpl || (async url => {
       expect(String(url)).toStartWith('https://api.meld.io/');
-      return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT',
+      return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT_POLYGON',
         paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
     }) as typeof fetch });
   return app;
@@ -90,7 +90,7 @@ test('HTTP public personal funding accepts USD30 while USD20 and29.99 are reject
 test('HTTP personal SPEI rejects 930.99 MXN and accepts 931 MXN without changing the source currency', async () => {
   let writes = 0;
   const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; },
-    fetchImpl: (async () => Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT',
+    fetchImpl: (async () => Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
       paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } }] }])) as unknown as typeof fetch });
   for (const [amount, status] of [[930.99, 409], [931, 201]] as const) {
     const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
@@ -104,13 +104,14 @@ test('HTTP personal SPEI rejects 930.99 MXN and accepts 931 MXN without changing
 test('funding mutations are isolated by exact portal origin even when both hosts trust the same native auth service', async () => {
   let calls = 0;
   const app = application({ execute: async () => { calls++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });
-  for (const untrusted of [administrativeOrigin, 'https://wallet.mindblisspower.com.evil.test', 'https://mindblisspower.com']) {
+  for (const untrusted of [administrativeOrigin, 'https://wallet.mindblisspower.com.evil.test', 'https://mindblisspower.com.evil.test',
+    'http://mindblisspower.com', 'https://mindblisspower.com:443', 'https://mindblisspower.com/']) {
     const rejected = await app.request(personalPath, { method: 'POST', headers: { origin: untrusted, 'content-type': 'application/json' },
       body: JSON.stringify(input) });
     expect(rejected.status).toBe(403);
     expect(await rejected.json()).toEqual({ error: 'invalid_origin' });
   }
-  for (const untrusted of [origin, 'https://mindbliss-portal-rewon.devfidubit.workers.dev', 'https://wallet.mindblisspower.com.evil.test',
+  for (const untrusted of [origin, 'https://mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev', 'https://wallet.mindblisspower.com.evil.test',
     'http://wallet.mindblisspower.com', 'https://wallet.mindblisspower.com:443', 'https://wallet.mindblisspower.com/']) {
     const rejected = await app.request(administrativePath, signedRequest(administrativePath,
       JSON.stringify({ ...input, serviceProvider: 'BANXA' }), { origin: untrusted }));
@@ -127,6 +128,28 @@ test('funding mutations are isolated by exact portal origin even when both hosts
   expect(administrative.status).toBe(503);
   expect(await administrative.json()).toEqual({ error: 'wallet_funding_unconfigured' });
   expect(calls).toBe(1);
+});
+
+test('root and app personal recharge acknowledgements remain production-only and independent from sandbox', async () => {
+  let writes = 0;
+  const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    const response = await app.request(personalPath, signedRequest(personalPath, JSON.stringify(input), { origin }));
+    expect(response.status).toBe(201);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toMatchObject({ walletKind: 'personal', environment: 'production', sourceCurrencyCode: 'USD' });
+  }
+  expect(writes).toBe(2);
+});
+
+test('a retired funding writer or conflicting historical intent gives an actionable safe code even through SQL wrappers', async () => {
+  for (const code of ['wallet_funding_network_changed', 'wallet_funding_request_already_used']) {
+    const app = application({ execute: async () => { throw new Error('private SQL and parameters', { cause: new Error(code) }); } });
+    const response = await app.request(personalPath, signedRequest(personalPath, JSON.stringify(input)));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: code });
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+  }
 });
 
 test('the administrative provider IP must come from a signed proxy envelope bound to path, cookie and body', async () => {

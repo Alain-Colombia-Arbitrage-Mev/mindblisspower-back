@@ -192,7 +192,7 @@ test('personal and administrative mutations cannot cross their explicitly separa
   const administrative = { ...input, country: 'CO', serviceProvider: 'BANXA' };
   const never = () => assert.fail('cross-portal financial request dispatched');
   assert.equal((await dispatchCore(request(path, input, { origin: 'https://wallet.mindblisspower.com' }), env, never)).status, 503);
-  for (const origin of ['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev',
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev',
     'https://wallet.mindblisspower.com.evil.test', 'http://wallet.mindblisspower.com', 'https://wallet.mindblisspower.com:443',
     'https://wallet.mindblisspower.com/', 'https://WALLET.mindblisspower.com']) {
     assert.equal((await dispatchCore(request(administrativePath, administrative, { origin }), env, never)).status, 503);
@@ -201,6 +201,20 @@ test('personal and administrative mutations cannot cross their explicitly separa
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   assert.equal((await dispatchCore(request(administrativePath, administrative), env, resolve)).status, 200);
   assert.equal((await dispatchCore(request(path, input, { origin: 'https://mindbliss-portal-rewon.devfidubit.workers.dev' }), env, resolve)).status, 200);
+  assert.equal(calls, 2);
+});
+
+test('Core admits personal recharge from root and app without admitting origin aliases', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  const never = () => assert.fail('invalid personal funding origin dispatched');
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request(path, input, { origin }), env, resolve)).status, 200);
+  }
+  for (const origin of ['https://mindblisspower.com.evil.test', 'http://mindblisspower.com',
+    'https://mindblisspower.com:443', 'https://mindblisspower.com/', 'https://wallet.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request(path, input, { origin }), env, never)).status, 503);
+  }
   assert.equal(calls, 2);
 });
 

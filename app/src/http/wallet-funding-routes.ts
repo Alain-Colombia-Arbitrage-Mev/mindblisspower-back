@@ -10,7 +10,7 @@ type Dependencies = { database: Pick<IdentityDatabase, 'execute'>;
   environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch };
 const noStore = { 'Cache-Control': 'private, no-store' };
 
-const PERSONAL_FUNDING_ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const PERSONAL_FUNDING_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const ADMINISTRATIVE_FUNDING_ORIGIN = 'https://wallet.mindblisspower.com';
 
 function allowedOrigin(kind: 'personal' | 'administrative', value: string, environment: Record<string, string | undefined>) {
@@ -21,13 +21,20 @@ function allowedOrigin(kind: 'personal' | 'administrative', value: string, envir
 
 function failure(error: unknown) {
   if (error instanceof z.ZodError || error instanceof SyntaxError) return { error: 'invalid_request', status: 400 as const };
-  const code = error instanceof Error ? error.message : '';
+  let current: unknown = error, code = '';
+  // Drizzle wraps PostgreSQL failures. Inspect only bounded canonical codes;
+  // query text, parameters and provider messages never enter an HTTP response.
+  for (let depth = 0; depth < 3 && current && typeof current === 'object'; depth++) {
+    const wrapped = current as { message?: unknown; cause?: unknown };
+    if (typeof wrapped.message === 'string' && /^wallet_funding_[a-z_]{1,80}$/.test(wrapped.message)) { code = wrapped.message; break; }
+    current = wrapped.cause;
+  }
   if (['wallet_funding_invalid_country', 'wallet_funding_invalid_currency'].includes(code)) return { error: 'invalid_request', status: 400 as const };
   if (code === 'wallet_funding_not_found') return { error: code, status: 404 as const };
   if (['wallet_funding_forbidden', 'wallet_funding_wallet_not_linked', 'wallet_funding_wallet_not_assigned'].includes(code)) {
     return { error: 'wallet_funding_forbidden', status: 403 as const };
   }
-  if (code === 'wallet_funding_request_already_used') return { error: code, status: 409 as const };
+  if (['wallet_funding_request_already_used', 'wallet_funding_network_changed'].includes(code)) return { error: code, status: 409 as const };
   if (code === 'wallet_funding_rate_limited') return { error: code, status: 429 as const };
   if (code === 'wallet_funding_unconfigured') return { error: code, status: 503 as const };
   if (code === 'wallet_funding_method_unavailable') return { error: code, status: 409 as const };

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { authProxyContext } from './auth-proxy-context';
 import type { ApiApplication } from './types';
 export const SOLANA_PRIVATE_HEADERS = { 'Cache-Control': 'private, no-store', Vary: 'Cookie' };
-const ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const conflicts = new Set(['wallet_already_linked', 'wallet_address_in_use', 'solana_payment_pending_exists', 'solana_payment_request_already_used',
   'solana_payment_invalid_transition', 'solana_payment_expired', 'solana_payment_insufficient_balance', 'solana_payment_transaction_mismatch', 'solana_payment_confirmation_conflict']);
 const badInput = new Set(['invalid_wallet_address', 'wallet_signature_invalid', 'wallet_challenge_invalid', 'invalid_request',

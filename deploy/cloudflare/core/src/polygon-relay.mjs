@@ -1,7 +1,7 @@
 export const POLYGON_RELAY_PREFIX = '/api/member/polygon-relay';
 export const POLYGON_RELAY_MAX_BODY = 4096;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 export function polygonRelayNamespace(path) { return path === POLYGON_RELAY_PREFIX || path.startsWith(`${POLYGON_RELAY_PREFIX}/`); }

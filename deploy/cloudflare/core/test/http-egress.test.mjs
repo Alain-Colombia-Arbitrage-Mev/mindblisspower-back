@@ -114,7 +114,7 @@ test('installed SDK persistence prevents claiming a flag-off or restart-only rol
   assert.match(sdk, /const persistedOutboundConfiguration = this\.restoreOutboundConfiguration\(\)/);
   assert.match(sdk, /this\.outboundHandlerOverride = configuration\.outboundHandlerOverride/);
   assert.match(sdk, /this\.hasInterceptAllRegistration = configuration\.hasInterceptAllRegistration === true/);
-  const runbook = readFileSync(new URL('../HTTP-EGRESS-CANARY.md', import.meta.url), 'utf8');
+  const runbook = readFileSync(new URL('../HTTP-EGRESS-CANARY.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(runbook, /not approved for production activation/);
   assert.match(runbook, /restarting a Container is not a proven\nrollback/);
   assert.match(runbook, /new isolated Worker, DO namespace and instance/);

@@ -9,7 +9,7 @@ import { preparePersonalPolygonRelay, authorizePersonalPolygonRelay, submitPerso
   abandonPersonalPolygonRelay, readPersonalPolygonRelay, readPersonalPolygonRelayHistory } from '../modules/payments/polygon-relay-payment';
 
 const PREFIX = '/api/member/polygon-relay';
-const origins = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const origins = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const noStore = { 'Cache-Control': 'private, no-store', Vary: 'Cookie' };
 const forbidden = new Set(['polygon_relay_forbidden', 'polygon_relay_wallet_not_linked', 'wallet_identity_unavailable', 'company_payment_forbidden', 'company_payment_wallet_not_linked']);
 const conflicts = new Set(['polygon_relay_request_already_used', 'polygon_relay_pending_exists', 'polygon_relay_insufficient_balance',

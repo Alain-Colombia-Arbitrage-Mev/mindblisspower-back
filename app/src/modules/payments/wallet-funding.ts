@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { z } from 'zod';
 import { readAdministrativeWallet } from '../identity/administrative-wallet';
 import type { IdentityDatabase } from '../identity/model';
-import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, readReownProductionOptions } from './reown-funding-options';
+import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_DESTINATION, readReownProductionOptions } from './reown-funding-options';
 
 type FundingDatabase = Pick<IdentityDatabase, 'execute'>;
 type FundingEnvironment = Record<string, string | undefined>;
@@ -58,12 +58,14 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   // Never start persistence for that cancelled operation; an already accepted
   // database write remains immutable and must not be retried automatically.
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v3(
+  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v4(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType},${input.sourceCurrencyCode})`);
   const row = oneRow(rows, intentRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
   return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const,
     provider: 'reown' as const, status: 'initiated' as const, requestedAmount: input.amount, sourceCurrencyCode: input.sourceCurrencyCode,
+    destinationCurrencyCode: PERSONAL_FUNDING_DESTINATION,
+    destination: { address: input.walletAddress.toLowerCase(), asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const },
     paymentMethodType: input.paymentMethodType, allowedProviders,
     createdAt: row.created_at.toISOString() };
 }

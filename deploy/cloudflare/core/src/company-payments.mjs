@@ -2,7 +2,7 @@ export const COMPANY_PAYMENT_PREFIX = '/api/member/company-payments';
 export const COMPANY_PAYMENT_MAX_BODY = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH = /^0x[0-9a-f]{64}$/;
-const ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const CLIENT_EVENTS = new Set(['wallet_prompt_opened', 'wallet_rejected', 'wallet_failed', 'broadcast_uncertain',
   'broadcast_observed', 'recovery_detected', 'registration_failed', 'verification_requested', 'verification_failed']);
 const EVENT_CODES = new Set(['user_rejected', 'wallet_changed', 'network_changed', 'rpc_unavailable',

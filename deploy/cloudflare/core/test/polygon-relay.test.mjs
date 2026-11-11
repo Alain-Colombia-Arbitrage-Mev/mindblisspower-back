@@ -65,6 +65,21 @@ test('Core rejects foreign portals, missing session/HMAC and caller-selected pol
   }
 });
 
+test('Core admits exact root and app relay origins while rejecting forged origin variants and missing HMAC', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request('prepare', undefined, { origin }), env, resolve)).status, 200);
+    assert.equal((await dispatchCore(read('history', { origin }), env, resolve)).status, 200);
+    assert.equal((await dispatchCore(request('prepare', undefined, { origin, 'x-vp-auth-signature': '' }), env, never)).status, 503);
+  }
+  for (const origin of ['https://mindblisspower.com.evil.test', 'http://mindblisspower.com',
+    'https://mindblisspower.com:443', 'https://mindblisspower.com/', 'https://wallet.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request('prepare', undefined, { origin }), env, never)).status, 503);
+  }
+  assert.equal(calls, 4);
+});
+
 test('relay namespace aliases, extra queries, unsupported methods and oversized bodies cannot fall through the gateway', async () => {
   const broad = { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
   for (const action of ['%70repare', '%2570repare', '/prepare', 'prepare/', 'prepare/extra', 'prepare?subject=foreign']) {

@@ -38,11 +38,12 @@ function rpcFetch(overrides: Record<string, unknown> = {}, seen: string[] = [], 
   }) as typeof fetch;
 }
 test('preparation derives its verified sender and stores only a fixed personal payment snapshot after real balance checks', async () => {
-  const db = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [base]]), seen: string[] = [];
-  const result = await preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount }, 'owner', { environment, fetchImpl: rpcFetch({}, seen) });
+  const polygon = { ...base, chain_id: 137, token_address: LEGACY_POLYGON_TOKEN };
+  const db = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [polygon]]), seen: string[] = [];
+  const result = await preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount, chainId: 137 }, 'owner', { environment, fetchImpl: rpcFetch({}, seen, 137) });
   expect(result).toMatchObject({ paymentId: id, walletKind: 'personal', walletAddress: address, recipientAddress: COMPANY_PAYMENT_RECIPIENT,
-    chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: 6, amountAtomic: amount, status: 'prepared', membershipAssignment: 'pending' });
-  expect(db.queries.at(-1)!.params).toEqual(['owner', address, amount, id, 1]);
+    chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, tokenDecimals: 6, amountAtomic: amount, status: 'prepared', membershipAssignment: 'pending' });
+  expect(db.queries.at(-1)!.params).toEqual(['owner', address, amount, id, 137]);
   expect(db.queries.at(-1)!.sql).toContain('prepare_personal_company_payment');
   expect(seen.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId']);
   expect(db.queries.map(row => row.sql).join(' ')).not.toMatch(/administrative|commission|membership|INSERT INTO.*ledger/i);
@@ -64,7 +65,7 @@ test('forged owners, destinations, amounts and unverified identities cannot crea
     expect(db.queries).toHaveLength(0);
   }
   const db = queued([[], [{ ...principal, email_verified: false }]]);
-  await expect(preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount }, 'owner', { environment,
+  await expect(preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount, chainId: 137 }, 'owner', { environment,
     fetchImpl: (async () => { throw Error('ineligible identity contacted RPC'); }) as unknown as typeof fetch })).rejects.toThrow('wallet_identity_unavailable');
   expect(db.queries).toHaveLength(2);
 });
@@ -164,9 +165,9 @@ test('stored network identity is immutable and a Polygon replay requires explici
   for (const corrupt of [{ ...base, chain_id: 137 }, { ...legacy, chain_id: 1 }]) {
     await expect(readPersonalCompanyPayment(queued([[corrupt]]).database, 'owner', id)).rejects.toThrow('company_payment_unavailable');
   }
-  const unsafeWriter = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [legacy]]);
-  await expect(preparePersonalCompanyPayment(unsafeWriter.database, { requestId: id, amountAtomic: amount }, 'owner', {
-    environment, fetchImpl: rpcFetch(),
+  const unsafeWriter = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [base]]);
+  await expect(preparePersonalCompanyPayment(unsafeWriter.database, { requestId: id, amountAtomic: amount, chainId: 137 }, 'owner', {
+    environment, fetchImpl: rpcFetch({}, [], 137),
   })).rejects.toThrow('company_payment_unavailable');
 });
 
@@ -254,8 +255,19 @@ test('cancelling a display refresh rejects the entire stale result instead of pu
 });
 
 
-test('new preparations independently check the selected Ethereum or Polygon balance and persist its fixed token and recipient', async () => {
-  for (const chainId of [1, 137] as const) {
+test('new preparations require Polygon while exact historical Ethereum replays retain their own network', async () => {
+  for (const selector of [undefined, 1]) {
+    const blocked = queued([[]]), seen: string[] = [];
+    await expect(preparePersonalCompanyPayment(blocked.database, { requestId: id, amountAtomic: amount,
+      ...(selector === undefined ? {} : { chainId: selector }) }, 'owner', { environment, fetchImpl: rpcFetch({}, seen) }))
+      .rejects.toThrow('company_payment_network_changed');
+    expect(blocked.queries).toHaveLength(1); expect(seen).toHaveLength(0);
+  }
+  const historical = queued([[base]]);
+  expect((await preparePersonalCompanyPayment(historical.database, { requestId: id, amountAtomic: amount, chainId: 1 }, 'owner', {
+    environment, fetchImpl: rpcFetch(),
+  })).chainId).toBe(1);
+  for (const chainId of [137] as Array<1 | 137>) {
     const token = chainId === 1 ? COMPANY_PAYMENT_TOKEN : LEGACY_POLYGON_TOKEN;
     const prepared = { ...base, chain_id: chainId, token_address: token };
     const db = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [prepared]]), seen: string[] = [];

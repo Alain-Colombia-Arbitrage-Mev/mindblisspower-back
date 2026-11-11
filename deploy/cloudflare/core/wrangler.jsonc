@@ -75,7 +75,7 @@
         "CORE_HTTP_EGRESS_STRICT_ENABLED": "false",
         "CORE_OBSERVABILITY_ENABLED": "false",
         "CORE_AUTH_TRACE_ENABLED": "true",
-        "API_AUTH_ADDITIONAL_ORIGINS": "https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev,https://wallet.mindblisspower.com",
+        "API_AUTH_ADDITIONAL_ORIGINS": "https://mindblisspower.com,https://app.mindblisspower.com,https://mindbliss-portal-rewon.devfidubit.workers.dev,https://wallet.mindblisspower.com",
         "STRIPE_CHECKOUT_ENABLED": "false",
         "NOWPAYMENTS_MEMBERSHIPS_ENABLED": "true",
         "NOWPAYMENTS_OPERATIONAL_ENABLED": "true",
@@ -105,7 +105,7 @@
         "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
       },
       "containers": [
-        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-personal-polygon-relay:20261111-r11@sha256:4830f04ad04854cfade62903f0cd202b47854a153ab9b083e570d23d3fea9782", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100, "observability": { "enabled": true, "logs": { "enabled": true } } },
+        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-personal-polygon-only:20261111-r12@sha256:65fd8a6acda3925cd95c3a0108710b784cc66a95e84eb2600e9771745819f519", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100, "observability": { "enabled": true, "logs": { "enabled": true } } },
         { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
         { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-manual-main-20261105@sha256:af2d54ba02a219219520044d59e26a7fbb5f78570ffa747d0375747114b82125", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }

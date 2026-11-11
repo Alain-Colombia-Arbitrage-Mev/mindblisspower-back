@@ -7,7 +7,7 @@ import { sql } from 'drizzle-orm';
 import { readReownProductionOptions } from './reown-funding-options';
 import { createPersonalFundingIntent, readWalletFundingHistory, readWalletFundingStatus } from './wallet-funding';
 import { preparePersonalCompanyPayment, submitPersonalCompanyPayment, verifyPersonalCompanyPayment, readPersonalCompanyPaymentHistory } from './personal-company-payment';
-import { COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC, companyPaymentCalldata } from './personal-company-rpc';
+import { LEGACY_POLYGON_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC, companyPaymentCalldata } from './personal-company-rpc';
 import { registerPersonalCompanyPaymentRoutes } from '../../http/personal-company-payment-routes';
 import type { ApiEnvironment } from '../../http/types';
 import type { readPersonalCompanyPaymentActivity } from './personal-company-events';
@@ -94,24 +94,24 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     const fakeProvider = (async (target, init) => {
       const url = new URL(String(target));
       if (url.hostname === 'api.meld.io') {
-        expect(init?.method).toBe('GET'); expect(url.pathname).toContain(`/${scenario.country}/${scenario.currency}/USDT`);
+        expect(init?.method).toBe('GET'); expect(url.pathname).toContain(`/${scenario.country}/${scenario.currency}/USDT_POLYGON`);
         expect(url.searchParams.get('partners')).toBe('SWAPPED,MERCURYO'); providerGets++;
-        return Response.json([{ partner: 'SWAPPED', source: scenario.currency, destination: 'USDT', paymentMethods: [
+        return Response.json([{ partner: 'SWAPPED', source: scenario.currency, destination: 'USDT_POLYGON', paymentMethods: [
           { name: scenario.method, limits: { currencyCode: scenario.currency, min: scenario.currency === 'MXN' ? 148.66 : 7.81, max: 200_000 } },
         ] }]);
       }
       expect(url.origin + url.pathname).toBe('https://rpc.walletconnect.org/v1');
       expect(init?.method).toBe('POST');
       const request = JSON.parse(String(init?.body)); rpcMethods.push(request.method);
-      const transaction = { hash: scenario.hash, from: scenario.sender, to: COMPANY_PAYMENT_TOKEN, input: companyPaymentCalldata(scenario.fundedAtomic.toString()),
-        value: '0x0', chainId: '0x1', blockNumber: '0x64', blockHash };
-      const results: Record<string, unknown> = { eth_chainId: '0x1', eth_getTransactionByHash: dispatched ? transaction : null,
-        eth_getTransactionReceipt: dispatched ? { transactionHash: scenario.hash, from: scenario.sender, to: COMPANY_PAYMENT_TOKEN,
-          blockNumber: '0x64', blockHash, status: '0x1', logs: [{ address: COMPANY_PAYMENT_TOKEN,
+      const transaction = { hash: scenario.hash, from: scenario.sender, to: LEGACY_POLYGON_TOKEN, input: companyPaymentCalldata(scenario.fundedAtomic.toString()),
+        value: '0x0', chainId: '0x89', blockNumber: '0x64', blockHash };
+      const results: Record<string, unknown> = { eth_chainId: '0x89', eth_getTransactionByHash: dispatched ? transaction : null,
+        eth_getTransactionReceipt: dispatched ? { transactionHash: scenario.hash, from: scenario.sender, to: LEGACY_POLYGON_TOKEN,
+          blockNumber: '0x64', blockHash, status: '0x1', logs: [{ address: LEGACY_POLYGON_TOKEN,
             topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(scenario.sender), word(COMPANY_PAYMENT_RECIPIENT)], data: word(scenario.fundedAtomic.toString(16)), removed: false }] } : null,
         eth_blockNumber: `0x${head.toString(16)}`, eth_getBlockByNumber: { number: '0x64', hash: blockHash } };
       if (request.method === 'eth_call') {
-        const input = request.params[0]; expect(input.to).toBe(COMPANY_PAYMENT_TOKEN);
+        const input = request.params[0]; expect(input.to).toBe(LEGACY_POLYGON_TOKEN);
         if (input.data === '0x313ce567') return Response.json({ jsonrpc: '2.0', id: request.id, result: word('6') });
         expect(input.data).toBe(`0x70a08231${scenario.sender.slice(2).padStart(64, '0')}`);
         return Response.json({ jsonrpc: '2.0', id: request.id, result: word(balance.toString(16)) });
@@ -132,15 +132,18 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     if (scenario.currency === 'MXN') expect(available.routes[0]!.paymentMethods[0]!.minimumAmount).toBe(931);
     const funding = await createPersonalFundingIntent(database, { requestId: fundingId, walletAddress: scenario.sender, country: scenario.country,
       sourceCurrencyCode: scenario.currency, paymentMethodType: scenario.method, amount: scenario.sourceAmount }, scenario.owner, { fetchImpl: fakeProvider });
+    expect(available).toMatchObject({ destinationCurrencyCode: 'USDT_POLYGON', network: 'polygon', chainId: 137 });
+    expect(funding).toMatchObject({ destinationCurrencyCode: 'USDT_POLYGON', destination: {
+      address: scenario.sender, asset: 'USDT', network: 'polygon', chainId: 137 } });
     expect(funding.status).toBe('initiated'); expect(funding.requestedAmount).toBe(scenario.sourceAmount); expect(balance).toBe(0n);
-    await expect(preparePersonalCompanyPayment(database, { requestId: paymentId, amountAtomic: scenario.fundedAtomic.toString() }, scenario.owner, options))
+    await expect(preparePersonalCompanyPayment(database, { requestId: paymentId, amountAtomic: scenario.fundedAtomic.toString(), chainId: 137 }, scenario.owner, options))
       .rejects.toThrow('company_payment_insufficient_balance');
     expect((await readPersonalCompanyPaymentHistory(database, scenario.owner)).records).toHaveLength(0);
 
     // Deliberate simulation boundary: a test fixture supplies an observed token
     // balance. Neither an onramp purchase nor fiat/USDT valuation is inferred.
     balance = scenario.fundedAtomic;
-    const prepared = await preparePersonalCompanyPayment(database, { requestId: paymentId, amountAtomic: balance.toString() }, scenario.owner, options);
+    const prepared = await preparePersonalCompanyPayment(database, { requestId: paymentId, amountAtomic: balance.toString(), chainId: 137 }, scenario.owner, options);
     expect(prepared.amountAtomic).toBe(scenario.fundedAtomic.toString()); expect(prepared.status).toBe('prepared');
     expect(prepared.walletAddress).toBe(scenario.sender); expect(prepared.membershipAssignment).toBe('pending');
     await expect(submitPersonalCompanyPayment(database, { paymentId, transactionHash: scenario.hash }, scenario.owner, options))
@@ -159,13 +162,14 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     const callsAfterConfirmation = rpcMethods.length;
     expect(await submitPersonalCompanyPayment(database, { paymentId, transactionHash: scenario.hash }, scenario.owner, options)).toEqual(confirmed);
     expect(await verifyPersonalCompanyPayment(database, { paymentId }, scenario.owner, options)).toEqual(confirmed);
-    expect(await preparePersonalCompanyPayment(database, { requestId: paymentId, amountAtomic: scenario.fundedAtomic.toString() }, scenario.owner, options)).toEqual(confirmed);
+    expect(await preparePersonalCompanyPayment(database, { requestId: paymentId, amountAtomic: scenario.fundedAtomic.toString(), chainId: 137 }, scenario.owner, options)).toEqual(confirmed);
     expect(rpcMethods).toHaveLength(callsAfterConfirmation);
-    await expect(preparePersonalCompanyPayment(database, { requestId: randomUUID(), amountAtomic: '1' }, scenario.owner, options))
+    await expect(preparePersonalCompanyPayment(database, { requestId: randomUUID(), amountAtomic: '1', chainId: 137 }, scenario.owner, options))
       .rejects.toThrow('company_payment_insufficient_balance');
     const persisted = await readPersonalCompanyPaymentHistory(database, scenario.owner);
     expect(persisted.records).toHaveLength(1); expect(persisted.records[0]!.amountAtomic).toBe(scenario.fundedAtomic.toString());
     const originalFunding = await readWalletFundingStatus(database, scenario.owner, 'personal', fundingId);
+    expect(originalFunding.destination).toMatchObject({ address: scenario.sender, asset: 'USDT', network: 'polygon', chainId: 137 });
     expect(originalFunding.requestStatus).toBe('initiated');
     expect(originalFunding.confirmation).toEqual({ state: 'unconfirmed', source: 'none', testMode: false });
     expect((await readWalletFundingHistory(database, scenario.owner, 'personal')).settlement).toBe('unconfirmed');
@@ -175,16 +179,16 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     expect(balance).toBe(0n);
     const written = await database.execute(sql`SELECT * FROM payments.read_personal_company_payment(${scenario.owner},${paymentId}::uuid)`);
     expect(written).toHaveLength(1);
-    await assertOwnedApiJournal(scenario.owner, scenario.owner === 'flow-card' ? 'flow-spei' : 'flow-card', paymentId, scenario.hash, 1);
+    await assertOwnedApiJournal(scenario.owner, scenario.owner === 'flow-card' ? 'flow-spei' : 'flow-card', paymentId, scenario.hash, 137);
   }, 20_000);
 
-  test('an independently prefunded Polygon wallet transfers its own MAX without relabelling Ethereum onramp funds', async () => {
+  test('an independently prefunded Polygon balance transfers its own MAX without changing the earlier onramp records', async () => {
     const owner = 'flow-card', sender = `0x${'56'.repeat(20)}`, paymentId = randomUUID();
     const transactionHash = `0x${'d4'.repeat(32)}`, blockHash = `0x${'e5'.repeat(32)}`, amountAtomic = '42500001';
     const before = await readPersonalCompanyPaymentHistory(database, owner);
-    expect(before.records).toHaveLength(1); expect(before.records[0]!.chainId).toBe(1);
+    expect(before.records).toHaveLength(1); expect(before.records[0]!.chainId).toBe(137);
     const fundingBefore = await readWalletFundingHistory(database, owner, 'personal');
-    expect(fundingBefore.records).toHaveLength(1); expect(fundingBefore.records[0]!.destination.chainId).toBe(1);
+    expect(fundingBefore.records).toHaveLength(1); expect(fundingBefore.records[0]!.destination.chainId).toBe(137);
     let dispatched = false, head = '0xd2';
     const methods: string[] = [], word = (value: string) => `0x${value.replace(/^0x/, '').padStart(64, '0')}`;
     const fetchImpl = (async (target, init) => {
@@ -220,7 +224,7 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     expect(await verifyPersonalCompanyPayment(database, { paymentId }, owner, options)).toMatchObject({ status: 'confirmed', chainId: 137,
       tokenAddress: LEGACY_POLYGON_TOKEN, amountAtomic, confirmations: 12, membershipAssignment: 'pending' });
     const history = await readPersonalCompanyPaymentHistory(database, owner);
-    expect(history.records).toHaveLength(2); expect(new Set(history.records.map(record => record.chainId))).toEqual(new Set([1, 137]));
+    expect(history.records).toHaveLength(2); expect(new Set(history.records.map(record => record.chainId))).toEqual(new Set([137]));
     const fundingAfter = await readWalletFundingHistory(database, owner, 'personal');
     expect(fundingAfter).toEqual(fundingBefore);
     expect(methods.every(method => ['eth_chainId', 'eth_call', 'eth_getTransactionByHash', 'eth_getTransactionReceipt', 'eth_blockNumber', 'eth_getBlockByNumber'].includes(method))).toBe(true);

@@ -24,7 +24,7 @@ test('Core admits only isolated native company payment registration capabilities
 });
 test('Core denies crossed portals, forged payment policies, unsigned requests and aliases even with broad Core enabled', async () => {
   const never = () => assert.fail('unauthorized company payment reached a container');
-  for (const extra of [{ origin: 'https://wallet.mindblisspower.com' }, { origin: 'https://mindblisspower.com' }, { cookie: '' },
+  for (const extra of [{ origin: 'https://wallet.mindblisspower.com' }, { origin: 'https://mindblisspower.com.evil.test' }, { cookie: '' },
     { 'x-vp-act-as': 'other' }, { 'x-vp-auth-signature': '' }, { 'content-encoding': 'gzip' }]) {
     assert.equal((await dispatchCore(request('prepare', undefined, extra), env, never)).status, 503);
   }
@@ -41,6 +41,23 @@ test('Core denies crossed portals, forged payment policies, unsigned requests an
   const crossedRead = new Request(`https://auth.core.internal${prefix}/history`, { headers: request('prepare', undefined,
     { origin: 'https://wallet.mindblisspower.com' }).headers });
   assert.equal((await dispatchCore(crossedRead, env, never)).status, 503);
+});
+
+test('Core admits exact root and app personal payment and journal origins without relaxing the signed contract', async () => {
+  let calls = 0;
+  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  const never = () => assert.fail('invalid personal origin reached a container');
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1' }, { origin }), env, resolve)).status, 200);
+    const headers = request('prepare', undefined, { origin }).headers;
+    assert.equal((await dispatchCore(new Request(`https://auth.core.internal${prefix}/activity?limit=1`, { headers }), env, resolve)).status, 200);
+    assert.equal((await dispatchCore(request('prepare', undefined, { origin, 'x-vp-auth-signature': '' }), env, never)).status, 503);
+  }
+  for (const origin of ['https://mindblisspower.com.evil.test', 'http://mindblisspower.com',
+    'https://mindblisspower.com:443', 'https://mindblisspower.com/', 'https://wallet.mindblisspower.com']) {
+    assert.equal((await dispatchCore(request('prepare', undefined, { origin }), env, never)).status, 503);
+  }
+  assert.equal(calls, 4);
 });
 test('Core projects only safe company payment errors and never returns provider payloads or cookie headers', async () => {
   const response = await dispatchCore(request(), env, () => ({ fetch: async () => Response.json({ error: 'company_payment_rpc_unavailable', private: 'provider detail' },

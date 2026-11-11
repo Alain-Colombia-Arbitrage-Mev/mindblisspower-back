@@ -3,7 +3,7 @@ import { normalizeReownProductionRoutes, readReownProductionOptions } from './re
 
 const route = (partner = 'SWAPPED', methods: unknown[] = [
   { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 10, max: 30_000 } },
-]) => ({ partner, source: 'USD', destination: 'USDT', paymentMethods: methods });
+]) => ({ partner, source: 'USD', destination: 'USDT_POLYGON', paymentMethods: methods });
 const mockFetch = (handler: (url: string, init: RequestInit) => Response | Promise<Response>) =>
   (async (url, init) => handler(String(url), init!)) as typeof fetch;
 
@@ -11,7 +11,7 @@ test('personal discovery is a read-only production request scoped to the public 
   let calls = 0;
   const result = await readReownProductionOptions('US', { fetchImpl: mockFetch((url, init) => {
     calls++;
-    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT?partners=SWAPPED,MERCURYO');
+    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO');
     expect(init.method).toBe('GET');
     expect(init.redirect).toBe('error');
     expect(init.cache).toBe('no-store');
@@ -25,6 +25,7 @@ test('personal discovery is a read-only production request scoped to the public 
   }) });
   expect(calls).toBe(1);
   expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', sourceCurrencyCode: 'USD',
+    destinationCurrencyCode: 'USDT_POLYGON', network: 'polygon', chainId: 137,
     paymentMethods: ['CREDIT_DEBIT_CARD', 'ASTROPAY'], routes: [
       { serviceProvider: 'SWAPPED', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 }] },
       { serviceProvider: 'MERCURYO', paymentMethods: [
@@ -51,11 +52,11 @@ test('public USD discovery intersects provider limits with 30 to 15000 without a
 });
 
 test('MXN SPEI discovery keeps provider currency and limits distinct from USD', async () => {
-  const speiRoute = { partner: 'SWAPPED', source: 'MXN', destination: 'USDT',
+  const speiRoute = { partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
     paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } },
       { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'MXN', min: 100, max: 500000 } }] };
   const result = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch((url, init) => {
-    expect(url).toContain('/MX/MXN/USDT');
+    expect(url).toContain('/MX/MXN/USDT_POLYGON');
     expect(url).not.toContain('api-sb');
     expect(init.method).toBe('GET');
     return Response.json([speiRoute]);
@@ -78,7 +79,7 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
 });
 
 test('personal MXN discovery applies the fixed 931 floor, preserves higher provider minima and omits routes that cannot meet it', async () => {
-  const mxn = (partner: string, min: number, max: number) => ({ partner, source: 'MXN', destination: 'USDT',
+  const mxn = (partner: string, min: number, max: number) => ({ partner, source: 'MXN', destination: 'USDT_POLYGON',
     paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min, max } }] });
   const result = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() =>
     Response.json([mxn('SWAPPED', 148.66, 212370.61), mxn('MERCURYO', 1200, 10000)])) });
@@ -95,7 +96,7 @@ test('personal MXN discovery applies the fixed 931 floor, preserves higher provi
 test('personal funding admits US, Mexico and Colombia in USD and removes Neteller and Skrill rails', async () => {
   for (const country of ['US', 'MX', 'CO']) {
     const result = await readReownProductionOptions(country, { fetchImpl: mockFetch((url) => {
-      expect(url).toContain(`/${country}/USD/USDT`);
+      expect(url).toContain(`/${country}/USD/USDT_POLYGON`);
       return Response.json([route('SWAPPED', [
         { name: 'NETELLER', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
         { name: 'SKRILL', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
@@ -118,7 +119,7 @@ test('unavailable country routes and unknown limits never invent default rails',
 
 test('malformed provider routes cannot broaden allowed country, currency or amount', async () => {
   const invalid: unknown[] = [null, {}, { routes: [route()] }, [null], [{ ...route(), source: 'COP' }],
-    [{ ...route(), destination: 'USDT_ETHEREUM' }], [{ ...route(), destination: 'USDT_POLYGON' }], [route('SWAPPED', [{ name: 'card', limits: { currencyCode: 'USD', min: 10, max: 100 } }])],
+    [{ ...route(), destination: 'USDT_ETHEREUM' }], [{ ...route(), destination: 'USDT' }], [route('SWAPPED', [{ name: 'card', limits: { currencyCode: 'USD', min: 10, max: 100 } }])],
     [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'COP', min: 10, max: 100 } }])],
     [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: '10', max: 100 } }])],
     [route('SWAPPED', [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: -1, max: 100 } }])],

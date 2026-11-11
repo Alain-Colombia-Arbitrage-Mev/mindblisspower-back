@@ -57,6 +57,20 @@ test('journal never accepts client confirmation, source, owner, balance, signatu
     source: 'client_reported', event: 'wallet_failed', recordedAt: row.created_at.toISOString() });
 });
 
+test('root and app journals admit only signed client reports without promoting payment state', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; return [row]; } });
+  const path = `${PREFIX}/events`, raw = JSON.stringify({ eventId, paymentId: id, event: 'wallet_failed' });
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    const response = await app.request(path, signed(path, 'POST', raw, { origin }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ source: 'client_reported', event: 'wallet_failed' });
+    const forged = JSON.stringify({ eventId, paymentId: id, event: 'confirmed' });
+    expect((await app.request(path, signed(path, 'POST', forged, { origin }))).status).toBe(400);
+  }
+  expect(calls).toBe(2);
+});
+
 test('journal pagination rejects duplicate, encoded, cross-owner and arbitrary selectors while preserving uncached activity', async () => {
   let calls = 0; const app = application({ execute: async () => { calls++; return [row]; } });
   for (const path of [`${PREFIX}/events`, `${PREFIX}/events?paymentId=${id}&subject=other`, `${PREFIX}/events?paymentId=${id}&paymentId=${id}`,

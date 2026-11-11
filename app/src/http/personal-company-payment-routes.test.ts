@@ -43,7 +43,8 @@ test('company payment endpoints require a native session and valid signed BFF en
 test('only the personal portal may mutate a payment and all input selectors are strict and bounded', async () => {
   let calls = 0; const app = application({ execute: async () => { calls++; throw Error('unexpected database access'); } });
   const path = `${PREFIX}/prepare`, input = { requestId: id, amountAtomic: '20000000' }, body = JSON.stringify(input);
-  for (const origin of ['https://wallet.mindblisspower.com', 'https://mindblisspower.com', 'https://app.mindblisspower.com.evil.test']) {
+  for (const origin of ['https://wallet.mindblisspower.com', 'https://mindblisspower.com.evil.test', 'https://app.mindblisspower.com.evil.test',
+    'http://mindblisspower.com', 'https://mindblisspower.com:443', 'https://mindblisspower.com/']) {
     expect((await app.request(path, signed(path, 'POST', body, { origin }))).status).toBe(403);
   }
   for (const extra of [{ recipientAddress: address }, { walletAddress: address }, { subject: 'other' }, { chainId: 56 }, { amountAtomic: '01' }]) {
@@ -53,6 +54,20 @@ test('only the personal portal may mutate a payment and all input selectors are 
   expect((await app.request(path, signed(path, 'POST', body, { 'content-type': 'text/plain' }))).status).toBe(415);
   expect((await app.request(path, signed(path, 'POST', ' '.repeat(2049)))).status).toBe(413);
   expect(calls).toBe(0);
+});
+
+test('root and app personal portals keep the same owned recovery and strict mutation contract', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; return [row]; } });
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    const path = `${PREFIX}/history`, response = await app.request(path, signed(path, 'GET', '', { origin }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    const prepare = `${PREFIX}/prepare`, raw = JSON.stringify({ requestId: id, amountAtomic: '1', subject: 'other' });
+    expect((await app.request(prepare, signed(prepare, 'POST', raw, { origin }))).status).toBe(400);
+    expect((await app.request(path, signed(path, 'GET', '', { origin, 'x-vp-auth-signature': '0'.repeat(64) }))).status).toBe(403);
+  }
+  expect(calls).toBe(2);
 });
 test('owned status and recovery history are uncached and cannot select another owner or forge confirmation', async () => {
   let calls = 0; const app = application({ execute: async () => { calls++; return [row]; } });
@@ -156,7 +171,7 @@ test('dual balances retain native owner isolation, reject selectors and keep hea
 });
 
 
-test('HTTP preparation accepts only Ethereum or Polygon, with omitted chain defaulting to Ethereum and server-derived policy', async () => {
+test('HTTP new preparation requires explicit Polygon and reports a safe network change for old Ethereum clients', async () => {
   const path = `${PREFIX}/prepare`, created = new Date('2026-11-10T20:00:00Z');
   const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
     person_email: 'synthetic@example.invalid', person_status: 'active', user_id: 'owner', blacklisted: false, access_restricted: false };
@@ -174,6 +189,12 @@ test('HTTP preparation accepts only Ethereum or Polygon, with omitted chain defa
       }) as typeof fetch });
     const body = JSON.stringify({ requestId: id, amountAtomic: row.amount_atomic, ...(selector === undefined ? {} : { chainId: selector }) });
     const response = await app.request(path, signed(path, 'POST', body));
+    if (chainId === 1) {
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: 'company_payment_network_changed' });
+      expect(rows).toHaveLength(3);
+      continue;
+    }
     expect(response.status).toBe(201); expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(await response.json()).toMatchObject({ chainId, tokenAddress: token, recipientAddress: COMPANY_PAYMENT_RECIPIENT, amountAtomic: row.amount_atomic });
   }

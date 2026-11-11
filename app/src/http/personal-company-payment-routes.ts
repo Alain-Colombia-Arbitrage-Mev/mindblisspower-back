@@ -8,13 +8,13 @@ import { authProxyContext } from './auth-proxy-context';
 import { recordPersonalCompanyPaymentEvent, readPersonalCompanyPaymentActivity } from '../modules/payments/personal-company-events';
 
 const PREFIX = '/api/member/company-payments';
-const ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const noStore = { 'Cache-Control': 'private, no-store' };
 const knownErrors = new Set(['company_payment_forbidden', 'company_payment_wallet_not_linked', 'wallet_identity_unavailable',
   'company_payment_not_found', 'company_payment_rate_limited', 'company_payment_request_already_used', 'company_payment_hash_reused',
   'company_payment_invalid_transition', 'company_payment_pending_exists', 'company_payment_insufficient_balance',
   'company_payment_transaction_pending', 'company_payment_transaction_mismatch', 'company_payment_confirmation_conflict',
-  'company_payment_network_retired', 'company_payment_unconfigured', 'company_payment_rpc_unavailable',
+  'company_payment_network_retired', 'company_payment_network_changed', 'company_payment_unconfigured', 'company_payment_rpc_unavailable',
   'company_payment_event_conflict', 'company_payment_invalid_cursor', 'company_payment_invalid_request']);
 function failure(error: unknown) {
   if (error instanceof z.ZodError || error instanceof SyntaxError) return { error: 'invalid_request', status: 400 as const };
@@ -31,7 +31,7 @@ function failure(error: unknown) {
   if (['company_payment_invalid_cursor', 'company_payment_invalid_request'].includes(code)) return { error: code, status: 400 as const };
   if (code === 'company_payment_rate_limited') return { error: code, status: 429 as const };
   if (['company_payment_request_already_used', 'company_payment_hash_reused', 'company_payment_invalid_transition',
-    'company_payment_pending_exists', 'company_payment_insufficient_balance', 'company_payment_network_retired', 'company_payment_transaction_pending',
+    'company_payment_pending_exists', 'company_payment_insufficient_balance', 'company_payment_network_retired', 'company_payment_network_changed', 'company_payment_transaction_pending',
     'company_payment_transaction_mismatch', 'company_payment_confirmation_conflict', 'company_payment_event_conflict'].includes(code)) return { error: code, status: 409 as const };
   if (['company_payment_unconfigured', 'company_payment_rpc_unavailable'].includes(code)) return { error: code, status: 503 as const };
   return { error: 'company_payment_unavailable', status: 503 as const };

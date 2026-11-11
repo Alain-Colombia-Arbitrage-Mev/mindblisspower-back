@@ -56,6 +56,26 @@ test('relay forms reject selectors, raw transaction instructions, forged statuse
   expect((await app.request(path, signed(path, 'POST', 'x'.repeat(4097)))).status).toBe(413);
   expect(calls).toBe(0);
 });
+
+test('root and app relay portals share scoped capabilities while lookalikes remain blocked', async () => {
+  let calls = 0;
+  const app = application({ execute: async () => { calls++; return []; } });
+  const path = `${PREFIX}/capabilities`;
+  for (const origin of ['https://mindblisspower.com', 'https://app.mindblisspower.com']) {
+    const response = await app.request(path, signed(path, 'GET', '', { origin }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toMatchObject({ executionMode: 'polygon_native_meta_aa', chainId: 137 });
+    const prepare = `${PREFIX}/prepare`, raw = JSON.stringify({ requestId: id, amountAtomic: '1', recipientAddress: 'other' });
+    expect((await app.request(prepare, signed(prepare, 'POST', raw, { origin }))).status).toBe(400);
+    expect((await app.request(path, signed(path, 'GET', '', { origin, 'x-vp-auth-signature': '0'.repeat(64) }))).status).toBe(403);
+  }
+  for (const origin of ['https://wallet.mindblisspower.com', 'https://mindblisspower.com.evil.test',
+    'http://mindblisspower.com', 'https://mindblisspower.com:443', 'https://mindblisspower.com/']) {
+    expect((await app.request(path, signed(path, 'GET', '', { origin }))).status).toBe(403);
+  }
+  expect(calls).toBe(0);
+});
 test('relay status/history queries cannot select another owner or parse duplicate/encoded identifiers; errors contain safe codes only', async () => {
   let calls = 0; const app = application({ execute: async () => { calls++; return []; } });
   for (const suffix of [`status?paymentId=${id}&subject=other`, `status?paymentId=${id}&paymentId=${id}`, `status?paymentId=%31${id.slice(1)}`,

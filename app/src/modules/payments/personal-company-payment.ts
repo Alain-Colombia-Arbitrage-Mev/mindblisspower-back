@@ -118,6 +118,7 @@ export async function preparePersonalCompanyPayment(database: Database, raw: unk
       active(rpc.signal);
       return view(previous);
     }
+    if (input.chainId !== 137) throw new Error('company_payment_network_changed');
     const binding = await readWalletBinding(database, { userId: owner });
     if (!binding.linked || typeof binding.address !== 'string') throw new Error('company_payment_wallet_not_linked');
     const sender = binding.address.toLowerCase();

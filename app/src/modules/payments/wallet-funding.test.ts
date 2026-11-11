@@ -15,7 +15,7 @@ const environment = { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'syn
 const assignment = { status: 'assigned', address, address_family: 'EVM', asset: 'USDT', checkout_reference: customerReference, assigned_at: createdAt };
 const method = (name = 'CREDIT_DEBIT_CARD', min = 20, max = 15000) => ({ name, limits: { currencyCode: 'USD', min, max } });
 const route = (partner = 'TRANSAK', paymentMethods = [method()]) => ({ partner, source: 'USD', destination: 'USDT_POLYGON', paymentMethods });
-const personalRoute = (partner = 'SWAPPED', paymentMethods = [method()]) => ({ partner, source: 'USD', destination: 'USDT', paymentMethods });
+const personalRoute = (partner = 'SWAPPED', paymentMethods = [method()]) => ({ partner, source: 'USD', destination: 'USDT_POLYGON', paymentMethods });
 const productionFetch = (async () => Response.json([personalRoute('SWAPPED')])) as unknown as typeof fetch;
 
 function withSandboxOptions(widgetFetch: typeof fetch): typeof fetch {
@@ -40,9 +40,10 @@ test('personal requests persist an unconfirmed Reown intent without any Meld quo
   const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
   const result = await createPersonalFundingIntent(database, input, 'synthetic-owner', { fetchImpl: productionFetch });
   expect(result).toEqual({ checkoutReference: id, walletKind: 'personal', environment: 'production', provider: 'reown',
+    destinationCurrencyCode: 'USDT_POLYGON', destination: { address, asset: 'USDT', network: 'polygon', chainId: 137 },
     status: 'initiated', requestedAmount: 100, sourceCurrencyCode: 'USD', paymentMethodType: 'CREDIT_DEBIT_CARD', allowedProviders: ['SWAPPED'], createdAt: createdAt.toISOString() });
   expect(queries).toHaveLength(1);
-  expect(queries[0]!.sql).toContain('payments.create_reown_funding_intent');
+  expect(queries[0]!.sql).toContain('payments.create_reown_funding_intent_v4');
   expect(queries[0]!.params).toEqual(['synthetic-owner', address, 'US', 100, id, 'CREDIT_DEBIT_CARD', 'USD']);
   expect(Object.keys(result)).not.toContain('commission');
   expect(Object.keys(result)).not.toContain('destinationAmount');
@@ -50,6 +51,23 @@ test('personal requests persist an unconfirmed Reown intent without any Meld quo
     await expect(createPersonalFundingIntent(database, bad, 'synthetic-owner')).rejects.toThrow();
   }
   expect(queries).toHaveLength(1);
+});
+
+test('new personal intent cannot use an Ethereum route or a caller-selected destination and never writes a mismatched checkout', async () => {
+  for (const destination of ['USDT', 'USDT_ETHEREUM', 'USDT_ARBITRUM']) {
+    const { database, queries } = queuedDatabase([]);
+    await expect(createPersonalFundingIntent(database, input, 'owner', {
+      fetchImpl: (async () => Response.json([{ ...personalRoute(), destination }])) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_provider_unavailable');
+    expect(queries).toHaveLength(0);
+  }
+  const { database, queries } = queuedDatabase([]);
+  for (const extra of [{ chainId: 1 }, { destinationCurrencyCode: 'USDT' }, { network: 'ethereum' }]) {
+    await expect(createPersonalFundingIntent(database, { ...input, ...extra }, 'owner', {
+      fetchImpl: (async () => { throw Error('caller policy reached discovery'); }) as unknown as typeof fetch,
+    })).rejects.toThrow();
+  }
+  expect(queries).toHaveLength(0);
 });
 
 test('personal intent revalidates its own production method and amount, then computes eligible providers server-side', async () => {
@@ -118,13 +136,13 @@ test('public personal USD30 to 15000 is independent of administrative USD50 and 
 test('personal SPEI uses the actual MXN amount and provider limits without manufacturing a USD valuation', async () => {
   const speiInput = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', amount: 931 };
   const fetchImpl = (async (url, init) => {
-    expect(String(url)).toContain('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/MX/MXN/USDT');
+    expect(String(url)).toContain('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/MX/MXN/USDT_POLYGON');
     expect(init?.method).toBe('GET');
     expect(new Headers(init?.headers).get('authorization')).not.toContain(environment.MELD_API_SANDBOX);
-    return Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT', paymentMethods: [
+    return Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [
       { name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212_370.61 } },
       { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'MXN', min: 100, max: 500_000 } },
-    ] }, { partner: 'TOPPER', source: 'MXN', destination: 'USDT', paymentMethods: [
+    ] }, { partner: 'TOPPER', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [
       { name: 'SPEI', limits: { currencyCode: 'MXN', min: 1, max: 500_000 } },
     ] }]);
   }) as typeof fetch;
@@ -140,7 +158,7 @@ test('personal SPEI uses the actual MXN amount and provider limits without manuf
   }
   const higher = queuedDatabase([]);
   await expect(createPersonalFundingIntent(higher.database, speiInput, 'owner', { fetchImpl: (async () => Response.json([
-    { partner: 'MERCURYO', source: 'MXN', destination: 'USDT', paymentMethods: [
+    { partner: 'MERCURYO', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [
       { name: 'SPEI', limits: { currencyCode: 'MXN', min: 1200, max: 10000 } },
     ] },
   ])) as unknown as typeof fetch })).rejects.toThrow('wallet_funding_amount_unavailable');
@@ -200,7 +218,7 @@ test('Colombia personal funding records USD30 through its production routes and 
   const captured = queuedDatabase([[{ id, created_at: createdAt }]]);
   const result = await createPersonalFundingIntent(captured.database, { ...input, country: 'CO', amount: 30 }, 'owner', {
     fetchImpl: (async (url, init) => {
-      expect(String(url)).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/CO/USD/USDT?partners=SWAPPED,MERCURYO');
+      expect(String(url)).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/CO/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO');
       expect(init?.method).toBe('GET');
       expect(new Headers(init?.headers).get('authorization')).not.toContain(environment.MELD_API_SANDBOX);
       return Response.json([personalRoute('SWAPPED'), personalRoute('MERCURYO')]);

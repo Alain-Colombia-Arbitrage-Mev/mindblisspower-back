@@ -1,7 +1,7 @@
 export const WALLET_FUNDING_PREFIX = '/api/member/wallet-funding';
 export const WALLET_FUNDING_MAX_BODY = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PERSONAL_ORIGINS = new Set(['https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const PERSONAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const ADMINISTRATIVE_ORIGIN = 'https://wallet.mindblisspower.com';
 const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'CO']);
 
