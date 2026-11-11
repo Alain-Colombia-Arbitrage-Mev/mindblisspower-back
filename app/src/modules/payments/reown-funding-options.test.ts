@@ -26,26 +26,26 @@ test('personal discovery is a read-only production request scoped to the public 
   expect(calls).toBe(1);
   expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', sourceCurrencyCode: 'USD',
     paymentMethods: ['CREDIT_DEBIT_CARD', 'ASTROPAY'], routes: [
-      { serviceProvider: 'SWAPPED', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 100, maximumAmount: 15_000, minimumUsd: 100, maximumUsd: 15_000 }] },
+      { serviceProvider: 'SWAPPED', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 }] },
       { serviceProvider: 'MERCURYO', paymentMethods: [
-        { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 100, maximumAmount: 15_000, minimumUsd: 100, maximumUsd: 15_000 },
-        { method: 'ASTROPAY', currencyCode: 'USD', minimumAmount: 100, maximumAmount: 15_000, minimumUsd: 100, maximumUsd: 15_000 },
+        { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 },
+        { method: 'ASTROPAY', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 },
       ] },
     ] });
   expect(JSON.stringify(result)).not.toContain('WXETMu');
 });
 
-test('public USD discovery intersects provider limits with 100 to 15000 without a test-minimum bypass', async () => {
+test('public USD discovery intersects provider limits with 30 to 15000 without a test-minimum bypass', async () => {
   const usd = (partner: string, min: number, max: number) => route(partner, [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min, max } }]);
   const result = await readReownProductionOptions('US', { fetchImpl: mockFetch(() => Response.json([
     usd('SWAPPED', 7.81, 111530), usd('MERCURYO', 200, 12000),
   ])) });
   expect(result.routes.map(route => route.paymentMethods[0])).toEqual([
-    { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 100, maximumAmount: 15000, minimumUsd: 100, maximumUsd: 15000 },
+    { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15000, minimumUsd: 30, maximumUsd: 15000 },
     { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 200, maximumAmount: 12000, minimumUsd: 200, maximumUsd: 12000 },
   ]);
   const none = await readReownProductionOptions('US', { fetchImpl: mockFetch(() => Response.json([
-    usd('SWAPPED', 1, 99.99), usd('MERCURYO', 15000.01, 20000),
+    usd('SWAPPED', 1, 29.99), usd('MERCURYO', 15000.01, 20000),
   ])) });
   expect(none.paymentMethods).toEqual([]); expect(none.routes).toEqual([]);
 });

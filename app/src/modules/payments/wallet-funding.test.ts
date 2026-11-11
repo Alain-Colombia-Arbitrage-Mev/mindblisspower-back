@@ -75,15 +75,15 @@ test('personal intent revalidates its own production method and amount, then com
   await expect(createPersonalFundingIntent(queuedDatabase([]).database, { ...input, paymentMethodType: undefined }, 'owner', { fetchImpl })).rejects.toThrow();
 });
 
-test('public personal USD100 to 15000 is independent of administrative USD50 and each provider can impose a higher minimum', async () => {
+test('public personal USD30 to 15000 is independent of administrative USD50 and each provider can impose a higher minimum', async () => {
   const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
-  const result = await createPersonalFundingIntent(database, { ...input, amount: 100 }, 'owner', {
+  const result = await createPersonalFundingIntent(database, { ...input, amount: 30 }, 'owner', {
     fetchImpl: (async () => Response.json([route('SWAPPED', [method('CREDIT_DEBIT_CARD', 10, 1000)]),
       route('MERCURYO', [method('CREDIT_DEBIT_CARD', 150, 1000)]), route('TOPPER', [method('CREDIT_DEBIT_CARD', 1, 1000)])])) as unknown as typeof fetch,
   });
-  expect(result.requestedAmount).toBe(100);
+  expect(result.requestedAmount).toBe(30);
   expect(result.allowedProviders).toEqual(['SWAPPED']);
-  expect(queries[0]!.params).toEqual(['owner', address, 'US', 100, id, 'CREDIT_DEBIT_CARD', 'USD']);
+  expect(queries[0]!.params).toEqual(['owner', address, 'US', 30, id, 'CREDIT_DEBIT_CARD', 'USD']);
   const thirty = queuedDatabase([[{ id, created_at: createdAt }]]);
   const both = await createPersonalFundingIntent(thirty.database, { ...input, amount: 200 }, 'owner', {
     fetchImpl: (async () => Response.json([route('SWAPPED', [method('CREDIT_DEBIT_CARD', 10, 1000)]),
@@ -94,7 +94,7 @@ test('public personal USD100 to 15000 is independent of administrative USD50 and
   await expect(createPersonalFundingIntent(blocked.database, { ...input, amount: 100 }, 'owner', {
     fetchImpl: (async () => Response.json([route('MERCURYO', [method('CREDIT_DEBIT_CARD', 150, 1000)])])) as unknown as typeof fetch,
   })).rejects.toThrow('wallet_funding_amount_unavailable');
-  for (const amount of [20, 50, 99.99, 15000.01]) await expect(createPersonalFundingIntent(blocked.database, { ...input, amount }, 'owner', {
+  for (const amount of [20, 29.99, 15000.01]) await expect(createPersonalFundingIntent(blocked.database, { ...input, amount }, 'owner', {
     fetchImpl: (async () => { throw new Error('outside public bounds must not query providers'); }) as unknown as typeof fetch,
   })).rejects.toThrow('wallet_funding_amount_unavailable');
   const maximum = queuedDatabase([[{ id, created_at: createdAt }]]);

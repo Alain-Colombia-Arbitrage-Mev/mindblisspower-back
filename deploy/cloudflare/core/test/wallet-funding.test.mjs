@@ -189,12 +189,12 @@ test('personal and administrative mutations cannot cross their explicitly separa
   assert.equal(calls, 2);
 });
 
-test('Core admits only public personal USD100 to 15000 while retaining administrative USD50 to25000', async () => {
+test('Core admits only public personal USD30 to 15000 while retaining administrative USD50 to25000', async () => {
   let calls = 0;
   const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   const never = () => assert.fail('below minimum request dispatched');
-  for (const amount of [100, 15000]) assert.equal((await dispatchCore(request(path, { ...input, amount }), env, resolve)).status, 200);
-  for (const amount of [20, 50, 99.99, 15000.01]) assert.equal((await dispatchCore(request(path, { ...input, amount }), env, never)).status, 503);
+  for (const amount of [30, 15000]) assert.equal((await dispatchCore(request(path, { ...input, amount }), env, resolve)).status, 200);
+  for (const amount of [20, 29.99, 15000.01]) assert.equal((await dispatchCore(request(path, { ...input, amount }), env, never)).status, 503);
   for (const amount of [20, 49.99]) assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
     ...input, amount, serviceProvider: 'BANXA' }), env, never)).status, 503);
   assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
