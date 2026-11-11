@@ -47,7 +47,7 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
   }) });
   expect(result.sourceCurrencyCode).toBe('MXN');
   expect(result.routes).toEqual([{ serviceProvider: 'SWAPPED', paymentMethods: [
-    { method: 'SPEI', currencyCode: 'MXN', minimumAmount: 148.66, maximumAmount: 212370.61 },
+    { method: 'SPEI', currencyCode: 'MXN', minimumAmount: 931, maximumAmount: 212370.61 },
   ] }]);
   expect(JSON.stringify(result)).not.toContain('minimumUsd');
   expect(() => normalizeReownProductionRoutes([speiRoute], 'USD')).toThrow();
@@ -59,6 +59,21 @@ test('MXN SPEI discovery keeps provider currency and limits distinct from USD', 
   }
   await expect(readReownProductionOptions('US', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() => { throw new Error('must not fetch'); }) }))
     .rejects.toThrow('wallet_funding_invalid_currency');
+});
+
+test('personal MXN discovery applies the fixed 931 floor, preserves higher provider minima and omits routes that cannot meet it', async () => {
+  const mxn = (partner: string, min: number, max: number) => ({ partner, source: 'MXN', destination: 'USDT_POLYGON',
+    paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min, max } }] });
+  const result = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() =>
+    Response.json([mxn('SWAPPED', 148.66, 212370.61), mxn('MERCURYO', 1200, 10000)])) });
+  expect(result.routes.map(route => route.paymentMethods[0]!.minimumAmount)).toEqual([931, 1200]);
+  const unavailable = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() =>
+    Response.json([mxn('SWAPPED', 100, 930.99)])) });
+  expect(unavailable.routes).toEqual([]); expect(unavailable.paymentMethods).toEqual([]);
+  const exact = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() =>
+    Response.json([mxn('SWAPPED', 100, 931)])) });
+  expect(exact.routes[0]!.paymentMethods[0]).toEqual({ method: 'SPEI', currencyCode: 'MXN', minimumAmount: 931, maximumAmount: 931 });
+  expect(JSON.stringify(result)).not.toMatch(/minimumUsd|exchangeRate|fiatAmountInUsd/);
 });
 
 test('personal funding is limited to US and Mexico and removes Neteller and Skrill rails', async () => {

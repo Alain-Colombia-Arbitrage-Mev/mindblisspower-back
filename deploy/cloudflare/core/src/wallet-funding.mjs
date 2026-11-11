@@ -51,7 +51,7 @@ export function walletFundingRequest(request, url, body, env, ready) {
       || (personal && (!PERSONAL_COUNTRIES.has(input.country) || ['NETELLER', 'SKRILL'].includes(input.paymentMethodType)))
       || typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)
       || (sourceCurrencyCode !== 'USD' && !localSpei)
-      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 20 : 50) : 0.01)
+      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 20 : 50) : 931)
       || input.amount > (sourceCurrencyCode === 'USD' ? 25000 : 1_000_000_000)
       || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001
       || typeof input.paymentMethodType !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(input.paymentMethodType)) return false;

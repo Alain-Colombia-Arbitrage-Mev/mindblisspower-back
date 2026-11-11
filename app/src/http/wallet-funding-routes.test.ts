@@ -22,7 +22,9 @@ function signedRequest(path: string, body: string, extraHeaders: Record<string, 
     'x-vp-auth-client-ip': ip, 'x-vp-auth-timestamp': timestamp, 'x-vp-auth-signature': signature, ...extraHeaders }, body };
 }
 
-function application({ signedIn = true, execute = async () => [] }: { signedIn?: boolean; execute?: (input: unknown) => Promise<unknown[]> } = {}) {
+function application({ signedIn = true, execute = async () => [], fetchImpl }: {
+  signedIn?: boolean; execute?: (input: unknown) => Promise<unknown[]>; fetchImpl?: typeof fetch;
+} = {}) {
   const app = new Hono<ApiEnvironment>();
   app.use('*', async (context, next) => {
     context.set('session', signedIn ? { user: { id: 'synthetic-owner' } } as never : null);
@@ -31,7 +33,7 @@ function application({ signedIn = true, execute = async () => [] }: { signedIn?:
   registerWalletFundingRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
     environment: { BETTER_AUTH_URL: origin,
       BETTER_AUTH_TRUSTED_ORIGINS: `${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
-    fetchImpl: (async url => {
+    fetchImpl: fetchImpl || (async url => {
       expect(String(url)).toStartWith('https://api.meld.io/');
       return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT_POLYGON',
         paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
@@ -83,6 +85,20 @@ test('HTTP personal funding accepts USD20 and rejects USD19.99 while administrat
   expect(administrative.status).toBe(409);
   expect(await administrative.json()).toEqual({ error: 'wallet_funding_amount_unavailable' });
   expect(calls).toBe(1);
+});
+
+test('HTTP personal SPEI rejects 930.99 MXN and accepts 931 MXN without changing the source currency', async () => {
+  let writes = 0;
+  const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; },
+    fetchImpl: (async () => Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
+      paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } }] }])) as unknown as typeof fetch });
+  for (const [amount, status] of [[930.99, 409], [931, 201]] as const) {
+    const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...input, country: 'MX', sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', amount }) });
+    expect(response.status).toBe(status);
+    if (status === 201) expect(await response.json()).toMatchObject({ requestedAmount: 931, sourceCurrencyCode: 'MXN', allowedProviders: ['SWAPPED'] });
+  }
+  expect(writes).toBe(1);
 });
 
 test('funding mutations are isolated by exact portal origin even when both hosts trust the same native auth service', async () => {

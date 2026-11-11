@@ -4,6 +4,7 @@
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
 const PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
 export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX'] as const;
+export const PERSONAL_FUNDING_MINIMUM_MXN = 931;
 const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
 const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;
@@ -155,7 +156,13 @@ export async function readReownProductionOptions(country: string, {
     phase = 'body';
     const body = await boundedJson(response, controller.signal);
     phase = 'normalization';
-    const routes = normalizeReownProductionRoutes(body, sourceCurrencyCode);
+    const normalized = normalizeReownProductionRoutes(body, sourceCurrencyCode);
+    // This is a fixed MXN business minimum, not a USD exchange-rate quote.
+    // A provider can require more, and a route whose maximum is lower is absent.
+    const routes = sourceCurrencyCode === 'MXN' ? normalized.map(route => ({ ...route,
+      paymentMethods: route.paymentMethods.filter(method => method.maximumAmount >= PERSONAL_FUNDING_MINIMUM_MXN)
+        .map(method => ({ ...method, minimumAmount: Math.max(PERSONAL_FUNDING_MINIMUM_MXN, method.minimumAmount) })),
+    })).filter(route => route.paymentMethods.length > 0) : normalized;
     const paymentMethods = [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))];
     if (controller.signal.aborted) throw unavailable();
     return { walletKind: 'personal', environment: 'production', provider: 'reown', country, sourceCurrencyCode, paymentMethods, routes };

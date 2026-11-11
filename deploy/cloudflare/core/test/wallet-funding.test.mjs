@@ -93,7 +93,8 @@ test('currency discovery admits canonical selectors while duplicate and encoded 
   assert.equal((await dispatchCore(read(administrative + '?country=MX&serviceProvider=TRANSAK&sourceCurrencyCode=MXN'), env, never)).status, 503);
   assert.equal((await dispatchCore(read(administrative + '?country=MX&sourceCurrencyCode=MXN&serviceProvider=SWAPPED'), env, never)).status, 503);
   // Admission is not financial valuation: the API still rejects nonUSD writes until an independently verified provider valuation exists.
-  assert.equal((await dispatchCore(request(path, { ...input, country: 'MX', paymentMethodType: 'SPEI', sourceCurrencyCode: 'MXN', amount: 150 }), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, { ...input, country: 'MX', paymentMethodType: 'SPEI', sourceCurrencyCode: 'MXN', amount: 931 }), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(request(path, { ...input, country: 'MX', paymentMethodType: 'SPEI', sourceCurrencyCode: 'MXN', amount: 930.99 }), env, never)).status, 503);
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: 'mxn', amount: 1000 }), env, never)).status, 503);
   assert.equal((await dispatchCore(request(path, { ...input, sourceCurrencyCode: null, amount: 1000 }), env, never)).status, 503);
   assert.equal((await dispatchCore(request(path, { ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount: 1000 }), env, never)).status, 503);

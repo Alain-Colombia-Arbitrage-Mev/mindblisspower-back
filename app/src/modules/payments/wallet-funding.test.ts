@@ -110,7 +110,7 @@ test('personal USD20 minimum is independent of administrative USD50 and each pro
 });
 
 test('personal SPEI uses the actual MXN amount and provider limits without manufacturing a USD valuation', async () => {
-  const speiInput = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', amount: 148.66 };
+  const speiInput = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', amount: 931 };
   const fetchImpl = (async (url, init) => {
     expect(String(url)).toContain('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/MX/MXN/USDT_POLYGON');
     expect(init?.method).toBe('GET');
@@ -124,14 +124,26 @@ test('personal SPEI uses the actual MXN amount and provider limits without manuf
   }) as typeof fetch;
   const { database, queries } = queuedDatabase([[{ id, created_at: createdAt }]]);
   const result = await createPersonalFundingIntent(database, speiInput, 'owner', { fetchImpl });
-  expect(result).toMatchObject({ requestedAmount: 148.66, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', allowedProviders: ['SWAPPED'] });
-  expect(queries[0]!.params).toEqual(['owner', address, 'MX', 148.66, id, 'SPEI', 'MXN']);
-  for (const amount of [148.65, 212_370.62]) {
+  expect(result).toMatchObject({ requestedAmount: 931, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', allowedProviders: ['SWAPPED'] });
+  expect(queries[0]!.params).toEqual(['owner', address, 'MX', 931, id, 'SPEI', 'MXN']);
+  for (const amount of [148.66, 930.99, 212_370.62]) {
     const blocked = queuedDatabase([]);
     await expect(createPersonalFundingIntent(blocked.database, { ...speiInput, amount }, 'owner', { fetchImpl }))
       .rejects.toThrow('wallet_funding_amount_unavailable');
     expect(blocked.queries).toHaveLength(0);
   }
+  const higher = queuedDatabase([]);
+  await expect(createPersonalFundingIntent(higher.database, speiInput, 'owner', { fetchImpl: (async () => Response.json([
+    { partner: 'MERCURYO', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [
+      { name: 'SPEI', limits: { currencyCode: 'MXN', min: 1200, max: 10000 } },
+    ] },
+  ])) as unknown as typeof fetch })).rejects.toThrow('wallet_funding_amount_unavailable');
+  expect(higher.queries).toHaveLength(0);
+  const below = queuedDatabase([]);
+  await expect(createPersonalFundingIntent(below.database, { ...speiInput, amount: 930.99 }, 'owner', {
+    fetchImpl: (async () => { throw new Error('below business minimum must not query a quote'); }) as unknown as typeof fetch,
+  })).rejects.toThrow('wallet_funding_amount_unavailable');
+  expect(below.queries).toHaveLength(0);
   for (const change of [{ country: 'US' }, { paymentMethodType: 'CREDIT_DEBIT_CARD' }, { sourceCurrencyCode: 'COP' }]) {
     const blocked = queuedDatabase([]);
     await expect(createPersonalFundingIntent(blocked.database, { ...speiInput, ...change }, 'owner', {
