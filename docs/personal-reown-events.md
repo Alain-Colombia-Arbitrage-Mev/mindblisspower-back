@@ -9,6 +9,10 @@ The public dashboard client also implements native `/auth/v1/webhooks` CRUD and
 per-endpoint secret rotation against `api.reown.com`. Those client-management
 calls do not document the outgoing signature protocol and are not used by this
 receiver. No authenticated dashboard API credential is copied into the app.
+The dashboard's displayed event count is `success_count + failure_count`, with
+missing counts treated as zero. It is not a count of selected event types.
+The create request supplies only the endpoint URL; no event-type list or
+incoming-signature configuration appears in that public dashboard client.
 
 The frontend route is initially a quarantined protocol-discovery receiver.
 It always returns HTTP 503 `reown_webhook_verification_pending` for inspected
