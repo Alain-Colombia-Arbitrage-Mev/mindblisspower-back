@@ -4,7 +4,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { readWalletBinding } from '../identity/wallet-link';
 import { checkCompanyPaymentBalance, checkCompanyPaymentSubmission, companyPaymentAtomic, createCompanyPaymentRpc,
   verifyCompanyPaymentReceipt, COMPANY_PAYMENT_CHAIN_ID, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT,
-  COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS, companyPaymentNetwork } from './personal-company-rpc';
+  COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS, companyPaymentNetwork, readCompanyPaymentBalances, readPersonalWalletNetworkBalances, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
 
 type Database = Pick<IdentityDatabase, 'execute'>;
 type Options = { environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch; signal?: AbortSignal };
@@ -48,6 +48,56 @@ function view(row: PaymentRow, confirmations = row.confirmations) {
 function active(signal?: AbortSignal) { if (signal?.aborted) throw new DOMException('Aborted', 'AbortError'); }
 async function readRow(database: Database, owner: string, paymentId: string) {
   return one(await database.execute(sql`SELECT * FROM payments.read_personal_company_payment(${owner},${paymentId}::uuid)`), paymentId);
+}
+
+async function boundPersonalWalletAddress(database: Database, userId: string, signal?: AbortSignal) {
+  const owner = subject.parse(userId);
+  active(signal);
+  const binding = await readWalletBinding(database, { userId: owner });
+  if (!binding.linked || typeof binding.address !== 'string') throw new Error('company_payment_wallet_not_linked');
+  if (binding.chainId !== COMPANY_PAYMENT_CHAIN_ID) throw new Error('company_payment_unavailable');
+  const walletAddress = address.parse(binding.address.toLowerCase());
+  active(signal);
+  return walletAddress;
+}
+
+/** The session selects one verified owner binding; no client address or financial writer is accepted. */
+export async function readPersonalCompanyPaymentBalance(database: Database, userId: string, {
+  environment = process.env, fetchImpl = fetch, signal,
+}: Options = {}) {
+  const walletAddress = await boundPersonalWalletAddress(database, userId, signal);
+  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal);
+  try {
+    const balances = await readCompanyPaymentBalances(rpc, walletAddress);
+    active(rpc.signal);
+    return { walletKind: 'personal' as const, walletAddress, chainId: COMPANY_PAYMENT_CHAIN_ID,
+      tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: COMPANY_PAYMENT_DECIMALS, asset: 'USDT' as const, network: 'ethereum' as const,
+      ...balances, observedAt: new Date().toISOString() };
+  } finally { rpc.dispose(); }
+}
+
+/** Independent display snapshots. A failed network never overwrites the other network with zero. */
+export async function readPersonalCompanyPaymentBalances(database: Database, userId: string, {
+  environment = process.env, fetchImpl = fetch, signal,
+}: Options = {}) {
+  const walletAddress = await boundPersonalWalletAddress(database, userId, signal);
+  const networks = [{ chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, network: 'ethereum' },
+    { chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, network: 'polygon' }] as const;
+  const balances = await Promise.all(networks.map(async network => {
+    const snapshot = { walletKind: 'personal' as const, walletAddress, ...network, tokenDecimals: COMPANY_PAYMENT_DECIMALS, asset: 'USDT' as const };
+    let rpc: ReturnType<typeof createCompanyPaymentRpc> | undefined;
+    try {
+      rpc = createCompanyPaymentRpc(environment, fetchImpl, signal, network.chainId);
+      const values = await readPersonalWalletNetworkBalances(rpc, walletAddress);
+      active(rpc.signal);
+      return { ...snapshot, ...values, observedAt: new Date().toISOString() };
+    } catch {
+      active(signal);
+      return { ...snapshot, balanceAtomic: null, nativeBalanceAtomic: null, observedAt: null, error: 'company_payment_rpc_unavailable' as const };
+    } finally { rpc?.dispose(); }
+  }));
+  active(signal);
+  return { walletKind: 'personal' as const, walletAddress, balances };
 }
 
 /** Preparation fixes a payment snapshot. It cannot broadcast or approve token spending. */

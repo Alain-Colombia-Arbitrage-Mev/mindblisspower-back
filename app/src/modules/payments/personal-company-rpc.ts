@@ -1,7 +1,7 @@
 /** Fixed personal-wallet payment policy. No browser-supplied RPC, chain or destination. */
 export const COMPANY_PAYMENT_CHAIN_ID = 1;
 export const COMPANY_PAYMENT_TOKEN = '0xdac17f958d2ee523a2206206994597c13d831ec7';
-const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
+export const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
 /** Legacy networks are read/receipt recovery only; every new preparation uses Ethereum. */
 export function companyPaymentNetwork(chainId: unknown, tokenAddress: unknown) {
   if (chainId === COMPANY_PAYMENT_CHAIN_ID && tokenAddress === COMPANY_PAYMENT_TOKEN) return Object.freeze({ chainId: 1 as const, tokenAddress: COMPANY_PAYMENT_TOKEN });
@@ -19,7 +19,7 @@ const QUANTITY = /^0x(?:0|[1-9a-f][0-9a-f]*)$/i;
 const WORD = /^0x[0-9a-f]{64}$/i;
 const unavailable = () => new Error('company_payment_rpc_unavailable');
 type Environment = Record<string, string | undefined>;
-type RpcMethod = 'eth_chainId' | 'eth_call' | 'eth_getTransactionByHash' | 'eth_getTransactionReceipt' | 'eth_blockNumber' | 'eth_getBlockByNumber';
+type RpcMethod = 'eth_chainId' | 'eth_call' | 'eth_getBalance' | 'eth_getTransactionByHash' | 'eth_getTransactionReceipt' | 'eth_blockNumber' | 'eth_getBlockByNumber';
 export function companyPaymentAtomic(value: unknown): value is string {
   return typeof value === 'string' && /^[1-9][0-9]{0,77}$/.test(value) && BigInt(value) < (1n << 256n);
 }
@@ -118,6 +118,26 @@ export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amou
     || typeof balance !== 'string' || !WORD.test(balance)) throw unavailable();
   if (BigInt(balance) < BigInt(amountAtomic)) throw new Error('company_payment_insufficient_balance');
 }
+// Display-only reads may include the legacy Polygon balance. New payments stay Ethereum-only.
+export async function readPersonalWalletNetworkBalances(rpc: Rpc, address: string) {
+  if (!companyPaymentNetwork(rpc.policy.chainId, rpc.policy.tokenAddress) || !ADDRESS.test(address)) throw unavailable();
+  await checkCompanyPaymentChain(rpc);
+  const [decimals, balance, nativeBalance] = await Promise.all([
+    rpc.call('eth_call', [{ to: rpc.policy.tokenAddress, data: '0x313ce567' }, 'latest']),
+    rpc.call('eth_call', [{ to: rpc.policy.tokenAddress, data: `0x70a08231${address.slice(2).toLowerCase().padStart(64, '0')}` }, 'latest']),
+    rpc.call('eth_getBalance', [address.toLowerCase(), 'latest']),
+  ]);
+  if (typeof decimals !== 'string' || !WORD.test(decimals) || BigInt(decimals) !== BigInt(COMPANY_PAYMENT_DECIMALS)
+    || typeof balance !== 'string' || !WORD.test(balance)) throw unavailable();
+  return { balanceAtomic: BigInt(balance).toString(), nativeBalanceAtomic: hexQuantity(nativeBalance).toString() };
+}
+
+/** Transfer/MAX balance remains Ethereum-only even when the wallet displays both networks. */
+export async function readCompanyPaymentBalances(rpc: Rpc, address: string) {
+  if (rpc.policy.chainId !== COMPANY_PAYMENT_CHAIN_ID || rpc.policy.tokenAddress !== COMPANY_PAYMENT_TOKEN) throw unavailable();
+  return readPersonalWalletNetworkBalances(rpc, address);
+}
+
 export function companyPaymentCalldata(amountAtomic: string) {
   return `0xa9059cbb${COMPANY_PAYMENT_RECIPIENT.slice(2).padStart(64, '0')}${BigInt(amountAtomic).toString(16).padStart(64, '0')}`;
 }

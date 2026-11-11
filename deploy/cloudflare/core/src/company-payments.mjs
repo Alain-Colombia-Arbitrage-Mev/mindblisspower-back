@@ -14,7 +14,7 @@ export function companyPaymentRequest(request, url, body, env, ready) {
     || !/^\d{10}$/.test(request.headers.get('x-vp-auth-timestamp') || '')
     || !/^[a-f0-9:.]{2,45}$/i.test(request.headers.get('x-vp-auth-client-ip') || '')) return false;
   if (request.method === 'GET') {
-    if (url.pathname === `${COMPANY_PAYMENT_PREFIX}/history`) return url.search === '';
+    if ([`${COMPANY_PAYMENT_PREFIX}/history`, `${COMPANY_PAYMENT_PREFIX}/balance`, `${COMPANY_PAYMENT_PREFIX}/balances`].includes(url.pathname)) return url.search === '';
     const paymentId = url.searchParams.get('paymentId');
     return url.pathname === `${COMPANY_PAYMENT_PREFIX}/status` && UUID.test(paymentId || '') && url.search === `?paymentId=${paymentId}`;
   }

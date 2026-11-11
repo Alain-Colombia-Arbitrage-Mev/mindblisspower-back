@@ -16,11 +16,11 @@ test('Core admits only isolated native company payment registration capabilities
   for (const [action, input] of [['prepare', { requestId: id, amountAtomic: '20000000' }], ['submit', { paymentId: id, transactionHash: hash }], ['verify', { paymentId: id }], ['abandon', { paymentId: id }]]) {
     assert.equal((await dispatchCore(request(action, input), env, resolve)).status, 200);
   }
-  for (const path of ['history', `status?paymentId=${id}`]) {
+  for (const path of ['history', `status?paymentId=${id}`, 'balance', 'balances']) {
     const post = request(); const read = new Request(`https://auth.core.internal${prefix}/${path}`, { headers: post.headers });
     assert.equal((await dispatchCore(read, env, resolve)).status, 200);
   }
-  assert.equal(calls, 6);
+  assert.equal(calls, 8);
 });
 test('Core denies crossed portals, forged payment policies, unsigned requests and aliases even with broad Core enabled', async () => {
   const never = () => assert.fail('unauthorized company payment reached a container');
@@ -57,4 +57,29 @@ test('public Reown RPC project configuration is forwarded exclusively to the ena
   assert.equal(containerEnvironment('api', base).REOWN_PROJECT_ID, base.API_REOWN_PROJECT_ID);
   assert.equal(containerEnvironment('api', { ...base, PERSONAL_COMPANY_PAYMENTS_ENABLED: 'false' }).REOWN_PROJECT_ID, undefined);
   assert.throws(() => containerEnvironment('api', { ...base, API_REOWN_PROJECT_ID: 'http://127.0.0.1' }));
+});
+
+
+test('Core balance capability is read-only, owner-scoped and cannot select a wallet, token, network or provider', async () => {
+  const headers = request().headers;
+  const never = () => assert.fail('unapproved balance selector reached a container');
+  for (const query of ['?chainId=137', '?walletAddress=0x' + '2'.repeat(40), '?subject=other', '?tokenAddress=0x' + '3'.repeat(40), '?rpcUrl=https://evil.invalid']) {
+    const read = new Request(`https://auth.core.internal${prefix}/balance${query}`, { headers });
+    assert.equal((await dispatchCore(read, env, never)).status, 503);
+  }
+  for (const action of ['balance', 'balance/extra', '%62alance']) {
+    assert.equal((await dispatchCore(request(action, {}), env, never)).status, 503);
+  }
+  const crossed = new Request(`https://auth.core.internal${prefix}/balance`, { headers: request('prepare', undefined, { origin: 'https://wallet.mindblisspower.com' }).headers });
+  assert.equal((await dispatchCore(crossed, env, never)).status, 503);
+});
+
+
+test('Core dual display capability permits only exact GET balances without granting Polygon transfer selectors', async () => {
+  const headers = request().headers, never = () => assert.fail('unapproved dual balance request reached a container');
+  for (const query of ['?chainId=137', '?network=polygon', '?walletAddress=0x' + '2'.repeat(40), '?subject=other', '?tokenAddress=0x' + '3'.repeat(40)]) {
+    assert.equal((await dispatchCore(new Request(`https://auth.core.internal${prefix}/balances${query}`, { headers }), env, never)).status, 503);
+  }
+  for (const action of ['balances', 'balances/extra', '%62alances']) assert.equal((await dispatchCore(request(action, {}), env, never)).status, 503);
+  assert.equal((await dispatchCore(request('prepare', { requestId: id, amountAtomic: '1', chainId: 137 }), env, never)).status, 503);
 });

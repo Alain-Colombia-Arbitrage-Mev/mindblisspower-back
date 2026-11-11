@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { bodyLimit } from 'hono/body-limit';
 import { preparePersonalCompanyPayment, submitPersonalCompanyPayment, verifyPersonalCompanyPayment,
-  readPersonalCompanyPayment, readPersonalCompanyPaymentHistory, abandonPersonalCompanyPayment } from '../modules/payments/personal-company-payment';
+  readPersonalCompanyPayment, readPersonalCompanyPaymentHistory, readPersonalCompanyPaymentBalance, readPersonalCompanyPaymentBalances, abandonPersonalCompanyPayment } from '../modules/payments/personal-company-payment';
 import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiApplication } from './types';
 import { authProxyContext } from './auth-proxy-context';
@@ -58,6 +58,20 @@ export function registerPersonalCompanyPaymentRoutes(app: ApiApplication, { data
         { environment, fetchImpl, signal: context.req.raw.signal });
       return context.json(result, action === 'prepare' ? 201 : 200, noStore);
     } catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+  });
+  app.get(`${PREFIX}/balance`, async context => {
+    if (new URL(context.req.url).search || context.req.header('content-encoding')) return context.json({ error: 'invalid_request' }, 400, noStore);
+    context.header('Vary', 'Cookie');
+    try { return context.json(await readPersonalCompanyPaymentBalance(database, context.get('session')!.user.id,
+      { environment, fetchImpl, signal: context.req.raw.signal }), 200, noStore); }
+    catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+  });
+  app.get(`${PREFIX}/balances`, async context => {
+    if (new URL(context.req.url).search || context.req.header('content-encoding')) return context.json({ error: 'invalid_request' }, 400, noStore);
+    context.header('Vary', 'Cookie');
+    try { return context.json(await readPersonalCompanyPaymentBalances(database, context.get('session')!.user.id,
+      { environment, fetchImpl, signal: context.req.raw.signal }), 200, noStore); }
+    catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
   });
   app.get(`${PREFIX}/status`, async context => {
     const url = new URL(context.req.url), paymentId = url.searchParams.get('paymentId');

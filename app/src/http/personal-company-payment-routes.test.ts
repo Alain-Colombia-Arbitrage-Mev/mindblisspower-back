@@ -19,19 +19,19 @@ function signed(path: string, method = 'GET', body = '', extra: Record<string, s
     'x-vp-auth-client-ip': ip, 'x-vp-auth-timestamp': timestamp, 'x-vp-auth-signature': createHmac('sha256', secret).update(message).digest('hex'), ...extra },
     ...(method === 'POST' ? { body } : {}) };
 }
-function application({ signedIn = true, enabled = true, execute = async () => [] }: {
-  signedIn?: boolean; enabled?: boolean; execute?: (input: unknown) => Promise<unknown[]>;
+function application({ signedIn = true, enabled = true, execute = async () => [], fetchImpl = (async () => { throw Error('unexpected external call'); }) as unknown as typeof fetch }: {
+  signedIn?: boolean; enabled?: boolean; execute?: (input: unknown) => Promise<unknown[]>; fetchImpl?: typeof fetch;
 } = {}) {
   const app = new Hono<ApiEnvironment>();
   app.use('*', async (context, next) => { context.set('session', signedIn ? { user: { id: 'owner' } } as never : null); await next(); });
   registerPersonalCompanyPaymentRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
     environment: { PERSONAL_COMPANY_PAYMENTS_ENABLED: String(enabled), AUTH_BFF_SHARED_SECRET: secret, REOWN_PROJECT_ID: 'a'.repeat(32) },
-    fetchImpl: (async () => { throw Error('unexpected external call'); }) as unknown as typeof fetch });
+    fetchImpl });
   return app;
 }
 test('company payment endpoints require a native session and valid signed BFF envelope before any database access', async () => {
   let calls = 0; const app = application({ execute: async () => { calls++; return [row]; } });
-  for (const path of [`${PREFIX}/status?paymentId=${id}`, `${PREFIX}/history`]) {
+  for (const path of [`${PREFIX}/status?paymentId=${id}`, `${PREFIX}/history`, `${PREFIX}/balance`, `${PREFIX}/balances`]) {
     expect((await application({ signedIn: false }).request(path, signed(path))).status).toBe(401);
     expect((await app.request(path)).status).toBe(403);
     expect((await app.request(path, signed(path, 'GET', '', { 'x-vp-auth-signature': '0'.repeat(64) }))).status).toBe(403);
@@ -91,4 +91,66 @@ test('abandon uses the same personal native-session signature boundary and canno
   const terminal = application({ execute: async () => { throw Error('company_payment_invalid_transition'); } });
   const rejected = await terminal.request(path, signed(path, 'POST', body));
   expect(rejected.status).toBe(409); expect(await rejected.json()).toEqual({ error: 'company_payment_invalid_transition' });
+});
+
+
+test('balance is an uncached owner-only Ethereum read with no address, chain, token, body or mutation selectors', async () => {
+  const path = `${PREFIX}/balance`, created = new Date('2026-11-10T20:00:00Z');
+  const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
+    person_email: 'synthetic@example.invalid', person_status: 'active', user_id: 'owner', blacklisted: false, access_restricted: false };
+  const rows: unknown[][] = [[principal], [{ address, chain_id: 1, verified_at: created }]];
+  const app = application({ execute: async () => { if (!rows.length) throw Error('unexpected write'); return rows.shift()!; },
+    fetchImpl: (async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const result = request.method === 'eth_chainId' ? '0x1' : request.method === 'eth_getBalance' ? '0x0'
+        : `0x${(request.params[0].data === '0x313ce567' ? '6' : '0').padStart(64, '0')}`;
+      return Response.json({ jsonrpc: '2.0', id: request.id, result });
+    }) as typeof fetch });
+  const response = await app.request(path, signed(path));
+  expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(response.headers.get('vary')).toBe('Cookie');
+  expect(await response.json()).toEqual({ walletKind: 'personal', walletAddress: address, chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN,
+    tokenDecimals: 6, asset: 'USDT', network: 'ethereum', balanceAtomic: '0', nativeBalanceAtomic: '0', observedAt: expect.any(String) });
+  let reads = 0;
+  const blocked = application({ execute: async () => { reads++; throw Error('selector reached database'); } });
+  for (const query of [`?walletAddress=${address}`, '?chainId=137', `?tokenAddress=${COMPANY_PAYMENT_TOKEN}`, '?subject=other', '?', '?paymentId=x']) {
+    const target = path + query;
+    if (query === '?') continue; // URL normalizes an empty query to no selector.
+    expect((await blocked.request(target, signed(target))).status).toBe(400);
+  }
+  expect((await blocked.request(path, signed(path, 'GET', '', { 'content-encoding': 'gzip' }))).status).toBe(400);
+  expect((await blocked.request(path, signed(path, 'POST', '{}'))).status).toBe(404);
+  expect(reads).toBe(0);
+});
+
+
+test('dual balances retain native owner isolation, reject selectors and keep healthy network data when the other RPC fails', async () => {
+  const path = `${PREFIX}/balances`, created = new Date('2026-11-10T20:00:00Z');
+  const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
+    person_email: 'synthetic@example.invalid', person_status: 'active', user_id: 'owner', blacklisted: false, access_restricted: false };
+  const rows: unknown[][] = [[principal], [{ address, chain_id: 1, verified_at: created }]];
+  const app = application({ execute: async () => { if (!rows.length) throw Error('unexpected write'); return rows.shift()!; },
+    fetchImpl: (async (target, init) => {
+      if (new URL(String(target)).searchParams.get('chainId') === 'eip155:137') throw Error('private upstream detail');
+      const request = JSON.parse(String(init?.body));
+      const result = request.method === 'eth_chainId' ? '0x1' : request.method === 'eth_getBalance' ? '0x0'
+        : `0x${(request.params[0].data === '0x313ce567' ? '6' : '989680').padStart(64, '0')}`;
+      return Response.json({ jsonrpc: '2.0', id: request.id, result });
+    }) as typeof fetch });
+  const response = await app.request(path, signed(path));
+  expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('private, no-store'); expect(response.headers.get('vary')).toBe('Cookie');
+  const payload = await response.json();
+  expect(payload).toMatchObject({ walletKind: 'personal', walletAddress: address, balances: [
+    { chainId: 1, network: 'ethereum', balanceAtomic: '10000000', nativeBalanceAtomic: '0' },
+    { chainId: 137, network: 'polygon', balanceAtomic: null, nativeBalanceAtomic: null, observedAt: null, error: 'company_payment_rpc_unavailable' },
+  ] });
+  expect(JSON.stringify(payload)).not.toContain('private upstream detail');
+  let reads = 0;
+  const blocked = application({ execute: async () => { reads++; throw Error('selector reached database'); } });
+  for (const query of [`?walletAddress=${address}`, '?chainId=137', `?tokenAddress=${COMPANY_PAYMENT_TOKEN}`, '?subject=other']) {
+    const target = path + query; expect((await blocked.request(target, signed(target))).status).toBe(400);
+  }
+  expect((await blocked.request(path, signed(path, 'POST', '{}'))).status).toBe(404);
+  expect((await blocked.request(path, signed(path, 'GET', '', { 'content-encoding': 'gzip' }))).status).toBe(400);
+  expect(reads).toBe(0);
 });

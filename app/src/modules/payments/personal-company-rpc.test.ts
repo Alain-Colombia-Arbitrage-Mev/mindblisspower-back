@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from 'bun:test';
 import { checkCompanyPaymentBalance, checkCompanyPaymentSubmission, companyPaymentAtomic, companyPaymentCalldata,
-  createCompanyPaymentRpc, verifyCompanyPaymentReceipt, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC } from './personal-company-rpc';
+  createCompanyPaymentRpc, readCompanyPaymentBalances, readPersonalWalletNetworkBalances, LEGACY_POLYGON_TOKEN, verifyCompanyPaymentReceipt, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TRANSFER_TOPIC } from './personal-company-rpc';
 
 export const companyFixture = {
   sender: `0x${'2'.repeat(40)}`, hash: `0x${'3'.repeat(64)}`, blockHash: `0x${'4'.repeat(64)}`, amount: '20000000',
@@ -128,5 +128,73 @@ test('cancelling non-abortable RPC work stops verification and ignores late succ
     await started; controller.abort(); await expect(pending).rejects.toHaveProperty('name', 'AbortError');
     release(Response.json({ jsonrpc: '2.0', id: 1, result: '0x1' }));
     await Promise.resolve();
+  } finally { rpc.dispose(); }
+});
+
+
+test('read-only Ethereum balances preserve zero and exact uint256 values without preparing or sending funds', async () => {
+  for (const [tokenBalance, nativeBalance] of [[0n, 0n], [10_000_000n, 123_456_789n], [(1n << 256n) - 1n, (1n << 256n) - 1n]]) {
+    const calls: string[] = [];
+    const rpc = createCompanyPaymentRpc(companyEnvironment, (async (url, init) => {
+      expect(String(url)).toContain('chainId=eip155:1&');
+      const request = JSON.parse(String(init?.body)); calls.push(request.method);
+      let result;
+      if (request.method === 'eth_chainId') result = '0x1';
+      else if (request.method === 'eth_getBalance') {
+        expect(request.params).toEqual([companyFixture.sender, 'latest']);
+        result = `0x${nativeBalance!.toString(16)}`;
+      } else {
+        expect(request.method).toBe('eth_call');
+        expect(request.params[0].to).toBe(COMPANY_PAYMENT_TOKEN);
+        expect(request.params[1]).toBe('latest');
+        const selector = request.params[0].data;
+        expect(['0x313ce567', `0x70a08231${companyFixture.sender.slice(2).padStart(64, '0')}`]).toContain(selector);
+        result = word(selector === '0x313ce567' ? '6' : tokenBalance!.toString(16));
+      }
+      return Response.json({ jsonrpc: '2.0', id: request.id, result });
+    }) as typeof fetch);
+    try {
+      expect(await readCompanyPaymentBalances(rpc, companyFixture.sender)).toEqual({ balanceAtomic: tokenBalance!.toString(), nativeBalanceAtomic: nativeBalance!.toString() });
+      expect(calls.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId', 'eth_getBalance']);
+    } finally { rpc.dispose(); }
+  }
+});
+
+test('balance reads reject legacy networks, invalid address, wrong chain, token decimals and malformed native quantities', async () => {
+  for (const [chain, owner] of [[137, companyFixture.sender], [1, 'not-an-address']] as const) {
+    const rpc = createCompanyPaymentRpc(companyEnvironment, (async () => { throw Error('unapproved balance read reached RPC'); }) as unknown as typeof fetch, undefined, chain);
+    try { await expect(readCompanyPaymentBalances(rpc, owner)).rejects.toThrow('company_payment_rpc_unavailable'); }
+    finally { rpc.dispose(); }
+  }
+  for (const variant of ['wrong-chain', 'wrong-decimals', 'malformed-token', 'empty-native', 'leading-zero-native', 'overflow-native']) {
+    const rpc = createCompanyPaymentRpc(companyEnvironment, (async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const result = request.method === 'eth_chainId' ? (variant === 'wrong-chain' ? '0x89' : '0x1')
+        : request.method === 'eth_getBalance' ? ({ 'empty-native': '0x', 'leading-zero-native': '0x00', 'overflow-native': `0x1${'0'.repeat(64)}` }[variant] ?? '0x0')
+        : request.params[0].data === '0x313ce567' ? word(variant === 'wrong-decimals' ? '18' : '6')
+        : variant === 'malformed-token' ? '0x0' : word('0');
+      return Response.json({ jsonrpc: '2.0', id: request.id, result });
+    }) as typeof fetch);
+    try { await expect(readCompanyPaymentBalances(rpc, companyFixture.sender)).rejects.toThrow('company_payment_rpc_unavailable'); }
+    finally { rpc.dispose(); }
+  }
+});
+
+
+test('display-only Polygon reads use its own authentic USDT token and native quantity while transfer balance remains Ethereum-only', async () => {
+  const seen: string[] = [];
+  const rpc = createCompanyPaymentRpc(companyEnvironment, (async (url, init) => {
+    expect(String(url)).toContain('chainId=eip155:137&');
+    const request = JSON.parse(String(init?.body)); seen.push(request.method);
+    if (request.method === 'eth_call') expect(request.params[0].to).toBe(LEGACY_POLYGON_TOKEN);
+    const result = request.method === 'eth_chainId' ? '0x89' : request.method === 'eth_getBalance' ? '0x0'
+      : word(request.params[0].data === '0x313ce567' ? '6' : 'f4240');
+    return Response.json({ jsonrpc: '2.0', id: request.id, result });
+  }) as typeof fetch, undefined, 137);
+  try {
+    expect(await readPersonalWalletNetworkBalances(rpc, companyFixture.sender)).toEqual({ balanceAtomic: '1000000', nativeBalanceAtomic: '0' });
+    expect(seen.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId', 'eth_getBalance']);
+    await expect(readCompanyPaymentBalances(rpc, companyFixture.sender)).rejects.toThrow('company_payment_rpc_unavailable');
+    expect(seen).toHaveLength(4);
   } finally { rpc.dispose(); }
 });

@@ -3,8 +3,8 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { IdentityDatabase } from '../identity/model';
 import { preparePersonalCompanyPayment, submitPersonalCompanyPayment, verifyPersonalCompanyPayment,
-  readPersonalCompanyPayment, readPersonalCompanyPaymentHistory, abandonPersonalCompanyPayment } from './personal-company-payment';
-import { COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, companyPaymentCalldata } from './personal-company-rpc';
+  readPersonalCompanyPayment, readPersonalCompanyPaymentHistory, readPersonalCompanyPaymentBalance, readPersonalCompanyPaymentBalances, abandonPersonalCompanyPayment } from './personal-company-payment';
+import { COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, LEGACY_POLYGON_TOKEN, companyPaymentCalldata } from './personal-company-rpc';
 const id = '11111111-1111-4111-8111-111111111111';
 const address = `0x${'2'.repeat(40)}`, hash = `0x${'3'.repeat(64)}`, blockHash = `0x${'4'.repeat(64)}`;
 const amount = '20000123', created = new Date('2026-11-10T20:00:00Z');
@@ -28,7 +28,7 @@ function rpcFetch(overrides: Record<string, unknown> = {}, seen: string[] = [], 
     expect(String(url)).toContain(`chainId=eip155:${chainId}&`);
     const request = JSON.parse(String(init?.body)); seen.push(request.method);
     const tx = { hash, from: address, to: token, input: companyPaymentCalldata(amount), value: '0x0', chainId: chainHex, blockNumber: '0x64', blockHash };
-    const values: Record<string, unknown> = { eth_chainId: chainHex, eth_getTransactionByHash: tx, eth_blockNumber: '0x6f',
+    const values: Record<string, unknown> = { eth_chainId: chainHex, eth_getBalance: '0x0', eth_getTransactionByHash: tx, eth_blockNumber: '0x6f',
       eth_getBlockByNumber: { number: '0x64', hash: blockHash },
       eth_getTransactionReceipt: { transactionHash: hash, from: address, to: token, blockNumber: '0x64', blockHash, status: '0x1',
         logs: [{ address: token, topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(address), word(COMPANY_PAYMENT_RECIPIENT)], data: word(BigInt(amount).toString(16)) }] }, ...overrides };
@@ -168,4 +168,87 @@ test('Ethereum is the only new preparation policy while legacy Polygon receipts 
   await expect(preparePersonalCompanyPayment(unsafeWriter.database, { requestId: id, amountAtomic: amount }, 'owner', {
     environment, fetchImpl: rpcFetch(),
   })).rejects.toThrow('company_payment_unavailable');
+});
+
+
+test('personal balance uses only the eligible session owner binding and performs no payment or ledger writes', async () => {
+  const bound = { address, chain_id: 1, verified_at: created };
+  const db = queued([[principal], [bound]]), seen: string[] = [];
+  const result = await readPersonalCompanyPaymentBalance(db.database, 'owner', { environment, fetchImpl: rpcFetch({}, seen) });
+  expect(result).toEqual({ walletKind: 'personal', walletAddress: address, chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: 6,
+    asset: 'USDT', network: 'ethereum', balanceAtomic: amount, nativeBalanceAtomic: '0', observedAt: expect.any(String) });
+  expect(new Date(result.observedAt).toISOString()).toBe(result.observedAt);
+  expect(db.queries).toHaveLength(2);
+  expect(db.queries[1]!.params).toEqual(['owner']);
+  expect(db.queries.map(query => query.sql).join(' ')).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\b|prepare_personal_company|create_reown|administrative|commission|membership/i);
+  expect(seen.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId', 'eth_getBalance']);
+  for (const [rows, code] of [
+    [[[principal], []], 'company_payment_wallet_not_linked'],
+    [[[principal], [{ ...bound, chain_id: 137 }]], 'company_payment_unavailable'],
+    [[[ { ...principal, email_verified: false } ]], 'wallet_identity_unavailable'],
+  ] as const) {
+    await expect(readPersonalCompanyPaymentBalance(queued(rows.map(value => [...value])).database, 'owner', { environment,
+      fetchImpl: (async () => { throw Error('ineligible binding queried RPC'); }) as unknown as typeof fetch,
+    })).rejects.toThrow(code);
+  }
+  const aborted = new AbortController(); aborted.abort();
+  await expect(readPersonalCompanyPaymentBalance(queued([]).database, 'owner', { environment, signal: aborted.signal })).rejects.toHaveProperty('name', 'AbortError');
+});
+
+
+function displayBalanceFetch(failedChain?: 1 | 137, seen: string[] = []): typeof fetch {
+  return (async (target, init) => {
+    const chain = new URL(String(target)).searchParams.get('chainId') || '';
+    expect(['eip155:1', 'eip155:137']).toContain(chain);
+    const ethereum = chain === 'eip155:1', chainId = ethereum ? 1 : 137;
+    const request = JSON.parse(String(init?.body)); seen.push(`${chainId}:${request.method}`);
+    if (chainId === failedChain) return Response.json({ error: 'private provider failure' }, { status: 503 });
+    if (request.method === 'eth_call') expect(request.params[0].to).toBe(ethereum ? COMPANY_PAYMENT_TOKEN : LEGACY_POLYGON_TOKEN);
+    if (request.method === 'eth_getBalance') expect(request.params).toEqual([address, 'latest']);
+    const result = request.method === 'eth_chainId' ? (ethereum ? '0x1' : '0x89') : request.method === 'eth_getBalance' ? (ethereum ? '0x0' : '0xde0b6b3a7640000')
+      : `0x${(request.params[0].data === '0x313ce567' ? '6' : ethereum ? '989680' : '0').padStart(64, '0')}`;
+    return Response.json({ jsonrpc: '2.0', id: request.id, result });
+  }) as typeof fetch;
+}
+
+test('display balances resolve one eligible owner binding and return separate authentic Ethereum and Polygon snapshots including zero', async () => {
+  const db = queued([[principal], [{ address, chain_id: 1, verified_at: created }]]), seen: string[] = [];
+  const result = await readPersonalCompanyPaymentBalances(db.database, 'owner', { environment, fetchImpl: displayBalanceFetch(undefined, seen) });
+  expect(result).toEqual({ walletKind: 'personal', walletAddress: address, balances: [
+    { walletKind: 'personal', walletAddress: address, chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: 6,
+      asset: 'USDT', network: 'ethereum', balanceAtomic: '10000000', nativeBalanceAtomic: '0', observedAt: expect.any(String) },
+    { walletKind: 'personal', walletAddress: address, chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, tokenDecimals: 6,
+      asset: 'USDT', network: 'polygon', balanceAtomic: '0', nativeBalanceAtomic: '1000000000000000000', observedAt: expect.any(String) },
+  ] });
+  expect(db.queries).toHaveLength(2); expect(db.queries[1]!.params).toEqual(['owner']);
+  expect(db.queries.map(query => query.sql).join(' ')).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\b|prepare_personal_company|create_reown|administrative|commission|membership/i);
+  expect(seen).toHaveLength(8);
+  expect(seen.every(value => /^(?:1|137):(?:eth_chainId|eth_call|eth_getBalance)$/.test(value))).toBe(true);
+});
+
+test('one unavailable display network keeps the other balance and exposes no invented zero, provider error or stale timestamp', async () => {
+  for (const failedChain of [1, 137] as const) {
+    const db = queued([[principal], [{ address, chain_id: 1, verified_at: created }]]);
+    const result = await readPersonalCompanyPaymentBalances(db.database, 'owner', { environment, fetchImpl: displayBalanceFetch(failedChain) });
+    const failed = result.balances.find(row => row.chainId === failedChain)!;
+    const policy = failedChain === 1
+      ? { chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, network: 'ethereum' } as const
+      : { chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, network: 'polygon' } as const;
+    expect(failed).toEqual({ walletKind: 'personal', walletAddress: address, ...policy, tokenDecimals: 6, asset: 'USDT',
+      balanceAtomic: null, nativeBalanceAtomic: null, observedAt: null, error: 'company_payment_rpc_unavailable' });
+    const healthy = result.balances.find(row => row.chainId !== failedChain)!;
+    expect(healthy.balanceAtomic).toBe(failedChain === 1 ? '0' : '10000000');
+    expect(healthy.observedAt).toEqual(expect.any(String)); expect(healthy).not.toHaveProperty('error');
+    expect(JSON.stringify(result)).not.toContain('private provider failure');
+    expect(db.queries).toHaveLength(2);
+  }
+});
+
+test('cancelling a display refresh rejects the entire stale result instead of publishing per-network error snapshots', async () => {
+  const controller = new AbortController();
+  const db = queued([[principal], [{ address, chain_id: 1, verified_at: created }]]);
+  await expect(readPersonalCompanyPaymentBalances(db.database, 'owner', { environment, signal: controller.signal,
+    fetchImpl: (async () => { controller.abort(); throw Error('aborted fixture'); }) as unknown as typeof fetch,
+  })).rejects.toHaveProperty('name', 'AbortError');
+  expect(db.queries).toHaveLength(2);
 });
