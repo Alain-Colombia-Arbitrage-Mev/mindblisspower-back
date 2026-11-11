@@ -10,8 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 // exact sources, and restored solely into a labelled network-disabled container.
 const joined=process.argv.length===3&&process.argv[2]==='--joined';
 const ownershipAmount=process.argv.length===3&&process.argv[2]==='--ownership-amount';
-assert.ok(process.argv.length===2||joined||ownershipAmount);
-if(ownershipAmount){
+const sponsorBudget=process.argv.length===3&&process.argv[2]==='--sponsor-budget';
+assert.ok(process.argv.length===2||joined||ownershipAmount||sponsorBudget);
+if(ownershipAmount||sponsorBudget){
  const health=spawnSync('docker',['info','--format','{{.ServerVersion}}'],{encoding:'utf8',shell:false,timeout:15000});
  assert.equal(health.status,0,'Docker Engine must respond before isolated ownership probes can run');
 }
@@ -36,8 +37,9 @@ if(!cache){
  const injection=`\n  const relayModule=await import(${JSON.stringify(moduleUrl.href)});\n`+
   `  await relayModule.saveSyntheticBaseline({container,docker,database,inputHash:${JSON.stringify(inputHash)},directory:${JSON.stringify(directory.href)}});\n`+
   `  await relayModule.runPolygonRelayProbes({container,docker,psql,value,equal,rejects,parallelPsql,immutable,role,database,joined:${joined}});\n`;
- const ownershipInjection=ownershipAmount?`\n const securityModule=await import(${JSON.stringify(new URL('scripts/ownership-amount-schema-probes.mjs',root).href)});await securityModule.runOwnershipAmountProbes({container,docker,psql,value,parallelPsql,role,database});\n`:'';
- const generated=baseline.replaceAll('import.meta.url',JSON.stringify(baselineUrl.href)).replace(marker,injection+ownershipInjection+marker);
+ const ownershipInjection=ownershipAmount||sponsorBudget?`\n const securityModule=await import(${JSON.stringify(new URL('scripts/ownership-amount-schema-probes.mjs',root).href)});await securityModule.runOwnershipAmountProbes({container,docker,psql,value,parallelPsql,role,database});\n`:'';
+ const budgetInjection=sponsorBudget?`\n const budgetModule=await import(${JSON.stringify(new URL('scripts/polygon-relay-budget-schema-probes.mjs',root).href)});await budgetModule.runPolygonRelayBudgetProbes({container,docker,psql,value,parallelPsql,role,database});\n`:'';
+ const generated=baseline.replaceAll('import.meta.url',JSON.stringify(baselineUrl.href)).replace(marker,injection+ownershipInjection+budgetInjection+marker);
  const path=new URL(`harness-${randomUUID()}.mjs`,directory);await writeFile(path,generated,{flag:'wx'});
  const child=spawn(process.execPath,[fileURLToPath(path)],{stdio:'inherit',shell:false});
  process.exitCode=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('close',resolve);});
@@ -59,7 +61,8 @@ if(!cache){
   let ready=false;for(let i=0;i<100;i++){if(docker(['exec',container,'pg_isready','-h','127.0.0.1','-U','postgres','-d',database]).status===0){ready=true;break;}await delay(200);}assert.equal(ready,true);
   psql(`CREATE ROLE ${role} NOLOGIN;CREATE ROLE app_read NOLOGIN;${cache}`);
   const module=await import(moduleUrl);await module.runPolygonRelayProbes({container,docker,psql,value,equal,rejects,parallelPsql,immutable,role,database,joined});
-  if(ownershipAmount){const securityModule=await import(new URL('scripts/ownership-amount-schema-probes.mjs',root));await securityModule.runOwnershipAmountProbes({container,docker,psql,value,parallelPsql,role,database});}
+  if(ownershipAmount||sponsorBudget){const securityModule=await import(new URL('scripts/ownership-amount-schema-probes.mjs',root));await securityModule.runOwnershipAmountProbes({container,docker,psql,value,parallelPsql,role,database});}
+  if(sponsorBudget){const budgetModule=await import(new URL('scripts/polygon-relay-budget-schema-probes.mjs',root));await budgetModule.runPolygonRelayBudgetProbes({container,docker,psql,value,parallelPsql,role,database});}
  }catch(error){console.error(JSON.stringify({polygonRelaySchema:'failed',message:error.message}));process.exitCode=1;
  }finally{const ownership=docker(['inspect','--format','{{ index .Config.Labels "mindbliss.synthetic" }}',container]);
   if(ownership.status===0&&ownership.stdout.trim()==='polygon-relay-schema'&&/^mb-polygon-relay-test-[a-f0-9-]{36}$/.test(container))docker(['rm','--force',container]);}
