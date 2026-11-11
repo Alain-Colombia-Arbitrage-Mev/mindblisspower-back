@@ -37,7 +37,7 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
   for (const route of data) {
     if (!record(route) || typeof route.partner !== 'string') throw unavailable();
     if (!PROVIDERS.some(provider => provider === route.partner)) continue;
-    if (route.source !== sourceCurrencyCode || route.destination !== 'USDT_POLYGON'
+    if (route.source !== sourceCurrencyCode || route.destination !== 'USDT'
       || !Array.isArray(route.paymentMethods) || route.paymentMethods.length > 64) throw unavailable();
     const provider = route.partner as ReownFundingRoute['serviceProvider'];
     const methods = routes.get(provider) ?? new Map<string, ReownFundingMethod>();
@@ -148,7 +148,7 @@ export async function readReownProductionOptions(country: string, {
   let phase: DiscoveryDiagnostic['phase'] = 'fetch';
   let status: number | null = null;
   try {
-    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT_POLYGON?partners=SWAPPED,MERCURYO`;
+    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/USDT?partners=SWAPPED,MERCURYO`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       headers: { Authorization: `BASIC ${REOWN_MELD_PUBLIC_KEY}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },

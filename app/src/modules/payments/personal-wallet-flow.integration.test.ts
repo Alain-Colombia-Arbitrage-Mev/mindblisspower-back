@@ -47,9 +47,9 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     const fakeProvider = (async (target, init) => {
       const url = new URL(String(target));
       if (url.hostname === 'api.meld.io') {
-        expect(init?.method).toBe('GET'); expect(url.pathname).toContain(`/${scenario.country}/${scenario.currency}/USDT_POLYGON`);
+        expect(init?.method).toBe('GET'); expect(url.pathname).toContain(`/${scenario.country}/${scenario.currency}/USDT`);
         expect(url.searchParams.get('partners')).toBe('SWAPPED,MERCURYO'); providerGets++;
-        return Response.json([{ partner: 'SWAPPED', source: scenario.currency, destination: 'USDT_POLYGON', paymentMethods: [
+        return Response.json([{ partner: 'SWAPPED', source: scenario.currency, destination: 'USDT', paymentMethods: [
           { name: scenario.method, limits: { currencyCode: scenario.currency, min: scenario.currency === 'MXN' ? 148.66 : 7.81, max: 200_000 } },
         ] }]);
       }
@@ -57,8 +57,8 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
       expect(init?.method).toBe('POST');
       const request = JSON.parse(String(init?.body)); rpcMethods.push(request.method);
       const transaction = { hash: scenario.hash, from: scenario.sender, to: COMPANY_PAYMENT_TOKEN, input: companyPaymentCalldata(scenario.fundedAtomic.toString()),
-        value: '0x0', chainId: '0x89', blockNumber: '0x64', blockHash };
-      const results: Record<string, unknown> = { eth_chainId: '0x89', eth_getTransactionByHash: dispatched ? transaction : null,
+        value: '0x0', chainId: '0x1', blockNumber: '0x64', blockHash };
+      const results: Record<string, unknown> = { eth_chainId: '0x1', eth_getTransactionByHash: dispatched ? transaction : null,
         eth_getTransactionReceipt: dispatched ? { transactionHash: scenario.hash, from: scenario.sender, to: COMPANY_PAYMENT_TOKEN,
           blockNumber: '0x64', blockHash, status: '0x1', logs: [{ address: COMPANY_PAYMENT_TOKEN,
             topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(scenario.sender), word(COMPANY_PAYMENT_RECIPIENT)], data: word(scenario.fundedAtomic.toString(16)), removed: false }] } : null,
@@ -81,7 +81,7 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
     }
     const available = await readReownProductionOptions(scenario.country, { sourceCurrencyCode: scenario.currency, fetchImpl: fakeProvider });
     expect(available.paymentMethods).toContain(scenario.method);
-    if (scenario.currency === 'USD') expect(available.routes[0]!.paymentMethods[0]).toMatchObject({ minimumAmount: 100, maximumAmount: 15000 });
+    if (scenario.currency === 'USD') expect(available.routes[0]!.paymentMethods[0]).toMatchObject({ minimumAmount: 30, maximumAmount: 15000 });
     if (scenario.currency === 'MXN') expect(available.routes[0]!.paymentMethods[0]!.minimumAmount).toBe(931);
     const funding = await createPersonalFundingIntent(database, { requestId: fundingId, walletAddress: scenario.sender, country: scenario.country,
       sourceCurrencyCode: scenario.currency, paymentMethodType: scenario.method, amount: scenario.sourceAmount }, scenario.owner, { fetchImpl: fakeProvider });

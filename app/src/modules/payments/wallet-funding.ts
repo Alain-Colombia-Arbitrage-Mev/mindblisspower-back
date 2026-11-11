@@ -58,7 +58,7 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   // Never start persistence for that cancelled operation; an already accepted
   // database write remains immutable and must not be retried automatically.
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent(
+  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v3(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType},${input.sourceCurrencyCode})`);
   const row = oneRow(rows, intentRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
@@ -347,20 +347,28 @@ const historyRow = z.object({
   provider: z.enum(['reown', 'meld']), status: z.enum(['initiated', 'session_created', 'unavailable', 'failed']),
   wallet_address: addressInput, country_code: z.string().regex(/^[A-Z]{2}$/),
   requested_amount: z.coerce.number().finite().min(0.01).max(1_000_000_000), created_at: z.coerce.date(),
+  destination_currency: z.enum(['USDT', 'USDT_POLYGON']),
   source_currency: z.enum(['USD', 'MXN']), payment_method: z.string().regex(/^[A-Z0-9_]{2,40}$/).nullable(),
 });
 
 function validPersistedFundingSource(row: z.infer<typeof historyRow>, personal: boolean) {
   if (Math.abs(row.requested_amount * 100 - Math.round(row.requested_amount * 100)) > 0.000001) return false;
+  if (!personal && row.destination_currency !== 'USDT_POLYGON') return false;
   return row.source_currency === 'USD'
     ? row.requested_amount >= (personal ? 20 : 50) && row.requested_amount <= 25_000
     : personal && row.country_code === 'MX' && row.payment_method === 'SPEI';
 }
 
+function fundingDestination(row: z.infer<typeof historyRow>) {
+  return row.destination_currency === 'USDT'
+    ? { address: row.wallet_address, asset: 'USDT' as const, network: 'ethereum' as const, chainId: 1 as const }
+    : { address: row.wallet_address, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const };
+}
+
 export async function readWalletFundingHistory(database: FundingDatabase, subject: string, rawKind: unknown) {
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
-  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_history_v2(${owner},${walletKind})`);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_history_v3(${owner},${walletKind})`);
   if (rows.length > 20) throw new Error('wallet_funding_unavailable');
   const items = rows.map(value => {
     const row = historyRow.parse(value);
@@ -372,7 +380,7 @@ export async function readWalletFundingHistory(database: FundingDatabase, subjec
     }
     return { checkoutReference: row.id, provider: row.provider,
       status: row.status, country: row.country_code,
-      requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency,
+      requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency, destination: fundingDestination(row),
       ...(row.payment_method ? { paymentMethodType: row.payment_method } : {}), createdAt: row.created_at.toISOString() };
   });
   return { walletKind, environment: walletKind === 'personal' ? 'production' as const : 'sandbox' as const,
@@ -384,7 +392,7 @@ export async function readWalletFundingStatus(database: FundingDatabase, subject
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
   const reference = checkoutReferenceInput.parse(rawReference);
-  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status_v2(${owner},${walletKind},${reference}::uuid)`);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status_v3(${owner},${walletKind},${reference}::uuid)`);
   if (!rows.length) throw new Error('wallet_funding_not_found');
   const row = oneRow(rows, historyRow);
   const personal = walletKind === 'personal';
@@ -394,6 +402,6 @@ export async function readWalletFundingStatus(database: FundingDatabase, subject
   return { checkoutReference: row.id, walletKind, environment: row.environment, provider: row.provider,
     requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency,
     ...(row.payment_method ? { paymentMethodType: row.payment_method } : {}), country: row.country_code, requestStatus: row.status,
-    destination: { address: row.wallet_address, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const },
+    destination: fundingDestination(row),
     confirmation: { state: 'unconfirmed' as const, source: 'none' as const, testMode: !personal } };
 }

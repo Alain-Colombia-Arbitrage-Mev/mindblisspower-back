@@ -12,18 +12,18 @@ export function companyRpcFixture() {
   const log = { address: COMPANY_PAYMENT_TOKEN, topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(sender), word(COMPANY_PAYMENT_RECIPIENT)],
     data: word(BigInt(amount).toString(16)), transactionHash: hash, blockHash, removed: false };
   return {
-    transaction: { hash, from: sender, to: COMPANY_PAYMENT_TOKEN, input: companyPaymentCalldata(amount), value: '0x0', chainId: '0x89', blockNumber: '0x64', blockHash },
+    transaction: { hash, from: sender, to: COMPANY_PAYMENT_TOKEN, input: companyPaymentCalldata(amount), value: '0x0', chainId: '0x1', blockNumber: '0x64', blockHash },
     receipt: { transactionHash: hash, from: sender, to: COMPANY_PAYMENT_TOKEN, blockNumber: '0x64', blockHash, status: '0x1', logs: [log] },
     head: '0x6f', block: { number: '0x64', hash: blockHash },
   };
 }
 export function companyFetch(fixture = companyRpcFixture(), extra: Record<string, unknown> = {}, seen: string[] = []): typeof fetch {
   return (async (url, init) => {
-    expect(String(url)).toBe(`https://rpc.walletconnect.org/v1?chainId=eip155:137&projectId=${companyEnvironment.REOWN_PROJECT_ID}`);
+    expect(String(url)).toBe(`https://rpc.walletconnect.org/v1?chainId=eip155:1&projectId=${companyEnvironment.REOWN_PROJECT_ID}`);
     expect(init?.method).toBe('POST'); expect(init?.redirect).toBe('error'); expect(init?.credentials).toBe('omit');
     expect(new Headers(init?.headers).get('origin')).toBe('https://app.mindblisspower.com');
     const body = JSON.parse(String(init?.body)); seen.push(body.method);
-    const results: Record<string, unknown> = { eth_chainId: '0x89', eth_getTransactionByHash: fixture.transaction,
+    const results: Record<string, unknown> = { eth_chainId: '0x1', eth_getTransactionByHash: fixture.transaction,
       eth_getTransactionReceipt: fixture.receipt, eth_blockNumber: fixture.head, eth_getBlockByNumber: fixture.block, ...extra };
     const result = body.method === 'eth_call' ? word(body.params[0].data === '0x313ce567' ? '6' : BigInt(companyFixture.amount).toString(16)) : results[body.method];
     if (result === undefined) throw Error('unapproved RPC method');
@@ -34,7 +34,7 @@ async function withRpc<T>(perform: (rpc: ReturnType<typeof createCompanyPaymentR
   const rpc = createCompanyPaymentRpc(companyEnvironment, companyFetch(fixture, extra));
   try { return await perform(rpc); } finally { rpc.dispose(); }
 }
-test('fixed Polygon USDT preparation supports all six-decimal balance without approving or sending funds', async () => {
+test('fixed Ethereum USDT preparation supports all six-decimal balance without approving or sending funds', async () => {
   const methods: string[] = [];
   const rpc = createCompanyPaymentRpc(companyEnvironment, companyFetch(companyRpcFixture(), {}, methods));
   try {
@@ -51,7 +51,7 @@ test('fixed Polygon USDT preparation supports all six-decimal balance without ap
 test('hash registration requires the actual bound sender, exact token, recipient, amount, chain and zero native value', async () => {
   await withRpc(rpc => checkCompanyPaymentSubmission(rpc, companyFixture.hash, companyFixture.sender, companyFixture.amount));
   for (const change of [{ from: `0x${'5'.repeat(40)}` }, { to: COMPANY_PAYMENT_RECIPIENT }, { input: companyPaymentCalldata('1') },
-    { input: companyPaymentCalldata(companyFixture.amount) + '00' }, { value: '0x1' }, { chainId: '0x1' }, { hash: `0x${'6'.repeat(64)}` }]) {
+    { input: companyPaymentCalldata(companyFixture.amount) + '00' }, { value: '0x1' }, { chainId: '0x89' }, { hash: `0x${'6'.repeat(64)}` }]) {
     const fixture = companyRpcFixture(); Object.assign(fixture.transaction, change);
     await expect(withRpc(rpc => checkCompanyPaymentSubmission(rpc, companyFixture.hash, companyFixture.sender, companyFixture.amount), fixture))
       .rejects.toThrow('company_payment_transaction_mismatch');
@@ -99,8 +99,8 @@ test('wrong logs, duplicate events, wrong receipt destination and reverted trans
 });
 test('provider failures, malformed envelopes and wrong RPC chains never become payment evidence', async () => {
   await expect(withRpc(rpc => verifyCompanyPaymentReceipt(rpc, companyFixture.hash, companyFixture.sender, companyFixture.amount), companyRpcFixture(),
-    { eth_chainId: '0x1' })).rejects.toThrow('company_payment_rpc_unavailable');
-  for (const response of [Response.json({ jsonrpc: '2.0', id: 999, result: '0x89' }), Response.json({ private: 'provider details' }, { status: 503 }),
+    { eth_chainId: '0x89' })).rejects.toThrow('company_payment_rpc_unavailable');
+  for (const response of [Response.json({ jsonrpc: '2.0', id: 999, result: '0x1' }), Response.json({ private: 'provider details' }, { status: 503 }),
     new Response('[]', { status: 302, headers: { location: 'http://127.0.0.1' } }),
     new Response('private provider details', { headers: { 'content-type': 'application/json', 'content-length': '262145' } }),
     new Response('x'.repeat(262145), { headers: { 'content-type': 'application/json' } })]) {
@@ -126,7 +126,7 @@ test('cancelling non-abortable RPC work stops verification and ignores late succ
   try {
     const pending = checkCompanyPaymentSubmission(rpc, companyFixture.hash, companyFixture.sender, companyFixture.amount);
     await started; controller.abort(); await expect(pending).rejects.toHaveProperty('name', 'AbortError');
-    release(Response.json({ jsonrpc: '2.0', id: 1, result: '0x89' }));
+    release(Response.json({ jsonrpc: '2.0', id: 1, result: '0x1' }));
     await Promise.resolve();
   } finally { rpc.dispose(); }
 });

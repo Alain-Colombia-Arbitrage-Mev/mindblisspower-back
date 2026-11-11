@@ -4,7 +4,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { readWalletBinding } from '../identity/wallet-link';
 import { checkCompanyPaymentBalance, checkCompanyPaymentSubmission, companyPaymentAtomic, createCompanyPaymentRpc,
   verifyCompanyPaymentReceipt, COMPANY_PAYMENT_CHAIN_ID, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT,
-  COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS } from './personal-company-rpc';
+  COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS, companyPaymentNetwork } from './personal-company-rpc';
 
 type Database = Pick<IdentityDatabase, 'execute'>;
 type Options = { environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch; signal?: AbortSignal };
@@ -17,7 +17,7 @@ export const prepareCompanyPaymentInput = z.object({ requestId: uuid, amountAtom
 export const submitCompanyPaymentInput = z.object({ paymentId: uuid, transactionHash: hash }).strict();
 export const verifyCompanyPaymentInput = z.object({ paymentId: uuid }).strict();
 const rowSchema = z.object({ id: uuid, wallet_address: address, recipient_address: z.literal(COMPANY_PAYMENT_RECIPIENT),
-  chain_id: z.literal(COMPANY_PAYMENT_CHAIN_ID), token_address: z.literal(COMPANY_PAYMENT_TOKEN), token_decimals: z.literal(COMPANY_PAYMENT_DECIMALS),
+  chain_id: z.union([z.literal(1), z.literal(137)]), token_address: address, token_decimals: z.literal(COMPANY_PAYMENT_DECIMALS),
   amount_atomic: atomic, status: z.enum(['prepared', 'submitted', 'confirmed', 'failed']), expires_at: z.coerce.date(), created_at: z.coerce.date(),
   transaction_hash: hash.nullable(), block_number: z.string().regex(/^[1-9][0-9]{0,18}$/).nullable(), block_hash: hash.nullable(),
   abandoned_at: z.coerce.date().nullable(),
@@ -29,7 +29,7 @@ function one(rows: unknown[], paymentId?: string): PaymentRow {
   const parsed = rowSchema.safeParse(rows[0]);
   if (!parsed.success) throw new Error('company_payment_unavailable');
   const row = parsed.data;
-  if ((paymentId && row.id !== paymentId) || row.expires_at <= row.created_at || (row.abandoned_at !== null && row.abandoned_at < row.created_at)
+  if (!companyPaymentNetwork(row.chain_id, row.token_address) || (paymentId && row.id !== paymentId) || row.expires_at <= row.created_at || (row.abandoned_at !== null && row.abandoned_at < row.created_at)
     || (row.status === 'prepared' && (row.transaction_hash !== null || row.block_number !== null || row.block_hash !== null || row.confirmations !== 0 || row.failure_reason !== null))
     || (row.status !== 'prepared' && row.transaction_hash === null)
     || (row.status === 'confirmed' && (row.block_number === null || row.block_hash === null || row.confirmations < COMPANY_PAYMENT_CONFIRMATIONS || row.failure_reason !== null))
@@ -63,6 +63,7 @@ export async function preparePersonalCompanyPayment(database: Database, raw: unk
     catch (error) { if (!(error instanceof Error) || error.message !== 'company_payment_not_found') throw error; }
     if (previous) {
       if (previous.amount_atomic !== input.amountAtomic) throw new Error('company_payment_request_already_used');
+      if (previous.status === 'prepared' && previous.chain_id !== COMPANY_PAYMENT_CHAIN_ID) throw new Error('company_payment_network_retired');
       if (previous.status === 'prepared' && previous.abandoned_at === null) await checkCompanyPaymentBalance(rpc, previous.wallet_address, previous.amount_atomic);
       active(rpc.signal);
       return view(previous);
@@ -72,9 +73,9 @@ export async function preparePersonalCompanyPayment(database: Database, raw: unk
     const sender = binding.address.toLowerCase();
     await checkCompanyPaymentBalance(rpc, sender, input.amountAtomic);
     active(rpc.signal);
-    const row = one(await database.execute(sql`SELECT * FROM payments.prepare_personal_company_payment(
+    const row = one(await database.execute(sql`SELECT * FROM payments.prepare_personal_company_payment_v2(
       ${owner},${sender},${input.amountAtomic},${input.requestId}::uuid)`), input.requestId);
-    if (row.wallet_address !== sender || row.amount_atomic !== input.amountAtomic) throw new Error('company_payment_unavailable');
+    if (row.chain_id !== COMPANY_PAYMENT_CHAIN_ID || row.token_address !== COMPANY_PAYMENT_TOKEN || row.wallet_address !== sender || row.amount_atomic !== input.amountAtomic) throw new Error('company_payment_unavailable');
     return view(row);
   } finally { rpc.dispose(); }
 }
@@ -89,13 +90,13 @@ export async function submitPersonalCompanyPayment(database: Database, raw: unkn
     if (row.transaction_hash !== input.transactionHash) throw new Error('company_payment_request_already_used');
     return view(row);
   }
-  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal);
+  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal, row.chain_id);
   try {
     await checkCompanyPaymentSubmission(rpc, input.transactionHash, row.wallet_address, row.amount_atomic);
     active(rpc.signal);
     const saved = one(await database.execute(sql`SELECT * FROM payments.submit_personal_company_payment(
       ${owner},${input.paymentId}::uuid,${input.transactionHash})`), input.paymentId);
-    if (saved.transaction_hash !== input.transactionHash || saved.wallet_address !== row.wallet_address || saved.amount_atomic !== row.amount_atomic) {
+    if (saved.chain_id !== row.chain_id || saved.token_address !== row.token_address || saved.transaction_hash !== input.transactionHash || saved.wallet_address !== row.wallet_address || saved.amount_atomic !== row.amount_atomic) {
       throw new Error('company_payment_unavailable');
     }
     return view(saved);
@@ -109,7 +110,7 @@ export async function verifyPersonalCompanyPayment(database: Database, raw: unkn
   const owner = subject.parse(userId), input = verifyCompanyPaymentInput.parse(raw);
   const row = await readRow(database, owner, input.paymentId);
   if (row.status !== 'submitted' || !row.transaction_hash) return view(row);
-  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal);
+  const rpc = createCompanyPaymentRpc(environment, fetchImpl, signal, row.chain_id);
   try {
     const proof = await verifyCompanyPaymentReceipt(rpc, row.transaction_hash, row.wallet_address, row.amount_atomic);
     active(rpc.signal);
@@ -120,7 +121,7 @@ export async function verifyPersonalCompanyPayment(database: Database, raw: unkn
       : await database.execute(sql`SELECT * FROM payments.reject_personal_company_payment(${owner},${row.id}::uuid,
         ${row.transaction_hash},${proof.reason})`);
     const saved = one(rows, input.paymentId);
-    if (saved.transaction_hash !== row.transaction_hash || saved.amount_atomic !== row.amount_atomic || saved.wallet_address !== row.wallet_address
+    if (saved.chain_id !== row.chain_id || saved.token_address !== row.token_address || saved.transaction_hash !== row.transaction_hash || saved.amount_atomic !== row.amount_atomic || saved.wallet_address !== row.wallet_address
       || saved.status !== (proof.state === 'confirmed' ? 'confirmed' : 'failed')
       // Another verifier can have committed the same immutable receipt at an
       // earlier sufficient confirmation count. Never overwrite that snapshot.

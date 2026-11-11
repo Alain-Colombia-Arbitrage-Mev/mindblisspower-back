@@ -26,6 +26,7 @@ const statusMigration = readFileSync(new URL('../_meta/migration/95_wallet_fundi
 const usd20Migration = readFileSync(new URL('../_meta/migration/96_personal_usd20_membership_catalog.sql', import.meta.url), 'utf8');
 const mxnMigration = readFileSync(new URL('../_meta/migration/97_personal_mxn_spei_requests.sql', import.meta.url), 'utf8');
 const companyMigration = readFileSync(new URL('../_meta/migration/98_personal_company_payments.sql', import.meta.url), 'utf8');
+const ethereumMigration = readFileSync(new URL('../_meta/migration/99_personal_ethereum_only.sql', import.meta.url), 'utf8');
 let probes = 0;
 
 function docker(args, input) {
@@ -546,6 +547,86 @@ try {
     WHERE p.pronamespace='payments'::regnamespace AND p.proname LIKE '%personal_company_payment%';`,false));
   const duplicateCompany=psql(companyMigration,true);assert.notEqual(duplicateCompany.status,0);assert.match(duplicateCompany.stderr,/company_payment_fresh_prerequisites_required/);probes++;
 
+  // Preserve pre-cutover snapshots exactly; Ethereum is a new request policy,
+  // never a reinterpretation of a historical Polygon transaction or onramp.
+  const ethereumAddress = `0x${'9a'.repeat(20)}`;
+  const ethereumFundingAddress = `0x${'9b'.repeat(20)}`;
+  const legacyAddress = `0x${'9c'.repeat(20)}`;
+  psql(`INSERT INTO auth."user" VALUES('ethereum-company',true),('ethereum-funding',true),('ethereum-legacy',true);
+    INSERT INTO identity.wallet_binding VALUES('ethereum-company','${ethereumAddress}'),('ethereum-funding','${ethereumFundingAddress}'),('ethereum-legacy','${legacyAddress}');`);
+  const legacyDraft = randomUUID(), ethereumDraft = randomUUID();
+  equal(companyPrepare('123000000',legacyDraft,'ethereum-legacy',legacyAddress),'prepared');
+  const cutoverSnapshot=`SELECT md5((SELECT jsonb_agg(to_jsonb(r) ORDER BY id)::text FROM payments.personal_company_payment r)||
+    (SELECT jsonb_agg(to_jsonb(r) ORDER BY id)::text FROM payments.reown_funding_intent r)||
+    (SELECT jsonb_agg(to_jsonb(r) ORDER BY id)::text FROM payments.meld_sandbox_funding_attempt r));`;
+  const beforeEthereum=value(cutoverSnapshot,false);
+  const disabledGuard=psql(`BEGIN;ALTER TABLE payments.personal_company_payment DISABLE TRIGGER personal_company_payment_immutable;
+    ${ethereumMigration.replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,'')}`,true);
+  assert.notEqual(disabledGuard.status,0);assert.match(disabledGuard.stderr,/personal_ethereum_runtime_isolation_required/);probes++;
+  psql(ethereumMigration);
+  equal(cutoverSnapshot,beforeEthereum,false);
+  const ethereumPrepare=(amount='123000000',id=ethereumDraft,owner='ethereum-company',sender=ethereumAddress)=>
+    `SELECT chain_id||'|'||token_address||'|'||amount_atomic||'|'||status FROM payments.prepare_personal_company_payment_v2('${owner}','${sender}','${amount}','${id}');`;
+  const ethereumFunding=(amount='30',id=randomUUID(),country='US',currency='USD',method='CREDIT_DEBIT_CARD',owner='ethereum-funding',sender=ethereumFundingAddress)=>
+    `SELECT id FROM payments.create_reown_funding_intent_v3('${owner}','${sender}','${country}',${amount},'${id}','${method}','${currency}');`;
+  const ethereumToken='0xdac17f958d2ee523a2206206994597c13d831ec7';
+  equal(ethereumPrepare(),`1|${ethereumToken}|123000000|prepared`);
+  equal(ethereumPrepare(),`1|${ethereumToken}|123000000|prepared`);
+  rejects(ethereumPrepare('124000000'),'company_payment_request_already_used');
+  rejects(companyPrepare('1',randomUUID(),'ethereum-company',ethereumAddress),'company_payment_network_changed');
+  rejects(ethereumPrepare('123000000',legacyDraft,'ethereum-legacy',legacyAddress),'company_payment_request_already_used');
+  rejects(ethereumPrepare('123000000',randomUUID(),'ethereum-legacy',legacyAddress),'company_payment_pending_exists');
+  equal(`SELECT chain_id FROM payments.read_personal_company_payment('ethereum-legacy','${legacyDraft}');`,'137');
+  equal(`SELECT abandoned_at IS NOT NULL FROM payments.abandon_personal_company_payment('ethereum-legacy','${legacyDraft}');`,'t');
+  equal(ethereumPrepare('1',randomUUID(),'ethereum-legacy',legacyAddress),`1|${ethereumToken}|1|prepared`);
+  const lateLegacyHash=`0x${'9d'.repeat(32)}`;
+  equal(companySubmit(legacyDraft,lateLegacyHash,'ethereum-legacy'),'submitted');
+  equal(companyVerify(legacyDraft,lateLegacyHash,'80000001',blockHash,'12','ethereum-legacy'),'confirmed');
+  equal(`SELECT chain_id||'|'||token_address||'|'||amount_atomic FROM payments.read_personal_company_payment('ethereum-legacy','${legacyDraft}');`,
+    '137|0xc2132d05d31c914a87c6611c10748aeb04b58e8f|123000000');
+  immutable(`UPDATE payments.personal_company_payment SET chain_id=1,token_address='${ethereumToken}' WHERE id='${legacyDraft}';`,'company_payment_snapshot_immutable');
+  immutable(`UPDATE payments.personal_company_payment SET chain_id=137,token_address='0xc2132d05d31c914a87c6611c10748aeb04b58e8f' WHERE id='${ethereumDraft}';`,'company_payment_snapshot_immutable');
+  const wrongPair=psql(`INSERT INTO payments.personal_company_payment(id,subject,wallet_address,amount_atomic,chain_id,token_address)
+    VALUES(gen_random_uuid(),'ethereum-company','${ethereumAddress}','1',137,'${ethereumToken}');`,true);
+  assert.notEqual(wrongPair.status,0);assert.match(wrongPair.stderr,/personal_company_payment_chain_asset_check/);probes++;
+  const ethereumFundingId=randomUUID(), speiFundingId=randomUUID(), colombiaFundingId=randomUUID();
+  equal(ethereumFunding('30',ethereumFundingId),ethereumFundingId);
+  equal(ethereumFunding('30',ethereumFundingId),ethereumFundingId);
+  equal(ethereumFunding('931',speiFundingId,'MX','MXN','SPEI'),speiFundingId);
+  equal(ethereumFunding('30',colombiaFundingId,'CO'),colombiaFundingId);
+  equal(`SELECT destination_currency FROM payments.read_wallet_funding_status_v3('ethereum-funding','personal','${ethereumFundingId}');`,'USDT');
+  equal(`SELECT source_currency||'|'||payment_method||'|'||destination_currency FROM payments.read_wallet_funding_status_v3('ethereum-funding','personal','${speiFundingId}');`,'MXN|SPEI|USDT');
+  equal(`SELECT destination_currency FROM payments.read_wallet_funding_status_v3('bob','personal','${bobId}');`,'USDT_POLYGON');
+  equal(`SELECT destination_currency FROM payments.read_wallet_funding_status_v3('alice','administrative','${requestId}');`,'USDT_POLYGON');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status_v2('ethereum-funding','personal','${ethereumFundingId}');`,'0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_status('ethereum-funding','personal','${ethereumFundingId}');`,'0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_history_v2('ethereum-funding','personal');`,'0');
+  equal(`SELECT count(*) FROM payments.read_wallet_funding_history('ethereum-funding','personal');`,'0');
+  equal(`SELECT bool_and(destination_currency='USDT') FROM payments.read_wallet_funding_history_v3('ethereum-funding','personal');`,'t');
+  rejects(ethereumFunding('100',bobId,'CO','USD','CREDIT_DEBIT_CARD','bob',bobPersonalAddress),'wallet_funding_request_already_used');
+  rejects(`SELECT * FROM payments.create_reown_funding_intent('ethereum-funding','${ethereumFundingAddress}','US',30,'${randomUUID()}','CREDIT_DEBIT_CARD','USD');`,'wallet_funding_network_changed');
+  rejects(`SELECT * FROM payments.create_reown_funding_intent('ethereum-funding','${ethereumFundingAddress}','US',30,'${randomUUID()}','CREDIT_DEBIT_CARD');`,'wallet_funding_network_changed');
+  for(const method of ['NETELLER','SKRILL']) rejects(ethereumFunding('30',randomUUID(),'CO','USD',method),'wallet_funding_invalid_request');
+  for(const amount of ['29.99','15000.01',"'NaN'::numeric"]) rejects(ethereumFunding(amount),'wallet_funding_invalid_request');
+  rejects(ethereumFunding('930.99',randomUUID(),'MX','MXN','SPEI'),'wallet_funding_invalid_request');
+  rejects(ethereumFunding('931',randomUUID(),'CO','MXN','SPEI'),'wallet_funding_invalid_request');
+  rejects(ethereumFunding('931',randomUUID(),'MX','MXN','CREDIT_DEBIT_CARD'),'wallet_funding_invalid_request');
+  rejects(ethereumFunding('30',randomUUID(),'CO','COP'),'wallet_funding_invalid_request');
+  rejects(ethereumFunding('30',randomUUID(),'ES'),'wallet_funding_invalid_request');
+  rejects(ethereumFunding('30',randomUUID(),'US','USD','CREDIT_DEBIT_CARD','blocked',ethereumFundingAddress),'wallet_funding_forbidden');
+  rejects(ethereumFunding('30',randomUUID(),'US','USD','CREDIT_DEBIT_CARD','bob',ethereumFundingAddress),'wallet_funding_wallet_not_linked');
+  for(const signature of ['payments.prepare_personal_company_payment_v2(text,text,text,uuid)',
+    'payments.create_reown_funding_intent_v3(text,text,text,numeric,uuid,text,text)',
+    'payments.read_wallet_funding_history_v3(text,text)','payments.read_wallet_funding_status_v3(text,text,uuid)']){
+    equal(`SELECT has_function_privilege('${role}','${signature}','EXECUTE') AND NOT has_function_privilege('app_read','${signature}','EXECUTE');`,'t',false);
+    equal(`SELECT prosecdef AND proconfig=ARRAY['search_path=pg_catalog']::text[] FROM pg_proc WHERE oid='${signature}'::regprocedure;`,'t',false);
+  }
+  const duplicateEthereum=psql(ethereumMigration,true);assert.notEqual(duplicateEthereum.status,0);
+  assert.match(duplicateEthereum.stderr,/personal_ethereum_requires_fresh_review/);probes++;
+  const ethereumProfile=JSON.parse(value(`SELECT jsonb_object_agg(p.proname,md5(pg_get_functiondef(p.oid)) ORDER BY p.proname)
+    FROM pg_proc p WHERE p.pronamespace='payments'::regnamespace AND p.proname IN('prepare_personal_company_payment_v2',
+     'create_reown_funding_intent_v3','read_wallet_funding_history_v3','read_wallet_funding_status_v3');`,false));
+
   if (personalFlow) {
     // Extend only this disposable fixture with the minimal registered-person
     // columns queried by the real API. No production DSN or host port exists.
@@ -594,7 +675,7 @@ try {
   }
 
   console.log(JSON.stringify({ walletFundingSchema: 'passed', probes, environment: 'disposable-postgres',
-    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, mxnProfile: JSON.parse(mxnProfile) }));
+    externalNetwork: 'disabled', productionConnections: 0, ledgerUnchanged: true, companyProfile, ethereumProfile, mxnProfile: JSON.parse(mxnProfile) }));
 } catch (error) {
   // This harness contains synthetic data only; avoid dumping whole SQL fixtures.
   console.error(JSON.stringify({ walletFundingSchema: 'failed', message: error.message }));

@@ -7,7 +7,7 @@ import { registerPersonalCompanyPaymentRoutes } from './personal-company-payment
 import { COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN } from '../modules/payments/personal-company-rpc';
 const PREFIX = '/api/member/company-payments', id = '11111111-1111-4111-8111-111111111111', secret = 's'.repeat(48);
 const address = `0x${'2'.repeat(40)}`, hash = `0x${'3'.repeat(64)}`;
-const row = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 137,
+const row = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 1,
   token_address: COMPANY_PAYMENT_TOKEN, token_decimals: 6, amount_atomic: '20000000', status: 'prepared',
   expires_at: new Date('2026-11-10T20:15:00Z'), created_at: new Date('2026-11-10T20:00:00Z'), transaction_hash: null,
   block_number: null, block_hash: null, confirmations: 0, failure_reason: null, abandoned_at: null };

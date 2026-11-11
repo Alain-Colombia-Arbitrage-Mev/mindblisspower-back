@@ -6,18 +6,26 @@ proved the protected existing records unchanged and the new receipt register
 empty. Tests use synthetic wallets without external payment calls; no real token
 transfer was sent by this task.
 
+Ethereum cutover: migration 99 was applied on 2026-11-10 with the existing
+records in all 118 protected tables unchanged. New personal payments use Ethereum
+mainnet, chain 1, through the matching API/frontend release. The
+complete cutover and legacy recovery policy is in
+[personal-ethereum-network-cutover.md](personal-ethereum-network-cutover.md).
+
 The user chose to register the payment and assign the membership afterwards.
 This feature records a payment receipt with purpose `company_payment`. It does
 not allocate a package, activate a membership, credit either wallet, pay a
 commission or mutate the existing financial, purchase or funding ledgers.
 
-The receiver is fixed to `0x0a600b03ef5f8e7f3e182b83440c6d292033db0e` on
-Polygon PoS, chain 137. The token is the six-decimal USDT/USDT0 proxy
+The receiver is fixed to `0x0a600b03ef5f8e7f3e182b83440c6d292033db0e`.
+Migration 98 originally used Polygon PoS, chain 137, and its six-decimal USDT/USDT0 proxy
 `0xc2132d05d31c914a87c6611c10748aeb04b58e8f`. The address appears in both the
 [official Polygon mapped-token list](https://docs.polygon.technology/pos/reference/mapped-tokens/)
 and [official USDT0 deployments](https://docs.usdt0.to/technical-documentation/deployments).
-These are constants in the SQL receipt policy, not a recipient supplied by a
-browser or an onramp provider.
+Those historical identities remain immutable. Migration 99 adds the exact
+Ethereum pair, chain 1 and six-decimal USDT contract
+`0xdac17f958d2ee523a2206206994597c13d831ec7`, for all new preparations. Neither
+chain nor token nor recipient is a browser-supplied payment parameter.
 
 The service reads the authenticated user's persisted personal-wallet binding and
 checks the production chain, token decimals and authoritative balance before
@@ -26,6 +34,14 @@ uint256 decimal string; no JavaScript floating point, fiat conversion or client
 assertion can establish the amount. The SQL prepare capability also checks the
 passed sender against the current binding, protecting the boundary between the
 RPC balance read and persistence.
+
+At the Ethereum cutover, new drafts use the versioned SQL prepare capability.
+The old preparation capability fails closed, so a warm API cannot keep creating
+Polygon drafts. A pre-existing Polygon draft can be abandoned if unsigned;
+already-broadcast Polygon payments retain submission and receipt verification
+against their original chain. Reading a legacy receipt never permits another
+Polygon wallet prompt. Ethereum USDT balances use Ethereum RPC, and ETH pays the
+network gas fee; Polygon balances and POL are separate assets.
 
 The independent `payments.personal_company_payment` registry follows
 `prepared → submitted → confirmed/failed`. A prepared snapshot expires after
@@ -83,6 +99,16 @@ idempotent; its race against late submission never loses the real hash.
 Financial, purchase, funding and catalogue snapshots stay
 unchanged throughout the company-payment scenarios.
 
+The migration 99 cutover validation passes 388 SQL probes plus two joined API
+scenarios with 225 assertions against a real disposable PostgreSQL instance.
+The joined scenarios simulate card funding and MXN/SPEI, deposit USDT into a mock
+Ethereum chain, transfer MAX through the real API workflow, and verify the
+immutable receipt after 12 confirmations. External network access is disabled.
+Historical rows, administrative sandbox requests and protected financial/catalogue
+data remain unchanged by the DDL. The test also rejects a disabled immutability
+trigger, mismatched chain/token pairs, old creation capabilities, cross-network
+request-ID reuse and forbidden grants. No production payment is made.
+
 The operator's exact REPEATABLE READ wrapper is validated with the same probes. Three
 additional synthetic release checks reject an old-ledger mutation and an
 unexpected function change, while allowing a concurrent writer without changing
@@ -101,3 +127,6 @@ If a later deployment is rolled back, first disable creation/submission of new
 company payments while keeping receipt recovery available. Never drop an
 existing receipt registry or delete submitted/confirmed records to undo the UI.
 Membership allocation remains a separate, explicitly reviewed operation.
+After migration 99, an old Polygon-only API is not a safe write rollback. Keep
+the chain-aware recovery API and immutable Ethereum receipts, and disable new
+payment creation until a compatible release is available.

@@ -1,6 +1,13 @@
 /** Fixed personal-wallet payment policy. No browser-supplied RPC, chain or destination. */
-export const COMPANY_PAYMENT_CHAIN_ID = 137;
-export const COMPANY_PAYMENT_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
+export const COMPANY_PAYMENT_CHAIN_ID = 1;
+export const COMPANY_PAYMENT_TOKEN = '0xdac17f958d2ee523a2206206994597c13d831ec7';
+const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
+/** Legacy networks are read/receipt recovery only; every new preparation uses Ethereum. */
+export function companyPaymentNetwork(chainId: unknown, tokenAddress: unknown) {
+  if (chainId === COMPANY_PAYMENT_CHAIN_ID && tokenAddress === COMPANY_PAYMENT_TOKEN) return Object.freeze({ chainId: 1 as const, tokenAddress: COMPANY_PAYMENT_TOKEN });
+  if (chainId === 137 && tokenAddress === LEGACY_POLYGON_TOKEN) return Object.freeze({ chainId: 137 as const, tokenAddress: LEGACY_POLYGON_TOKEN });
+  return null;
+}
 export const COMPANY_PAYMENT_RECIPIENT = '0x0a600b03ef5f8e7f3e182b83440c6d292033db0e';
 export const COMPANY_PAYMENT_DECIMALS = 6;
 export const COMPANY_PAYMENT_CONFIRMATIONS = 12;
@@ -65,7 +72,9 @@ async function json(response: Response, signal: AbortSignal): Promise<unknown> {
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } finally { signal.removeEventListener('abort', stop); try { reader.releaseLock(); } catch { /* already cancelled */ } }
 }
-export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typeof fetch = fetch, parent?: AbortSignal) {
+export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typeof fetch = fetch, parent?: AbortSignal, chainId: 1 | 137 = COMPANY_PAYMENT_CHAIN_ID) {
+  const policy = companyPaymentNetwork(chainId, chainId === 137 ? LEGACY_POLYGON_TOKEN : COMPANY_PAYMENT_TOKEN);
+  if (!policy) throw new Error('company_payment_unconfigured');
   const project = environment.REOWN_PROJECT_ID;
   if (environment.PERSONAL_COMPANY_PAYMENTS_ENABLED !== 'true' || typeof project !== 'string' || !/^[a-f0-9]{32}$/i.test(project)) {
     throw new Error('company_payment_unconfigured');
@@ -76,11 +85,12 @@ export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typ
   const timer = setTimeout(abort, 12_000);
   let sequence = 0;
   return {
+    policy,
     signal: controller.signal,
     async call(method: RpcMethod, params: unknown[]): Promise<unknown> {
       const id = ++sequence;
       try {
-        const response = await guarded(() => fetchImpl(`https://rpc.walletconnect.org/v1?chainId=eip155:137&projectId=${project}`, {
+        const response = await guarded(() => fetchImpl(`https://rpc.walletconnect.org/v1?chainId=eip155:${policy.chainId}&projectId=${project}`, {
           method: 'POST', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
           headers: { 'Content-Type': 'application/json', Accept: 'application/json', Origin: 'https://app.mindblisspower.com' },
           body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
@@ -96,13 +106,13 @@ export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typ
 }
 type Rpc = ReturnType<typeof createCompanyPaymentRpc>;
 export async function checkCompanyPaymentChain(rpc: Rpc) {
-  if (hexQuantity(await rpc.call('eth_chainId', [])) !== BigInt(COMPANY_PAYMENT_CHAIN_ID)) throw unavailable();
+  if (hexQuantity(await rpc.call('eth_chainId', [])) !== BigInt(rpc.policy.chainId)) throw unavailable();
 }
 export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amountAtomic: string) {
   await checkCompanyPaymentChain(rpc);
   const [decimals, balance] = await Promise.all([
-    rpc.call('eth_call', [{ to: COMPANY_PAYMENT_TOKEN, data: '0x313ce567' }, 'latest']),
-    rpc.call('eth_call', [{ to: COMPANY_PAYMENT_TOKEN, data: `0x70a08231${address.slice(2).toLowerCase().padStart(64, '0')}` }, 'latest']),
+    rpc.call('eth_call', [{ to: rpc.policy.tokenAddress, data: '0x313ce567' }, 'latest']),
+    rpc.call('eth_call', [{ to: rpc.policy.tokenAddress, data: `0x70a08231${address.slice(2).toLowerCase().padStart(64, '0')}` }, 'latest']),
   ]);
   if (typeof decimals !== 'string' || !WORD.test(decimals) || BigInt(decimals) !== BigInt(COMPANY_PAYMENT_DECIMALS)
     || typeof balance !== 'string' || !WORD.test(balance)) throw unavailable();
@@ -111,13 +121,13 @@ export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amou
 export function companyPaymentCalldata(amountAtomic: string) {
   return `0xa9059cbb${COMPANY_PAYMENT_RECIPIENT.slice(2).padStart(64, '0')}${BigInt(amountAtomic).toString(16).padStart(64, '0')}`;
 }
-function matchingTransaction(value: unknown, hash: string, sender: string, amountAtomic: string) {
+function matchingTransaction(rpc: Rpc, value: unknown, hash: string, sender: string, amountAtomic: string) {
   if (!object(value)) throw unavailable();
   for (const field of ['hash', 'from', 'to', 'input', 'value', 'chainId']) if (typeof value[field] !== 'string') throw unavailable();
   if (!HASH.test(value.hash as string) || !ADDRESS.test(value.from as string) || !ADDRESS.test(value.to as string)) throw unavailable();
-  const matches = same(value.hash, hash) && same(value.from, sender) && same(value.to, COMPANY_PAYMENT_TOKEN)
+  const matches = same(value.hash, hash) && same(value.from, sender) && same(value.to, rpc.policy.tokenAddress)
     && same(value.input, companyPaymentCalldata(amountAtomic)) && hexQuantity(value.value) === 0n
-    && hexQuantity(value.chainId) === BigInt(COMPANY_PAYMENT_CHAIN_ID);
+    && hexQuantity(value.chainId) === BigInt(rpc.policy.chainId);
   return { matches, transaction: value };
 }
 /** Prove ownership before claiming a globally unique hash; null is safely retryable. */
@@ -125,7 +135,7 @@ export async function checkCompanyPaymentSubmission(rpc: Rpc, hash: string, send
   await checkCompanyPaymentChain(rpc);
   const value = await rpc.call('eth_getTransactionByHash', [hash]);
   if (value === null) throw new Error('company_payment_transaction_pending');
-  if (!matchingTransaction(value, hash, sender, amountAtomic).matches) throw new Error('company_payment_transaction_mismatch');
+  if (!matchingTransaction(rpc, value, hash, sender, amountAtomic).matches) throw new Error('company_payment_transaction_mismatch');
 }
 export type CompanyPaymentProof = { state: 'pending'; confirmations: number } | { state: 'failed'; reason: 'transaction_reverted' | 'transaction_mismatch' }
   | { state: 'confirmed'; confirmations: number; blockNumber: string; blockHash: string };
@@ -133,7 +143,7 @@ export async function verifyCompanyPaymentReceipt(rpc: Rpc, hash: string, sender
   await checkCompanyPaymentChain(rpc);
   const [transaction, receipt] = await Promise.all([rpc.call('eth_getTransactionByHash', [hash]), rpc.call('eth_getTransactionReceipt', [hash])]);
   if (transaction === null || receipt === null) return { state: 'pending', confirmations: 0 };
-  const checked = matchingTransaction(transaction, hash, sender, amountAtomic);
+  const checked = matchingTransaction(rpc, transaction, hash, sender, amountAtomic);
   if (!object(receipt) || typeof receipt.transactionHash !== 'string' || !HASH.test(receipt.transactionHash)
     || typeof receipt.blockHash !== 'string' || !HASH.test(receipt.blockHash) || !Array.isArray(receipt.logs) || receipt.logs.length > 64
     || !ADDRESS.test(String(receipt.from)) || !ADDRESS.test(String(receipt.to))) throw unavailable();
@@ -151,7 +161,7 @@ export async function verifyCompanyPaymentReceipt(rpc: Rpc, hash: string, sender
   const count = latest - blockNumber + 1n;
   const confirmations = Number(count > 1_000_000_000n ? 1_000_000_000n : count);
   if (confirmations < COMPANY_PAYMENT_CONFIRMATIONS) return { state: 'pending', confirmations };
-  if (!checked.matches || !same(receipt.transactionHash, hash) || !same(receipt.from, sender) || !same(receipt.to, COMPANY_PAYMENT_TOKEN)) {
+  if (!checked.matches || !same(receipt.transactionHash, hash) || !same(receipt.from, sender) || !same(receipt.to, rpc.policy.tokenAddress)) {
     return { state: 'failed', reason: 'transaction_mismatch' };
   }
   if (status === 0n) return { state: 'failed', reason: 'transaction_reverted' };
@@ -162,7 +172,7 @@ export async function verifyCompanyPaymentReceipt(rpc: Rpc, hash: string, sender
     if (!object(value) || !ADDRESS.test(String(value.address)) || !Array.isArray(value.topics)) throw unavailable();
     if (value.removed === true) return { state: 'pending', confirmations: 0 };
     if (value.removed !== undefined && typeof value.removed !== 'boolean') throw unavailable();
-    if (!same(value.address, COMPANY_PAYMENT_TOKEN) || !same(value.topics[0], COMPANY_PAYMENT_TRANSFER_TOPIC)) continue;
+    if (!same(value.address, rpc.policy.tokenAddress) || !same(value.topics[0], COMPANY_PAYMENT_TRANSFER_TOPIC)) continue;
     if (value.topics.length !== 3 || value.topics.some(topic => typeof topic !== 'string' || !WORD.test(topic))
       || typeof value.data !== 'string' || !WORD.test(value.data)
       || (value.transactionHash !== undefined && !same(value.transactionHash, hash))

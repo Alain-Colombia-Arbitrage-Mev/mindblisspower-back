@@ -9,7 +9,7 @@ const id = '11111111-1111-4111-8111-111111111111';
 const address = `0x${'2'.repeat(40)}`, hash = `0x${'3'.repeat(64)}`, blockHash = `0x${'4'.repeat(64)}`;
 const amount = '20000123', created = new Date('2026-11-10T20:00:00Z');
 const environment = { PERSONAL_COMPANY_PAYMENTS_ENABLED: 'true', REOWN_PROJECT_ID: 'a'.repeat(32) };
-const base = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 137, token_address: COMPANY_PAYMENT_TOKEN,
+const base = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 1, token_address: COMPANY_PAYMENT_TOKEN,
   token_decimals: 6, amount_atomic: amount, status: 'prepared', expires_at: new Date(created.getTime() + 900_000), created_at: created,
   transaction_hash: null, block_number: null, block_hash: null, confirmations: 0, failure_reason: null, abandoned_at: null };
 const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
@@ -20,15 +20,18 @@ function queued(results: unknown[][]) {
     if (!results.length) throw Error('unexpected database write'); return results.shift(); } } as Pick<IdentityDatabase, 'execute'>;
   return { database, queries };
 }
-function rpcFetch(overrides: Record<string, unknown> = {}, seen: string[] = []): typeof fetch {
+function rpcFetch(overrides: Record<string, unknown> = {}, seen: string[] = [], chainId: 1 | 137 = 1): typeof fetch {
+  const token = chainId === 137 ? '0xc2132d05d31c914a87c6611c10748aeb04b58e8f' : COMPANY_PAYMENT_TOKEN;
+  const chainHex = chainId === 137 ? '0x89' : '0x1';
   const word = (value: string) => `0x${value.replace(/^0x/, '').padStart(64, '0')}`;
-  return (async (_url, init) => {
+  return (async (url, init) => {
+    expect(String(url)).toContain(`chainId=eip155:${chainId}&`);
     const request = JSON.parse(String(init?.body)); seen.push(request.method);
-    const tx = { hash, from: address, to: COMPANY_PAYMENT_TOKEN, input: companyPaymentCalldata(amount), value: '0x0', chainId: '0x89', blockNumber: '0x64', blockHash };
-    const values: Record<string, unknown> = { eth_chainId: '0x89', eth_getTransactionByHash: tx, eth_blockNumber: '0x6f',
+    const tx = { hash, from: address, to: token, input: companyPaymentCalldata(amount), value: '0x0', chainId: chainHex, blockNumber: '0x64', blockHash };
+    const values: Record<string, unknown> = { eth_chainId: chainHex, eth_getTransactionByHash: tx, eth_blockNumber: '0x6f',
       eth_getBlockByNumber: { number: '0x64', hash: blockHash },
-      eth_getTransactionReceipt: { transactionHash: hash, from: address, to: COMPANY_PAYMENT_TOKEN, blockNumber: '0x64', blockHash, status: '0x1',
-        logs: [{ address: COMPANY_PAYMENT_TOKEN, topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(address), word(COMPANY_PAYMENT_RECIPIENT)], data: word(BigInt(amount).toString(16)) }] }, ...overrides };
+      eth_getTransactionReceipt: { transactionHash: hash, from: address, to: token, blockNumber: '0x64', blockHash, status: '0x1',
+        logs: [{ address: token, topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, word(address), word(COMPANY_PAYMENT_RECIPIENT)], data: word(BigInt(amount).toString(16)) }] }, ...overrides };
     const result = request.method === 'eth_call' ? word(request.params[0].data === '0x313ce567' ? '6' : BigInt(amount).toString(16)) : values[request.method];
     if (result === undefined) throw Error('unapproved RPC operation');
     return Response.json({ jsonrpc: '2.0', id: request.id, result });
@@ -38,7 +41,7 @@ test('preparation derives its verified sender and stores only a fixed personal p
   const db = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [base]]), seen: string[] = [];
   const result = await preparePersonalCompanyPayment(db.database, { requestId: id, amountAtomic: amount }, 'owner', { environment, fetchImpl: rpcFetch({}, seen) });
   expect(result).toMatchObject({ paymentId: id, walletKind: 'personal', walletAddress: address, recipientAddress: COMPANY_PAYMENT_RECIPIENT,
-    chainId: 137, tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: 6, amountAtomic: amount, status: 'prepared', membershipAssignment: 'pending' });
+    chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, tokenDecimals: 6, amountAtomic: amount, status: 'prepared', membershipAssignment: 'pending' });
   expect(db.queries.at(-1)!.params).toEqual(['owner', address, amount, id]);
   expect(db.queries.at(-1)!.sql).toContain('prepare_personal_company_payment');
   expect(seen.sort()).toEqual(['eth_call', 'eth_call', 'eth_chainId']);
@@ -70,7 +73,7 @@ test('hash claims happen only after real transaction ownership proof; unindexed 
   const result = await submitPersonalCompanyPayment(db.database, { paymentId: id, transactionHash: hash }, 'owner', { environment, fetchImpl: rpcFetch() });
   expect(result.status).toBe('submitted'); expect(db.queries[1]!.params).toEqual(['owner', id, hash]);
   for (const [value, code] of [[null, 'company_payment_transaction_pending'], [{ hash, from: COMPANY_PAYMENT_RECIPIENT, to: COMPANY_PAYMENT_TOKEN,
-    input: companyPaymentCalldata(amount), value: '0x0', chainId: '0x89' }, 'company_payment_transaction_mismatch']] as const) {
+    input: companyPaymentCalldata(amount), value: '0x0', chainId: '0x1' }, 'company_payment_transaction_mismatch']] as const) {
     const blocked = queued([[base]]);
     await expect(submitPersonalCompanyPayment(blocked.database, { paymentId: id, transactionHash: hash }, 'owner', { environment,
       fetchImpl: rpcFetch({ eth_getTransactionByHash: value }) })).rejects.toThrow(code);
@@ -101,7 +104,7 @@ test('receipt confirmation calls only its isolated verifier writer and leaves me
 test('owned status and recovery history expose explicit policy and reject crossed or corrupt persisted rows', async () => {
   expect((await readPersonalCompanyPayment(queued([[base]]).database, 'owner', id)).amountAtomic).toBe(amount);
   expect((await readPersonalCompanyPaymentHistory(queued([[base]]).database, 'owner')).records).toHaveLength(1);
-  for (const change of [{ recipient_address: address }, { token_address: address }, { chain_id: 1 }, { token_decimals: 18 },
+  for (const change of [{ recipient_address: address }, { token_address: address }, { chain_id: 137 }, { token_decimals: 18 },
     { amount_atomic: '01' }, { status: 'confirmed', transaction_hash: hash, confirmations: 0 }]) {
     await expect(readPersonalCompanyPayment(queued([[{ ...base, ...change }]]).database, 'owner', id)).rejects.toThrow('company_payment_unavailable');
   }
@@ -111,7 +114,7 @@ test('cancellation of a pending proof prevents submission persistence and never 
   const db = queued([[base]]), controller = new AbortController();
   await expect(submitPersonalCompanyPayment(db.database, { paymentId: id, transactionHash: hash }, 'owner', { environment, signal: controller.signal,
     fetchImpl: (async (_url, init) => { controller.abort(); const body = JSON.parse(String(init?.body));
-      return Response.json({ jsonrpc: '2.0', id: body.id, result: '0x89' }); }) as typeof fetch })).rejects.toHaveProperty('name', 'AbortError');
+      return Response.json({ jsonrpc: '2.0', id: body.id, result: '0x1' }); }) as typeof fetch })).rejects.toHaveProperty('name', 'AbortError');
   expect(db.queries).toHaveLength(1);
 });
 
@@ -136,4 +139,33 @@ test('abandonment dismisses only the owned prepared draft idempotently and prese
     await expect(abandonPersonalCompanyPayment(queued([[unsafe]]).database, { paymentId: id }, 'owner')).rejects.toThrow('company_payment_unavailable');
   }
   await expect(abandonPersonalCompanyPayment(queued([]).database, { paymentId: id, subject: 'other' }, 'owner')).rejects.toThrow();
+});
+
+
+test('Ethereum is the only new preparation policy while legacy Polygon receipts retain their original proof network', async () => {
+  const legacy = { ...base, chain_id: 137, token_address: '0xc2132d05d31c914a87c6611c10748aeb04b58e8f' };
+  const history = await readPersonalCompanyPaymentHistory(queued([[base, { ...legacy, id: '22222222-2222-4222-8222-222222222222' }]]).database, 'owner');
+  expect(history.records.map(row => [row.chainId, row.tokenAddress])).toEqual([[1, COMPANY_PAYMENT_TOKEN], [137, legacy.token_address]]);
+  const retired = queued([[legacy]]);
+  await expect(preparePersonalCompanyPayment(retired.database, { requestId: id, amountAtomic: amount }, 'owner', {
+    environment, fetchImpl: (async () => { throw Error('retired draft must not query a balance or prepare a transfer'); }) as unknown as typeof fetch,
+  })).rejects.toThrow('company_payment_network_retired');
+  expect(retired.queries).toHaveLength(1);
+  const submitted = { ...legacy, status: 'submitted', transaction_hash: hash };
+  const registration = queued([[legacy], [submitted]]);
+  expect((await submitPersonalCompanyPayment(registration.database, { paymentId: id, transactionHash: hash }, 'owner', {
+    environment, fetchImpl: rpcFetch({}, [], 137),
+  })).chainId).toBe(137);
+  const confirmed = { ...submitted, status: 'confirmed', block_number: '100', block_hash: blockHash, confirmations: 12 };
+  const verification = queued([[submitted], [confirmed]]);
+  expect((await verifyPersonalCompanyPayment(verification.database, { paymentId: id }, 'owner', {
+    environment, fetchImpl: rpcFetch({}, [], 137),
+  })).chainId).toBe(137);
+  for (const corrupt of [{ ...base, chain_id: 137 }, { ...legacy, chain_id: 1 }]) {
+    await expect(readPersonalCompanyPayment(queued([[corrupt]]).database, 'owner', id)).rejects.toThrow('company_payment_unavailable');
+  }
+  const unsafeWriter = queued([[], [principal], [{ address, chain_id: 1, verified_at: created }], [legacy]]);
+  await expect(preparePersonalCompanyPayment(unsafeWriter.database, { requestId: id, amountAtomic: amount }, 'owner', {
+    environment, fetchImpl: rpcFetch(),
+  })).rejects.toThrow('company_payment_unavailable');
 });

@@ -35,7 +35,7 @@ function application({ signedIn = true, execute = async () => [], fetchImpl }: {
       BETTER_AUTH_TRUSTED_ORIGINS: `${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
     fetchImpl: fetchImpl || (async url => {
       expect(String(url)).toStartWith('https://api.meld.io/');
-      return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT_POLYGON',
+      return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT',
         paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
     }) as typeof fetch });
   return app;
@@ -90,7 +90,7 @@ test('HTTP public personal funding accepts USD30 while USD20 and29.99 are reject
 test('HTTP personal SPEI rejects 930.99 MXN and accepts 931 MXN without changing the source currency', async () => {
   let writes = 0;
   const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; },
-    fetchImpl: (async () => Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
+    fetchImpl: (async () => Response.json([{ partner: 'SWAPPED', source: 'MXN', destination: 'USDT',
       paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 148.66, max: 212370.61 } }] }])) as unknown as typeof fetch });
   for (const [amount, status] of [[930.99, 409], [931, 201]] as const) {
     const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
