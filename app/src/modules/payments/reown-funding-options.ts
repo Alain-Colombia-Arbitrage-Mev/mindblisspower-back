@@ -3,8 +3,10 @@
 // This is the public checkout key shipped by Reown, not a Mindbliss private API key.
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
 const USD_MXN_PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
+const US_USD_PROVIDERS = ['SWAPPED', 'MERCURYO', 'TOPPER'] as const;
+const CO_USD_PROVIDERS = ['SWAPPED'] as const;
 const COP_PROVIDERS = ['ONRAMPMONEY'] as const;
-const PROVIDERS = [...USD_MXN_PROVIDERS, ...COP_PROVIDERS] as const;
+const PROVIDERS = [...US_USD_PROVIDERS, ...COP_PROVIDERS] as const;
 export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'CO'] as const;
 export const PERSONAL_FUNDING_MINIMUM_USD = 30;
 export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
@@ -12,8 +14,10 @@ export const PERSONAL_FUNDING_MINIMUM_MXN = 931;
 export const PERSONAL_FUNDING_MINIMUM_COP = 170_000;
 export const PERSONAL_FUNDING_MAXIMUM_COP = 4_000_000;
 export const PERSONAL_FUNDING_COP_METHODS = ['PSE', 'LOCAL_BANK_TRANSFER'] as const;
+export const PERSONAL_FUNDING_MXN_METHODS = ['SPEI', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'] as const;
+const TOPPER_METHODS = ['VENMO', 'PAYPAL', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'] as const;
 export const PERSONAL_FUNDING_DESTINATION = 'USDT_POLYGON' as const;
-const EXCLUDED_PERSONAL_METHODS = new Set(['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
+const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
 // Temporary integration gate: a positive AstroPay quote does not establish a usable hosted checkout rail.
 const UNAVAILABLE_PERSONAL_METHODS = new Set(['ASTROPAY']);
 const MAX_BYTES = 65_536;
@@ -47,11 +51,22 @@ export function isPersonalCopFundingMethod(value: unknown) {
   return typeof value === 'string' && PERSONAL_FUNDING_COP_METHODS.some(method => method === value);
 }
 
+export function isPersonalMxnFundingMethod(value: unknown) {
+  return typeof value === 'string' && PERSONAL_FUNDING_MXN_METHODS.some(method => method === value);
+}
+
+function providersFor(country: string | undefined, currency: string): readonly ReownFundingRoute['serviceProvider'][] {
+  return currency === 'COP' ? COP_PROVIDERS : country === 'CO' && currency === 'USD' ? CO_USD_PROVIDERS
+    : country === 'US' && currency === 'USD' ? US_USD_PROVIDERS : USD_MXN_PROVIDERS;
+}
+
 /** Canonical IDs and limits in the requested fiat; labels and guessed rails are never accepted. */
-export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode = 'USD'): ReownFundingRoute[] {
+export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode = 'USD', country?: string): ReownFundingRoute[] {
   if (!['USD', 'MXN', 'COP'].includes(sourceCurrencyCode)) throw unavailable();
+  if (country !== undefined && (!PERSONAL_FUNDING_COUNTRIES.some(allowed => allowed === country)
+    || (sourceCurrencyCode === 'MXN' && country !== 'MX') || (sourceCurrencyCode === 'COP' && country !== 'CO'))) throw unavailable();
   if (!Array.isArray(data) || data.length > 100) throw unavailable();
-  const providers: readonly ReownFundingRoute['serviceProvider'][] = sourceCurrencyCode === 'COP' ? COP_PROVIDERS : USD_MXN_PROVIDERS;
+  const providers = providersFor(country, sourceCurrencyCode);
   const routes = new Map<ReownFundingRoute['serviceProvider'], Map<string, ReownFundingMethod>>();
   for (const route of data) {
     if (!record(route) || typeof route.partner !== 'string') throw unavailable();
@@ -65,8 +80,13 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
         throw unavailable();
       }
       if (isBlockedPersonalFundingMethod(method.name)) continue;
+      if (method.checkoutSupported === false) continue;
+      if (country === 'CO' && sourceCurrencyCode === 'USD' && !['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'].includes(method.name)) continue;
+      if (provider === 'TOPPER' && (!TOPPER_METHODS.some(allowed => allowed === method.name) || method.checkoutSupported !== true)) continue;
+      if (['VENMO', 'PAYPAL'].includes(method.name) && (country !== 'US' || sourceCurrencyCode !== 'USD' || provider !== 'TOPPER' || method.checkoutSupported !== true)) continue;
       // Each approved local rail stays in its original fiat and hosted checkout.
-      if (sourceCurrencyCode === 'MXN' && method.name !== 'SPEI') continue;
+      if (sourceCurrencyCode === 'MXN' && (!isPersonalMxnFundingMethod(method.name)
+        || (method.name !== 'SPEI' && method.checkoutSupported !== true))) continue;
       if (sourceCurrencyCode === 'COP' && (!isPersonalCopFundingMethod(method.name) || method.checkoutSupported !== true)) continue;
       if (sourceCurrencyCode === 'USD' && ['PSE', 'LOCAL_BANK_TRANSFER', 'SPEI'].includes(method.name)) continue;
       // Without limits, the server cannot verify the selected amount for this rail.
@@ -157,8 +177,9 @@ export async function readReownProductionOptions(country: string, {
     throw new Error('wallet_funding_invalid_country');
   }
   if (typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw new Error('wallet_funding_invalid_currency');
-  if (sourceCurrencyCode !== 'USD' && !(country === 'MX' && sourceCurrencyCode === 'MXN')
-    && !(country === 'CO' && sourceCurrencyCode === 'COP')) {
+  // Catalogue COP rails currently fail hosted quotes. Keep historical COP data,
+  // but do not advertise or send new users into a checkout with no usable quote.
+  if (sourceCurrencyCode !== 'USD' && !(country === 'MX' && sourceCurrencyCode === 'MXN')) {
     throw new Error('wallet_funding_invalid_currency');
   }
   const controller = new AbortController();
@@ -169,7 +190,7 @@ export async function readReownProductionOptions(country: string, {
   let phase: DiscoveryDiagnostic['phase'] = 'fetch';
   let status: number | null = null;
   try {
-    const providers = sourceCurrencyCode === 'COP' ? COP_PROVIDERS : USD_MXN_PROVIDERS;
+    const providers = providersFor(country, sourceCurrencyCode);
     const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/${PERSONAL_FUNDING_DESTINATION}?partners=${providers.join(',')}`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
@@ -180,13 +201,13 @@ export async function readReownProductionOptions(country: string, {
     phase = 'body';
     const body = await boundedJson(response, controller.signal);
     phase = 'normalization';
-    const normalized = normalizeReownProductionRoutes(body, sourceCurrencyCode);
+    const normalized = normalizeReownProductionRoutes(body, sourceCurrencyCode, country);
     // This is a fixed MXN business minimum, not a USD exchange-rate quote.
     // A provider can require more, and a route whose maximum is lower is absent.
     const routes = normalized.map(route => ({ ...route, paymentMethods: route.paymentMethods.flatMap(method => {
-      const floor = sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : sourceCurrencyCode === 'MXN' ? PERSONAL_FUNDING_MINIMUM_MXN : PERSONAL_FUNDING_MINIMUM_COP;
+      const floor = sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : PERSONAL_FUNDING_MINIMUM_MXN;
       const minimumAmount = Math.max(floor, method.minimumAmount);
-      const maximumAmount = Math.min(sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MAXIMUM_USD : sourceCurrencyCode === 'COP' ? PERSONAL_FUNDING_MAXIMUM_COP : 1_000_000_000, method.maximumAmount);
+      const maximumAmount = Math.min(sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MAXIMUM_USD : 1_000_000_000, method.maximumAmount);
       return minimumAmount > maximumAmount ? [] : [{ ...method, minimumAmount, maximumAmount,
         ...(sourceCurrencyCode === 'USD' ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) }];
     }) })).filter(route => route.paymentMethods.length > 0);

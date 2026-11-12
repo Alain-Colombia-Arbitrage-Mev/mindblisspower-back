@@ -223,55 +223,15 @@ test('personal upstream throttling remains HTTP429 for discovery and intent with
   expect(reads).toBe(2); expect(writes).toBe(0);
 });
 
-test('HTTP Colombia keeps USD and offers COP PSE through Onramp Money without mixing provider routes or amounts', async () => {
-  let writes = 0;
-  const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; },
-    fetchImpl: (async url => {
-      if (String(url).includes('/CO/COP/')) {
-        expect(String(url)).toEndWith('/CO/COP/USDT_POLYGON?partners=ONRAMPMONEY');
-        return Response.json([{ partner: 'ONRAMPMONEY', source: 'COP', destination: 'USDT_POLYGON', paymentMethods: [
-          { name: 'PSE', checkoutSupported: true, headlessSupported: false, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
-          { name: 'LOCAL_BANK_TRANSFER', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
-        ] }]);
-      }
-      expect(String(url)).toContain('/CO/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO');
-      return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT_POLYGON',
-        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
-    }) as typeof fetch });
-  const options = await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=USD');
-  expect(options.status).toBe(200);
-  expect(await options.json()).toMatchObject({ country: 'CO', sourceCurrencyCode: 'USD', environment: 'production',
-    routes: [{ serviceProvider: 'SWAPPED', paymentMethods: [{ minimumAmount: 30, maximumAmount: 15000, minimumUsd: 30, maximumUsd: 15000 }] }] });
-  const accepted = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ...input, country: 'CO', amount: 30 }) });
-  expect(accepted.status).toBe(201);
-  expect(await accepted.json()).toMatchObject({ sourceCurrencyCode: 'USD', requestedAmount: 30, environment: 'production' });
-  const copOptions = await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=COP');
-  expect(copOptions.status).toBe(200);
-  expect(copOptions.headers.get('cache-control')).toBe('private, no-store');
-  expect(await copOptions.json()).toMatchObject({ country: 'CO', sourceCurrencyCode: 'COP', environment: 'production', paymentMethods: ['PSE', 'LOCAL_BANK_TRANSFER'],
-    routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 }, { currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 }] }] });
-  const pse = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 170000, paymentMethodType: 'PSE' };
-  const copIntent = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(pse) });
-  expect(copIntent.status).toBe(201);
-  expect(await copIntent.json()).toMatchObject({ sourceCurrencyCode: 'COP', requestedAmount: 170000, paymentMethodType: 'PSE', allowedProviders: ['ONRAMPMONEY'] });
-  const localIntent = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ...pse, paymentMethodType: 'LOCAL_BANK_TRANSFER' }) });
-  expect(localIntent.status).toBe(201);
-  expect(await localIntent.json()).toMatchObject({ requestedAmount: 170000, sourceCurrencyCode: 'COP', paymentMethodType: 'LOCAL_BANK_TRANSFER', allowedProviders: ['ONRAMPMONEY'] });
-  expect((await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=MXN')).status).toBe(400);
-  for (const country of ['US', 'MX']) expect((await app.request(`/api/member/wallet-funding/personal/options?country=${country}&sourceCurrencyCode=COP`)).status).toBe(400);
-  for (const sourceCurrencyCode of ['COP', 'MXN']) {
-    const rejected = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
-      body: JSON.stringify({ ...input, country: 'CO', sourceCurrencyCode, amount: 931, paymentMethodType: 'SPEI' }) });
-    expect(rejected.status).toBe(503);
-    expect(await rejected.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
+test('HTTP Colombia offers only USD card/mobile and rejects new COP before discovery or intent persistence',async()=>{
+  let writes=0,reads=0;
+  const app=application({execute:async()=>{writes++;return[{id:input.requestId,created_at:new Date('2026-11-10T20:00:00Z')}];},fetchImpl:(async url=>{reads++;expect(String(url)).toEndWith('/CO/USD/USDT_POLYGON?partners=SWAPPED');return Response.json([{partner:'SWAPPED',source:'USD',destination:'USDT_POLYGON',paymentMethods:['CREDIT_DEBIT_CARD','APPLE_PAY','GOOGLE_PAY'].map(name=>({name,checkoutSupported:true,limits:{currencyCode:'USD',min:20,max:15000}}))}]);}) as typeof fetch});
+  const options=await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=USD');expect(options.status).toBe(200);expect(await options.json()).toMatchObject({paymentMethods:['CREDIT_DEBIT_CARD','APPLE_PAY','GOOGLE_PAY']});
+  expect((await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=COP')).status).toBe(400);
+  for(const paymentMethodType of ['PSE','LOCAL_BANK_TRANSFER']){
+    const response=await app.request(personalPath,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({...input,country:'CO',sourceCurrencyCode:'COP',amount:170000,paymentMethodType})});expect(response.status).toBe(503);expect(await response.json()).toEqual({error:'wallet_funding_valuation_unavailable'});
   }
-  for (const amount of [42300, 100000, 169999.99, 4000000.01]) {
-    const rejected = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...pse, amount }) });
-    expect(rejected.status).toBe(409); expect(await rejected.json()).toEqual({ error: 'wallet_funding_amount_unavailable' });
-  }
-  expect(writes).toBe(3);
+  expect(reads).toBe(1);expect(writes).toBe(0);
 });
 
 test('currency selectors are strict and non-USD mutations expose no unverified USD acknowledgement', async () => {
@@ -286,7 +246,7 @@ test('currency selectors are strict and non-USD mutations expose no unverified U
     }
   }
   const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ...input, country: 'MX', sourceCurrencyCode: 'MXN' }) });
+    body: JSON.stringify({ ...input, country: 'MX', sourceCurrencyCode: 'MXN', paymentMethodType: 'VENMO' }) });
   expect(response.status).toBe(503);
   expect(await response.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
   const administrative = await app.request(administrativePath, signedRequest(administrativePath,
@@ -294,6 +254,26 @@ test('currency selectors are strict and non-USD mutations expose no unverified U
   expect(administrative.status).toBe(503);
   expect(await administrative.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
   expect(calls).toBe(0);
+});
+
+test('HTTP US Venmo uses Topper and Mexico MXN card/mobile intents keep pesos rather than USD labels', async () => {
+  let writes = 0;
+  const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; },
+    fetchImpl: (async url => String(url).includes('/MX/MXN/') ? Response.json([{ partner: 'MERCURYO', source: 'MXN', destination: 'USDT_POLYGON',
+      paymentMethods: ['SPEI', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'].map(name => ({ name, checkoutSupported: true, limits: { currencyCode: 'MXN', min: 520.03, max: 312013.70 } })) }])
+      : Response.json([{ partner: 'TOPPER', source: 'USD', destination: 'USDT_POLYGON', paymentMethods: ['VENMO', 'PAYPAL'].map(name => ({ name, checkoutSupported: true, limits: { currencyCode: 'USD', min: 10, max: 1000 } })) }])) as typeof fetch });
+  const venmoOptions = await app.request('/api/member/wallet-funding/personal/options?country=US');
+  expect(venmoOptions.status).toBe(200); expect(await venmoOptions.json()).toMatchObject({ paymentMethods: ['VENMO', 'PAYPAL'], routes: [{ serviceProvider: 'TOPPER' }] });
+  const venmo = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...input, paymentMethodType: 'VENMO' }) });
+  expect(venmo.status).toBe(201); expect(await venmo.json()).toMatchObject({ sourceCurrencyCode: 'USD', requestedAmount: 100, allowedProviders: ['TOPPER'] });
+  const paypal = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...input, paymentMethodType: 'PAYPAL' }) });
+  expect(paypal.status).toBe(201); expect(await paypal.json()).toMatchObject({ sourceCurrencyCode: 'USD', requestedAmount: 100, paymentMethodType: 'PAYPAL', allowedProviders: ['TOPPER'] });
+  for (const paymentMethodType of ['SPEI', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY']) {
+    const response = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount: 931, paymentMethodType }) });
+    expect(response.status).toBe(201); expect(await response.json()).toMatchObject({ sourceCurrencyCode: 'MXN', requestedAmount: 931, paymentMethodType, allowedProviders: ['MERCURYO'] });
+  }
+  expect(writes).toBe(6);
 });
 
 test('status requires native ownership, an exact reference query and uncached indistinguishable not-found responses', async () => {

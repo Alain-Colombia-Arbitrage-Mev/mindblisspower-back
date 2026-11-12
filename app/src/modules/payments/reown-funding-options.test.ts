@@ -11,7 +11,7 @@ test('personal discovery is a read-only production request scoped to the public 
   let calls = 0;
   const result = await readReownProductionOptions('US', { fetchImpl: mockFetch((url, init) => {
     calls++;
-    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO');
+    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDT_POLYGON?partners=SWAPPED,MERCURYO,TOPPER');
     expect(init.method).toBe('GET');
     expect(init.redirect).toBe('error');
     expect(init.cache).toBe('no-store');
@@ -39,6 +39,35 @@ test('temporarily unavailable AstroPay cannot become an offered rail even with v
   expect(normalizeReownProductionRoutes([route('SWAPPED', [
     { name: 'ASTROPAY', limits: { currencyCode: 'USD', min: 7.81, max: 20633.05 } },
   ])])).toEqual([]);
+});
+
+test('Topper is US/USD only and Venmo/PayPal cannot be borrowed by another provider or country', async () => {
+  const methods = ['VENMO', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'BANK_TRANSFER', 'PAYPAL'].map(name => ({ name,
+    checkoutSupported: true, limits: { currencyCode: 'USD', min: 10, max: 1000 } }));
+  for (const country of ['US', 'MX', 'CO']) {
+    const result = await readReownProductionOptions(country, { fetchImpl: mockFetch(url => {
+      expect(url.endsWith(country === 'US' ? '?partners=SWAPPED,MERCURYO,TOPPER' : country === 'CO' ? '?partners=SWAPPED' : '?partners=SWAPPED,MERCURYO')).toBe(true);
+      return Response.json([route('TOPPER', methods), route('SWAPPED', [methods[0]!])]);
+    }) });
+    expect(result.paymentMethods).toEqual(country === 'US' ? ['VENMO', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'PAYPAL'] : []);
+    expect(result.routes.map(route => route.serviceProvider)).toEqual(country === 'US' ? ['TOPPER'] : []);
+  }
+  expect(normalizeReownProductionRoutes([route('TOPPER', methods)], 'USD')).toEqual([]);
+  expect(normalizeReownProductionRoutes([route('TOPPER', methods.map(method => ({ ...method, checkoutSupported: false })))], 'USD', 'US')).toEqual([]);
+  expect(() => normalizeReownProductionRoutes([], 'MXN', 'US')).toThrow();
+});
+
+test('Mexico MXN offers only its four real hosted methods with the fixed 931 floor and higher provider minima', async () => {
+  const methods = ['SPEI', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'VENMO', 'PSE', 'PAYPAL'].map(name => ({ name,
+    checkoutSupported: true, limits: { currencyCode: 'MXN', min: 520.03, max: 312013.70 } }));
+  const result = await readReownProductionOptions('MX', { sourceCurrencyCode: 'MXN', fetchImpl: mockFetch(() => Response.json([
+    { partner: 'MERCURYO', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: methods },
+    { partner: 'TOPPER', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: methods },
+  ])) });
+  expect(result.paymentMethods).toEqual(['SPEI', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY']);
+  expect(result.routes.map(route => route.serviceProvider)).toEqual(['MERCURYO']);
+  expect(result.routes[0]!.paymentMethods.every(method => method.currencyCode === 'MXN' && method.minimumAmount === 931 && method.maximumAmount === 312013.70)).toBe(true);
+  expect(JSON.stringify(result)).not.toContain('minimumUsd');
 });
 
 test('public USD discovery intersects provider limits with 30 to 15000 without a test-minimum bypass', async () => {
@@ -98,42 +127,17 @@ test('personal MXN discovery applies the fixed 931 floor, preserves higher provi
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|exchangeRate|fiatAmountInUsd/);
 });
 
-test('Colombia COP discovers only hosted PSE and local bank through Onramp Money within the COP business bounds', async () => {
-  const cop = (partner = 'ONRAMPMONEY', checkoutSupported: unknown = true) => ({ partner, source: 'COP', destination: 'USDT_POLYGON', paymentMethods: [
-    { name: 'PSE', checkoutSupported, headlessSupported: false, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
-    { name: 'LOCAL_BANK_TRANSFER', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
-    { name: 'CREDIT_DEBIT_CARD', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
-    { name: 'SKRILL', checkoutSupported: true, limits: { currencyCode: 'COP', min: 1, max: 99999999 } },
-  ] });
-  let calls = 0;
-  const result = await readReownProductionOptions('CO', { sourceCurrencyCode: 'COP', fetchImpl: mockFetch((url, init) => {
-    calls++;
-    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/CO/COP/USDT_POLYGON?partners=ONRAMPMONEY');
-    expect(init.method).toBe('GET');
-    return Response.json([cop(), cop('SWAPPED'), cop('MERCURYO')]);
-  }) });
-  expect(calls).toBe(1);
-  expect(result).toMatchObject({ country: 'CO', sourceCurrencyCode: 'COP', destinationCurrencyCode: 'USDT_POLYGON', network: 'polygon', chainId: 137,
-    paymentMethods: ['PSE', 'LOCAL_BANK_TRANSFER'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [
-      { method: 'PSE', currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 },
-      { method: 'LOCAL_BANK_TRANSFER', currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 },
-    ] }] });
-  expect(JSON.stringify(result)).not.toMatch(/minimumUsd|maximumUsd|exchangeRate|fiatAmountInUsd/);
-  for (const supported of [false, undefined, 'true', null]) {
-    const body = cop(); body.paymentMethods.forEach(method => { method.checkoutSupported = supported; });
-    expect(normalizeReownProductionRoutes([body], 'COP')).toEqual([]);
-  }
-  for (const country of ['US', 'MX']) await expect(readReownProductionOptions(country, { sourceCurrencyCode: 'COP',
-    fetchImpl: mockFetch(() => { throw Error('foreign COP must not fetch'); }) })).rejects.toThrow('wallet_funding_invalid_currency');
-  expect(normalizeReownProductionRoutes([{ ...cop(), source: 'USD' }], 'USD')).toEqual([]);
-  expect(() => normalizeReownProductionRoutes([{ ...cop(), destination: 'USDT_ETHEREUM' }], 'COP')).toThrow();
-  expect(() => normalizeReownProductionRoutes([{ ...cop(), paymentMethods: [{ ...cop().paymentMethods[0]!, limits: { currencyCode: 'USD', min: 50, max: 100 } }] }], 'COP')).toThrow();
-  for (const [min, max, expected] of [[200000, 2000000, [200000, 2000000]], [42300, 169999, null], [4000001, 59900000, null]] as const) {
-    const limited = cop(); limited.paymentMethods = [limited.paymentMethods[0]!]; limited.paymentMethods[0]!.limits = { currencyCode: 'COP', min, max };
-    const options = await readReownProductionOptions('CO', { sourceCurrencyCode: 'COP', fetchImpl: mockFetch(() => Response.json([limited])) });
-    expect(options.routes.flatMap(route => route.paymentMethods.map(method => [method.minimumAmount, method.maximumAmount])))
-      .toEqual(expected ? [[...expected]] : []);
-  }
+test('new COP discovery is disabled before upstream and Colombia USD is only Swapped card and mobile pay', async () => {
+  let calls=0;
+  await expect(readReownProductionOptions('CO',{sourceCurrencyCode:'COP',fetchImpl:mockFetch(()=>{calls++;throw Error('COP discovery disabled');})})).rejects.toThrow('wallet_funding_invalid_currency');
+  expect(calls).toBe(0);
+  const result=await readReownProductionOptions('CO',{fetchImpl:mockFetch(url=>{
+    expect(url.endsWith('/CO/USD/USDT_POLYGON?partners=SWAPPED')).toBe(true);
+    const methods=['CREDIT_DEBIT_CARD','APPLE_PAY','GOOGLE_PAY','VENMO','PAYPAL','BANK_TRANSFER'].map(name=>({name,checkoutSupported:true,limits:{currencyCode:'USD',min:10,max:1000}}));
+    return Response.json([route('SWAPPED',methods),route('MERCURYO',methods),route('TOPPER',methods)]);
+  })});
+  expect(result.paymentMethods).toEqual(['CREDIT_DEBIT_CARD','APPLE_PAY','GOOGLE_PAY']);
+  expect(result.routes.map(route=>route.serviceProvider)).toEqual(['SWAPPED']);
 });
 
 test('local COP and MXN bank method IDs never become USD bank rails and unconfigured bank providers remain excluded', async () => {

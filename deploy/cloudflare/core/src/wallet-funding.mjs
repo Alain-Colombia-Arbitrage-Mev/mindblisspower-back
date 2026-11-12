@@ -4,9 +4,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const PERSONAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const ADMINISTRATIVE_ORIGIN = 'https://wallet.mindblisspower.com';
 const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'CO']);
-const PERSONAL_COP_MINIMUM = 170000;
-const PERSONAL_COP_MAXIMUM = 4000000;
-const PROHIBITED_PERSONAL_METHODS = new Set(['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
+const PROHIBITED_PERSONAL_METHODS = new Set(['NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
 // Temporary integration gate, separate from the user's permanently prohibited methods.
 const UNAVAILABLE_PERSONAL_METHODS = new Set(['ASTROPAY']);
 
@@ -30,8 +28,7 @@ export function walletFundingRequest(request, url, body, env, ready) {
     if (sourceCurrencyCode !== null && !/^[A-Z]{3}$/.test(sourceCurrencyCode)) return false;
     const currencyQuery = sourceCurrencyCode === null ? '' : `&sourceCurrencyCode=${sourceCurrencyCode}`;
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return PERSONAL_COUNTRIES.has(country)
-      && (sourceCurrencyCode === null || sourceCurrencyCode === 'USD' || (country === 'MX' && sourceCurrencyCode === 'MXN')
-        || (country === 'CO' && sourceCurrencyCode === 'COP'))
+      && (sourceCurrencyCode === null || sourceCurrencyCode === 'USD' || (country === 'MX' && sourceCurrencyCode === 'MXN'))
       && url.search === `?country=${country}${currencyQuery}`;
     const provider = url.searchParams.get('serviceProvider');
     return env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/options`
@@ -51,19 +48,20 @@ export function walletFundingRequest(request, url, body, env, ready) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
     const allowed = ['requestId', 'walletAddress', 'country', 'amount', 'sourceCurrencyCode', 'paymentMethodType', ...(administrative ? ['serviceProvider'] : [])];
     const sourceCurrencyCode = input.sourceCurrencyCode === undefined ? 'USD' : input.sourceCurrencyCode;
-    const localSpei = personal && input.country === 'MX' && sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
-    const localCop = personal && input.country === 'CO' && sourceCurrencyCode === 'COP'
-      && ['PSE', 'LOCAL_BANK_TRANSFER'].includes(input.paymentMethodType);
+    const localMxn = personal && input.country === 'MX' && sourceCurrencyCode === 'MXN'
+      && ['SPEI', 'CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'].includes(input.paymentMethodType);
     if (Object.keys(input).some(key => !allowed.includes(key)) || !UUID.test(input.requestId || '')
       || !/^0x[a-f0-9]{40}$/i.test(input.walletAddress || '') || !/^[A-Z]{2}$/.test(input.country || '')
       || (personal && (!PERSONAL_COUNTRIES.has(input.country) || PROHIBITED_PERSONAL_METHODS.has(input.paymentMethodType)
         || UNAVAILABLE_PERSONAL_METHODS.has(input.paymentMethodType)))
       || typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)
-      || (sourceCurrencyCode !== 'USD' && !localSpei && !localCop)
-      || (personal && ['PSE', 'LOCAL_BANK_TRANSFER'].includes(input.paymentMethodType) && !localCop)
-      || (personal && input.paymentMethodType === 'SPEI' && !localSpei)
-      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 30 : 50) : localCop ? PERSONAL_COP_MINIMUM : 931)
-      || input.amount > (sourceCurrencyCode === 'USD' ? (personal ? 15000 : 25000) : localCop ? PERSONAL_COP_MAXIMUM : 1_000_000_000)
+      || (sourceCurrencyCode !== 'USD' && !localMxn)
+      || (personal && ['PSE', 'LOCAL_BANK_TRANSFER'].includes(input.paymentMethodType))
+      || (personal && input.paymentMethodType === 'SPEI' && !localMxn)
+      || (personal && ['VENMO', 'PAYPAL'].includes(input.paymentMethodType) && (input.country !== 'US' || sourceCurrencyCode !== 'USD'))
+      || (personal && input.country === 'CO' && sourceCurrencyCode === 'USD' && !['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'].includes(input.paymentMethodType))
+      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 30 : 50) : 931)
+      || input.amount > (sourceCurrencyCode === 'USD' ? (personal ? 15000 : 25000) : 1_000_000_000)
       || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001
       || typeof input.paymentMethodType !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(input.paymentMethodType)) return false;
     return !administrative || ['TRANSAK', 'BANXA'].includes(input.serviceProvider);
