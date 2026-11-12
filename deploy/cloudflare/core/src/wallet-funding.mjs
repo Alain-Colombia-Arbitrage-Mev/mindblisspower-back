@@ -4,6 +4,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const PERSONAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const ADMINISTRATIVE_ORIGIN = 'https://wallet.mindblisspower.com';
 const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'CO']);
+const PROHIBITED_PERSONAL_METHODS = new Set(['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
+// Temporary integration gate, separate from the user's permanently prohibited methods.
+const UNAVAILABLE_PERSONAL_METHODS = new Set(['ASTROPAY']);
 
 export function walletFundingNamespace(path) {
   return path === WALLET_FUNDING_PREFIX || path.startsWith(`${WALLET_FUNDING_PREFIX}/`);
@@ -48,7 +51,8 @@ export function walletFundingRequest(request, url, body, env, ready) {
     const localSpei = personal && input.country === 'MX' && sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
     if (Object.keys(input).some(key => !allowed.includes(key)) || !UUID.test(input.requestId || '')
       || !/^0x[a-f0-9]{40}$/i.test(input.walletAddress || '') || !/^[A-Z]{2}$/.test(input.country || '')
-      || (personal && (!PERSONAL_COUNTRIES.has(input.country) || ['NETELLER', 'SKRILL'].includes(input.paymentMethodType)))
+      || (personal && (!PERSONAL_COUNTRIES.has(input.country) || PROHIBITED_PERSONAL_METHODS.has(input.paymentMethodType)
+        || UNAVAILABLE_PERSONAL_METHODS.has(input.paymentMethodType)))
       || typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)
       || (sourceCurrencyCode !== 'USD' && !localSpei)
       || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 30 : 50) : 931)

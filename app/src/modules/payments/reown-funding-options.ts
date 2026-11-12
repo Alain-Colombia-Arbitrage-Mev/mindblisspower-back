@@ -8,7 +8,9 @@ export const PERSONAL_FUNDING_MINIMUM_USD = 30;
 export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
 export const PERSONAL_FUNDING_MINIMUM_MXN = 931;
 export const PERSONAL_FUNDING_DESTINATION = 'USDT_POLYGON' as const;
-const EXCLUDED_PERSONAL_METHODS = new Set(['NETELLER', 'SKRILL']);
+const EXCLUDED_PERSONAL_METHODS = new Set(['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
+// Temporary integration gate: a positive AstroPay quote does not establish a usable hosted checkout rail.
+const UNAVAILABLE_PERSONAL_METHODS = new Set(['ASTROPAY']);
 const MAX_BYTES = 65_536;
 const TIMEOUT_MS = 8_000;
 const unavailable = () => new Error('wallet_funding_provider_unavailable');
@@ -31,6 +33,11 @@ function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Personal-only purchase policy; historical records and administrative routes retain their own contracts. */
+export function isBlockedPersonalFundingMethod(value: unknown) {
+  return typeof value === 'string' && (EXCLUDED_PERSONAL_METHODS.has(value) || UNAVAILABLE_PERSONAL_METHODS.has(value));
+}
+
 /** Canonical IDs and limits in the requested fiat; labels and guessed rails are never accepted. */
 export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode = 'USD'): ReownFundingRoute[] {
   if (!/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw unavailable();
@@ -47,7 +54,7 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
       if (!record(method) || typeof method.name !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(method.name)) {
         throw unavailable();
       }
-      if (EXCLUDED_PERSONAL_METHODS.has(method.name)) continue;
+      if (isBlockedPersonalFundingMethod(method.name)) continue;
       // The approved local-fiat policy is SPEI in Mexico; other local methods
       // cannot silently inherit the USD minimum or currency conversion rules.
       if (sourceCurrencyCode === 'MXN' && method.name !== 'SPEI') continue;

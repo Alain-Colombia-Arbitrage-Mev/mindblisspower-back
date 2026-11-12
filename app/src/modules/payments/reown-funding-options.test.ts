@@ -26,14 +26,19 @@ test('personal discovery is a read-only production request scoped to the public 
   expect(calls).toBe(1);
   expect(result).toEqual({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', sourceCurrencyCode: 'USD',
     destinationCurrencyCode: 'USDT_POLYGON', network: 'polygon', chainId: 137,
-    paymentMethods: ['CREDIT_DEBIT_CARD', 'ASTROPAY'], routes: [
+    paymentMethods: ['CREDIT_DEBIT_CARD'], routes: [
       { serviceProvider: 'SWAPPED', paymentMethods: [{ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 }] },
       { serviceProvider: 'MERCURYO', paymentMethods: [
         { method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 },
-        { method: 'ASTROPAY', currencyCode: 'USD', minimumAmount: 30, maximumAmount: 15_000, minimumUsd: 30, maximumUsd: 15_000 },
       ] },
     ] });
   expect(JSON.stringify(result)).not.toContain('WXETMu');
+});
+
+test('temporarily unavailable AstroPay cannot become an offered rail even with valid positive provider limits', () => {
+  expect(normalizeReownProductionRoutes([route('SWAPPED', [
+    { name: 'ASTROPAY', limits: { currencyCode: 'USD', min: 7.81, max: 20633.05 } },
+  ])])).toEqual([]);
 });
 
 test('public USD discovery intersects provider limits with 30 to 15000 without a test-minimum bypass', async () => {
@@ -93,13 +98,13 @@ test('personal MXN discovery applies the fixed 931 floor, preserves higher provi
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|exchangeRate|fiatAmountInUsd/);
 });
 
-test('personal funding admits US, Mexico and Colombia in USD and removes Neteller and Skrill rails', async () => {
+test('personal funding admits its countries but removes every prohibited method and alias from provider routes', async () => {
   for (const country of ['US', 'MX', 'CO']) {
     const result = await readReownProductionOptions(country, { fetchImpl: mockFetch((url) => {
       expect(url).toContain(`/${country}/USD/USDT_POLYGON`);
       return Response.json([route('SWAPPED', [
-        { name: 'NETELLER', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
-        { name: 'SKRILL', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
+        ...['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL'].map(name => ({
+          name, limits: { currencyCode: 'USD', min: 10, max: 1000 } })),
         { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
         { name: 'GOOGLE_PAY', limits: { currencyCode: 'USD', min: 10, max: 1000 } },
       ])]);
@@ -107,6 +112,9 @@ test('personal funding admits US, Mexico and Colombia in USD and removes Netelle
     expect(result.paymentMethods).toEqual(['CREDIT_DEBIT_CARD', 'GOOGLE_PAY']);
     expect(result.routes[0]!.paymentMethods.map(method => method.method)).toEqual(result.paymentMethods);
   }
+  expect(normalizeReownProductionRoutes([route('SWAPPED', ['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL'].map(name => ({
+    name, limits: { currencyCode: 'USD', min: 10, max: 1000 },
+  })))])).toEqual([]);
 });
 
 test('unavailable country routes and unknown limits never invent default rails', async () => {

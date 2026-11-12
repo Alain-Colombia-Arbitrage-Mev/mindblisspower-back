@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { z } from 'zod';
 import { readAdministrativeWallet } from '../identity/administrative-wallet';
 import type { IdentityDatabase } from '../identity/model';
-import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_DESTINATION, readReownProductionOptions } from './reown-funding-options';
+import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_DESTINATION, readReownProductionOptions, isBlockedPersonalFundingMethod } from './reown-funding-options';
 
 type FundingDatabase = Pick<IdentityDatabase, 'execute'>;
 type FundingEnvironment = Record<string, string | undefined>;
@@ -42,6 +42,7 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
 }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {}) {
   const owner = subjectInput.parse(subject);
   const input = personalFundingInput.parse(rawInput);
+  if (isBlockedPersonalFundingMethod(input.paymentMethodType)) throw new Error('wallet_funding_method_unavailable');
   const localSpei = input.country === 'MX' && input.sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
   if (input.sourceCurrencyCode !== 'USD' && !localSpei) throw new Error('wallet_funding_valuation_unavailable');
   if (input.sourceCurrencyCode === 'USD' && (input.amount < PERSONAL_FUNDING_MINIMUM_USD || input.amount > PERSONAL_FUNDING_MAXIMUM_USD)) {

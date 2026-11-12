@@ -110,7 +110,7 @@ test('personal country and payment exclusions do not restrict the separate admin
     assert.equal((await dispatchCore(new Request(`https://auth.core.internal/api/member/wallet-funding/personal/options?country=${country}`,
       { headers: { cookie: 'better-auth.session_token=synthetic' } }), env, never)).status, 503);
   }
-  for (const paymentMethodType of ['NETELLER', 'SKRILL']) {
+  for (const paymentMethodType of ['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL', 'ASTROPAY']) {
     assert.equal((await dispatchCore(request(path, { ...input, paymentMethodType }), env, never)).status, 503);
   }
   let calls = 0;

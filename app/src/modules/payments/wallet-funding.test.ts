@@ -202,9 +202,9 @@ test('personal country and method restrictions cannot be bypassed by forging an 
       fetchImpl: (async () => { throw new Error('unsupported country must not fetch'); }) as unknown as typeof fetch,
     })).rejects.toThrow('wallet_funding_invalid_country');
   }
-  for (const paymentMethodType of ['NETELLER', 'SKRILL']) {
+  for (const paymentMethodType of ['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL', 'ASTROPAY']) {
     await expect(createPersonalFundingIntent(blocked.database, { ...input, paymentMethodType }, 'owner', {
-      fetchImpl: (async () => Response.json([personalRoute('SWAPPED', [method(paymentMethodType)])])) as unknown as typeof fetch,
+      fetchImpl: (async () => { throw new Error('A prohibited personal method must not request provider discovery'); }) as unknown as typeof fetch,
     })).rejects.toThrow('wallet_funding_method_unavailable');
   }
   expect(blocked.queries).toHaveLength(0);
