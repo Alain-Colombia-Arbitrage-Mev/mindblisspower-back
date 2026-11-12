@@ -6,7 +6,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
-if (process.argv.slice(2).join(' ') !== '--synthetic-docker') throw new Error('Requires --synthetic-docker');
+const requested = process.argv.slice(2).join(' ');
+const atomicVerification = requested === '--synthetic-docker --atomic-email-verification';
+if (requested !== '--synthetic-docker' && !atomicVerification) throw new Error('Requires --synthetic-docker');
 const name = `email-contact-pg-${randomBytes(6).toString('hex')}`;
 const password = randomBytes(24).toString('hex');
 const source = fileURLToPath(new URL('../', import.meta.url));
@@ -17,10 +19,10 @@ const verifiedEmailMigration = readFileSync(new URL('../../../_meta/migration/78
 const env = { ...process.env, POSTGRES_PASSWORD: password,
   EMAIL_CONTACT_TEST_DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:5432/email_contact_synthetic`,
   EMAIL_CONTACT_AUTH_DATABASE_URL: `postgres://contact_auth_fixture:${password}@127.0.0.1:5432/email_contact_synthetic` };
-function docker(args, input) {
+function docker(args, input, includeDiagnostics = false) {
   const result = spawnSync('docker', args, { env, input, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 90_000 });
   if (result.status !== 0) throw new Error((result.stderr || result.stdout || 'Synthetic Docker command failed').replaceAll(password, '[redacted]'));
-  return result.stdout.trim();
+  return (includeDiagnostics ? [result.stdout, result.stderr].filter(Boolean).join('\n') : result.stdout).trim();
 }
 let created = false;
 try {
@@ -180,4 +182,12 @@ try {
     } finally {await Promise.all([writerConnection.end({timeout:2}),owner.end({timeout:2})]);}
   `);
   console.log(result);
+  if (atomicVerification) {
+    console.log(docker(['run', '--pull=never', '--rm', '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp',
+      '--mount', `type=bind,source=${source},target=/app/src,readonly`,
+      '--mount', `type=bind,source=${phoneLibrary},target=/app/node_modules/libphonenumber-js,readonly`,
+      '-e', 'EMAIL_CONTACT_TEST_DATABASE_URL', '-e', 'EMAIL_CONTACT_AUTH_DATABASE_URL',
+      '--entrypoint', 'bun', 'mindbliss-polygon-relay-tests:20261111', '--no-env-file', 'test',
+      'src/auth/atomic-email-verification-postgres.integration.test.ts', '--timeout', '20000'], undefined, true));
+  }
 } finally {if (created) docker(['rm', '-f', name]);}
