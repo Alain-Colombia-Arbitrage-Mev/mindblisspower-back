@@ -180,7 +180,9 @@ export async function readReownProductionOptions(country: string, {
     try { diagnostic({ event: 'personal_funding_discovery_failure', phase, status, country, sourceCurrencyCode,
       code: controller.signal.aborted ? 'TIMEOUT' : phase === 'fetch' ? 'TRANSPORT_FAILURE'
         : phase === 'response' ? 'HTTP_REJECTED' : 'INVALID_RESPONSE' }); } catch { /* diagnostics cannot change availability */ }
-    throw unavailable();
+    // Preserve provider throttling through the route/BFF so the browser does
+    // not treat it as a transient service failure and repeat discovery.
+    throw status === 429 ? new Error('wallet_funding_rate_limited') : unavailable();
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);

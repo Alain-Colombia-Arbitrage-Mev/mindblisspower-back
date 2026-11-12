@@ -206,6 +206,23 @@ test('personal options use one native-session country query without a sandbox cr
   expect(await response.json()).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', country: 'US', paymentMethods: ['CREDIT_DEBIT_CARD'] });
 });
 
+test('personal upstream throttling remains HTTP429 for discovery and intent without persisting or exposing provider details', async () => {
+  let reads = 0, writes = 0;
+  const app = application({ execute: async () => { writes++; throw Error('Throttled discovery cannot persist an intent'); },
+    fetchImpl: (async () => { reads++; return Response.json({ code: 'private-provider-code', message: 'private-provider-message' },
+      { status: 429, headers: { 'retry-after': '60' } }); }) as unknown as typeof fetch });
+  for (const [path, init] of [
+    ['/api/member/wallet-funding/personal/options?country=US', undefined],
+    [personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(input) }],
+  ] as const) {
+    const response = await app.request(path, init);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({ error: 'wallet_funding_rate_limited' });
+  }
+  expect(reads).toBe(2); expect(writes).toBe(0);
+});
+
 test('HTTP Colombia personal discovery and intent stay production USD only', async () => {
   let writes = 0;
   const app = application({ execute: async () => { writes++; return [{ id: input.requestId, created_at: new Date('2026-11-10T20:00:00Z') }]; } });

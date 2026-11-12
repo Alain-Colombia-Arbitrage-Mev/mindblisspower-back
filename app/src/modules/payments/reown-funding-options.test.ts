@@ -175,7 +175,7 @@ test('discovery diagnostics identify only bounded failure phase, status and cate
   for (const item of cases) {
     const events: unknown[] = [];
     await expect(readReownProductionOptions('US', { fetchImpl: item.fetchImpl, diagnostic: event => events.push(event) }))
-      .rejects.toThrow('wallet_funding_provider_unavailable');
+      .rejects.toThrow(item.status === 429 ? 'wallet_funding_rate_limited' : 'wallet_funding_provider_unavailable');
     expect(events).toEqual([{ event: 'personal_funding_discovery_failure', phase: item.phase, status: item.status,
       code: item.code, country: 'US', sourceCurrencyCode: 'USD' }]);
     expect(JSON.stringify(events)).not.toMatch(/private|credentials|secret|provider diagnostics|https?:|WXETMu/);
