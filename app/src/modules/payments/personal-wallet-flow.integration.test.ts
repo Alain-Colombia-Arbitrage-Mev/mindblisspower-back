@@ -95,7 +95,7 @@ else describe('joined personal flow with real isolated SQL and synthetic provide
       const url = new URL(String(target));
       if (url.hostname === 'api.meld.io') {
         expect(init?.method).toBe('GET'); expect(url.pathname).toContain(`/${scenario.country}/${scenario.currency}/USDT_POLYGON`);
-        expect(url.searchParams.get('partners')).toBe('SWAPPED,MERCURYO'); providerGets++;
+        expect(url.searchParams.get('partners')).toBe(scenario.country === 'US' ? 'SWAPPED,MERCURYO,TOPPER' : 'SWAPPED,MERCURYO'); providerGets++;
         return Response.json([{ partner: 'SWAPPED', source: scenario.currency, destination: 'USDT_POLYGON', paymentMethods: [
           { name: scenario.method, limits: { currencyCode: scenario.currency, min: scenario.currency === 'MXN' ? 148.66 : 7.81, max: 200_000 } },
         ] }]);
