@@ -98,6 +98,35 @@ test('personal MXN discovery applies the fixed 931 floor, preserves higher provi
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|exchangeRate|fiatAmountInUsd/);
 });
 
+test('Colombia COP discovers only hosted PSE through Onramp Money and retains its real COP limits', async () => {
+  const cop = (partner = 'ONRAMPMONEY', checkoutSupported: unknown = true) => ({ partner, source: 'COP', destination: 'USDT_POLYGON', paymentMethods: [
+    { name: 'PSE', checkoutSupported, headlessSupported: false, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
+    { name: 'LOCAL_BANK_TRANSFER', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
+    { name: 'CREDIT_DEBIT_CARD', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
+    { name: 'SKRILL', checkoutSupported: true, limits: { currencyCode: 'COP', min: 1, max: 99999999 } },
+  ] });
+  let calls = 0;
+  const result = await readReownProductionOptions('CO', { sourceCurrencyCode: 'COP', fetchImpl: mockFetch((url, init) => {
+    calls++;
+    expect(url).toBe('https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/CO/COP/USDT_POLYGON?partners=ONRAMPMONEY');
+    expect(init.method).toBe('GET');
+    return Response.json([cop(), cop('SWAPPED'), cop('MERCURYO')]);
+  }) });
+  expect(calls).toBe(1);
+  expect(result).toMatchObject({ country: 'CO', sourceCurrencyCode: 'COP', destinationCurrencyCode: 'USDT_POLYGON', network: 'polygon', chainId: 137,
+    paymentMethods: ['PSE'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ method: 'PSE', currencyCode: 'COP', minimumAmount: 42300, maximumAmount: 59900000 }] }] });
+  expect(JSON.stringify(result)).not.toMatch(/minimumUsd|maximumUsd|exchangeRate|fiatAmountInUsd/);
+  for (const supported of [false, undefined, 'true', null]) {
+    const body = cop(); body.paymentMethods[0]!.checkoutSupported = supported;
+    expect(normalizeReownProductionRoutes([body], 'COP')).toEqual([]);
+  }
+  for (const country of ['US', 'MX']) await expect(readReownProductionOptions(country, { sourceCurrencyCode: 'COP',
+    fetchImpl: mockFetch(() => { throw Error('foreign COP must not fetch'); }) })).rejects.toThrow('wallet_funding_invalid_currency');
+  expect(normalizeReownProductionRoutes([{ ...cop(), source: 'USD' }], 'USD')).toEqual([]);
+  expect(() => normalizeReownProductionRoutes([{ ...cop(), destination: 'USDT_ETHEREUM' }], 'COP')).toThrow();
+  expect(() => normalizeReownProductionRoutes([{ ...cop(), paymentMethods: [{ ...cop().paymentMethods[0]!, limits: { currencyCode: 'USD', min: 50, max: 100 } }] }], 'COP')).toThrow();
+});
+
 test('personal funding admits its countries but removes every prohibited method and alias from provider routes', async () => {
   for (const country of ['US', 'MX', 'CO']) {
     const result = await readReownProductionOptions(country, { fetchImpl: mockFetch((url) => {

@@ -28,7 +28,8 @@ export function walletFundingRequest(request, url, body, env, ready) {
     if (sourceCurrencyCode !== null && !/^[A-Z]{3}$/.test(sourceCurrencyCode)) return false;
     const currencyQuery = sourceCurrencyCode === null ? '' : `&sourceCurrencyCode=${sourceCurrencyCode}`;
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return PERSONAL_COUNTRIES.has(country)
-      && (sourceCurrencyCode === null || sourceCurrencyCode === 'USD' || (country === 'MX' && sourceCurrencyCode === 'MXN'))
+      && (sourceCurrencyCode === null || sourceCurrencyCode === 'USD' || (country === 'MX' && sourceCurrencyCode === 'MXN')
+        || (country === 'CO' && sourceCurrencyCode === 'COP'))
       && url.search === `?country=${country}${currencyQuery}`;
     const provider = url.searchParams.get('serviceProvider');
     return env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/options`
@@ -49,13 +50,15 @@ export function walletFundingRequest(request, url, body, env, ready) {
     const allowed = ['requestId', 'walletAddress', 'country', 'amount', 'sourceCurrencyCode', 'paymentMethodType', ...(administrative ? ['serviceProvider'] : [])];
     const sourceCurrencyCode = input.sourceCurrencyCode === undefined ? 'USD' : input.sourceCurrencyCode;
     const localSpei = personal && input.country === 'MX' && sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
+    const localPse = personal && input.country === 'CO' && sourceCurrencyCode === 'COP' && input.paymentMethodType === 'PSE';
     if (Object.keys(input).some(key => !allowed.includes(key)) || !UUID.test(input.requestId || '')
       || !/^0x[a-f0-9]{40}$/i.test(input.walletAddress || '') || !/^[A-Z]{2}$/.test(input.country || '')
       || (personal && (!PERSONAL_COUNTRIES.has(input.country) || PROHIBITED_PERSONAL_METHODS.has(input.paymentMethodType)
         || UNAVAILABLE_PERSONAL_METHODS.has(input.paymentMethodType)))
       || typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)
-      || (sourceCurrencyCode !== 'USD' && !localSpei)
-      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 30 : 50) : 931)
+      || (sourceCurrencyCode !== 'USD' && !localSpei && !localPse)
+      || (personal && input.paymentMethodType === 'PSE' && !localPse)
+      || typeof input.amount !== 'number' || !Number.isFinite(input.amount) || input.amount < (sourceCurrencyCode === 'USD' ? (personal ? 30 : 50) : localPse ? 0.01 : 931)
       || input.amount > (sourceCurrencyCode === 'USD' ? (personal ? 15000 : 25000) : 1_000_000_000)
       || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001
       || typeof input.paymentMethodType !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(input.paymentMethodType)) return false;

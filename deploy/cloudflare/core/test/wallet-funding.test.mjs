@@ -121,19 +121,47 @@ test('personal country and payment exclusions do not restrict the separate admin
   assert.equal(calls, 4);
 });
 
-test('Colombia personal admission permits only USD discovery and intents, preserving Mexico-only MXN SPEI', async () => {
+test('Colombia admits exact COP PSE discovery and passes the unchanged COP amount while retaining USD', async () => {
   let calls = 0;
-  const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
+  const bodies = [];
+  const resolve = () => ({ fetch: async request => { calls++; if (request.method === 'POST') bodies.push(await request.json()); return Response.json({}); } });
   const read = currency => new Request(`https://auth.core.internal/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=${currency}`,
     { headers: { cookie: 'better-auth.session_token=synthetic' } });
   assert.equal((await dispatchCore(read('USD'), env, resolve)).status, 200);
   assert.equal((await dispatchCore(request(path, { ...input, country: 'CO', sourceCurrencyCode: 'USD', amount: 30 }), env, resolve)).status, 200);
+  assert.equal((await dispatchCore(read('COP'), env, resolve)).status, 200);
+  const cop = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 74321.5 };
+  assert.equal((await dispatchCore(request(path, cop), env, resolve)).status, 200);
+  assert.deepEqual(bodies[1], cop, 'Gateway must not convert pesos, alter the verified wallet or introduce a provider');
   const never = () => assert.fail('Colombia local-currency request dispatched');
+  assert.equal((await dispatchCore(read('MXN'), env, never)).status, 503);
   for (const sourceCurrencyCode of ['COP', 'MXN']) {
-    assert.equal((await dispatchCore(read(sourceCurrencyCode), env, never)).status, 503);
     assert.equal((await dispatchCore(request(path, { ...input, country: 'CO', sourceCurrencyCode, paymentMethodType: 'SPEI', amount: 931 }), env, never)).status, 503);
   }
-  assert.equal(calls, 2);
+  assert.equal(calls, 4);
+});
+
+test('COP PSE gateway admission cannot expand currencies, methods, countries or administrative capabilities', async () => {
+  const never = () => assert.fail('Crossed COP context reached the API container');
+  const cop = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 100000 };
+  for (const change of [{ country: 'MX' }, { country: 'US' }, { sourceCurrencyCode: 'USD' }, { sourceCurrencyCode: 'MXN' },
+    { paymentMethodType: 'CREDIT_DEBIT_CARD' }, { paymentMethodType: 'LOCAL_BANK_TRANSFER' }, { paymentMethodType: 'PAYPAL' },
+    { amount: 0 }, { amount: 0.009 }, { amount: 1000000000.01 }, { amount: 100000.001 },
+    { serviceProvider: 'ONRAMPMONEY' }, { subject: 'other' }, { destinationCurrencyCode: 'USDT' }]) {
+    assert.equal((await dispatchCore(request(path, { ...cop, ...change }), env, never)).status, 503);
+  }
+  for (const query of ['?country=MX&sourceCurrencyCode=COP', '?country=US&sourceCurrencyCode=COP',
+    '?country=CO&sourceCurrencyCode=COP&sourceCurrencyCode=USD', '?country=CO&sourceCurrencyCode=%43OP',
+    '?country=CO&sourceCurrencyCode=COP&serviceProvider=ONRAMPMONEY']) {
+    const get = new Request('https://auth.core.internal/api/member/wallet-funding/personal/options' + query,
+      { headers: { cookie: 'better-auth.session_token=synthetic' } });
+    assert.equal((await dispatchCore(get, env, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(request('/api/member/wallet-funding/administrative/session', {
+    ...cop, serviceProvider: 'BANXA' }), env, never)).status, 503);
+  for (const headers of [{ cookie: '' }, { origin: 'https://wallet.mindblisspower.com' }, { 'x-vp-act-as': 'other' }]) {
+    assert.equal((await dispatchCore(request(path, cop, headers), env, never)).status, 503);
+  }
 });
 
 test('owned status reads are a separate exact native-session capability with no checkout or owner overrides', async () => {

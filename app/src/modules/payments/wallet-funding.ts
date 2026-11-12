@@ -44,7 +44,9 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   const input = personalFundingInput.parse(rawInput);
   if (isBlockedPersonalFundingMethod(input.paymentMethodType)) throw new Error('wallet_funding_method_unavailable');
   const localSpei = input.country === 'MX' && input.sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
-  if (input.sourceCurrencyCode !== 'USD' && !localSpei) throw new Error('wallet_funding_valuation_unavailable');
+  const localPse = input.country === 'CO' && input.sourceCurrencyCode === 'COP' && input.paymentMethodType === 'PSE';
+  if (input.sourceCurrencyCode !== 'USD' && !localSpei && !localPse) throw new Error('wallet_funding_valuation_unavailable');
+  if (input.paymentMethodType === 'PSE' && !localPse) throw new Error('wallet_funding_method_unavailable');
   if (input.sourceCurrencyCode === 'USD' && (input.amount < PERSONAL_FUNDING_MINIMUM_USD || input.amount > PERSONAL_FUNDING_MAXIMUM_USD)) {
     throw new Error('wallet_funding_amount_unavailable');
   }
@@ -59,7 +61,7 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   // Never start persistence for that cancelled operation; an already accepted
   // database write remains immutable and must not be retried automatically.
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v4(
+  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v5(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType},${input.sourceCurrencyCode})`);
   const row = oneRow(rows, intentRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
@@ -351,7 +353,7 @@ const historyRow = z.object({
   wallet_address: addressInput, country_code: z.string().regex(/^[A-Z]{2}$/),
   requested_amount: z.coerce.number().finite().min(0.01).max(1_000_000_000), created_at: z.coerce.date(),
   destination_currency: z.enum(['USDT', 'USDT_POLYGON']),
-  source_currency: z.enum(['USD', 'MXN']), payment_method: z.string().regex(/^[A-Z0-9_]{2,40}$/).nullable(),
+  source_currency: z.enum(['USD', 'MXN', 'COP']), payment_method: z.string().regex(/^[A-Z0-9_]{2,40}$/).nullable(),
 });
 
 function validPersistedFundingSource(row: z.infer<typeof historyRow>, personal: boolean) {
@@ -359,7 +361,8 @@ function validPersistedFundingSource(row: z.infer<typeof historyRow>, personal: 
   if (!personal && row.destination_currency !== 'USDT_POLYGON') return false;
   return row.source_currency === 'USD'
     ? row.requested_amount >= (personal ? 20 : 50) && row.requested_amount <= 25_000
-    : personal && row.country_code === 'MX' && row.payment_method === 'SPEI';
+    : personal && (row.source_currency === 'MXN' ? row.country_code === 'MX' && row.payment_method === 'SPEI'
+      : row.country_code === 'CO' && row.payment_method === 'PSE' && row.destination_currency === 'USDT_POLYGON');
 }
 
 function fundingDestination(row: z.infer<typeof historyRow>) {

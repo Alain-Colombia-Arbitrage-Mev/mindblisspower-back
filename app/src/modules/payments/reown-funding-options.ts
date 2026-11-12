@@ -2,7 +2,9 @@
 // Published by @reown/appkit-controllers 1.8.24 (src/utils/ConstantsUtil.js).
 // This is the public checkout key shipped by Reown, not a Mindbliss private API key.
 const REOWN_MELD_PUBLIC_KEY = 'WXETMuFUQmqqybHuRkSgxv:25B8LJHSfpG6LVjR2ytU5Cwh7Z4Sch2ocoU';
-const PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
+const USD_MXN_PROVIDERS = ['SWAPPED', 'MERCURYO'] as const;
+const COP_PROVIDERS = ['ONRAMPMONEY'] as const;
+const PROVIDERS = [...USD_MXN_PROVIDERS, ...COP_PROVIDERS] as const;
 export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'CO'] as const;
 export const PERSONAL_FUNDING_MINIMUM_USD = 30;
 export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
@@ -40,12 +42,13 @@ export function isBlockedPersonalFundingMethod(value: unknown) {
 
 /** Canonical IDs and limits in the requested fiat; labels and guessed rails are never accepted. */
 export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode = 'USD'): ReownFundingRoute[] {
-  if (!/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw unavailable();
+  if (!['USD', 'MXN', 'COP'].includes(sourceCurrencyCode)) throw unavailable();
   if (!Array.isArray(data) || data.length > 100) throw unavailable();
+  const providers: readonly ReownFundingRoute['serviceProvider'][] = sourceCurrencyCode === 'COP' ? COP_PROVIDERS : USD_MXN_PROVIDERS;
   const routes = new Map<ReownFundingRoute['serviceProvider'], Map<string, ReownFundingMethod>>();
   for (const route of data) {
     if (!record(route) || typeof route.partner !== 'string') throw unavailable();
-    if (!PROVIDERS.some(provider => provider === route.partner)) continue;
+    if (!providers.some(provider => provider === route.partner)) continue;
     if (route.source !== sourceCurrencyCode || route.destination !== PERSONAL_FUNDING_DESTINATION
       || !Array.isArray(route.paymentMethods) || route.paymentMethods.length > 64) throw unavailable();
     const provider = route.partner as ReownFundingRoute['serviceProvider'];
@@ -55,9 +58,10 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
         throw unavailable();
       }
       if (isBlockedPersonalFundingMethod(method.name)) continue;
-      // The approved local-fiat policy is SPEI in Mexico; other local methods
-      // cannot silently inherit the USD minimum or currency conversion rules.
+      // Each approved local rail stays in its original fiat and hosted checkout.
       if (sourceCurrencyCode === 'MXN' && method.name !== 'SPEI') continue;
+      if (sourceCurrencyCode === 'COP' && (method.name !== 'PSE' || method.checkoutSupported !== true)) continue;
+      if (sourceCurrencyCode !== 'COP' && method.name === 'PSE') continue;
       // Without limits, the server cannot verify the selected amount for this rail.
       if (method.limits === null || method.limits === undefined) continue;
       if (!record(method.limits)) throw unavailable();
@@ -73,7 +77,7 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
     }
     if (methods.size) routes.set(provider, methods);
   }
-  return PROVIDERS.flatMap(serviceProvider => {
+  return providers.flatMap(serviceProvider => {
     const methods = routes.get(serviceProvider);
     return methods ? [{ serviceProvider, paymentMethods: [...methods.values()] }] : [];
   });
@@ -146,7 +150,8 @@ export async function readReownProductionOptions(country: string, {
     throw new Error('wallet_funding_invalid_country');
   }
   if (typeof sourceCurrencyCode !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) throw new Error('wallet_funding_invalid_currency');
-  if (sourceCurrencyCode !== 'USD' && !(country === 'MX' && sourceCurrencyCode === 'MXN')) {
+  if (sourceCurrencyCode !== 'USD' && !(country === 'MX' && sourceCurrencyCode === 'MXN')
+    && !(country === 'CO' && sourceCurrencyCode === 'COP')) {
     throw new Error('wallet_funding_invalid_currency');
   }
   const controller = new AbortController();
@@ -157,7 +162,8 @@ export async function readReownProductionOptions(country: string, {
   let phase: DiscoveryDiagnostic['phase'] = 'fetch';
   let status: number | null = null;
   try {
-    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/${PERSONAL_FUNDING_DESTINATION}?partners=SWAPPED,MERCURYO`;
+    const providers = sourceCurrencyCode === 'COP' ? COP_PROVIDERS : USD_MXN_PROVIDERS;
+    const url = `https://api.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/${PERSONAL_FUNDING_DESTINATION}?partners=${providers.join(',')}`;
     const response = await withSignal(() => fetchImpl(url, {
       method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       headers: { Authorization: `BASIC ${REOWN_MELD_PUBLIC_KEY}`, Accept: 'application/json', 'Meld-Version': '2026-02-03' },
@@ -171,7 +177,8 @@ export async function readReownProductionOptions(country: string, {
     // This is a fixed MXN business minimum, not a USD exchange-rate quote.
     // A provider can require more, and a route whose maximum is lower is absent.
     const routes = normalized.map(route => ({ ...route, paymentMethods: route.paymentMethods.flatMap(method => {
-      const minimumAmount = Math.max(sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : PERSONAL_FUNDING_MINIMUM_MXN, method.minimumAmount);
+      const floor = sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : sourceCurrencyCode === 'MXN' ? PERSONAL_FUNDING_MINIMUM_MXN : 0.01;
+      const minimumAmount = Math.max(floor, method.minimumAmount);
       const maximumAmount = sourceCurrencyCode === 'USD' ? Math.min(PERSONAL_FUNDING_MAXIMUM_USD, method.maximumAmount) : method.maximumAmount;
       return minimumAmount > maximumAmount ? [] : [{ ...method, minimumAmount, maximumAmount,
         ...(sourceCurrencyCode === 'USD' ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) }];
