@@ -98,7 +98,7 @@ test('personal MXN discovery applies the fixed 931 floor, preserves higher provi
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|exchangeRate|fiatAmountInUsd/);
 });
 
-test('Colombia COP discovers only hosted PSE through Onramp Money and retains its real COP limits', async () => {
+test('Colombia COP discovers only hosted PSE and local bank through Onramp Money within the COP business bounds', async () => {
   const cop = (partner = 'ONRAMPMONEY', checkoutSupported: unknown = true) => ({ partner, source: 'COP', destination: 'USDT_POLYGON', paymentMethods: [
     { name: 'PSE', checkoutSupported, headlessSupported: false, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
     { name: 'LOCAL_BANK_TRANSFER', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
@@ -114,10 +114,13 @@ test('Colombia COP discovers only hosted PSE through Onramp Money and retains it
   }) });
   expect(calls).toBe(1);
   expect(result).toMatchObject({ country: 'CO', sourceCurrencyCode: 'COP', destinationCurrencyCode: 'USDT_POLYGON', network: 'polygon', chainId: 137,
-    paymentMethods: ['PSE'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ method: 'PSE', currencyCode: 'COP', minimumAmount: 42300, maximumAmount: 59900000 }] }] });
+    paymentMethods: ['PSE', 'LOCAL_BANK_TRANSFER'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [
+      { method: 'PSE', currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 },
+      { method: 'LOCAL_BANK_TRANSFER', currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 },
+    ] }] });
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|maximumUsd|exchangeRate|fiatAmountInUsd/);
   for (const supported of [false, undefined, 'true', null]) {
-    const body = cop(); body.paymentMethods[0]!.checkoutSupported = supported;
+    const body = cop(); body.paymentMethods.forEach(method => { method.checkoutSupported = supported; });
     expect(normalizeReownProductionRoutes([body], 'COP')).toEqual([]);
   }
   for (const country of ['US', 'MX']) await expect(readReownProductionOptions(country, { sourceCurrencyCode: 'COP',
@@ -125,6 +128,24 @@ test('Colombia COP discovers only hosted PSE through Onramp Money and retains it
   expect(normalizeReownProductionRoutes([{ ...cop(), source: 'USD' }], 'USD')).toEqual([]);
   expect(() => normalizeReownProductionRoutes([{ ...cop(), destination: 'USDT_ETHEREUM' }], 'COP')).toThrow();
   expect(() => normalizeReownProductionRoutes([{ ...cop(), paymentMethods: [{ ...cop().paymentMethods[0]!, limits: { currencyCode: 'USD', min: 50, max: 100 } }] }], 'COP')).toThrow();
+  for (const [min, max, expected] of [[200000, 2000000, [200000, 2000000]], [42300, 169999, null], [4000001, 59900000, null]] as const) {
+    const limited = cop(); limited.paymentMethods = [limited.paymentMethods[0]!]; limited.paymentMethods[0]!.limits = { currencyCode: 'COP', min, max };
+    const options = await readReownProductionOptions('CO', { sourceCurrencyCode: 'COP', fetchImpl: mockFetch(() => Response.json([limited])) });
+    expect(options.routes.flatMap(route => route.paymentMethods.map(method => [method.minimumAmount, method.maximumAmount])))
+      .toEqual(expected ? [[...expected]] : []);
+  }
+});
+
+test('local COP and MXN bank method IDs never become USD bank rails and unconfigured bank providers remain excluded', async () => {
+  for (const country of ['US', 'MX']) {
+    const options = await readReownProductionOptions(country, { fetchImpl: mockFetch(() => Response.json([
+      route('SWAPPED', ['CREDIT_DEBIT_CARD', 'PSE', 'SPEI', 'LOCAL_BANK_TRANSFER'].map(name => ({ name, checkoutSupported: true, limits: { currencyCode: 'USD', min: 30, max: 15000 } }))),
+      route('BINANCECONNECT', [{ name: 'BANK_TRANSFER', limits: { currencyCode: 'USD', min: 50, max: 15000 } }]),
+      route('ONRAMPMONEY', [{ name: 'LOCAL_BANK_TRANSFER', checkoutSupported: true, limits: { currencyCode: 'USD', min: 50, max: 15000 } }]),
+    ])) });
+    expect(options.paymentMethods).toEqual(['CREDIT_DEBIT_CARD']);
+    expect(options.routes.map(route => route.serviceProvider)).toEqual(['SWAPPED']);
+  }
 });
 
 test('personal funding admits its countries but removes every prohibited method and alias from provider routes', async () => {

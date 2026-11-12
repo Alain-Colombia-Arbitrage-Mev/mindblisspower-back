@@ -130,23 +130,26 @@ test('Colombia admits exact COP PSE discovery and passes the unchanged COP amoun
   assert.equal((await dispatchCore(read('USD'), env, resolve)).status, 200);
   assert.equal((await dispatchCore(request(path, { ...input, country: 'CO', sourceCurrencyCode: 'USD', amount: 30 }), env, resolve)).status, 200);
   assert.equal((await dispatchCore(read('COP'), env, resolve)).status, 200);
-  const cop = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 74321.5 };
+  const cop = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 234567.5 };
   assert.equal((await dispatchCore(request(path, cop), env, resolve)).status, 200);
   assert.deepEqual(bodies[1], cop, 'Gateway must not convert pesos, alter the verified wallet or introduce a provider');
+  const localBank = { ...cop, paymentMethodType: 'LOCAL_BANK_TRANSFER', amount: 500000 };
+  assert.equal((await dispatchCore(request(path, localBank), env, resolve)).status, 200);
+  assert.deepEqual(bodies[2], localBank, 'Local bank transfer must retain its own canonical rail');
   const never = () => assert.fail('Colombia local-currency request dispatched');
   assert.equal((await dispatchCore(read('MXN'), env, never)).status, 503);
   for (const sourceCurrencyCode of ['COP', 'MXN']) {
     assert.equal((await dispatchCore(request(path, { ...input, country: 'CO', sourceCurrencyCode, paymentMethodType: 'SPEI', amount: 931 }), env, never)).status, 503);
   }
-  assert.equal(calls, 4);
+  assert.equal(calls, 5);
 });
 
 test('COP PSE gateway admission cannot expand currencies, methods, countries or administrative capabilities', async () => {
   const never = () => assert.fail('Crossed COP context reached the API container');
-  const cop = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 100000 };
+  const cop = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 500000 };
   for (const change of [{ country: 'MX' }, { country: 'US' }, { sourceCurrencyCode: 'USD' }, { sourceCurrencyCode: 'MXN' },
-    { paymentMethodType: 'CREDIT_DEBIT_CARD' }, { paymentMethodType: 'LOCAL_BANK_TRANSFER' }, { paymentMethodType: 'PAYPAL' },
-    { amount: 0 }, { amount: 0.009 }, { amount: 1000000000.01 }, { amount: 100000.001 },
+    { paymentMethodType: 'CREDIT_DEBIT_CARD' }, { paymentMethodType: 'BRE_B' }, { paymentMethodType: 'PAYPAL' },
+    { amount: 0 }, { amount: 0.009 }, { amount: 169999.99 }, { amount: 4000000.01 }, { amount: 100000.001 },
     { serviceProvider: 'ONRAMPMONEY' }, { subject: 'other' }, { destinationCurrencyCode: 'USDT' }]) {
     assert.equal((await dispatchCore(request(path, { ...cop, ...change }), env, never)).status, 503);
   }
@@ -161,6 +164,22 @@ test('COP PSE gateway admission cannot expand currencies, methods, countries or 
     ...cop, serviceProvider: 'BANXA' }), env, never)).status, 503);
   for (const headers of [{ cookie: '' }, { origin: 'https://wallet.mindblisspower.com' }, { 'x-vp-act-as': 'other' }]) {
     assert.equal((await dispatchCore(request(path, cop, headers), env, never)).status, 503);
+  }
+  let admitted = 0;
+  const resolve = () => ({ fetch: async () => { admitted++; return Response.json({}); } });
+  for (const paymentMethodType of ['PSE', 'LOCAL_BANK_TRANSFER']) {
+    for (const amount of [170000, 4000000]) {
+      assert.equal((await dispatchCore(request(path, { ...cop, paymentMethodType, amount }), env, resolve)).status, 200);
+    }
+    for (const amount of [169999.99, 4000000.01]) {
+      assert.equal((await dispatchCore(request(path, { ...cop, paymentMethodType, amount }), env, never)).status, 503);
+    }
+  }
+  assert.equal(admitted, 4);
+  for (const paymentMethodType of ['PSE', 'LOCAL_BANK_TRANSFER', 'SPEI']) {
+    for (const country of ['US', 'MX', 'CO']) {
+      assert.equal((await dispatchCore(request(path, { ...input, country, sourceCurrencyCode: 'USD', paymentMethodType }), env, never)).status, 503);
+    }
   }
 });
 

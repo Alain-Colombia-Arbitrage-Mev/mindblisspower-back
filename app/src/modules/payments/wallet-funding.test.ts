@@ -43,7 +43,7 @@ test('personal requests persist an unconfirmed Reown intent without any Meld quo
     destinationCurrencyCode: 'USDT_POLYGON', destination: { address, asset: 'USDT', network: 'polygon', chainId: 137 },
     status: 'initiated', requestedAmount: 100, sourceCurrencyCode: 'USD', paymentMethodType: 'CREDIT_DEBIT_CARD', allowedProviders: ['SWAPPED'], createdAt: createdAt.toISOString() });
   expect(queries).toHaveLength(1);
-  expect(queries[0]!.sql).toContain('payments.create_reown_funding_intent_v5');
+  expect(queries[0]!.sql).toContain('payments.create_reown_funding_intent_v6');
   expect(queries[0]!.params).toEqual(['synthetic-owner', address, 'US', 100, id, 'CREDIT_DEBIT_CARD', 'USD']);
   expect(Object.keys(result)).not.toContain('commission');
   expect(Object.keys(result)).not.toContain('destinationAmount');
@@ -235,8 +235,8 @@ test('Colombia personal funding records USD30 through its production routes and 
   expect(blocked.queries).toHaveLength(0);
 });
 
-test('Colombia PSE stores COP and only Onramp Money after checking the live hosted route minimum and maximum', async () => {
-  const pse = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 42300 };
+test('Colombia PSE and local bank store COP via Onramp Money within both business and live provider limits', async () => {
+  const pse = { ...input, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', amount: 170000 };
   const routes = [{ partner: 'ONRAMPMONEY', source: 'COP', destination: 'USDT_POLYGON', paymentMethods: [
     { name: 'PSE', checkoutSupported: true, headlessSupported: false, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
     { name: 'LOCAL_BANK_TRANSFER', checkoutSupported: true, limits: { currencyCode: 'COP', min: 42300, max: 59900000 } },
@@ -247,17 +247,27 @@ test('Colombia PSE stores COP and only Onramp Money after checking the live host
   }) as typeof fetch;
   const captured = queuedDatabase([[{ id, created_at: createdAt }]]);
   const result = await createPersonalFundingIntent(captured.database, pse, 'cop-owner', { fetchImpl });
-  expect(captured.queries[0]!.sql).toContain('payments.create_reown_funding_intent_v5');
-  expect(captured.queries[0]!.params).toEqual(['cop-owner', address, 'CO', 42300, id, 'PSE', 'COP']);
-  expect(result).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', requestedAmount: 42300,
+  expect(captured.queries[0]!.sql).toContain('payments.create_reown_funding_intent_v6');
+  expect(captured.queries[0]!.params).toEqual(['cop-owner', address, 'CO', 170000, id, 'PSE', 'COP']);
+  expect(result).toMatchObject({ walletKind: 'personal', environment: 'production', provider: 'reown', requestedAmount: 170000,
     sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', allowedProviders: ['ONRAMPMONEY'],
     destination: { address, asset: 'USDT', network: 'polygon', chainId: 137 } });
   expect(JSON.stringify(result)).not.toMatch(/minimumUsd|amountUsd|exchangeRate|commission|checkoutUrl/);
-  for (const amount of [42300 - 0.01, 59900000 + 0.01]) {
+  const local = queuedDatabase([[{ id, created_at: createdAt }]]);
+  expect(await createPersonalFundingIntent(local.database, { ...pse, paymentMethodType: 'LOCAL_BANK_TRANSFER' }, 'cop-owner', { fetchImpl })).toMatchObject({
+    requestedAmount: 170000, sourceCurrencyCode: 'COP', paymentMethodType: 'LOCAL_BANK_TRANSFER', allowedProviders: ['ONRAMPMONEY'],
+  });
+  expect(local.queries[0]!.params).toEqual(['cop-owner', address, 'CO', 170000, id, 'LOCAL_BANK_TRANSFER', 'COP']);
+  for (const amount of [42300, 100000, 170000 - 0.01, 4000000 + 0.01]) {
     const blocked = queuedDatabase([]);
     await expect(createPersonalFundingIntent(blocked.database, { ...pse, amount }, 'owner', { fetchImpl })).rejects.toThrow('wallet_funding_amount_unavailable');
     expect(blocked.queries).toHaveLength(0);
   }
+  const maximum = queuedDatabase([[{ id, created_at: createdAt }]]);
+  expect((await createPersonalFundingIntent(maximum.database, { ...pse, amount: 4000000 }, 'owner', { fetchImpl })).requestedAmount).toBe(4000000);
+  const higherFloor = routes.map(route => ({ ...route, paymentMethods: route.paymentMethods.map(method => ({ ...method, limits: { ...method.limits, min: 200000 } })) }));
+  await expect(createPersonalFundingIntent(queuedDatabase([]).database, pse, 'owner', { fetchImpl: (async () => Response.json(higherFloor)) as unknown as typeof fetch }))
+    .rejects.toThrow('wallet_funding_amount_unavailable');
   for (const change of [{ country: 'MX' }, { country: 'US' }, { paymentMethodType: 'CREDIT_DEBIT_CARD' }, { paymentMethodType: 'SPEI' }]) {
     const blocked = queuedDatabase([]);
     await expect(createPersonalFundingIntent(blocked.database, { ...pse, ...change }, 'owner', {
@@ -266,6 +276,9 @@ test('Colombia PSE stores COP and only Onramp Money after checking the live host
     expect(blocked.queries).toHaveLength(0);
   }
   await expect(createPersonalFundingIntent(queuedDatabase([]).database, { ...pse, sourceCurrencyCode: 'USD', amount: 50 }, 'owner', { fetchImpl }))
+    .rejects.toThrow('wallet_funding_method_unavailable');
+  for (const paymentMethodType of ['PSE', 'SPEI', 'LOCAL_BANK_TRANSFER']) await expect(createPersonalFundingIntent(queuedDatabase([]).database,
+    { ...input, country: 'MX', paymentMethodType }, 'owner', { fetchImpl: (async () => { throw Error('A local ID cannot be submitted as USD'); }) as unknown as typeof fetch }))
     .rejects.toThrow('wallet_funding_method_unavailable');
   const unsupported = routes.map(route => ({ ...route, paymentMethods: route.paymentMethods.map(method => ({ ...method, checkoutSupported: false })) }));
   await expect(createPersonalFundingIntent(queuedDatabase([]).database, pse, 'owner', {
@@ -662,13 +675,17 @@ test('V2 history and status expose explicit MXN/SPEI metadata and reject currenc
     .rejects.toThrow('wallet_funding_unavailable');
 });
 
-test('COP history and status retain personal Colombia PSE Polygon units and never accept crossed fiat, networks or sandbox wallets', async () => {
+test('COP history and status retain old PSE amounts and separate local-bank Polygon units without crossed fiat, networks or sandbox wallets', async () => {
   const row = { id, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated', wallet_address: address,
     country_code: 'CO', requested_amount: '42300.00', destination_currency: 'USDT_POLYGON', source_currency: 'COP', payment_method: 'PSE', created_at: createdAt };
   expect((await readWalletFundingHistory(queuedDatabase([[row]]).database, 'owner', 'personal')).records[0]).toMatchObject({ requestedAmount: 42300,
     sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', country: 'CO', destination: { network: 'polygon', chainId: 137 } });
   expect(await readWalletFundingStatus(queuedDatabase([[row]]).database, 'owner', 'personal', id)).toMatchObject({ requestedAmount: 42300,
     sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', confirmation: { state: 'unconfirmed', source: 'none', testMode: false } });
+  const old = { ...row, requested_amount: '100000.00' };
+  expect((await readWalletFundingHistory(queuedDatabase([[old]]).database, 'owner', 'personal')).records[0]!.requestedAmount).toBe(100000);
+  const local = { ...row, requested_amount: '170000.00', payment_method: 'LOCAL_BANK_TRANSFER' };
+  expect((await readWalletFundingHistory(queuedDatabase([[local]]).database, 'owner', 'personal')).records[0]).toMatchObject({ requestedAmount: 170000, sourceCurrencyCode: 'COP', paymentMethodType: 'LOCAL_BANK_TRANSFER' });
   for (const change of [{ country_code: 'MX' }, { country_code: 'US' }, { payment_method: 'SPEI' }, { payment_method: null },
     { destination_currency: 'USDT' }, { wallet_kind: 'administrative' }, { environment: 'sandbox' }, { provider: 'meld' }, { requested_amount: '42300.001' }]) {
     await expect(readWalletFundingHistory(queuedDatabase([[{ ...row, ...change }]]).database, 'owner', 'personal')).rejects.toThrow();

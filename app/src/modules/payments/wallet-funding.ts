@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { z } from 'zod';
 import { readAdministrativeWallet } from '../identity/administrative-wallet';
 import type { IdentityDatabase } from '../identity/model';
-import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_DESTINATION, readReownProductionOptions, isBlockedPersonalFundingMethod } from './reown-funding-options';
+import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_COP, PERSONAL_FUNDING_MAXIMUM_COP, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_DESTINATION, readReownProductionOptions, isBlockedPersonalFundingMethod, isPersonalCopFundingMethod } from './reown-funding-options';
 
 type FundingDatabase = Pick<IdentityDatabase, 'execute'>;
 type FundingEnvironment = Record<string, string | undefined>;
@@ -44,13 +44,15 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   const input = personalFundingInput.parse(rawInput);
   if (isBlockedPersonalFundingMethod(input.paymentMethodType)) throw new Error('wallet_funding_method_unavailable');
   const localSpei = input.country === 'MX' && input.sourceCurrencyCode === 'MXN' && input.paymentMethodType === 'SPEI';
-  const localPse = input.country === 'CO' && input.sourceCurrencyCode === 'COP' && input.paymentMethodType === 'PSE';
-  if (input.sourceCurrencyCode !== 'USD' && !localSpei && !localPse) throw new Error('wallet_funding_valuation_unavailable');
-  if (input.paymentMethodType === 'PSE' && !localPse) throw new Error('wallet_funding_method_unavailable');
+  const localCop = input.country === 'CO' && input.sourceCurrencyCode === 'COP' && isPersonalCopFundingMethod(input.paymentMethodType);
+  if (input.sourceCurrencyCode !== 'USD' && !localSpei && !localCop) throw new Error('wallet_funding_valuation_unavailable');
+  if ((isPersonalCopFundingMethod(input.paymentMethodType) && !localCop)
+    || (input.paymentMethodType === 'SPEI' && !localSpei)) throw new Error('wallet_funding_method_unavailable');
   if (input.sourceCurrencyCode === 'USD' && (input.amount < PERSONAL_FUNDING_MINIMUM_USD || input.amount > PERSONAL_FUNDING_MAXIMUM_USD)) {
     throw new Error('wallet_funding_amount_unavailable');
   }
   if (localSpei && input.amount < PERSONAL_FUNDING_MINIMUM_MXN) throw new Error('wallet_funding_amount_unavailable');
+  if (localCop && (input.amount < PERSONAL_FUNDING_MINIMUM_COP || input.amount > PERSONAL_FUNDING_MAXIMUM_COP)) throw new Error('wallet_funding_amount_unavailable');
   const options = await readReownProductionOptions(input.country, { fetchImpl, signal, sourceCurrencyCode: input.sourceCurrencyCode });
   const matching = options.routes.filter(route => route.paymentMethods.some(method => method.method === input.paymentMethodType));
   if (!matching.length) throw new Error('wallet_funding_method_unavailable');
@@ -61,7 +63,7 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
   // Never start persistence for that cancelled operation; an already accepted
   // database write remains immutable and must not be retried automatically.
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v5(
+  const rows = await database.execute(sql`SELECT * FROM payments.create_reown_funding_intent_v6(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,${input.paymentMethodType},${input.sourceCurrencyCode})`);
   const row = oneRow(rows, intentRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
@@ -362,7 +364,7 @@ function validPersistedFundingSource(row: z.infer<typeof historyRow>, personal: 
   return row.source_currency === 'USD'
     ? row.requested_amount >= (personal ? 20 : 50) && row.requested_amount <= 25_000
     : personal && (row.source_currency === 'MXN' ? row.country_code === 'MX' && row.payment_method === 'SPEI'
-      : row.country_code === 'CO' && row.payment_method === 'PSE' && row.destination_currency === 'USDT_POLYGON');
+      : row.country_code === 'CO' && isPersonalCopFundingMethod(row.payment_method) && row.destination_currency === 'USDT_POLYGON');
 }
 
 function fundingDestination(row: z.infer<typeof historyRow>) {

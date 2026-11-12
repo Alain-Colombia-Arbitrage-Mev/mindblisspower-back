@@ -9,6 +9,9 @@ export const PERSONAL_FUNDING_COUNTRIES = ['US', 'MX', 'CO'] as const;
 export const PERSONAL_FUNDING_MINIMUM_USD = 30;
 export const PERSONAL_FUNDING_MAXIMUM_USD = 15_000;
 export const PERSONAL_FUNDING_MINIMUM_MXN = 931;
+export const PERSONAL_FUNDING_MINIMUM_COP = 170_000;
+export const PERSONAL_FUNDING_MAXIMUM_COP = 4_000_000;
+export const PERSONAL_FUNDING_COP_METHODS = ['PSE', 'LOCAL_BANK_TRANSFER'] as const;
 export const PERSONAL_FUNDING_DESTINATION = 'USDT_POLYGON' as const;
 const EXCLUDED_PERSONAL_METHODS = new Set(['PAYPAL', 'NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
 // Temporary integration gate: a positive AstroPay quote does not establish a usable hosted checkout rail.
@@ -40,6 +43,10 @@ export function isBlockedPersonalFundingMethod(value: unknown) {
   return typeof value === 'string' && (EXCLUDED_PERSONAL_METHODS.has(value) || UNAVAILABLE_PERSONAL_METHODS.has(value));
 }
 
+export function isPersonalCopFundingMethod(value: unknown) {
+  return typeof value === 'string' && PERSONAL_FUNDING_COP_METHODS.some(method => method === value);
+}
+
 /** Canonical IDs and limits in the requested fiat; labels and guessed rails are never accepted. */
 export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode = 'USD'): ReownFundingRoute[] {
   if (!['USD', 'MXN', 'COP'].includes(sourceCurrencyCode)) throw unavailable();
@@ -60,8 +67,8 @@ export function normalizeReownProductionRoutes(data: unknown, sourceCurrencyCode
       if (isBlockedPersonalFundingMethod(method.name)) continue;
       // Each approved local rail stays in its original fiat and hosted checkout.
       if (sourceCurrencyCode === 'MXN' && method.name !== 'SPEI') continue;
-      if (sourceCurrencyCode === 'COP' && (method.name !== 'PSE' || method.checkoutSupported !== true)) continue;
-      if (sourceCurrencyCode !== 'COP' && method.name === 'PSE') continue;
+      if (sourceCurrencyCode === 'COP' && (!isPersonalCopFundingMethod(method.name) || method.checkoutSupported !== true)) continue;
+      if (sourceCurrencyCode === 'USD' && ['PSE', 'LOCAL_BANK_TRANSFER', 'SPEI'].includes(method.name)) continue;
       // Without limits, the server cannot verify the selected amount for this rail.
       if (method.limits === null || method.limits === undefined) continue;
       if (!record(method.limits)) throw unavailable();
@@ -177,9 +184,9 @@ export async function readReownProductionOptions(country: string, {
     // This is a fixed MXN business minimum, not a USD exchange-rate quote.
     // A provider can require more, and a route whose maximum is lower is absent.
     const routes = normalized.map(route => ({ ...route, paymentMethods: route.paymentMethods.flatMap(method => {
-      const floor = sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : sourceCurrencyCode === 'MXN' ? PERSONAL_FUNDING_MINIMUM_MXN : 0.01;
+      const floor = sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MINIMUM_USD : sourceCurrencyCode === 'MXN' ? PERSONAL_FUNDING_MINIMUM_MXN : PERSONAL_FUNDING_MINIMUM_COP;
       const minimumAmount = Math.max(floor, method.minimumAmount);
-      const maximumAmount = sourceCurrencyCode === 'USD' ? Math.min(PERSONAL_FUNDING_MAXIMUM_USD, method.maximumAmount) : method.maximumAmount;
+      const maximumAmount = Math.min(sourceCurrencyCode === 'USD' ? PERSONAL_FUNDING_MAXIMUM_USD : sourceCurrencyCode === 'COP' ? PERSONAL_FUNDING_MAXIMUM_COP : 1_000_000_000, method.maximumAmount);
       return minimumAmount > maximumAmount ? [] : [{ ...method, minimumAmount, maximumAmount,
         ...(sourceCurrencyCode === 'USD' ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) }];
     }) })).filter(route => route.paymentMethods.length > 0);

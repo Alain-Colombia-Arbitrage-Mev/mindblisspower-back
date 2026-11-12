@@ -249,12 +249,16 @@ test('HTTP Colombia keeps USD and offers COP PSE through Onramp Money without mi
   const copOptions = await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=COP');
   expect(copOptions.status).toBe(200);
   expect(copOptions.headers.get('cache-control')).toBe('private, no-store');
-  expect(await copOptions.json()).toMatchObject({ country: 'CO', sourceCurrencyCode: 'COP', environment: 'production', paymentMethods: ['PSE'],
-    routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ currencyCode: 'COP', minimumAmount: 42300, maximumAmount: 59900000 }] }] });
-  const pse = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 42300, paymentMethodType: 'PSE' };
+  expect(await copOptions.json()).toMatchObject({ country: 'CO', sourceCurrencyCode: 'COP', environment: 'production', paymentMethods: ['PSE', 'LOCAL_BANK_TRANSFER'],
+    routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 }, { currencyCode: 'COP', minimumAmount: 170000, maximumAmount: 4000000 }] }] });
+  const pse = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 170000, paymentMethodType: 'PSE' };
   const copIntent = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(pse) });
   expect(copIntent.status).toBe(201);
-  expect(await copIntent.json()).toMatchObject({ sourceCurrencyCode: 'COP', requestedAmount: 42300, paymentMethodType: 'PSE', allowedProviders: ['ONRAMPMONEY'] });
+  expect(await copIntent.json()).toMatchObject({ sourceCurrencyCode: 'COP', requestedAmount: 170000, paymentMethodType: 'PSE', allowedProviders: ['ONRAMPMONEY'] });
+  const localIntent = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ...pse, paymentMethodType: 'LOCAL_BANK_TRANSFER' }) });
+  expect(localIntent.status).toBe(201);
+  expect(await localIntent.json()).toMatchObject({ requestedAmount: 170000, sourceCurrencyCode: 'COP', paymentMethodType: 'LOCAL_BANK_TRANSFER', allowedProviders: ['ONRAMPMONEY'] });
   expect((await app.request('/api/member/wallet-funding/personal/options?country=CO&sourceCurrencyCode=MXN')).status).toBe(400);
   for (const country of ['US', 'MX']) expect((await app.request(`/api/member/wallet-funding/personal/options?country=${country}&sourceCurrencyCode=COP`)).status).toBe(400);
   for (const sourceCurrencyCode of ['COP', 'MXN']) {
@@ -263,11 +267,11 @@ test('HTTP Colombia keeps USD and offers COP PSE through Onramp Money without mi
     expect(rejected.status).toBe(503);
     expect(await rejected.json()).toEqual({ error: 'wallet_funding_valuation_unavailable' });
   }
-  for (const amount of [42299.99, 59900000.01]) {
+  for (const amount of [42300, 100000, 169999.99, 4000000.01]) {
     const rejected = await app.request(personalPath, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...pse, amount }) });
     expect(rejected.status).toBe(409); expect(await rejected.json()).toEqual({ error: 'wallet_funding_amount_unavailable' });
   }
-  expect(writes).toBe(2);
+  expect(writes).toBe(3);
 });
 
 test('currency selectors are strict and non-USD mutations expose no unverified USD acknowledgement', async () => {

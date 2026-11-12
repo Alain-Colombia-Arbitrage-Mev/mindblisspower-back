@@ -865,6 +865,7 @@ try {
     // Existing Ethereum fixture rows retain their network and recovery checks.
     psql(readFileSync(new URL('../_meta/migration/106_personal_polygon_funding.sql', import.meta.url), 'utf8'));
     psql(readFileSync(new URL('../_meta/migration/108_personal_colombia_cop_pse.sql', import.meta.url), 'utf8'));
+    psql(readFileSync(new URL('../_meta/migration/109_personal_colombia_bank_bounds.sql', import.meta.url), 'utf8'));
     // Extend only this disposable fixture with the minimal registered-person
     // columns queried by the real API. No production DSN or host port exists.
     psql(`ALTER TABLE auth."user" ADD COLUMN email text,ADD COLUMN email_verified boolean NOT NULL DEFAULT true,ADD COLUMN name text;
