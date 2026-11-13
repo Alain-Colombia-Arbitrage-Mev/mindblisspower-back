@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mindbliss-wallet-core",
+  "account_id": "ed805ed2b05218b41fc1d4d2440e658e",
+  "main": "src/wallet-sandbox-worker.mjs",
+  "compatibility_date": "2026-10-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": { "enabled": false },
+  "dev": { "enable_containers": false },
+  "env": {
+    "wallet": {
+      "name": "mindbliss-wallet-core",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [],
+      "durable_objects": { "bindings": [{ "name": "WALLET_SANDBOX_CONTAINER", "class_name": "WalletSandboxApi" }] },
+      "exports": { "WalletSandboxApi": { "type": "durable-object", "storage": "sqlite", "container": "wallet-sandbox-api" } },
+      "containers": [{ "name": "wallet-sandbox-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/wallet-sandbox-api:20261113-r1@sha256:e62ce938f2a9031ccc05fa6761bbeb2058325e1e2d864dc384e281695ddded4d",
+        "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default" }]
+    }
+  }
+}

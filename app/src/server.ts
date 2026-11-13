@@ -11,6 +11,7 @@ import { registerAdministrativeWalletRoutes } from './http/administrative-wallet
 import { registerMeldWebhookRoutes } from './http/meld-webhook-routes';
 import { registerMeldOnrampRoutes } from './http/meld-onramp-routes';
 import { registerWalletFundingRoutes } from './http/wallet-funding-routes';
+import { registerSandboxWalletRoutes } from './http/sandbox-wallet-routes';
 import { registerAdministrativeOfframpRoutes } from './http/administrative-offramp-routes';
 import { registerAdministrativeWalletSigningRoutes } from './http/administrative-wallet-signing-routes';
 import { registerAdministrativeOfframpSessionRoutes } from './http/administrative-offramp-session-routes';
@@ -57,6 +58,7 @@ registerWalletLinkRoutes(app, { database: authDb });
 registerAdministrativeWalletRoutes(app);
 registerMeldOnrampRoutes(app);
 registerWalletFundingRoutes(app, { database: authDb });
+registerSandboxWalletRoutes(app, { database: authDb });
 registerAdministrativeOfframpRoutes(app, { database: authDb });
 registerAdministrativeWalletSigningRoutes(app, { database: authDb });
 registerAdministrativeOfframpSessionRoutes(app, { database: authDb });
