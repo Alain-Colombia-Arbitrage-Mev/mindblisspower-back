@@ -46,9 +46,11 @@ export async function runNativeMemberProfileProbes({ container, docker, psql, va
     VALUES ${users.map(u=>`(${u.person},'${randomUUID()}','${u.subject}','${u.subject}@example.invalid','active','Old','Member','2025550123','Colombia','0x${'11'.repeat(20)}')`).join(',')};
     INSERT INTO identity.auth_binding(subject,provider,person_id)VALUES ${users.map(u=>`('${u.subject}','better_auth',${u.person})`).join(',')};
     INSERT INTO mlm.person(id,public_id,user_id,email,status,first_name,last_name,phone_number,country)VALUES
-    (11590,'${randomUUID()}',NULL,'sponsor115@example.invalid','active','Recruiting','Sponsor','','CO'),(11591,'${randomUUID()}',NULL,'parent115@example.invalid','active','Placement','Parent','','US');
-    INSERT INTO mlm.affiliate(id,person_id,sponsor_id,parent_id,invitation_link)VALUES
-    (115090,11590,NULL,NULL,'SPONSOR115'),(115091,11591,NULL,NULL,'PARENT115'),(115001,11501,115090,115091,'OWN115');`);
+    (11590,'${randomUUID()}',NULL,'sponsor115@example.invalid','active','Recruiting','Sponsor','','CO'),(11591,'${randomUUID()}',NULL,'parent115@example.invalid','active','Placement','Parent','','US'),
+    (11592,'${randomUUID()}',NULL,'second-sponsor115@example.invalid','active','Second','Sponsor','','MX'),(11593,'${randomUUID()}',NULL,'second-parent115@example.invalid','active','Other','Placement','','CO');
+    INSERT INTO mlm.affiliate(id,person_id,sponsor_id,parent_id,invitation_link,status)VALUES
+    (115090,11590,NULL,NULL,'SPONSOR115','active'),(115091,11591,NULL,NULL,'PARENT115','active'),(115001,11501,115090,115091,'OWN115','active'),
+    (115092,11592,NULL,NULL,'SECOND-SPONSOR115','active'),(115093,11593,NULL,NULL,'SECOND-PARENT115','active'),(115004,11502,115092,115093,'SECOND-OWN115','active');`);
   const functionNames=['identity.read_member_profile(text,text)','identity.update_member_profile(text,text,text,text,text)'];
   const fnQ=`SELECT md5(coalesce(jsonb_agg(jsonb_build_object('oid',p.oid,'definition',pg_get_functiondef(p.oid),'owner',p.proowner,'acl',p.proacl,'config',p.proconfig)ORDER BY p.oid)::text,'')) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN('identity','payments','mlm')AND p.proname NOT IN('read_member_profile','update_member_profile');`;
   const rowQueries=JSON.parse(value(`SELECT jsonb_agg(format('SELECT %L AS name,count(*)::text AS count,md5(coalesce(string_agg(to_jsonb(t)::text,E''\\n''ORDER BY to_jsonb(t)::text),''''))AS digest FROM %I.%I t',n.nspname||'.'||c.relname,n.nspname,c.relname)ORDER BY n.nspname,c.relname)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='r'AND n.nspname NOT IN('pg_catalog','information_schema')AND n.nspname !~ '^pg_toast';`,false));
@@ -62,11 +64,19 @@ export async function runNativeMemberProfileProbes({ container, docker, psql, va
   const read=(i=0,session=users[i].session)=>`SELECT row_to_json(r)::text FROM identity.read_member_profile('${users[i].subject}','${session}')r;`;
   const write=(i=0,name='Ana Pérez',phone='+12025550123',country='CO',session=users[i].session)=>`SELECT row_to_json(r)::text FROM identity.update_member_profile('${users[i].subject}','${session}',${lit(name)},${lit(phone)},${country===null?'NULL':lit(country)})r;`;
   const initial=JSON.parse(value(read()));probes++;assert.deepEqual(initial,{first_name:'Old',last_name:'Member',phone:'2025550123',country:'Colombia',payout_wallet_usdc:`0x${'11'.repeat(20)}`,sponsor_name:'Recruiting Sponsor',sponsor_referral_code:'SPONSOR115',referral_code:'OWN115'});probes++;
-  const noAffiliate=JSON.parse(value(read(1)));assert.equal(noAffiliate.sponsor_name,'');assert.equal(noAffiliate.sponsor_referral_code,'');assert.equal(noAffiliate.referral_code,'');probes++;
+  const secondOwner=JSON.parse(value(read(1)));assert.deepEqual(secondOwner,{...initial,sponsor_name:'Second Sponsor',sponsor_referral_code:'SECOND-SPONSOR115',referral_code:'SECOND-OWN115'});probes++;
+  const sponsorView=row=>[row.sponsor_name,row.sponsor_referral_code,row.referral_code];
+  assert.deepEqual(sponsorView(JSON.parse(value(read(0,users[0].alternate)))),sponsorView(initial));probes++;
+  assert.deepEqual(sponsorView(JSON.parse(value(read(1,users[1].alternate)))),sponsorView(secondOwner));probes++;
+  assert.ok(!JSON.stringify(initial).includes('Placement Parent')&&!JSON.stringify(initial).includes('PARENT115'));probes++;
+  assert.ok(!JSON.stringify(secondOwner).includes('Other Placement')&&!JSON.stringify(secondOwner).includes('SECOND-PARENT115'));probes++;
+  const noAffiliate=JSON.parse(value(read(2)));assert.equal(noAffiliate.sponsor_name,'');assert.equal(noAffiliate.sponsor_referral_code,'');assert.equal(noAffiliate.referral_code,'');probes++;
   const updated=JSON.parse(value(write()));assert.deepEqual(updated,{...initial,first_name:'Ana',last_name:'Pérez',phone:'+12025550123',country:'CO'});probes++;
   eq(`SELECT name||'|'||contact_phone_e164||'|'||phone_number||'|'||phone_number_verified::text||'|'||contact_whatsapp_e164 FROM auth."user" WHERE id='${users[0].subject}';`,'Ana Pérez|+12025550123|+12025550101|true|+12025550103',false);
   assert.deepEqual(JSON.parse(value(`SELECT (to_jsonb(p)-ARRAY['first_name','last_name','phone_number','country','updated_at'])::text FROM mlm.person p WHERE p.id=${users[0].person};`,false)),Object.fromEntries(Object.entries(JSON.parse(before.person).find(x=>x.id===users[0].person)).filter(([key])=>!['first_name','last_name','phone_number','country','updated_at'].includes(key))));probes++;
   const preserved=JSON.parse(value(write(1,'Single','',''+'')));assert.equal(preserved.first_name,'Single');assert.equal(preserved.last_name,'');assert.equal(preserved.phone,'');assert.equal(preserved.country,'');probes++;
+  assert.deepEqual(sponsorView(preserved),sponsorView(secondOwner));probes++;
+  assert.deepEqual(sponsorView(JSON.parse(value(read()))),sponsorView(initial));probes++;
   eq(`SELECT contact_phone_e164 IS NULL AND phone_number_verified AND phone_number='+12025550101' AND contact_whatsapp_e164='+12025550103' FROM auth."user" WHERE id='${users[1].subject}';`,'t',false);
   const legacy=JSON.parse(value(write(2,'Changed Display','+12025550104',null)));assert.equal(legacy.country,'Colombia');probes++;
   for(const name of ['José Núñez','D’Angelo O\'Brien','محمد عَلِي','王小明','आशा देवी','Алексей Иванов','A'.repeat(160),'  Ana   Pérez  ','Jose\u0301']){const row=JSON.parse(value(write(2,name,'+12025550104',null)));assert.equal([row.first_name,row.last_name].filter(Boolean).join(' '),name.normalize('NFC').trim().replace(/ +/g,' '));probes++;}
@@ -94,6 +104,11 @@ export async function runNativeMemberProfileProbes({ container, docker, psql, va
   psql(`UPDATE mlm.person SET user_id='another-native-owner' WHERE id=${users[6].person};`);deny(read(6),'member_profile_forbidden');
   psql(`INSERT INTO mlm.affiliate(id,person_id,invitation_link)VALUES(115002,11501,'DUPLICATE115');`);deny(read(0,users[0].alternate),'member_profile_forbidden');
   deny(write(0,'Valid Name','+12025550123','CO',users[0].alternate),'member_profile_forbidden');psql('DELETE FROM mlm.affiliate WHERE id=115002;');
+  psql(`INSERT INTO mlm.affiliate(id,person_id,invitation_link,status)VALUES(115005,11502,'SECOND-DUPLICATE115','active');`);
+  deny(read(1),'member_profile_forbidden');deny(write(1),'member_profile_forbidden');
+  assert.deepEqual(sponsorView(JSON.parse(value(read(0,users[0].alternate)))),sponsorView(initial));probes++;
+  psql('DELETE FROM mlm.affiliate WHERE id=115005;');
+  assert.deepEqual(sponsorView(JSON.parse(value(read(1)))),sponsorView(secondOwner));probes++;
   const race=await Promise.all([parallelPsql(write(1,'First Concurrent','+12025550105','MX')),parallelPsql(write(1,'Second Concurrent','+12025550106','US',users[1].alternate))]);assert.ok(race.every(x=>x.status===0));probes++;
   eq(`SELECT u.name=btrim(p.first_name||' '||p.last_name) AND u.contact_phone_e164=p.phone_number FROM auth."user" u JOIN mlm.person p ON p.user_id=u.id WHERE u.id='${users[1].subject}';`,'t',false);
   // Restore synthetic target rows only, then prove every original table digest unchanged.
@@ -107,10 +122,13 @@ export async function runNativeMemberProfileProbes({ container, docker, psql, va
   deny(`UPDATE mlm.person SET is_admin=true;`,'permission denied');
   const functions=functionNames.map(name=>JSON.parse(value(`SELECT jsonb_build_object('signature',p.oid::regprocedure::text,'md5',md5(pg_get_functiondef(p.oid)),'owner',p.proowner,'prosecdef',p.prosecdef,'proconfig',p.proconfig,'acl',p.proacl,'runtimeExecute',true)::text FROM pg_proc p WHERE oid='${name}'::regprocedure;`,false)));
   for(const f of functions){assert.equal(f.owner,before.owner);assert.equal(f.prosecdef,true);assert.deepEqual(f.proconfig,['search_path=pg_catalog']);probes++;}
-  await writeFile(new URL('../.wrangler/native-member-profile-115-manifest.json',import.meta.url),JSON.stringify({migrationSha256:hash(migration),syntheticPostgresPassed:true,
+  const sponsorRegression=process.env.NATIVE_MEMBER_PROFILE_SPONSOR_REGRESSION==='1';
+  const reportPath=sponsorRegression?'../.wrangler/native-member-profile-sponsor-isolation-115-report.json':'../.wrangler/native-member-profile-115-manifest.json';
+  await writeFile(new URL(reportPath,import.meta.url),JSON.stringify({migrationSha256:hash(migration),syntheticPostgresPassed:true,
     functions:functions.map(f=>({...f,ownerReferenceSignature:'identity.require_administrative_native_session(text,text)'})),tables:[],constraints:[],changedFunctions:[],probes,
     canonicalIdentityGuard:JSON.parse(value("SELECT jsonb_build_object('signature','identity.administrative_wallet_person(text)','md5',md5(pg_get_functiondef('identity.administrative_wallet_person(text)'::regprocedure)))::text;",false)),
-    existingRowsUnchanged:true,oldFunctionsAndFinancialRowsUnchanged:true,profileUpdatesSyntheticOnly:true,productionConnections:0,actualCharges:0,broadcasts:0,externalNetwork:'disabled',independentOfMigration113:true},null,2));
+    existingRowsUnchanged:true,oldFunctionsAndFinancialRowsUnchanged:true,profileUpdatesSyntheticOnly:true,productionConnections:0,actualCharges:0,broadcasts:0,externalNetwork:'disabled',independentOfMigration113:true,
+    sponsorIsolationRegression:sponsorRegression,twoOwnersWithDifferentSponsors:true,differentBinaryParents:true},null,2));
   console.log(JSON.stringify({nativeMemberProfileSchema:'passed',probes,ownedNativeSession:true,atomicDisplayAndContactOnly:true,readonlySponsorNotPlacementParent:true,
-    oldRowsAndFunctionsUnchanged:true,productionConnections:0,actualCharges:0}));
+    twoOwnersWithDifferentSponsors:true,differentBinaryParents:true,sponsorIsolationRegression:sponsorRegression,oldRowsAndFunctionsUnchanged:true,productionConnections:0,actualCharges:0}));
 }
