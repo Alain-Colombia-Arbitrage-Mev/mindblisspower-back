@@ -78,7 +78,8 @@ const verifiedReferralPositionSQL = `SELECT a.id IS NOT NULL
  WHERE b.subject=$1 AND b.provider='better_auth' AND u.email_verified
  AND lower(btrim(u.email))=$2 AND lower(btrim(p.email::text))=$2
  AND p.status::text IN('active','pending') AND NOT COALESCE(p.blacklisted,false)
- AND(a.id IS NULL OR a.status::text='active')
+ AND NOT EXISTS(SELECT 1 FROM mlm.affiliate restricted WHERE restricted.person_id=p.id
+ AND restricted.status::text IN('suspended','banned','deleted'))
  AND NOT EXISTS(SELECT 1 FROM mlm.person other
  WHERE other.id<>p.id AND lower(btrim(other.email::text))=$2)`
 
@@ -206,6 +207,11 @@ func (h *Handler) handleVerifiedReferral(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	subject, email, err := verifier.VerifySubject(r.Context(), raw)
+	if err != nil {
+		// Private Go -> BFF classification. The portal does not forward this
+		// header to customers; it contains only a fixed enum, never an identity.
+		w.Header().Set("X-Mindbliss-Identity-Reason", identityFailureReason(err))
+	}
 	if writeAuthenticationUnavailable(w, err) {
 		return
 	}

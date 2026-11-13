@@ -27,11 +27,21 @@ type BetterAuthVerifier struct {
 
 type betterAuthIdentity struct{ subject, email string }
 
+const betterAuthIssuedAtTolerance = 30 * time.Second
+const betterAuthVerificationTimeout = 5 * time.Second
+
 func NewBetterAuthVerifier(ctx context.Context, jwksURL, issuer, audience string) (*BetterAuthVerifier, error) {
 	if !trustedIdentityURL(jwksURL) || !trustedIdentityURL(issuer) || strings.TrimSpace(audience) == "" {
 		return nil, errors.New("Better Auth requires explicit HTTPS JWKS URL, issuer and audience (HTTP only on loopback)")
 	}
-	keys, err := keyfunc.NewDefaultCtx(ctx, []string{jwksURL})
+	keys, err := keyfunc.NewDefaultOverrideCtx(ctx, []string{jwksURL}, keyfunc.Override{
+		HTTPTimeout: betterAuthVerificationTimeout, RateLimitWaitMax: betterAuthVerificationTimeout,
+		// Request failures are classified below without leaking dependency errors
+		// or attacker-selected key IDs through the library's default logger.
+		RefreshErrorHandlerFunc: func(string) func(context.Context, error) {
+			return func(context.Context, error) {}
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize Better Auth JWKS: %w", err)
 	}
@@ -50,13 +60,21 @@ func trustedIdentityURL(raw string) bool {
 	return u.Scheme == "http" && (u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()))
 }
 
-func (v *BetterAuthVerifier) verifyIdentity(_ context.Context, raw string) (betterAuthIdentity, error) {
+func (v *BetterAuthVerifier) verifyIdentity(ctx context.Context, raw string) (betterAuthIdentity, error) {
+	ctx, cancel := context.WithTimeout(ctx, betterAuthVerificationTimeout)
+	defer cancel()
+	if ctx.Err() != nil {
+		return betterAuthIdentity{}, newIdentityFailure("identity_unavailable", true)
+	}
 	claims := jwt.MapClaims{}
-	token, err := jwt.ParseWithClaims(raw, claims, v.keys.Keyfunc,
+	token, err := jwt.ParseWithClaims(raw, claims, v.keys.KeyfuncCtx(ctx),
 		jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(v.issuer), jwt.WithAudience(v.audience),
-		jwt.WithExpirationRequired(), jwt.WithIssuedAt())
-	if err != nil || !token.Valid {
-		return betterAuthIdentity{}, errors.New("invalid Better Auth service token")
+		jwt.WithExpirationRequired())
+	if err != nil {
+		return betterAuthIdentity{}, classifyBetterAuthJWTError(err)
+	}
+	if token == nil || !token.Valid {
+		return betterAuthIdentity{}, newIdentityFailure("jwt_claims", false)
 	}
 	subject, _ := claims["sub"].(string)
 	email, _ := claims["email"].(string)
@@ -65,7 +83,16 @@ func (v *BetterAuthVerifier) verifyIdentity(_ context.Context, raw string) (bett
 	expires, eerr := claims.GetExpirationTime()
 	if strings.TrimSpace(subject) == "" || email == "" || claims["email_verified"] != true || claims["authVerified"] != true ||
 		ierr != nil || eerr != nil || issued == nil || expires == nil || expires.Time.Sub(issued.Time) <= 0 || expires.Time.Sub(issued.Time) > 5*time.Minute {
-		return betterAuthIdentity{}, errors.New("Better Auth requires verified email, authenticated subject and short-lived token")
+		return betterAuthIdentity{}, newIdentityFailure("jwt_claims", false)
+	}
+	// Match the service issuer contract for small clock differences ONLY on iat.
+	// No global leeway: expiration, nbf, signature, issuer and audience remain
+	// strict, and the signed token's maximum lifetime stays five minutes.
+	if issued.Time.After(time.Now().Add(betterAuthIssuedAtTolerance)) {
+		return betterAuthIdentity{}, newIdentityFailure("jwt_issued_in_future", false)
+	}
+	if ctx.Err() != nil {
+		return betterAuthIdentity{}, newIdentityFailure("identity_unavailable", true)
 	}
 	return betterAuthIdentity{subject: subject, email: email}, nil
 }
@@ -91,6 +118,8 @@ func (v *boundBetterAuthVerifier) VerifyEmail(ctx context.Context, raw string) (
 // VerifySubject preserves the signed subject for owner-scoped payment reads.
 // Unlike parsing a JWT after VerifyEmail, this never infers ownership by email.
 func (v *boundBetterAuthVerifier) VerifySubject(ctx context.Context, raw string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, betterAuthVerificationTimeout)
+	defer cancel()
 	identity, err := v.verifier.verifyIdentity(ctx, raw)
 	if err != nil {
 		return "", "", err
@@ -103,13 +132,13 @@ func (v *boundBetterAuthVerifier) VerifySubject(ctx context.Context, raw string)
 		  AND u.email_verified=true AND lower(btrim(u.email))=lower(btrim(p.email::text))
 		  AND p.status::text IN ('pending','active') AND NOT COALESCE(p.blacklisted,false)`, identity.subject).Scan(&email, &publicID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", "", errors.New("Better Auth subject has no available verified MLM binding")
+			return "", "", newIdentityFailure("binding_missing", false)
 		}
-		return "", "", ErrAuthenticationUnavailable
+		return "", "", newIdentityFailure("identity_storage_unavailable", true)
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" || publicID == "" || email != identity.email {
-		return "", "", errors.New("Better Auth binding requires identity review")
+		return "", "", newIdentityFailure("binding_mismatch", false)
 	}
 	return identity.subject, email, nil
 }

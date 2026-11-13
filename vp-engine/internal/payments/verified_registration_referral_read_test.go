@@ -42,7 +42,7 @@ func TestVerifiedReferralPositionReadPreservesCanonicalRestrictionsWithoutCapabi
 	}
 	for _, required := range []string{"b.subject=$1", "b.provider='better_auth'", "u.email_verified", "p.user_id=b.subject",
 		"lower(btrim(u.email))=$2", "lower(btrim(p.email::text))=$2", "p.status::text IN('active','pending')",
-		"NOT COALESCE(p.blacklisted,false)", "a.status::text='active'", "other.id<>p.id", "lower(btrim(other.email::text))=$2"} {
+		"NOT COALESCE(p.blacklisted,false)", "restricted.person_id=p.id", "restricted.status::text IN('suspended','banned','deleted')", "other.id<>p.id", "lower(btrim(other.email::text))=$2"} {
 		if !strings.Contains(q.query, required) {
 			t.Errorf("canonical read lost guard %q", required)
 		}
