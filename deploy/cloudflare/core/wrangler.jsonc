@@ -82,7 +82,7 @@
         "NOWPAYMENTS_OPERATIONAL_ENABLED": "true",
         "NOWPAYMENTS_ENGINE_ENABLED": "true",
         "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "true",
-        "MELD_WEBHOOK_ENABLED": "false",
+        "MELD_WEBHOOK_ENABLED": "true",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
