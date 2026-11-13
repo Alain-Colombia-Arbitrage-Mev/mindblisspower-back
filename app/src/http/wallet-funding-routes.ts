@@ -5,6 +5,8 @@ import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiApplication } from './types';
 import { authProxyContext } from './auth-proxy-context';
 import { readReownProductionOptions } from '../modules/payments/reown-funding-options';
+import { createMeldSandboxCheckout, meldCheckoutCapabilities } from '../modules/payments/meld-sandbox-checkout';
+import { readMeldCheckoutStatus, readMeldCheckoutHistory } from '../modules/payments/meld-sandbox-checkout-reconciliation';
 
 type Dependencies = { database: Pick<IdentityDatabase, 'execute'>;
   environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch };
@@ -47,6 +49,58 @@ function failure(error: unknown) {
 export function registerWalletFundingRoutes(app: ApiApplication, {
   database, environment = process.env, fetchImpl = fetch,
 }: Dependencies) {
+  const checkoutPath = '/api/member/wallet-funding/administrative/checkout';
+  app.get(`${checkoutPath}/capabilities`, async context => {
+    if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
+    if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+    if (context.req.header('origin') !== ADMINISTRATIVE_FUNDING_ORIGIN) return context.json({ error: 'invalid_origin' }, 403, noStore);
+    if (new URL(context.req.url).search) return context.json({ error: 'invalid_request' }, 400, noStore);
+    return context.json(meldCheckoutCapabilities(environment), 200, noStore);
+  });
+  app.post(checkoutPath, async (context, next) => {
+    context.header('Cache-Control', 'private, no-store');
+    if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
+    if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+    const secret = environment.AUTH_BFF_SHARED_SECRET;
+    if (!secret || secret.length < 32) return context.json({ error: 'wallet_funding_unconfigured' }, 503, noStore);
+    return authProxyContext(secret)(context, next);
+  }, async context => {
+    const subject = context.get('session')?.user.id;
+    if (!subject) return context.json({ error: 'unauthenticated' }, 401, noStore);
+    if (!allowedOrigin('administrative', context.req.header('origin') || '', environment)) return context.json({ error: 'invalid_origin' }, 403, noStore);
+    if (new URL(context.req.url).search) return context.json({ error: 'invalid_request' }, 400, noStore);
+    if (context.req.header('content-encoding') || !/^application\/json(?:\s*;|$)/i.test(context.req.header('content-type') || '')) return context.json({ error: 'json_required' }, 415, noStore);
+    const declared = context.req.header('content-length');
+    if (declared && (!/^\d+$/.test(declared) || Number(declared) > 4096)) return context.json({ error: 'request_too_large' }, 413, noStore);
+    try {
+      const raw = await context.req.text();
+      if (Buffer.byteLength(raw, 'utf8') > 4096) return context.json({ error: 'request_too_large' }, 413, noStore);
+      const result = await createMeldSandboxCheckout(database, JSON.parse(raw), { subject,
+        clientIp: context.req.header('x-vp-auth-client-ip') || '', environment, fetchImpl, signal: context.req.raw.signal });
+      return context.json(result, 201, noStore);
+    } catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+  });
+  app.get(`${checkoutPath}/status`, async context => {
+    const subject = context.get('session')?.user.id;
+    if (!subject) return context.json({ error: 'unauthenticated' }, 401, noStore);
+    if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+    if (context.req.header('origin') !== ADMINISTRATIVE_FUNDING_ORIGIN) return context.json({ error: 'invalid_origin' }, 403, noStore);
+    try {
+      const query = new URL(context.req.url).searchParams;
+      if ([...query.keys()].length !== 1 || query.getAll('checkoutReference').length !== 1) return context.json({ error: 'invalid_request' }, 400, noStore);
+      return context.json(await readMeldCheckoutStatus(database, { subject, checkoutReference: query.get('checkoutReference')! },
+        { environment, fetchImpl, signal: context.req.raw.signal }), 200, noStore);
+    } catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+  });
+  app.get(`${checkoutPath}/history`, async context => {
+    const subject = context.get('session')?.user.id;
+    if (!subject) return context.json({ error: 'unauthenticated' }, 401, noStore);
+    if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+    if (context.req.header('origin') !== ADMINISTRATIVE_FUNDING_ORIGIN) return context.json({ error: 'invalid_origin' }, 403, noStore);
+    if (new URL(context.req.url).search) return context.json({ error: 'invalid_request' }, 400, noStore);
+    try { return context.json(await readMeldCheckoutHistory(database, subject, { environment }), 200, noStore); }
+    catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+  });
   for (const kind of ['personal', 'administrative'] as const) {
     const path = kind === 'personal' ? '/api/member/wallet-funding/personal/intent'
       : '/api/member/wallet-funding/administrative/session';

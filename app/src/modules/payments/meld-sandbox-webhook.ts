@@ -3,6 +3,8 @@ import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { reconcileSandboxContext, sandboxContextInput, type SandboxDatabase,
   type SandboxReconciliationDependencies } from './meld-sandbox-reconciliation';
+import { handleVerifiedMeldCheckoutWebhook } from './meld-sandbox-checkout-reconciliation';
+import { handleVerifiedAdministrativeOfframpWebhook } from './administrative-offramp-status';
 
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/).refine(value => value !== '.' && value !== '..');
 const eventTypes = z.enum(['WEBHOOK_TEST', 'TRANSACTION_CRYPTO_PENDING', 'TRANSACTION_CRYPTO_TRANSFERRING',
@@ -41,10 +43,13 @@ export function verifySandboxMeldWebhook(rawBody: string, headers: { signature?:
 
 export async function handleSandboxMeldWebhook(database: SandboxDatabase,
   rawBody: string, headers: { signature?: string; signatureTimestamp?: string },
-  dependencies: SandboxReconciliationDependencies = {}) {
+  dependencies: SandboxReconciliationDependencies = {}): Promise<{ received: boolean; ignored?: boolean; duplicate?: boolean; mode: string }> {
   const { environment = process.env, now = Date.now } = dependencies;
   const { event, bodySha256 } = verifySandboxMeldWebhook(rawBody, headers, environment, now());
   if (!eventTypes.safeParse(event.eventType).success) return { received: true, ignored: true, mode: 'sandbox_only' };
+  if (event.payload.transactionType === 'CRYPTO_SELL' && event.eventType !== 'WEBHOOK_TEST') {
+    return handleVerifiedAdministrativeOfframpWebhook(database, event, dependencies);
+  }
   let context;
   if (event.eventType !== 'WEBHOOK_TEST') {
     const p = event.payload;
@@ -56,7 +61,7 @@ export async function handleSandboxMeldWebhook(database: SandboxDatabase,
     }
     const rows = await database.execute(sql`SELECT * FROM payments.read_meld_sandbox_webhook_context(
       ${p.externalSessionId}::uuid,${p.externalCustomerId}::uuid,${p.sessionId})`);
-    if (!rows.length) return { received: true, ignored: true, mode: 'sandbox_only' };
+    if (!rows.length) return handleVerifiedMeldCheckoutWebhook(database, { ...event, bodySha256 }, dependencies);
     if (rows.length !== 1) throw new Error('invalid_meld_event');
     const parsed = sandboxContextInput.safeParse(rows[0]);
     if (!parsed.success) throw new Error('wallet_funding_unavailable');

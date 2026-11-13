@@ -15,6 +15,57 @@ function request(route = path, body = input, extra = {}) {
     'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
 }
 
+test('general Meld checkout is an exact separate native capability, disabled by default except private configuration metadata', async () => {
+  const checkout = '/api/member/wallet-funding/administrative/checkout';
+  const data = { requestId: input.requestId, country: 'US', amount: 100, sourceCurrencyCode: 'USD' };
+  const create = (body = data, suffix = '', headers = {}) => request(checkout + suffix, body, { origin: 'https://wallet.mindblisspower.com', ...headers });
+  const read = (suffix, headers = {}) => new Request(`https://auth.core.internal${checkout}${suffix}`, { headers: {
+    cookie: 'better-auth.session_token=synthetic', origin: 'https://wallet.mindblisspower.com', ...headers } });
+  const enabled = { ...env, MELD_CHECKOUT_ENABLED: 'true' }, never = () => assert.fail('disabled or invalid generic checkout reached API');
+  const resolve = () => ({ fetch: async () => Response.json({}) });
+  assert.equal((await dispatchCore(read('/capabilities'), env, resolve)).status, 200);
+  for (const suffix of ['/capabilities', '/history', '/status?checkoutReference=' + input.requestId]) {
+    for (const origin of ['', 'https://app.mindblisspower.com', 'https://wallet.mindblisspower.com.evil.test']) {
+      assert.equal((await dispatchCore(read(suffix, { origin }), enabled, never)).status, 503);
+    }
+    assert.equal((await dispatchCore(new Request(`https://auth.core.internal${checkout}${suffix}`, { headers: { cookie: 'better-auth.session_token=synthetic' } }), enabled, never)).status, 503);
+    assert.equal((await dispatchCore(read(suffix, { 'x-vp-act-as': '' }), enabled, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(create(), env, never)).status, 503);
+  for (const suffix of ['/history', '/status?checkoutReference=' + input.requestId]) assert.equal((await dispatchCore(read(suffix), env, never)).status, 503);
+  assert.equal((await dispatchCore(create(), enabled, resolve)).status, 200);
+  for (const country of ['US', 'MX', 'CO']) for (const amount of [50, 25000]) assert.equal((await dispatchCore(create({ ...data, country, amount }), enabled, resolve)).status, 200);
+  for (const amount of [1, 10000000]) assert.equal((await dispatchCore(create({ ...data, country: 'MX', sourceCurrencyCode: 'MXN', amount }), enabled, resolve)).status, 200);
+  for (const suffix of ['/history', '/status?checkoutReference=' + input.requestId]) assert.equal((await dispatchCore(read(suffix), enabled, resolve)).status, 200);
+  for (const change of [{ country: 'ES' }, { country: 'co' }, { sourceCurrencyCode: 'COP' }, { sourceCurrencyCode: 'MXN' }, { amount: 49.99 },
+    { amount: 25000.01 }, { amount: 100.001 }, { walletAddress: input.walletAddress }, { serviceProvider: 'BANXA' }, { paymentMethodType: 'CREDIT_DEBIT_CARD' },
+    { subject: 'foreign' }, { publicKey: 'foreign' }, { sessionType: 'SELL' }, { redirectUrl: 'https://evil.test' }]) {
+    assert.equal((await dispatchCore(create({ ...data, ...change }), enabled, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(create(data, '', { origin: 'https://app.mindblisspower.com' }), enabled, never)).status, 503);
+  assert.equal((await dispatchCore(create(data, '', { cookie: '' }), enabled, never)).status, 503);
+  for (const suffix of ['/capabilities?debug=1', '/history?subject=foreign', '/status?checkoutReference=' + input.requestId + '&transactionId=foreign',
+    '/status?checkoutReference=' + input.requestId + '&checkoutReference=' + input.requestId]) assert.equal((await dispatchCore(read(suffix), enabled, never)).status, 503);
+});
+
+test('administrative offramp catalog reads remain independent of Checkout but never admit sells, aliases or a foreign portal', async () => {
+  const path = '/api/member/wallet-funding/administrative/offramp/options';
+  const read = (query, origin = 'https://wallet.mindblisspower.com') => new Request('https://auth.core.internal' + path + query,
+    { headers: { cookie: 'better-auth.session_token=synthetic', origin } });
+  const resolve = () => ({ fetch: async () => Response.json({ execution: { canCreateSession: false, canTransfer: false } }) });
+  const never = () => assert.fail('invalid offramp discovery reached API');
+  for (const [country, fiat] of [['US', 'USD'], ['MX', 'USD'], ['MX', 'MXN'], ['CO', 'USD'], ['CO', 'COP']]) {
+    assert.equal((await dispatchCore(read(`?country=${country}&destinationCurrencyCode=${fiat}`), { ...env, MELD_CHECKOUT_ENABLED: 'false' }, resolve)).status, 200);
+  }
+  for (const query of ['?country=US&destinationCurrencyCode=MXN', '?country=MX&destinationCurrencyCode=COP', '?country=ES&destinationCurrencyCode=EUR',
+    '?country=CO&destinationCurrencyCode=COP&amount=100', '?destinationCurrencyCode=USD&country=US', '?country=US&destinationCurrencyCode=USD&country=MX']) {
+    assert.equal((await dispatchCore(read(query), env, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(read('?country=US&destinationCurrencyCode=USD', 'https://app.mindblisspower.com'), env, never)).status, 503);
+  assert.equal((await dispatchCore(read('?country=US&destinationCurrencyCode=USD'), { ...env, MELD_ADMIN_SANDBOX_ENABLED: 'false' }, never)).status, 503);
+  assert.equal((await dispatchCore(request(path, { amount: 100 }, { origin: 'https://wallet.mindblisspower.com' }), env, never)).status, 503);
+});
+
 test('sandbox contract v2 is forwarded only for exact administrative capabilities and never upgrades warm or personal clients', async () => {
   const prefix = '/api/member/wallet-funding';
   for (const route of [`${prefix}/administrative/session`, `${prefix}/administrative/status?checkoutReference=${input.requestId}`,

@@ -297,6 +297,29 @@ test('Meld webhook secrets reach only the auth container when explicitly enabled
   assert.throws(() => containerEnvironment('api', { ...apiSecrets(), MELD_WEBHOOK_ENABLED: 'true' }));
 });
 
+test('Meld general Checkout forwards its public profile only after an explicit sandbox activation with matching isolated configuration', () => {
+  const base = { ...apiSecrets(), MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'sandbox-key-fixture',
+    MELD_ACCOUNT_ID: 'account-fixture', MELD_WIDGET_PUBLIC_KEY: 'public-key-fixture' };
+  const inactive = containerEnvironment('api', base);
+  assert.equal(inactive.MELD_CHECKOUT_ENABLED, 'false'); assert.equal(inactive.MELD_WIDGET_PUBLIC_KEY, undefined);
+  const active = containerEnvironment('api', { ...base, MELD_CHECKOUT_ENABLED: 'true' });
+  assert.equal(active.MELD_CHECKOUT_ENABLED, 'true'); assert.equal(active.MELD_WIDGET_PUBLIC_KEY, 'public-key-fixture');
+  assert.equal(active.MELD_ACCOUNT_ID, 'account-fixture'); assert.equal(active.MELD_API_SANDBOX, 'sandbox-key-fixture');
+  for (const change of [{ MELD_ADMIN_SANDBOX_ENABLED: 'false' }, { MELD_WIDGET_PUBLIC_KEY: undefined }, { MELD_WIDGET_PUBLIC_KEY: '' },
+    { MELD_WIDGET_PUBLIC_KEY: 'bad key' }, { MELD_WIDGET_PUBLIC_KEY: base.MELD_API_SANDBOX }, { MELD_ACCOUNT_ID: undefined }, { MELD_ACCOUNT_ID: '..' }]) {
+    assert.throws(() => containerEnvironment('api', { ...base, MELD_CHECKOUT_ENABLED: 'true', ...change }));
+  }
+});
+
+test('external administrative ownership and off-ramp feature flags never forward broadcast permission', () => {
+  const values = containerEnvironment('api', { ...apiSecrets(), ADMINISTRATIVE_WALLET_SIGNING_ENABLED: 'true',
+    ADMINISTRATIVE_MELD_OFFRAMP_ENABLED: 'true', ADMINISTRATIVE_WALLET_BROADCAST_ENABLED: 'true' });
+  assert.equal(values.ADMINISTRATIVE_WALLET_SIGNING_ENABLED, 'true'); assert.equal(values.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED, 'true');
+  assert.equal(values.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED, 'false');
+  const inactive = containerEnvironment('api', apiSecrets()); assert.equal(inactive.ADMINISTRATIVE_WALLET_SIGNING_ENABLED, 'false');
+  assert.equal(inactive.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED, 'false'); assert.equal(inactive.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED, 'false');
+});
+
 test('Meld onramp forwards only the environment-appropriate credential to the auth container', () => {
   const production = containerEnvironment('api', { ...apiSecrets(), CORE_ENV: 'production', MELD_API_KEY: 'live_synthetic_key',
     MELD_API_SANDBOX: 'must-not-reach-production' });
@@ -415,6 +438,8 @@ test('versioned environments have no public ingress, broad financial scheduler, 
     const env = config.env[name];
     assert.equal(env.workers_dev, false); assert.equal(env.preview_urls, false); assert.deepEqual(env.routes, []);
     assert.equal(env.vars.CORE_SERVICES_ENABLED, 'false');
+    assert.equal(env.vars.MELD_CHECKOUT_ENABLED, 'false');
+    for (const flag of ['ADMINISTRATIVE_WALLET_SIGNING_ENABLED', 'ADMINISTRATIVE_WALLET_BROADCAST_ENABLED', 'ADMINISTRATIVE_MELD_OFFRAMP_ENABLED']) assert.equal(env.vars[flag], 'false');
     assert.equal(env.vars.AUTH_SERVICES_ENABLED, name === 'production' ? 'true' : 'false');
     assert.equal(env.vars.CORE_NETWORK_VERIFIED, 'false');
     assert.equal(env.vars.CORE_READINESS_PROBE_ENABLED, 'false');

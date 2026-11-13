@@ -2,6 +2,17 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { MiddlewareHandler } from 'hono';
 
+/** Same native BFF envelope, verifiable after a caller has bounded the raw body. */
+export function verifyAuthProxyEnvelope(secret: string, input: { method: string; path: string; ip: string; timestamp: string;
+  signature: string; cookie: string; body: string }, now = Date.now()) {
+  if (secret.length < 32 || !isIP(input.ip) || !/^\d{10}$/.test(input.timestamp) || !/^[a-f0-9]{64}$/.test(input.signature)
+    || !Number.isFinite(now) || Math.abs(now / 1000 - Number(input.timestamp)) > 30) return false;
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+  const message = [input.method, input.path, input.timestamp, input.ip, hash(input.cookie), hash(input.body)].join('\n');
+  const expected = createHmac('sha256', secret).update(message).digest();
+  return timingSafeEqual(expected, Buffer.from(input.signature, 'hex'));
+}
+
 // Signed proxy context supplies a trustworthy rate-limit IP, not authentication.
 // The backend must not be reachable through an unsigned bypass after BFF cutover.
 export function authProxyContext(secret: string | undefined): MiddlewareHandler {

@@ -101,6 +101,9 @@ export function containerEnvironment(service, env) {
     }
   }
   if (service === 'api') {
+    values.ADMINISTRATIVE_WALLET_SIGNING_ENABLED = String(env.ADMINISTRATIVE_WALLET_SIGNING_ENABLED === 'true');
+    values.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED = 'false';
+    values.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED = String(env.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED === 'true');
     values.PERSONAL_COMPANY_PAYMENTS_ENABLED = String(env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true');
     const polygonRelayEnabled = env.PERSONAL_POLYGON_RELAY_ENABLED === 'true';
     values.PERSONAL_POLYGON_RELAY_ENABLED = String(polygonRelayEnabled);
@@ -154,6 +157,7 @@ export function containerEnvironment(service, env) {
       values[meldSource] = meldCredential;
     }
     values.MELD_ADMIN_SANDBOX_ENABLED = String(env.MELD_ADMIN_SANDBOX_ENABLED === 'true');
+    values.MELD_CHECKOUT_ENABLED = String(env.MELD_CHECKOUT_ENABLED === 'true');
     if (env.MELD_ADMIN_SANDBOX_ENABLED === 'true') {
       const sandboxKey = env.MELD_API_SANDBOX;
       if (typeof sandboxKey !== 'string' || !sandboxKey || sandboxKey.length > 2048 || /\s/.test(sandboxKey)) {
@@ -169,6 +173,14 @@ export function containerEnvironment(service, env) {
         }
         values.MELD_ACCOUNT_ID = env.MELD_ACCOUNT_ID;
       }
+    }
+    if (env.MELD_CHECKOUT_ENABLED === 'true') {
+      const publicKey = env.MELD_WIDGET_PUBLIC_KEY;
+      if (env.MELD_ADMIN_SANDBOX_ENABLED !== 'true' || typeof publicKey !== 'string' || !publicKey || publicKey.length > 2048
+        || !/^[\x21-\x7e]+$/.test(publicKey) || publicKey === env.MELD_API_SANDBOX
+        || typeof env.MELD_ACCOUNT_ID !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(env.MELD_ACCOUNT_ID)
+        || ['.', '..'].includes(env.MELD_ACCOUNT_ID)) throw new Error('Meld Checkout configuration is incomplete');
+      values.MELD_WIDGET_PUBLIC_KEY = publicKey;
     }
     if (env.MELD_WEBHOOK_ENABLED === 'true') {
       for (const key of ['MELD_WEBHOOK_SIGNING_KEY', 'MELD_ACCOUNT_ID', 'MELD_WEBHOOK_PROFILE_ID']) {

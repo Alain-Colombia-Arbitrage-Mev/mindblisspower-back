@@ -7,6 +7,7 @@ const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'CO']);
 const PROHIBITED_PERSONAL_METHODS = new Set(['NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
 // Temporary integration gate, separate from the user's permanently prohibited methods.
 const UNAVAILABLE_PERSONAL_METHODS = new Set(['ASTROPAY']);
+const MELD_CHECKOUT_PATH = `${WALLET_FUNDING_PREFIX}/administrative/checkout`;
 
 export function walletFundingNamespace(path) {
   return path === WALLET_FUNDING_PREFIX || path.startsWith(`${WALLET_FUNDING_PREFIX}/`);
@@ -27,6 +28,21 @@ export function walletFundingRequest(request, url, body, env, ready) {
     || url.host !== 'auth.core.internal' || request.headers.has('x-vp-act-as')
     || !/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=[^;\s,]+(?:;|$)/.test(request.headers.get('cookie') || '')) return false;
   if (request.method === 'GET') {
+    if (url.pathname === `${MELD_CHECKOUT_PATH}/capabilities`) return request.headers.get('origin') === ADMINISTRATIVE_ORIGIN && !url.search;
+    if (url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/offramp/options`) {
+      const country = url.searchParams.get('country'), fiat = url.searchParams.get('destinationCurrencyCode');
+      return env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && request.headers.get('origin') === ADMINISTRATIVE_ORIGIN
+        && ['US', 'MX', 'CO'].includes(country) && (fiat === 'USD' || (country === 'MX' && fiat === 'MXN') || (country === 'CO' && fiat === 'COP'))
+        && url.search === `?country=${country}&destinationCurrencyCode=${fiat}`;
+    }
+    if (url.pathname === `${MELD_CHECKOUT_PATH}/history`) return env.MELD_CHECKOUT_ENABLED === 'true'
+      && env.MELD_ADMIN_SANDBOX_ENABLED === 'true' && request.headers.get('origin') === ADMINISTRATIVE_ORIGIN && !url.search;
+    if (url.pathname === `${MELD_CHECKOUT_PATH}/status`) {
+      const reference = url.searchParams.get('checkoutReference');
+      return env.MELD_CHECKOUT_ENABLED === 'true' && env.MELD_ADMIN_SANDBOX_ENABLED === 'true'
+        && request.headers.get('origin') === ADMINISTRATIVE_ORIGIN
+        && UUID.test(reference || '') && url.search === `?checkoutReference=${reference}`;
+    }
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/history`) return ['?walletKind=personal', '?walletKind=administrative'].includes(url.search);
     if ([`${WALLET_FUNDING_PREFIX}/personal/status`, `${WALLET_FUNDING_PREFIX}/administrative/status`].includes(url.pathname)) {
       const reference = url.searchParams.get('checkoutReference');
@@ -44,6 +60,22 @@ export function walletFundingRequest(request, url, body, env, ready) {
       && /^[A-Z]{2}$/.test(country || '') && ['TRANSAK', 'BANXA'].includes(provider)
       && (sourceCurrencyCode === null || sourceCurrencyCode === 'USD' || (country === 'MX' && sourceCurrencyCode === 'MXN'))
       && url.search === `?country=${country}${currencyQuery}&serviceProvider=${provider}`;
+  }
+  if (url.pathname === MELD_CHECKOUT_PATH) {
+    if (env.MELD_CHECKOUT_ENABLED !== 'true' || env.MELD_ADMIN_SANDBOX_ENABLED !== 'true' || request.method !== 'POST' || url.search
+      || request.headers.has('content-encoding') || request.headers.get('origin') !== ADMINISTRATIVE_ORIGIN
+      || !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '') || !body?.length || body.length > WALLET_FUNDING_MAX_BODY) return false;
+    try {
+      const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
+      if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).length !== 4 || Object.keys(input).some(key => !['requestId', 'country', 'amount', 'sourceCurrencyCode'].includes(key))
+        || !UUID.test(input.requestId || '') || !['US', 'MX', 'CO'].includes(input.country)
+        || !['USD', 'MXN'].includes(input.sourceCurrencyCode) || (input.sourceCurrencyCode === 'MXN' && input.country !== 'MX')
+        || typeof input.amount !== 'number' || !Number.isFinite(input.amount)
+        || input.amount < (input.sourceCurrencyCode === 'USD' ? 50 : 1) || input.amount > (input.sourceCurrencyCode === 'USD' ? 25_000 : 10_000_000)
+        || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001) return false;
+      return true;
+    } catch { return false; }
   }
   const personal = url.pathname === `${WALLET_FUNDING_PREFIX}/personal/intent`;
   const administrative = url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/session`;
