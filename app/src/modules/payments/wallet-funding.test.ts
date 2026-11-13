@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { createAdministrativeSandboxSession, createPersonalFundingIntent, readAdministrativeSandboxOptions, readWalletFundingHistory,
-  readWalletFundingStatus, sandboxWidgetUrl, createAdministrativePreflightGate } from './wallet-funding';
+  readWalletFundingStatus, sandboxWidgetUrl, createAdministrativePreflightGate, sandboxProviderWidgetUrl, administrativeSandboxReturnUrl } from './wallet-funding';
 import type { IdentityDatabase } from '../identity/model';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
@@ -286,7 +286,7 @@ test('administrative sandbox binds the assigned address and records its session 
       expect(body).toEqual({ sessionType: 'BUY', externalCustomerId: customerReference, externalSessionId: id,
         sessionData: { serviceProvider: 'TRANSAK', countryCode: 'US', clientIpAddress: '192.0.2.1', sourceCurrencyCode: 'USD', sourceAmount: '100.00',
           destinationCurrencyCode: 'USDT_POLYGON', walletAddress: address, paymentMethodType: 'CREDIT_DEBIT_CARD',
-          lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } });
+          redirectUrl: administrativeSandboxReturnUrl(id), lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } });
       return Response.json({ id: 'provider-session', widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic-token',
         externalSessionId: id, externalCustomerId: customerReference, token: 'must-not-be-exposed', customerId: 'must-not-be-exposed' });
     }) as typeof fetch) });
@@ -773,7 +773,7 @@ test('administrative MXN quote, durable attempt and widget retain the exact fiat
         if (url.includes('/payments/crypto/quote')) {
           expect(db.queries).toHaveLength(1);
           expect(body).toEqual({ countryCode: 'MX', sourceCurrencyCode: 'MXN', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: amount,
-            paymentMethodType, serviceProviders: [serviceProvider] });
+            paymentMethodType, serviceProviders: [serviceProvider], walletAddress: assignment.address });
           return Response.json({ quotes: [{ serviceProvider, paymentMethodType, sourceCurrencyCode: 'MXN', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: amount, destinationAmount: 4.2 }] });
         }
         expect(db.queries).toHaveLength(2);
@@ -813,6 +813,7 @@ test('untrusted sandbox quotes cannot consume an attempt, open a widget or manuf
     destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: 100, destinationAmount: 95 };
   for (const quotes of [[], [canonical, canonical], [{ ...canonical, sourceAmount: 101 }], [{ ...canonical, countryCode: 'CO' }], [{ ...canonical, sourceCurrencyCode: 'MXN' }],
     [{ ...canonical, destinationCurrencyCode: 'USDT' }], [{ ...canonical, serviceProvider: 'BANXA' }], [{ ...canonical, paymentMethodType: 'APPLE_PAY' }],
+    [{ ...canonical, walletAddress: `0x${'3'.repeat(40)}` }],
     [{ ...canonical, destinationAmount: 0 }], [{ ...canonical, destinationAmount: -1 }], [{ ...canonical, destinationAmount: '95' }],
     [{ ...canonical, transactionType: 'CRYPTO_SELL' }]]) {
     const db = queuedDatabase([[assignment]]); let calls = 0;
@@ -852,7 +853,7 @@ test('sandbox preflight quota, duplicate ids and overlapping operations are boun
 test('administrative MXN history and status keep pesos and sandbox-only unconfirmed receipts under owner-scoped readers', async () => {
   const row = { id, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created', wallet_address: address,
     country_code: 'MX', requested_amount: '93.00', source_currency: 'MXN', payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDT_POLYGON', created_at: createdAt };
-  const history = queuedDatabase([[row]]), status = queuedDatabase([[row]]);
+  const history = queuedDatabase([[row], []]), status = queuedDatabase([[row]]);
   expect((await readWalletFundingHistory(history.database, 'owner', 'administrative')).records[0]).toMatchObject({ requestedAmount: 93, sourceCurrencyCode: 'MXN' });
   expect(await readWalletFundingStatus(status.database, 'owner', 'administrative', id)).toMatchObject({ requestedAmount: 93, sourceCurrencyCode: 'MXN', confirmation: { state: 'unconfirmed', source: 'none', testMode: true } });
   expect(history.queries[0]!.params).toEqual(['owner', 'administrative']); expect(status.queries[0]!.params).toEqual(['owner', 'administrative', id]);
@@ -926,4 +927,143 @@ test('Meld top-level32hex quote references survive safe diagnostics without acce
     expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'options', status: 500,
       code: 'UPSTREAM_REJECTED', providerCode: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION' }]);
   }
+});
+
+test('Meld prefers the provider staging URL and retains its sandbox fallback without exposing extra session data', async () => {
+  const direct = 'https://global-stg.transak.com/?apiKey=public_sandbox-key&sessionId=synthetic.session_token';
+  for (const payload of [
+    { serviceProviderWidgetUrl: direct },
+    { serviceProviderWidgetUrl: direct, widgetUrl: 'https://sb.meldcrypto.com/?wt=unused' },
+    { serviceProviderWidgetUrl: direct, widgetUrl: 'https://meldcrypto.com/?wt=must-not-open-production' },
+    { serviceProviderWidgetUrl: null, widgetUrl: 'https://sb.meldcrypto.com/?wt=legacy' },
+  ]) {
+    const db = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+    const result = await createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment, preferProviderCheckout: true,
+      fetchImpl: withSandboxOptions((async (_target, init) => {
+        const body = JSON.parse(String(init?.body));
+        expect(body.sessionData.redirectUrl).toBe(`https://wallet.mindblisspower.com/dashboard/wallet-administrative?checkoutReference=${id}`);
+        return Response.json({ id: 'provider-session', ...payload, externalCustomerId: customerReference, externalSessionId: id,
+          token: 'private-session-token', customerId: 'private-customer', serviceProvider: 'TRANSAK' });
+      }) as typeof fetch) });
+    expect(result.checkoutUrl).toBe(payload.serviceProviderWidgetUrl ? direct : 'https://sb.meldcrypto.com/?wt=legacy');
+    expect(result.serviceProvider).toBe('TRANSAK'); expect(result.status).toBe('session_created');
+    expect(Object.keys(result)).not.toContain('token'); expect(Object.keys(result)).not.toContain('customerId');
+    expect(JSON.stringify(db.queries)).not.toMatch(/private|apiKey|wt=/);
+  }
+  const fallback = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+  expect((await createAdministrativeSandboxSession(fallback.database, { ...adminInput, serviceProvider: 'BANXA' }, { subject: 'owner', clientIp: '192.0.2.1', environment, preferProviderCheckout: true,
+    fetchImpl: (async (target, init) => {
+      if (String(target).includes('/supported/routes/')) return Response.json([route('BANXA')]);
+      if (String(target).includes('/payments/crypto/quote')) return Response.json({ quotes: [{ serviceProvider: 'BANXA', paymentMethodType: 'CREDIT_DEBIT_CARD',
+        sourceCurrencyCode: 'USD', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: 100, destinationAmount: 95 }] });
+      expect(JSON.parse(String(init?.body)).sessionData.serviceProvider).toBe('BANXA');
+      return Response.json({ id: 'banxa-session', serviceProviderWidgetUrl: direct, widgetUrl: 'https://sb.meldcrypto.com/?wt=banxa-fallback' });
+    }) as typeof fetch })).checkoutUrl).toBe('https://sb.meldcrypto.com/?wt=banxa-fallback');
+});
+
+test('sandbox module defaults to the legacy Meld checkout until a caller explicitly opts into the provider contract', async () => {
+  const direct = 'https://global-stg.transak.com/?apiKey=public-key&sessionId=synthetic-session';
+  const legacy = 'https://sb.meldcrypto.com/?wt=synthetic-legacy';
+  for (const preferProviderCheckout of [undefined, false, true]) {
+    const db = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+    const result = await createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+      preferProviderCheckout, fetchImpl: withSandboxOptions((async () => Response.json({ id: 'provider-session',
+        widgetUrl: legacy, serviceProviderWidgetUrl: direct })) as unknown as typeof fetch) });
+    expect(result.checkoutUrl).toBe(preferProviderCheckout ? direct : legacy);
+    expect(result.serviceProvider).toBe(preferProviderCheckout ? 'TRANSAK' : undefined);
+    expect(result.walletKind).toBe('administrative'); expect(result.environment).toBe('sandbox');
+  }
+  const providerOnly = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+  await expect(createAdministrativeSandboxSession(providerOnly.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+    fetchImpl: withSandboxOptions((async () => Response.json({ id: 'provider-only', serviceProviderWidgetUrl: direct })) as unknown as typeof fetch),
+  })).rejects.toThrow('wallet_funding_invalid_provider');
+  expect(providerOnly.queries.at(-1)?.params).toEqual(['owner', id, 'failed', null]);
+});
+
+test('direct provider URLs reject production, crossed providers, ambiguous queries, ports and open redirects', () => {
+  const safe = 'https://global-stg.transak.com/?apiKey=public-key&sessionId=synthetic_session';
+  expect(sandboxProviderWidgetUrl(safe, 'TRANSAK')).toBe(safe);
+  expect(sandboxProviderWidgetUrl(safe.replace('/?', '?'), 'TRANSAK')).toBe(safe);
+  expect(sandboxProviderWidgetUrl(safe, 'BANXA')).toBeNull();
+  for (const url of [safe.replace('global-stg.', 'global.'), safe.replace('global-stg.transak.com', 'global-stg.transak.com.evil.test'),
+    safe.replace('https:', 'http:'), safe.replace('.com/', '.com:443/'), safe.replace('.com/', '.com:8443/'),
+    safe.replace('https://', 'https://user:password@'), safe + '#', safe + '#fragment', safe + '\n', safe + '&apiKey=another',
+    safe + '&redirectUrl=https://evil.test', safe.replace('/?', '/path?'), safe.replace('apiKey=', '%61piKey='),
+    safe.replace('sessionId=synthetic_session', 'sessionId='), safe.replace('sessionId=synthetic_session', 'sessionId=one%20two'),
+    safe.replace('sessionId=synthetic_session', 'sessionId=' + 'a'.repeat(4097)), safe.replace('apiKey=public-key', 'apiKey=' + 'a'.repeat(257)),
+    'javascript:alert(1)', 'https://checkout.banxa-sandbox.com/?order=synthetic']) expect(sandboxProviderWidgetUrl(url, 'TRANSAK')).toBeNull();
+  expect(administrativeSandboxReturnUrl(id.toUpperCase())).toBe(`https://wallet.mindblisspower.com/dashboard/wallet-administrative?checkoutReference=${id}`);
+  for (const bad of ['https://evil.test', id + '&redirectUrl=https://evil.test', id + '#paid']) expect(() => administrativeSandboxReturnUrl(bad)).toThrow();
+});
+
+test('a provider-only hostile checkout or crossed provider echo cannot become a successful sandbox session', async () => {
+  for (const payload of [{ serviceProviderWidgetUrl: 'https://global.transak.com/?apiKey=live&sessionId=private' },
+    { serviceProviderWidgetUrl: 'https://evil.test/?session=private' }, { serviceProviderWidgetUrl: 'https://global-stg.transak.com/?apiKey=key&sessionId=session', serviceProvider: 'BANXA' }]) {
+    const db = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+    await expect(createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment, preferProviderCheckout: true,
+      diagnostic: () => {}, fetchImpl: withSandboxOptions((async () => Response.json({ id: 'provider-session', ...payload })) as unknown as typeof fetch) })).rejects.toThrow('wallet_funding_invalid_provider');
+    expect(db.queries[2]!.params).toEqual(['owner', id, 'failed', null]);
+  }
+  const db = queuedDatabase([]);
+  await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, redirectUrl: 'https://evil.test' }, { subject: 'owner', clientIp: '192.0.2.1', environment })).rejects.toThrow();
+  expect(db.queries).toHaveLength(0);
+});
+
+const sandboxFundingProof = (reference = id, status = 'SETTLED') => ({ transactionId: 'synthetic-tx', accountId: 'synthetic-account',
+  sessionId: 'synthetic-session', externalSessionId: reference, externalCustomerId: customerReference, serviceProvider: 'TRANSAK',
+  countryCode: 'US', sourceCurrencyCode: 'USD', paymentMethodType: 'CREDIT_DEBIT_CARD', sourceAmount: '100.00', destinationCurrencyCode: 'USDT_POLYGON',
+  walletAddress: address, chainId: '137', providerStatus: status, providerUpdatedAt: '2026-11-13T01:00:00.000Z', receivedAmount: status === 'SETTLED' ? '95' : '0' });
+const sandboxFundingRow = (reference = id) => ({ id: reference, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld',
+  status: 'session_created', wallet_address: address, country_code: 'US', requested_amount: '100.00', created_at: createdAt,
+  source_currency: 'USD', payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDT_POLYGON' });
+
+test('administrative history projects only owner-scoped cached proof in one batch and never contacts a provider', async () => {
+  const otherId = '11111111-1111-4111-8111-111111111111';
+  const db = queuedDatabase([[sandboxFundingRow(), sandboxFundingRow(otherId)], [{ id, proof: sandboxFundingProof() }]]);
+  const result = await readWalletFundingHistory(db.database, 'owner', 'administrative');
+  expect(result.settlement).toBe('unconfirmed'); expect(result.records).toHaveLength(2);
+  expect(result.records[0]).toMatchObject({ destination: { address, asset: 'USDT', network: 'polygon', chainId: 137 },
+    confirmation: { state: 'confirmed', source: 'meld_sandbox_api', testMode: true, transactionId: 'synthetic-tx', providerStatus: 'SETTLED',
+      receivedAmount: '95', confirmedAt: '2026-11-13T01:00:00.000Z' } });
+  expect(Object.keys(result.records[1]!)).not.toContain('confirmation'); expect(db.queries).toHaveLength(2);
+  expect(db.queries[1]!.sql).toContain('read_meld_sandbox_confirmations'); expect(db.queries[1]!.params[0]).toBe('owner');
+  expect(JSON.stringify(result)).not.toMatch(/synthetic-session|synthetic-account|externalSessionId|externalCustomerId|proof|commission|token/);
+  expect(db.queries.map(q => q.sql).join(' ')).not.toMatch(/INSERT|UPDATE|DELETE|record_meld/i);
+  const invalidCache = queuedDatabase([[sandboxFundingRow()], [{ id: otherId, proof: sandboxFundingProof(otherId) }]]);
+  await expect(readWalletFundingHistory(invalidCache.database, 'owner', 'administrative')).rejects.toThrow('wallet_funding_unavailable');
+});
+
+test('manual administrative status performs a full sandbox readback only after the owned immutable request lookup', async () => {
+  for (const status of ['SETTLED', 'SETTLING', 'FAILED']) {
+    const proof = sandboxFundingProof(id, status);
+    const context = { id, subject: 'owner', wallet_address: address, country_code: 'US', requested_amount: 100, source_currency: 'USD',
+      service_provider: 'TRANSAK', payment_method: 'CREDIT_DEBIT_CARD', provider_session_id: 'synthetic-session', customer_reference: customerReference,
+      proof: null, checked_at: null };
+    const db = queuedDatabase([[sandboxFundingRow()], [context], [{ proof }]]); let gets = 0;
+    const response = await readWalletFundingStatus(db.database, 'owner', 'administrative', id, {
+      environment: { ...environment, MELD_ACCOUNT_ID: 'synthetic-account', MELD_API_KEY: 'must-not-be-used' }, fetchImpl: (async (target, init) => {
+        gets++; expect(db.queries).toHaveLength(2); expect(init?.method).toBe('GET');
+        expect(new Headers(init?.headers).get('authorization')).toBe('BASIC synthetic-sandbox-key');
+        const url = new URL(String(target)); expect(url.origin).toBe('https://api-sb.meld.io');
+        if (url.pathname === '/payments/transactions') { expect(url.searchParams.get('externalSessionIds')).toBe(id); return Response.json({ transactions: [{ id: 'synthetic-tx' }] }); }
+        expect(url.pathname).toBe('/payments/transactions/synthetic-tx');
+        return Response.json({ transaction: { id: 'synthetic-tx', accountId: proof.accountId, sessionId: proof.sessionId,
+          externalSessionId: id, externalCustomerId: customerReference, serviceProvider: 'TRANSAK', transactionType: 'CRYPTO_PURCHASE', countryCode: 'US',
+          sourceCurrencyCode: 'USD', paymentMethodType: 'CREDIT_DEBIT_CARD', sourceAmount: 100, destinationCurrencyCode: 'USDT_POLYGON', destinationAmount: status === 'SETTLED' ? 95 : 0,
+          status, updatedAt: proof.providerUpdatedAt, cryptoDetails: { destinationWalletAddress: address, chainId: '137' } } });
+      }) as typeof fetch });
+    expect(response.requestStatus).toBe('session_created'); expect(response.confirmation).toMatchObject({ state: status === 'SETTLED' ? 'confirmed' : status === 'FAILED' ? 'failed' : 'pending',
+      source: 'meld_sandbox_api', testMode: true, transactionId: 'synthetic-tx', providerStatus: status });
+    if (status === 'SETTLED') expect(response.confirmation).toMatchObject({ receivedAmount: '95', confirmedAt: proof.providerUpdatedAt });
+    expect(gets).toBe(2); expect(db.queries).toHaveLength(3); expect(db.queries[0]!.sql).toContain('read_wallet_funding_status_v4');
+    expect(db.queries[2]!.sql).toContain('record_meld_sandbox_proof');
+    expect(JSON.stringify(response)).not.toMatch(/synthetic-session|synthetic-account|externalSessionId|externalCustomerId|commission|token/);
+  }
+  const absent = queuedDatabase([[]]); let gets = 0;
+  await expect(readWalletFundingStatus(absent.database, 'owner', 'administrative', id, { fetchImpl: (async () => { gets++; throw Error('foreign request reached vendor'); }) as unknown as typeof fetch })).rejects.toThrow('wallet_funding_not_found');
+  expect(gets).toBe(0); expect(absent.queries).toHaveLength(1);
+  const personal = queuedDatabase([[{ ...sandboxFundingRow(), wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated' }]]);
+  expect((await readWalletFundingStatus(personal.database, 'owner', 'personal', id, { fetchImpl: (async () => { gets++; throw Error('personal cannot use sandbox'); }) as unknown as typeof fetch })).confirmation)
+    .toEqual({ state: 'unconfirmed', source: 'none', testMode: false });
+  expect(gets).toBe(0); expect(personal.queries).toHaveLength(1);
 });

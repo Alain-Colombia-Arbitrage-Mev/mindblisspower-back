@@ -356,3 +356,106 @@ test('HTTP malformed successful sandbox quote is sanitized503 and never persists
   expect(await response.json()).toEqual({ error: 'wallet_funding_provider_unavailable' });
   expect(databaseCalls).toBe(1); expect(providerCalls).toBe(2);
 });
+
+test('HTTP sandbox launch accepts only the selected provider staging URL and supplies a fixed wallet-domain return', async () => {
+  for (const contract of [undefined, 'v1', 'V2', 'v2, v2', 'v2']) {
+  const outputs = [[{ status: 'assigned', address: input.walletAddress, address_family: 'EVM', asset: 'USDT',
+    checkout_reference: 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', assigned_at: new Date() }],
+    [{ id: input.requestId, created_at: new Date(), created: true, status: 'initiated' }], [{ finished: true }]];
+  const direct = 'https://global-stg.transak.com/?apiKey=public-key&sessionId=synthetic.session'; let calls = 0;
+  const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key' },
+    execute: async () => outputs.shift()!, fetchImpl: (async (target, init) => {
+      calls++; if (String(target).includes('/supported/routes/')) return Response.json([{ partner: 'TRANSAK', source: 'USD', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 3000 } }] }]);
+      const body = JSON.parse(String(init?.body));
+      if (String(target).includes('/payments/crypto/quote')) {
+        expect(body.walletAddress).toBe(input.walletAddress);
+        return Response.json({ quotes: [{ serviceProvider: 'TRANSAK', paymentMethodType: 'CREDIT_DEBIT_CARD', sourceCurrencyCode: 'USD',
+          destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: 100, destinationAmount: 95 }] });
+      }
+      expect(body.sessionData.redirectUrl).toBe(`https://wallet.mindblisspower.com/dashboard/wallet-administrative?checkoutReference=${input.requestId}`);
+      return Response.json({ id: 'synthetic-session', serviceProviderWidgetUrl: direct, widgetUrl: 'https://sb.meldcrypto.com/?token=unused',
+        externalSessionId: input.requestId, externalCustomerId: 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', token: 'private-token' });
+    }) as typeof fetch });
+  const response = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'TRANSAK' }),
+    contract === undefined ? {} : { 'x-mindbliss-sandbox-contract': contract }));
+  expect(response.status).toBe(201);
+  const body = await response.json() as { checkoutUrl: string; serviceProvider?: string };
+  expect(body).toMatchObject({ checkoutUrl: contract === 'v2' ? direct : 'https://sb.meldcrypto.com/?token=unused', provider: 'meld', environment: 'sandbox' });
+  expect(body.serviceProvider).toBe(contract === 'v2' ? 'TRANSAK' : undefined);
+  expect(calls).toBe(3);
+  }
+});
+
+test('HTTP owned manual sandbox status exposes verified test confirmation while foreign selectors and personal calls stay isolated', async () => {
+  const reference = input.requestId, customer = 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', timestamp = '2026-11-13T01:00:00.000Z';
+  const proof = { transactionId: 'synthetic-tx', accountId: 'synthetic-account', sessionId: 'synthetic-session', externalSessionId: reference,
+    externalCustomerId: customer, serviceProvider: 'TRANSAK', countryCode: 'US', sourceCurrencyCode: 'USD', paymentMethodType: 'CREDIT_DEBIT_CARD',
+    sourceAmount: '100.00', destinationCurrencyCode: 'USDT_POLYGON', walletAddress: input.walletAddress, chainId: '137', providerStatus: 'SETTLED', providerUpdatedAt: timestamp, receivedAmount: '95' };
+  const row = { id: reference, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created', wallet_address: input.walletAddress,
+    country_code: 'US', requested_amount: '100.00', source_currency: 'USD', payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDT_POLYGON', created_at: new Date() };
+  const context = { id: reference, subject: 'synthetic-owner', wallet_address: input.walletAddress, country_code: 'US', requested_amount: 100,
+    source_currency: 'USD', service_provider: 'TRANSAK', payment_method: 'CREDIT_DEBIT_CARD', provider_session_id: 'synthetic-session', customer_reference: customer, proof: null, checked_at: null };
+  const outputs = [[row], [context], [{ proof }]]; let databaseCalls = 0, gets = 0;
+  const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key', MELD_ACCOUNT_ID: 'synthetic-account' },
+    execute: async () => { databaseCalls++; return outputs.shift()!; }, fetchImpl: (async (target, init) => {
+      gets++; expect(databaseCalls).toBe(2); expect(init?.method).toBe('GET'); const url = new URL(String(target)); expect(url.origin).toBe('https://api-sb.meld.io');
+      if (url.pathname === '/payments/transactions') return Response.json({ transactions: [{ id: 'synthetic-tx' }] });
+      expect(url.pathname).toBe('/payments/transactions/synthetic-tx');
+      return Response.json({ transaction: { id: proof.transactionId, accountId: proof.accountId, sessionId: proof.sessionId, externalSessionId: reference,
+        externalCustomerId: customer, serviceProvider: 'TRANSAK', countryCode: 'US', paymentMethodType: 'CREDIT_DEBIT_CARD', transactionType: 'CRYPTO_PURCHASE',
+        sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: 'USDT_POLYGON', destinationAmount: 95, status: 'SETTLED', updatedAt: timestamp,
+        cryptoDetails: { destinationWalletAddress: input.walletAddress, chainId: '137' } } });
+    }) as typeof fetch });
+  const path = '/api/member/wallet-funding/administrative/status?checkoutReference=' + reference;
+  for (const query of ['&transactionId=foreign', '&subject=other', '&checkoutReference=' + reference]) expect((await app.request(path + query)).status).toBe(400);
+  expect(databaseCalls).toBe(0); expect(gets).toBe(0);
+  const response = await app.request(path, { headers: { 'x-mindbliss-sandbox-contract': 'v2' } }); expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('private, no-store');
+  const body = await response.json(); expect(body).toMatchObject({ requestStatus: 'session_created', confirmation: { state: 'confirmed', source: 'meld_sandbox_api', testMode: true,
+    transactionId: 'synthetic-tx', providerStatus: 'SETTLED', receivedAmount: '95', confirmedAt: timestamp } });
+  expect(JSON.stringify(body)).not.toMatch(/synthetic-account|synthetic-session|externalSessionId|externalCustomerId|commission|token/);
+  expect(databaseCalls).toBe(3); expect(gets).toBe(2);
+});
+
+test('HTTP malformed provider checkout metadata is a sanitized upstream failure rather than invalid user input', async () => {
+  const outputs = [[{ status: 'assigned', address: input.walletAddress, address_family: 'EVM', asset: 'USDT',
+    checkout_reference: 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', assigned_at: new Date() }],
+    [{ id: input.requestId, created_at: new Date(), created: true, status: 'initiated' }], [{ finished: true }]];
+  let databaseCalls = 0;
+  const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key' },
+    execute: async () => { databaseCalls++; return outputs.shift()!; }, fetchImpl: (async target => {
+      if (String(target).includes('/supported/routes/')) return Response.json([{ partner: 'TRANSAK', source: 'USD', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 3000 } }] }]);
+      if (String(target).includes('/payments/crypto/quote')) return Response.json({ quotes: [{ serviceProvider: 'TRANSAK', paymentMethodType: 'CREDIT_DEBIT_CARD',
+        sourceCurrencyCode: 'USD', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: 100, destinationAmount: 95 }] });
+      return Response.json({ id: 'synthetic-session', serviceProviderWidgetUrl: { token: 'private-token' }, widgetUrl: 'https://sb.meldcrypto.com/?token=private' });
+    }) as typeof fetch });
+  const response = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'TRANSAK' })));
+  expect(response.status).toBe(503); expect(await response.json()).toEqual({ error: 'wallet_funding_unavailable' });
+  expect(databaseCalls).toBe(3);
+});
+
+test('warm or non-v2 clients retain the original unconfirmed sandbox status without provider or proof reads', async () => {
+  for (const contract of [undefined, 'v1', 'V2', 'v2, v2']) {
+    let reads = 0, providerCalls = 0;
+    const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key', MELD_ACCOUNT_ID: 'synthetic-account' },
+      execute: async () => { reads++; return [{ id: input.requestId, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created',
+        wallet_address: input.walletAddress, country_code: 'US', requested_amount: '100.00', source_currency: 'USD', payment_method: 'CREDIT_DEBIT_CARD',
+        destination_currency: 'USDT_POLYGON', created_at: new Date(), confirmation: { state: 'confirmed', receivedAmount: '95' } }]; },
+      fetchImpl: (async () => { providerCalls++; throw Error('legacy clients must not reconcile'); }) as unknown as typeof fetch });
+    const response = await app.request('/api/member/wallet-funding/administrative/status?checkoutReference=' + input.requestId,
+      { headers: contract === undefined ? {} : { 'x-mindbliss-sandbox-contract': contract } });
+    expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toMatchObject({ requestStatus: 'session_created',
+      confirmation: { state: 'unconfirmed', source: 'none', testMode: true } });
+    expect(reads).toBe(1); expect(providerCalls).toBe(0);
+  }
+  let reads = 0;
+  const personal = application({ execute: async () => { reads++; return [{ id: input.requestId, wallet_kind: 'personal', environment: 'production', provider: 'reown', status: 'initiated',
+    wallet_address: input.walletAddress, country_code: 'US', requested_amount: '100.00', source_currency: 'USD', payment_method: 'CREDIT_DEBIT_CARD',
+    destination_currency: 'USDT_POLYGON', created_at: new Date() }]; }, fetchImpl: (async () => { throw Error('personal cannot use sandbox v2'); }) as unknown as typeof fetch });
+  const response = await personal.request('/api/member/wallet-funding/personal/status?checkoutReference=' + input.requestId,
+    { headers: { 'x-mindbliss-sandbox-contract': 'v2' } });
+  expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ confirmation: { state: 'unconfirmed', source: 'none', testMode: false } });
+  expect(reads).toBe(1);
+});

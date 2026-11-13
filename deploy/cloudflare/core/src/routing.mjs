@@ -4,7 +4,7 @@ import { NOWPAYMENTS_PURCHASE_MAX_BODY, nowpaymentsPurchaseRequest, purchasesNam
 import { REFERRAL_ATTRIBUTION_MAX_BODY, referralAttributionRequest, referralAttributionNamespace } from './referral-attribution.mjs';
 import { boundedBody as readBoundedBody, fetchWithDeadline } from './transport.mjs';
 import { authTraceEnabled } from './auth-trace-store.mjs';
-import { WALLET_FUNDING_MAX_BODY, walletFundingNamespace, walletFundingRequest } from './wallet-funding.mjs';
+import { WALLET_FUNDING_MAX_BODY, walletFundingNamespace, walletFundingRequest, walletFundingContractHeaders } from './wallet-funding.mjs';
 import { COMPANY_PAYMENT_MAX_BODY, companyPaymentNamespace, companyPaymentRequest } from './company-payments.mjs';
 import { POLYGON_RELAY_MAX_BODY, polygonRelayNamespace, polygonRelayRequest } from './polygon-relay.mjs';
 export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
@@ -420,6 +420,7 @@ export async function dispatchCore(request, env, resolve) {
     headers.delete('host');
     headers.delete('content-length');
     headers.delete('cf-container-target-port');
+    walletFundingContractHeaders(headers, url);
     // No arbitrary target URL, no redirects followed by the gateway, no retries.
     const forwarded = new Request(request.url, {
       method: request.method, headers, body, redirect: 'manual', signal: request.signal,

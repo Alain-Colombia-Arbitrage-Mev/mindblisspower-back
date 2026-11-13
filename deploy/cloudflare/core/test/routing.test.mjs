@@ -290,6 +290,7 @@ test('Meld webhook secrets reach only the auth container when explicitly enabled
   const values = containerEnvironment('api', { ...apiSecrets(), MELD_WEBHOOK_ENABLED: 'true',
     MELD_WEBHOOK_SIGNING_KEY: 's'.repeat(32), MELD_ACCOUNT_ID: 'account-fixture', MELD_WEBHOOK_PROFILE_ID: 'profile-fixture' });
   assert.equal(values.MELD_WEBHOOK_SIGNING_KEY, 's'.repeat(32));
+  assert.equal(values.MELD_WEBHOOK_ENABLED, 'true');
   assert.equal(values.MELD_ACCOUNT_ID, 'account-fixture');
   assert.equal(values.MELD_WEBHOOK_PROFILE_ID, 'profile-fixture');
   assert.equal(values.MELD_WEBHOOK_PUBLIC_URL, 'https://wallet.mindblisspower.com/api/webhooks/meld');
@@ -311,6 +312,17 @@ test('Meld onramp forwards only the environment-appropriate credential to the au
     assert.throws(() => containerEnvironment('api', { ...apiSecrets(), CORE_ENV: 'production', MELD_API_KEY: value }),
       { message: 'Meld onramp configuration is invalid' });
   }
+});
+
+test('sandbox account metadata supports manual readback while incoming webhooks remain disabled', () => {
+  const env = { ...apiSecrets(), MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox',
+    MELD_ACCOUNT_ID: 'sandbox-account', MELD_WEBHOOK_ENABLED: 'false', MELD_WEBHOOK_SIGNING_KEY: 'private-not-forwarded' };
+  const values = containerEnvironment('api', env);
+  assert.equal(values.MELD_ACCOUNT_ID, 'sandbox-account');
+  assert.equal(values.MELD_WEBHOOK_ENABLED, undefined);
+  assert.equal(values.MELD_WEBHOOK_SIGNING_KEY, undefined);
+  assert.equal(containerEnvironment('api', { ...env, MELD_ADMIN_SANDBOX_ENABLED: 'false' }).MELD_ACCOUNT_ID, undefined);
+  assert.throws(() => containerEnvironment('api', { ...env, MELD_ACCOUNT_ID: 'bad\naccount' }));
 });
 
 test('opaque tunnel is reachable only from the API outbound binding at a fixed private endpoint', async () => {

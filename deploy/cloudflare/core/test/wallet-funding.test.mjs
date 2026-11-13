@@ -15,6 +15,30 @@ function request(route = path, body = input, extra = {}) {
     'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
 }
 
+test('sandbox contract v2 is forwarded only for exact administrative capabilities and never upgrades warm or personal clients', async () => {
+  const prefix = '/api/member/wallet-funding';
+  for (const route of [`${prefix}/administrative/session`, `${prefix}/administrative/status?checkoutReference=${input.requestId}`,
+    `${prefix}/administrative/options?country=US&serviceProvider=TRANSAK`, `${prefix}/history?walletKind=administrative`,
+    `${prefix}/personal/intent`, `${prefix}/personal/status?checkoutReference=${input.requestId}`, `${prefix}/personal/options?country=US`,
+    `${prefix}/history?walletKind=personal`]) {
+    const administrative = route.includes('/administrative/') || route.endsWith('walletKind=administrative');
+    for (const value of [undefined, 'v1', 'V2', 'v2, v2', 'v2']) {
+      let calls = 0;
+      const headers = value === undefined ? {} : { 'x-mindbliss-sandbox-contract': value };
+      const incoming = route.endsWith('/session') || route.endsWith('/intent')
+        ? request(route, { ...input, ...(administrative ? { serviceProvider: 'TRANSAK' } : {}) }, headers)
+        : new Request(`https://auth.core.internal${route}`, { headers: { cookie: 'better-auth.session_token=synthetic', ...headers } });
+      const response = await dispatchCore(incoming, env, () => ({ fetch: async forwarded => {
+        calls++;
+        assert.equal(forwarded.headers.get('x-mindbliss-sandbox-contract'), administrative && value === 'v2' ? 'v2' : null);
+        assert.equal(forwarded.headers.get('cookie'), incoming.headers.get('cookie'));
+        return Response.json({});
+      } }));
+      assert.equal(response.status, 200); assert.equal(calls, 1);
+    }
+  }
+});
+
 test('US Venmo/PayPal and Mexico MXN card/mobile methods retain exact country, currency and minima', async () => {
   const resolve = () => ({ fetch: async () => new Response('{}') });
   const never = () => assert.fail('A crossed local payment method reached a container');

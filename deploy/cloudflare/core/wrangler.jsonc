@@ -29,6 +29,7 @@
         "NOWPAYMENTS_ENGINE_ENABLED": "false",
         "NOWPAYMENTS_WEBHOOK_CAPTURE_ENABLED": "false",
         "MELD_WEBHOOK_ENABLED": "false",
+        "MELD_ADMIN_SANDBOX_ENABLED": "true",
         "CORE_SERVICES_ENABLED": "false",
         "CORE_NETWORK_VERIFIED": "false",
         "CORE_READINESS_PROBE_ENABLED": "false",
@@ -105,7 +106,7 @@
         "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
       },
       "containers": [
-        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-banxa-diagnostics:20261112-r22@sha256:0ec47724669f53ed72e027ece6ecce226c1357cedbe2aaa48cf5e5f39adaee89", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100, "observability": { "enabled": true, "logs": { "enabled": true } } },
+        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-meld-sandbox:20261112-r24@sha256:d9345b723169a74cf16f7b5d3f11b4565dc73686f22db29297b4648e07d368a2", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100, "observability": { "enabled": true, "logs": { "enabled": true } } },
         { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
         { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-manual-main-20261105@sha256:af2d54ba02a219219520044d59e26a7fbb5f78570ffa747d0375747114b82125", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }

@@ -12,6 +12,15 @@ export function walletFundingNamespace(path) {
   return path === WALLET_FUNDING_PREFIX || path.startsWith(`${WALLET_FUNDING_PREFIX}/`);
 }
 
+/** This is a response-format capability, never an ownership or payment grant. */
+export function walletFundingContractHeaders(headers, url) {
+  const name = 'x-mindbliss-sandbox-contract';
+  const administrative = [`${WALLET_FUNDING_PREFIX}/administrative/session`, `${WALLET_FUNDING_PREFIX}/administrative/status`,
+    `${WALLET_FUNDING_PREFIX}/administrative/options`].includes(url.pathname)
+    || (url.pathname === `${WALLET_FUNDING_PREFIX}/history` && url.search === '?walletKind=administrative');
+  if (!administrative || headers.get(name) !== 'v2') headers.delete(name);
+}
+
 /** A separate capability for recording requested funding, never financial settlement. */
 export function walletFundingRequest(request, url, body, env, ready) {
   if (!ready || env.WALLET_FUNDING_ENABLED !== 'true' || url.protocol !== 'https:'

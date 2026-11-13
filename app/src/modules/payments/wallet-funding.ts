@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { readAdministrativeWallet } from '../identity/administrative-wallet';
 import type { IdentityDatabase } from '../identity/model';
 import { PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_DESTINATION, readReownProductionOptions, isBlockedPersonalFundingMethod, isPersonalCopFundingMethod, isPersonalMxnFundingMethod } from './reown-funding-options';
+import { readAdministrativeSandboxConfirmations, reconcileAdministrativeSandboxFunding,
+  type SandboxReconciliationDependencies } from './meld-sandbox-reconciliation';
 
 type FundingDatabase = Pick<IdentityDatabase, 'execute'>;
 type FundingEnvironment = Record<string, string | undefined>;
@@ -219,15 +221,42 @@ function sandboxCredential(environment: FundingEnvironment) {
 }
 
 const sessionInput = z.object({
-  id: z.string().min(1).max(128), widgetUrl: z.string().min(1).max(8192),
-  externalSessionId: z.string().optional(), externalCustomerId: z.string().optional(),
+  id: z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/),
+  widgetUrl: z.string().max(8192).nullish(), serviceProviderWidgetUrl: z.string().max(8192).nullish(),
+  externalSessionId: z.string().min(1).max(128).optional(), externalCustomerId: z.string().min(1).max(128).optional(),
+  serviceProvider: z.string().min(1).max(40).optional(),
 });
 
 export function sandboxWidgetUrl(value: string) {
+  if (/[\\\u0000-\u0020\u007f]/.test(value)) throw new Error('wallet_funding_invalid_provider');
   const url = new URL(value);
   if (url.origin !== 'https://sb.meldcrypto.com' || url.username || url.password || url.hash
     || !url.search || !['/', '/widget'].includes(url.pathname)) throw new Error('wallet_funding_invalid_provider');
   return url.href;
+}
+
+/** Use only the documented Transak staging session URL, never a production host. */
+export function sandboxProviderWidgetUrl(value: unknown, serviceProvider: 'TRANSAK' | 'BANXA') {
+  if (serviceProvider !== 'TRANSAK' || typeof value !== 'string' || value.length > 8192
+    || /[\\\u0000-\u0020\u007f]/.test(value)
+    || value.includes('#') || !/^https:\/\/global-stg\.transak\.com\/?\?/.test(value)) return null;
+  try {
+    const url = new URL(value), keys = [...url.searchParams.keys()];
+    const rawKeys = value.slice(value.indexOf('?') + 1).split('&').map(part => part.slice(0, part.indexOf('=')));
+    const apiKey = url.searchParams.get('apiKey') || '', sessionId = url.searchParams.get('sessionId') || '';
+    if (url.origin !== 'https://global-stg.transak.com' || url.pathname !== '/' || url.username || url.password || url.hash
+      || keys.length !== 2 || url.searchParams.getAll('apiKey').length !== 1 || url.searchParams.getAll('sessionId').length !== 1
+      || rawKeys.some(key => key !== 'apiKey' && key !== 'sessionId')
+      || apiKey.length > 256 || !/^[A-Za-z0-9_-]+$/.test(apiKey)
+      || sessionId.length > 4096 || !/^[A-Za-z0-9._~-]+$/.test(sessionId)
+      || value.includes('%')) return null;
+    return url.href;
+  } catch { return null; }
+}
+
+/** Returning selects an owned request for inspection; it proves no settlement. */
+export function administrativeSandboxReturnUrl(reference: string) {
+  return `https://wallet.mindblisspower.com/dashboard/wallet-administrative?checkoutReference=${checkoutReferenceInput.parse(reference).toLowerCase()}`;
 }
 
 async function boundedProviderJson(response: Response, signal: AbortSignal) {
@@ -312,7 +341,7 @@ async function verifyAdministrativeSandboxQuote(input: z.infer<typeof administra
     headers: { Authorization: `BASIC ${key}`, 'Content-Type': 'application/json', Accept: 'application/json', 'Meld-Version': '2026-02-03' },
     body: JSON.stringify({ countryCode: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
       destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: input.amount, paymentMethodType: input.paymentMethodType,
-      serviceProviders: [input.serviceProvider] }),
+      serviceProviders: [input.serviceProvider], walletAddress: input.walletAddress }),
   }), signal, value => cancelBody(value.body)); } catch {
     diagnose(diagnostic, { phase: 'quote', status: null, code: 'TRANSPORT_FAILURE' });
     throw new Error('wallet_funding_provider_unavailable');
@@ -336,6 +365,7 @@ async function verifyAdministrativeSandboxQuote(input: z.infer<typeof administra
     || quote.serviceProvider !== input.serviceProvider || quote.paymentMethodType !== input.paymentMethodType
     || (quote.countryCode !== undefined && quote.countryCode !== input.country)
     || quote.sourceCurrencyCode !== input.sourceCurrencyCode || quote.destinationCurrencyCode !== 'USDT_POLYGON'
+    || (quote.walletAddress !== undefined && (typeof quote.walletAddress !== 'string' || quote.walletAddress.toLowerCase() !== input.walletAddress.toLowerCase()))
     || quote.sourceAmount !== input.amount || typeof quote.destinationAmount !== 'number'
     || !Number.isFinite(quote.destinationAmount) || quote.destinationAmount <= 0
     || (quote.transactionType !== undefined && quote.transactionType !== 'CRYPTO_PURCHASE')) {
@@ -346,8 +376,9 @@ async function verifyAdministrativeSandboxQuote(input: z.infer<typeof administra
 
 /** Sandbox sessions have their own store and never touch the commission ledger. */
 export async function createAdministrativeSandboxSession(database: FundingDatabase, rawInput: unknown, {
-  subject, clientIp, environment = process.env, fetchImpl = fetch, diagnostic = defaultDiagnostic, signal,
-}: { subject: string; clientIp: string; environment?: FundingEnvironment; fetchImpl?: typeof fetch; diagnostic?: Diagnostic; signal?: AbortSignal }) {
+  subject, clientIp, environment = process.env, fetchImpl = fetch, diagnostic = defaultDiagnostic, signal, preferProviderCheckout = false,
+}: { subject: string; clientIp: string; environment?: FundingEnvironment; fetchImpl?: typeof fetch; diagnostic?: Diagnostic; signal?: AbortSignal;
+  preferProviderCheckout?: boolean }) {
   // One budget includes assignment lookup, route/quote preflight, persistence,
   // widget creation and outcome persistence. A late/ambiguous provider result
   // never causes another session request or a false terminal settlement state.
@@ -363,7 +394,8 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
   const key = sandboxCredential(environment);
   if (!isIP(clientIp)) throw new Error('wallet_funding_unconfigured');
   const wallet = await withFundingSignal(() => readAdministrativeWallet(database, { userId: owner }), deadline.signal);
-  if (wallet.status !== 'assigned' || wallet.address?.toLowerCase() !== input.walletAddress.toLowerCase()) {
+  const assignedAddress = wallet.address;
+  if (wallet.status !== 'assigned' || !assignedAddress || assignedAddress.toLowerCase() !== input.walletAddress.toLowerCase()) {
     throw new Error('wallet_funding_forbidden');
   }
   const customerReference = checkoutReferenceInput.safeParse(wallet.checkoutReference);
@@ -382,9 +414,9 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
       diagnose(diagnostic, { phase: 'options', status: null, code: 'AMOUNT_OUTSIDE_ROUTE_LIMITS' });
       throw new Error('wallet_funding_amount_unavailable');
     }
-  await verifyAdministrativeSandboxQuote(input, key, fetchImpl, deadline.signal, diagnostic);
+  await verifyAdministrativeSandboxQuote({ ...input, walletAddress: assignedAddress }, key, fetchImpl, deadline.signal, diagnostic);
   const rows = await withFundingSignal(() => database.execute(sql`SELECT * FROM payments.create_meld_sandbox_funding_attempt_v2(
-    ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,
+    ${owner},${assignedAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,
     ${input.serviceProvider},${paymentMethod},${input.sourceCurrencyCode})`), deadline.signal);
   const row = oneRow(rows, sandboxRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
@@ -398,8 +430,9 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
       body: JSON.stringify({ sessionType: 'BUY', externalCustomerId: customerReference.data, externalSessionId: row.id,
         sessionData: { serviceProvider: input.serviceProvider, countryCode: input.country, clientIpAddress: clientIp,
           sourceCurrencyCode: input.sourceCurrencyCode, sourceAmount: input.amount.toFixed(2), destinationCurrencyCode: 'USDT_POLYGON',
-          walletAddress: wallet.address,
+          walletAddress: assignedAddress,
           paymentMethodType: paymentMethod,
+          redirectUrl: administrativeSandboxReturnUrl(row.id),
           lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'],
         } }),
     }), deadline.signal, value => cancelBody(value.body));
@@ -414,16 +447,23 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
       }
       throw new Error('wallet_funding_provider_unavailable');
     }
-    const providerSession = sessionInput.parse(data);
-    if ((providerSession.externalSessionId && providerSession.externalSessionId !== row.id)
-      || (providerSession.externalCustomerId && providerSession.externalCustomerId !== customerReference.data)) {
+    const parsedSession = sessionInput.safeParse(data);
+    if (!parsedSession.success) throw new Error('wallet_funding_invalid_provider');
+    const providerSession = parsedSession.data;
+    if ((providerSession.externalSessionId !== undefined && providerSession.externalSessionId !== row.id)
+      || (providerSession.externalCustomerId !== undefined && providerSession.externalCustomerId !== customerReference.data)
+      || (providerSession.serviceProvider !== undefined && providerSession.serviceProvider !== input.serviceProvider)) {
       throw new Error('wallet_funding_invalid_provider');
     }
-    const checkoutUrl = sandboxWidgetUrl(providerSession.widgetUrl);
+    // Warm clients only understand the legacy Meld URL. A reviewed v2 caller
+    // explicitly opts into the direct provider contract and its metadata.
+    const directCheckoutUrl = preferProviderCheckout ? sandboxProviderWidgetUrl(providerSession.serviceProviderWidgetUrl, input.serviceProvider) : null;
+    if (!directCheckoutUrl && !providerSession.widgetUrl) throw new Error('wallet_funding_invalid_provider');
+    const checkoutUrl = directCheckoutUrl ?? sandboxWidgetUrl(providerSession.widgetUrl!);
     outcomeWriteStarted = true;
     await withFundingSignal(() => finishSandbox(database, owner, row.id, 'session_created', providerSession.id), deadline.signal);
     return { checkoutReference: row.id, walletKind: 'administrative' as const, environment: 'sandbox' as const,
-    provider: 'meld' as const, status: 'session_created' as const, checkoutUrl,
+    provider: 'meld' as const, ...(preferProviderCheckout ? { serviceProvider: input.serviceProvider } : {}), status: 'session_created' as const, checkoutUrl,
       requestedAmount: input.amount, sourceCurrencyCode: input.sourceCurrencyCode, createdAt: row.created_at.toISOString() };
   } catch (error) {
     if (!outcomeWriteStarted && !deadline.signal.aborted) {
@@ -482,12 +522,20 @@ export async function readWalletFundingHistory(database: FundingDatabase, subjec
       requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency, destination: fundingDestination(row),
       ...(row.payment_method ? { paymentMethodType: row.payment_method } : {}), createdAt: row.created_at.toISOString() };
   });
+  const cached = walletKind === 'administrative' && items.length
+    ? await readAdministrativeSandboxConfirmations(database, { subject: owner, checkoutReferences: items.map(item => item.checkoutReference) })
+    : undefined;
+  const records = cached ? items.map(item => {
+    const confirmation = cached.get(item.checkoutReference);
+    return confirmation ? { ...item, confirmation } : item;
+  }) : items;
   return { walletKind, environment: walletKind === 'personal' ? 'production' as const : 'sandbox' as const,
-    records: items, settlement: 'unconfirmed' as const };
+    records, settlement: 'unconfirmed' as const };
 }
 
 /** An owned request snapshot. Checkout creation and return URLs prove no settlement. */
-export async function readWalletFundingStatus(database: FundingDatabase, subject: string, rawKind: unknown, rawReference: unknown) {
+export async function readWalletFundingStatus(database: FundingDatabase, subject: string, rawKind: unknown, rawReference: unknown,
+  reconciliation?: SandboxReconciliationDependencies) {
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
   const reference = checkoutReferenceInput.parse(rawReference);
@@ -498,9 +546,12 @@ export async function readWalletFundingStatus(database: FundingDatabase, subject
   if (row.id.toLowerCase() !== reference.toLowerCase() || row.wallet_kind !== walletKind
     || row.environment !== (personal ? 'production' : 'sandbox') || row.provider !== (personal ? 'reown' : 'meld')
     || (personal && row.status !== 'initiated') || !validPersistedFundingSource(row, personal)) throw new Error('wallet_funding_unavailable');
+  const confirmation = !personal && reconciliation
+    ? await reconcileAdministrativeSandboxFunding(database, { subject: owner, checkoutReference: row.id }, reconciliation)
+    : { state: 'unconfirmed' as const, source: 'none' as const, testMode: !personal };
   return { checkoutReference: row.id, walletKind, environment: row.environment, provider: row.provider,
     requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency,
     ...(row.payment_method ? { paymentMethodType: row.payment_method } : {}), country: row.country_code, requestStatus: row.status,
     destination: fundingDestination(row),
-    confirmation: { state: 'unconfirmed' as const, source: 'none' as const, testMode: !personal } };
+    confirmation };
 }

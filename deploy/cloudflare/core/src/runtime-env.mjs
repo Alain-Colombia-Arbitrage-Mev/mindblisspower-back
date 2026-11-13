@@ -162,6 +162,13 @@ export function containerEnvironment(service, env) {
       // This credential is consumed only by the separate sandbox session API.
       // The production commission writer still requires the live credential.
       values.MELD_API_SANDBOX = sandboxKey;
+      // Manual sandbox status reads are independent of incoming webhook enablement.
+      if (env.MELD_ACCOUNT_ID !== undefined) {
+        if (typeof env.MELD_ACCOUNT_ID !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(env.MELD_ACCOUNT_ID)) {
+          throw new Error('Meld sandbox account configuration is invalid');
+        }
+        values.MELD_ACCOUNT_ID = env.MELD_ACCOUNT_ID;
+      }
     }
     if (env.MELD_WEBHOOK_ENABLED === 'true') {
       for (const key of ['MELD_WEBHOOK_SIGNING_KEY', 'MELD_ACCOUNT_ID', 'MELD_WEBHOOK_PROFILE_ID']) {
@@ -169,7 +176,7 @@ export function containerEnvironment(service, env) {
           throw new Error('Meld webhook configuration is incomplete');
         }
       }
-      Object.assign(values, { MELD_WEBHOOK_SIGNING_KEY: env.MELD_WEBHOOK_SIGNING_KEY, MELD_ACCOUNT_ID: env.MELD_ACCOUNT_ID,
+      Object.assign(values, { MELD_WEBHOOK_ENABLED: 'true', MELD_WEBHOOK_SIGNING_KEY: env.MELD_WEBHOOK_SIGNING_KEY, MELD_ACCOUNT_ID: env.MELD_ACCOUNT_ID,
         MELD_WEBHOOK_PROFILE_ID: env.MELD_WEBHOOK_PROFILE_ID,
         MELD_WEBHOOK_PUBLIC_URL: 'https://wallet.mindblisspower.com/api/webhooks/meld' });
     }

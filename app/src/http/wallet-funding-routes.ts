@@ -73,6 +73,7 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         const result = kind === 'personal' ? await createPersonalFundingIntent(database, input, subject, { fetchImpl, signal: context.req.raw.signal })
           : await createAdministrativeSandboxSession(database, input, {
             subject, clientIp: context.req.header('x-vp-auth-client-ip') || '', environment, fetchImpl, signal: context.req.raw.signal,
+            preferProviderCheckout: context.req.header('x-mindbliss-sandbox-contract') === 'v2',
           });
         return context.json(result, 201, noStore);
       } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
@@ -128,7 +129,12 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         if ([...query.keys()].length !== 1 || query.getAll('checkoutReference').length !== 1) {
           return context.json({ error: 'invalid_request' }, 400, noStore);
         }
-        return context.json(await readWalletFundingStatus(database, subject, walletKind, query.get('checkoutReference')), 200, noStore);
+        // Existing JS/BFF releases accept only the original unconfirmed shape.
+        // Their reads must neither expose v2 proof nor initiate provider work.
+        const reconciliation = walletKind === 'administrative' && context.req.header('x-mindbliss-sandbox-contract') === 'v2'
+          ? { environment, fetchImpl, signal: context.req.raw.signal } : undefined;
+        return context.json(await readWalletFundingStatus(database, subject, walletKind, query.get('checkoutReference'),
+          reconciliation), 200, noStore);
       } catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
     });
   }
