@@ -884,3 +884,17 @@ test('explicitly disabled sandbox method-level hosted support cannot be quoted o
     }) as typeof fetch })).rejects.toThrow('wallet_funding_method_unavailable');
   expect(calls).toBe(1); expect(db.queries).toHaveLength(1);
 });
+
+test('malformed successful sandbox quote JSON is a provider failure without an attempt or widget', async () => {
+  const db = queuedDatabase([[assignment]]); const diagnostics: unknown[] = []; let calls = 0;
+  await expect(createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+    diagnostic: event => diagnostics.push(event), fetchImpl: (async target => {
+      calls++; if (String(target).includes('/supported/routes/')) return Response.json([route()]);
+      expect(String(target)).toContain('/payments/crypto/quote');
+      return new Response('{"private-token":', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch })).rejects.toThrow('wallet_funding_provider_unavailable');
+  expect(calls).toBe(2); expect(db.queries).toHaveLength(1);
+  expect(db.queries[0]!.sql).toContain('identity.read_administrative_wallet');
+  expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'quote', status: 200, code: 'INVALID_RESPONSE' }]);
+  expect(JSON.stringify(diagnostics)).not.toContain('private-token');
+});

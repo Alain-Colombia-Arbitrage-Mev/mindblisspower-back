@@ -339,3 +339,20 @@ test('HTTP administrative provider authentication failures expose only a safe co
   expect(duplicate.status).toBe(409); expect(await duplicate.json()).toEqual({ error: 'wallet_funding_request_already_used' });
   expect(providerCalls).toBe(2);
 });
+
+test('HTTP malformed successful sandbox quote is sanitized503 and never persists an attempt or opens a widget', async () => {
+  let databaseCalls = 0, providerCalls = 0;
+  const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key' },
+    execute: async () => { databaseCalls++; return [{ status: 'assigned', address: input.walletAddress, address_family: 'EVM', asset: 'USDT',
+      checkout_reference: 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', assigned_at: new Date() }]; },
+    fetchImpl: (async target => {
+      providerCalls++; if (String(target).includes('/supported/routes/')) return Response.json([{ partner: 'TRANSAK', source: 'USD', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 3000 } }] }]);
+      expect(String(target)).toContain('/payments/crypto/quote');
+      return new Response('{"private-provider-token":', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch });
+  const response = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'TRANSAK' })));
+  expect(response.status).toBe(503); expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(await response.json()).toEqual({ error: 'wallet_funding_provider_unavailable' });
+  expect(databaseCalls).toBe(1); expect(providerCalls).toBe(2);
+});

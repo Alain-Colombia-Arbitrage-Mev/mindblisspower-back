@@ -315,7 +315,11 @@ async function verifyAdministrativeSandboxQuote(input: z.infer<typeof administra
     diagnose(diagnostic, { phase: 'quote', status: null, code: 'TRANSPORT_FAILURE' });
     throw new Error('wallet_funding_provider_unavailable');
   }
-  const data = await boundedProviderJson(response, signal);
+  let data: unknown;
+  try { data = await boundedProviderJson(response, signal); } catch {
+    diagnose(diagnostic, { phase: 'quote', status: response.status, code: 'INVALID_RESPONSE' });
+    throw new Error('wallet_funding_provider_unavailable');
+  }
   if (!response.ok) {
     const metadata = providerMetadata(data);
     diagnose(diagnostic, { phase: 'quote', status: response.status, code: 'UPSTREAM_REJECTED', ...metadata });
