@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { createAdministrativeSandboxSession, createPersonalFundingIntent, readAdministrativeSandboxOptions, readWalletFundingHistory,
-  readWalletFundingStatus, sandboxWidgetUrl } from './wallet-funding';
+  readWalletFundingStatus, sandboxWidgetUrl, createAdministrativePreflightGate } from './wallet-funding';
 import type { IdentityDatabase } from '../identity/model';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
@@ -19,9 +19,16 @@ const personalRoute = (partner = 'SWAPPED', paymentMethods = [method()]) => ({ p
 const productionFetch = (async () => Response.json([personalRoute('SWAPPED')])) as unknown as typeof fetch;
 
 function withSandboxOptions(widgetFetch: typeof fetch): typeof fetch {
-  return (async (url, init) => String(url).includes('/supported/routes/')
-    ? Response.json([route()])
-    : widgetFetch(url, init)) as typeof fetch;
+  return (async (url, init) => {
+    if (String(url).includes('/supported/routes/')) return Response.json([route()]);
+    if (String(url).includes('/payments/crypto/quote')) {
+      const input = JSON.parse(String(init?.body));
+      return Response.json({ quotes: [{ serviceProvider: input.serviceProviders[0], paymentMethodType: input.paymentMethodType,
+        sourceCurrencyCode: input.sourceCurrencyCode, destinationCurrencyCode: input.destinationCurrencyCode,
+        sourceAmount: input.sourceAmount, destinationAmount: 95 }] });
+    }
+    return widgetFetch(url, init);
+  }) as typeof fetch;
 }
 
 function queuedDatabase(results: unknown[][]) {
@@ -332,7 +339,7 @@ test('invalid assignment customer identities stop before persistence or provider
   expect(badEcho.queries[2]!.params[2]).toBe('failed');
 });
 
-test('disabled sandbox, a live-only key, another assigned address and reused requests never reach Meld', async () => {
+test('disabled sandbox and foreign addresses never reach providers; persisted duplicate requests cannot open another widget', async () => {
   const neverFetch = (async () => { throw new Error('unexpected provider call'); }) as unknown as typeof fetch;
   for (const config of [{}, { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_KEY: 'must-not-be-read' },
     { ...environment, MELD_ADMIN_SANDBOX_ENABLED: 'false' }]) {
@@ -346,7 +353,7 @@ test('disabled sandbox, a live-only key, another assigned address and reused req
     .rejects.toThrow('wallet_funding_forbidden');
   expect(mismatch.queries).toHaveLength(1);
   const duplicate = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: false, status: 'session_created' }]]);
-  await expect(createAdministrativeSandboxSession(duplicate.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl: neverFetch }))
+  await expect(createAdministrativeSandboxSession(duplicate.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl: withSandboxOptions(neverFetch) }))
     .rejects.toThrow('wallet_funding_request_already_used');
   expect(duplicate.queries).toHaveLength(2);
 });
@@ -404,14 +411,14 @@ test('administrative MXN methods belong to the sandbox account and selected prov
       expect(String(url)).toBe('https://api-sb.meld.io/network-partner/supported/routes/CRYPTO_ONRAMP/MX/MXN/USDT_POLYGON');
       expect(new Headers(init!.headers).get('authorization')).toBe('BASIC synthetic-sandbox-key');
       return Response.json([{ partner: 'TRANSAK', source: 'MXN', destination: 'USDT_POLYGON',
-        paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 150, max: 200_000 } }] },
+        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'MXN', min: 150, max: 200_000 } }] },
       { partner: 'SWAPPED', source: 'MXN', destination: 'USDT_POLYGON',
         paymentMethods: [{ name: 'NETELLER', limits: { currencyCode: 'MXN', min: 100, max: 250_000 } }] }]);
     }) as typeof fetch,
   });
   expect(result).toMatchObject({ walletKind: 'administrative', environment: 'sandbox', provider: 'meld', country: 'MX',
-    sourceCurrencyCode: 'MXN', paymentMethods: ['SPEI'], routes: [{ serviceProvider: 'TRANSAK', paymentMethods: [
-      { method: 'SPEI', currencyCode: 'MXN', minimumAmount: 150, maximumAmount: 200_000 },
+    sourceCurrencyCode: 'MXN', paymentMethods: ['CREDIT_DEBIT_CARD'], routes: [{ serviceProvider: 'TRANSAK', paymentMethods: [
+      { method: 'CREDIT_DEBIT_CARD', currencyCode: 'MXN', minimumAmount: 150, maximumAmount: 200_000 },
     ] }] });
   expect(JSON.stringify(result)).not.toContain('minimumUsd');
   const bad = await readAdministrativeSandboxOptions({ country: 'MX', sourceCurrencyCode: 'MXN', serviceProvider: 'BANXA' }, {
@@ -451,13 +458,13 @@ test('the shared Banxa sandbox authentication failure is actionable without expo
       : Response.json({ code: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION', message: 'private provider message with secret',
         serviceProviderDetails: { address, token: 'private-token' } }, { status: 401 })) as typeof fetch,
   })).rejects.toThrow('wallet_funding_provider_authentication_unavailable');
-  expect(queries[2]!.params).toEqual(['owner', id, 'unavailable', null]);
-  expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'session', status: 401,
-    requestId: id, code: 'UPSTREAM_REJECTED', providerCode: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION' }]);
+  expect(queries).toHaveLength(1);
+  expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'quote', status: 401,
+    code: 'UPSTREAM_REJECTED', providerCode: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION' }]);
   expect(JSON.stringify(diagnostics)).not.toMatch(/private|secret|0x|token/);
 });
 
-test('a method not returned by the selected sandbox route never opens a widget and records unavailable', async () => {
+test('a missing sandbox method never opens a widget or consumes an attempt', async () => {
   const { database, queries } = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
   let calls = 0;
   await expect(createAdministrativeSandboxSession(database, { ...adminInput, paymentMethodType: 'BANK_TRANSFER' }, {
@@ -469,7 +476,7 @@ test('a method not returned by the selected sandbox route never opens a widget a
     }) as typeof fetch,
   })).rejects.toThrow('wallet_funding_method_unavailable');
   expect(calls).toBe(1);
-  expect(queries[2]!.params[2]).toBe('unavailable');
+  expect(queries).toHaveLength(1);
 });
 
 test('sandbox checks its selected method USD limits and logs only safe correlation metadata on rejection', async () => {
@@ -482,8 +489,8 @@ test('sandbox checks its selected method USD limits and logs only safe correlati
     }) as typeof fetch,
   })).rejects.toThrow('wallet_funding_amount_unavailable');
   expect(calls).toBe(1);
-  expect(outside.queries[2]!.params[2]).toBe('unavailable');
-  expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'session', status: null, requestId: id, code: 'AMOUNT_OUTSIDE_ROUTE_LIMITS' }]);
+  expect(outside.queries).toHaveLength(1);
+  expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'options', status: null, code: 'AMOUNT_OUTSIDE_ROUTE_LIMITS' }]);
   diagnostics.length = 0;
   const rejected = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
   await expect(createAdministrativeSandboxSession(rejected.database, adminInput, { subject: 'private-owner', clientIp: '192.0.2.1', environment,
@@ -555,6 +562,7 @@ test('one whole-operation deadline stops a slow sandbox widget and never retries
     await expect(createAdministrativeSandboxSession(database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
       diagnostic: () => {}, fetchImpl: (async (url, init) => {
         if (String(url).includes('/supported/routes/')) { await new Promise(resolve => originalTimeout(resolve, 5)); return Response.json([route()]); }
+        if (String(url).includes('/payments/crypto/quote')) return Response.json({ quotes: [{ serviceProvider: 'TRANSAK', paymentMethodType: 'CREDIT_DEBIT_CARD', sourceCurrencyCode: 'USD', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: 100, destinationAmount: 95 }] });
         widgetCalls++; widgetSignal = init!.signal;
         return new Promise<Response>(resolve => { finishLate = resolve; });
       }) as typeof fetch,
@@ -638,11 +646,11 @@ test('V2 history and status expose explicit MXN/SPEI metadata and reject currenc
     wallet_address: address, country_code: 'MX', requested_amount: '148.66', destination_currency: 'USDT_POLYGON', source_currency: 'MXN', payment_method: 'SPEI', created_at: createdAt };
   const history = queuedDatabase([[row]]);
   const result = await readWalletFundingHistory(history.database, 'owner', 'personal');
-  expect(history.queries[0]!.sql).toContain('payments.read_wallet_funding_history_v3');
+  expect(history.queries[0]!.sql).toContain('payments.read_wallet_funding_history_v4');
   expect(result.records[0]).toMatchObject({ requestedAmount: 148.66, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI' });
   const status = queuedDatabase([[row]]);
   const snapshot = await readWalletFundingStatus(status.database, 'owner', 'personal', id);
-  expect(status.queries[0]!.sql).toContain('payments.read_wallet_funding_status_v3');
+  expect(status.queries[0]!.sql).toContain('payments.read_wallet_funding_status_v4');
   expect(snapshot).toMatchObject({ requestedAmount: 148.66, sourceCurrencyCode: 'MXN', paymentMethodType: 'SPEI', country: 'MX',
     confirmation: { state: 'unconfirmed', source: 'none', testMode: false } });
   for (const change of [{ source_currency: undefined }, { source_currency: 'COP' }, { country_code: 'US' },
@@ -744,4 +752,135 @@ test('funding destinations preserve Ethereum personal requests and legacy Polygo
   for (const destination_currency of [undefined, 'USDT_ARBITRUM', 'ETH', 'USDT_POLYGON ']) {
     await expect(readWalletFundingStatus(queuedDatabase([[{ ...base, destination_currency }]]).database, 'owner', 'personal', id)).rejects.toThrow();
   }
+});
+
+test('administrative MXN quote, durable attempt and widget retain the exact fiat/provider/assigned destination using provider minima', async () => {
+  for (const [serviceProvider, paymentMethodType, amount, minimum] of [
+    ['TRANSAK', 'CREDIT_DEBIT_CARD', 93, 93], ['TRANSAK', 'APPLE_PAY', 560, 560],
+    ['TRANSAK', 'GOOGLE_PAY', 560, 560], ['BANXA', 'CREDIT_DEBIT_CARD', 650, 650],
+  ] as const) {
+    const db = queuedDatabase([[assignment], [{ id, created_at: createdAt, created: true, status: 'initiated' }], [{ finished: true }]]);
+    const calls: string[] = [];
+    const selected = { ...adminInput, country: 'MX', sourceCurrencyCode: 'MXN', serviceProvider, paymentMethodType, amount };
+    const result = await createAdministrativeSandboxSession(db.database, selected, { subject: 'admin-owner', clientIp: '192.0.2.1',
+      environment: { ...environment, MELD_API_KEY: 'must-never-be-used' }, fetchImpl: (async (target, init) => {
+        const url = String(target); calls.push(url);
+        expect(url).toStartWith('https://api-sb.meld.io/');
+        expect(new Headers(init?.headers).get('authorization')).toBe('BASIC synthetic-sandbox-key');
+        if (url.includes('/supported/routes/')) return Response.json([{ partner: serviceProvider, source: 'MXN', destination: 'USDT_POLYGON',
+          paymentMethods: [{ name: paymentMethodType, limits: { currencyCode: 'MXN', min: minimum, max: 20000 } }] }]);
+        const body = JSON.parse(String(init?.body));
+        if (url.includes('/payments/crypto/quote')) {
+          expect(db.queries).toHaveLength(1);
+          expect(body).toEqual({ countryCode: 'MX', sourceCurrencyCode: 'MXN', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: amount,
+            paymentMethodType, serviceProviders: [serviceProvider] });
+          return Response.json({ quotes: [{ serviceProvider, paymentMethodType, sourceCurrencyCode: 'MXN', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: amount, destinationAmount: 4.2 }] });
+        }
+        expect(db.queries).toHaveLength(2);
+        expect(body.sessionData).toMatchObject({ countryCode: 'MX', sourceCurrencyCode: 'MXN', sourceAmount: amount.toFixed(2), serviceProvider,
+          paymentMethodType, walletAddress: assignment.address, destinationCurrencyCode: 'USDT_POLYGON' });
+        return Response.json({ id: 'sandbox-session', widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic' });
+      }) as typeof fetch });
+    expect(result).toMatchObject({ requestedAmount: amount, sourceCurrencyCode: 'MXN', environment: 'sandbox', walletKind: 'administrative' });
+    expect(db.queries[1]!.sql).toContain('create_meld_sandbox_funding_attempt_v2');
+    expect(db.queries[1]!.params).toEqual(['admin-owner', address, 'MX', amount, id, serviceProvider, paymentMethodType, 'MXN']);
+    expect(calls).toHaveLength(3);
+    expect(db.queries.map(q => q.sql).join(' ')).not.toMatch(/create_reown|commission|meld_onramp_attempt|ledger/i);
+  }
+});
+
+test('administrative MXN enforces exact country, provider rail and discovered limits without a personal 931 or USD-equivalent floor', async () => {
+  const never = (async () => { throw Error('unsupported source reached provider'); }) as unknown as typeof fetch;
+  for (const change of [{ country: 'US' }, { country: 'CO' }, { sourceCurrencyCode: 'COP' }, { sourceCurrencyCode: 'EUR' },
+    { paymentMethodType: 'SPEI' }, { paymentMethodType: 'PSE' }, { serviceProvider: 'BANXA', paymentMethodType: 'APPLE_PAY' }]) {
+    const db = queuedDatabase([]);
+    await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, country: 'MX', sourceCurrencyCode: 'MXN', amount: 93, ...change },
+      { subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl: never })).rejects.toThrow('wallet_funding_valuation_unavailable');
+    expect(db.queries).toHaveLength(0);
+  }
+  for (const amount of [92.99, 20000.01]) {
+    const db = queuedDatabase([[assignment]]); let calls = 0;
+    await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, country: 'MX', sourceCurrencyCode: 'MXN', amount }, {
+      subject: 'owner', clientIp: '192.0.2.1', environment, diagnostic: () => {}, fetchImpl: (async () => { calls++;
+        return Response.json([{ partner: 'TRANSAK', source: 'MXN', destination: 'USDT_POLYGON', paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'MXN', min: 93, max: 20000 } }] }]);
+      }) as unknown as typeof fetch })).rejects.toThrow('wallet_funding_amount_unavailable');
+    expect(calls).toBe(1); expect(db.queries).toHaveLength(1);
+  }
+});
+
+test('untrusted sandbox quotes cannot consume an attempt, open a widget or manufacture a settlement', async () => {
+  const canonical = { serviceProvider: 'TRANSAK', paymentMethodType: 'CREDIT_DEBIT_CARD', sourceCurrencyCode: 'USD',
+    destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: 100, destinationAmount: 95 };
+  for (const quotes of [[], [canonical, canonical], [{ ...canonical, sourceAmount: 101 }], [{ ...canonical, countryCode: 'CO' }], [{ ...canonical, sourceCurrencyCode: 'MXN' }],
+    [{ ...canonical, destinationCurrencyCode: 'USDT' }], [{ ...canonical, serviceProvider: 'BANXA' }], [{ ...canonical, paymentMethodType: 'APPLE_PAY' }],
+    [{ ...canonical, destinationAmount: 0 }], [{ ...canonical, destinationAmount: -1 }], [{ ...canonical, destinationAmount: '95' }],
+    [{ ...canonical, transactionType: 'CRYPTO_SELL' }]]) {
+    const db = queuedDatabase([[assignment]]); let calls = 0;
+    await expect(createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+      diagnostic: () => {}, fetchImpl: (async target => { calls++; if (String(target).includes('/supported/routes/')) return Response.json([route()]);
+        expect(String(target)).toContain('/payments/crypto/quote'); return Response.json({ quotes });
+      }) as typeof fetch })).rejects.toThrow('wallet_funding_provider_unavailable');
+    expect(calls).toBe(2); expect(db.queries).toHaveLength(1);
+  }
+  const disabled = queuedDatabase([[assignment]]);
+  await expect(createAdministrativeSandboxSession(disabled.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+    diagnostic: () => {}, fetchImpl: (async target => { expect(String(target)).toContain('/supported/routes/'); return Response.json([{ ...route(), checkoutSupported: false }]); }) as typeof fetch,
+  })).rejects.toThrow('wallet_funding_method_unavailable');
+  expect(disabled.queries).toHaveLength(1);
+});
+
+test('sandbox preflight quota, duplicate ids and overlapping operations are bounded separately from financial attempts', async () => {
+  let now = 1000; const gate = createAdministrativePreflightGate(() => now, 2);
+  const release = gate('alice', 'first');
+  expect(() => gate('alice', 'second')).toThrow('wallet_funding_request_pending');
+  release(); expect(() => gate('alice', 'first')).toThrow('wallet_funding_request_already_used');
+  for (let i = 1; i < 10; i++) gate('alice', String(i))();
+  expect(() => gate('alice', 'eleventh')).toThrow('wallet_funding_rate_limited');
+  gate('bob', 'first')(); expect(() => gate('charlie', 'first')).toThrow('wallet_funding_rate_limited');
+  now += 600001; gate('alice', 'first')(); gate('charlie', 'first')();
+  const db = queuedDatabase(Array.from({ length: 12 }, () => [assignment])); let providerCalls = 0;
+  const fetchImpl = (async target => { providerCalls++; if (String(target).includes('/supported/routes/')) return Response.json([route()]);
+    return Response.json({ code: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION' }, { status: 401 }); }) as typeof fetch;
+  for (let i = 0; i < 10; i++) await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, requestId: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` },
+    { subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl, diagnostic: () => {} })).rejects.toThrow('wallet_funding_provider_authentication_unavailable');
+  expect(providerCalls).toBe(20);
+  await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, requestId: '00000000-0000-4000-8000-999999999999' },
+    { subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl })).rejects.toThrow('wallet_funding_rate_limited');
+  expect(providerCalls).toBe(20); expect(db.queries.every(q => q.sql.includes('read_administrative_wallet'))).toBe(true);
+});
+
+test('administrative MXN history and status keep pesos and sandbox-only unconfirmed receipts under owner-scoped readers', async () => {
+  const row = { id, wallet_kind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created', wallet_address: address,
+    country_code: 'MX', requested_amount: '93.00', source_currency: 'MXN', payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDT_POLYGON', created_at: createdAt };
+  const history = queuedDatabase([[row]]), status = queuedDatabase([[row]]);
+  expect((await readWalletFundingHistory(history.database, 'owner', 'administrative')).records[0]).toMatchObject({ requestedAmount: 93, sourceCurrencyCode: 'MXN' });
+  expect(await readWalletFundingStatus(status.database, 'owner', 'administrative', id)).toMatchObject({ requestedAmount: 93, sourceCurrencyCode: 'MXN', confirmation: { state: 'unconfirmed', source: 'none', testMode: true } });
+  expect(history.queries[0]!.params).toEqual(['owner', 'administrative']); expect(status.queries[0]!.params).toEqual(['owner', 'administrative', id]);
+  for (const change of [{ country_code: 'US' }, { payment_method: 'SPEI' }, { source_currency: 'COP' }, { destination_currency: 'USDT' }, { environment: 'production' }]) {
+    await expect(readWalletFundingHistory(queuedDatabase([[{ ...row, ...change }]]).database, 'owner', 'administrative')).rejects.toThrow();
+  }
+});
+
+test('concurrent or cancelled administrative quote preflights never open a second provider operation or consume attempts', async () => {
+  const db = queuedDatabase([[assignment], [assignment]]); const controller = new AbortController();
+  let quoteStarted = () => {}; const started = new Promise<void>(resolve => { quoteStarted = resolve; }); let providerCalls = 0;
+  const fetchImpl = (async target => { providerCalls++; if (String(target).includes('/supported/routes/')) return Response.json([route()]);
+    quoteStarted(); return new Promise<Response>(() => {});
+  }) as typeof fetch;
+  const first = createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+    signal: controller.signal, fetchImpl, diagnostic: () => {} });
+  const outcome = first.then(() => null, error => error as Error); await started;
+  await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, requestId: '00000000-0000-4000-8000-123456789012' },
+    { subject: 'owner', clientIp: '192.0.2.1', environment, fetchImpl })).rejects.toThrow('wallet_funding_request_pending');
+  expect(providerCalls).toBe(2); expect(db.queries).toHaveLength(2); controller.abort(); expect((await outcome)?.message).toBe('wallet_funding_provider_unavailable');
+  expect(db.queries.every(q => q.sql.includes('read_administrative_wallet'))).toBe(true);
+});
+
+test('explicitly disabled sandbox method-level hosted support cannot be quoted or opened', async () => {
+  const db = queuedDatabase([[assignment]]); let calls = 0;
+  await expect(createAdministrativeSandboxSession(db.database, adminInput, { subject: 'owner', clientIp: '192.0.2.1', environment,
+    diagnostic: () => {}, fetchImpl: (async target => { calls++; expect(String(target)).toContain('/supported/routes/');
+      return Response.json([{ ...route(), paymentMethods: [{ ...method(), checkoutSupported: false }] }]);
+    }) as typeof fetch })).rejects.toThrow('wallet_funding_method_unavailable');
+  expect(calls).toBe(1); expect(db.queries).toHaveLength(1);
 });

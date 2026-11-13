@@ -34,7 +34,7 @@ function failure(error: unknown) {
   if (['wallet_funding_forbidden', 'wallet_funding_wallet_not_linked', 'wallet_funding_wallet_not_assigned'].includes(code)) {
     return { error: 'wallet_funding_forbidden', status: 403 as const };
   }
-  if (['wallet_funding_request_already_used', 'wallet_funding_network_changed'].includes(code)) return { error: code, status: 409 as const };
+  if (['wallet_funding_request_already_used', 'wallet_funding_request_pending', 'wallet_funding_network_changed'].includes(code)) return { error: code, status: 409 as const };
   if (code === 'wallet_funding_rate_limited') return { error: code, status: 429 as const };
   if (code === 'wallet_funding_unconfigured') return { error: code, status: 503 as const };
   if (code === 'wallet_funding_method_unavailable') return { error: code, status: 409 as const };

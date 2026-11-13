@@ -31,6 +31,39 @@ export const administrativeOptionsInput = z.object({
 const intentRow = z.object({ id: z.string().uuid(), created_at: z.coerce.date() });
 const sandboxRow = intentRow.extend({ created: z.boolean(), status: z.string() });
 
+/** Local administrative fiat never inherits personal-wallet limits or rails. */
+function administrativeSourceSupported(country: string, currency: string, provider: string, method?: string) {
+  if (currency === 'USD') return true;
+  return currency === 'MXN' && country === 'MX' && (method === undefined
+    || method === 'CREDIT_DEBIT_CARD' || (provider === 'TRANSAK' && ['APPLE_PAY', 'GOOGLE_PAY'].includes(method)));
+}
+
+/** Bound provider preflights independently of accepted checkout records. */
+export function createAdministrativePreflightGate(now: () => number = Date.now, maximumOwners = 10_000) {
+  const owners = new Map<string, { until: number; requests: Set<string>; active: boolean }>();
+  return (owner: string, requestId: string) => {
+    const instant = now();
+    if (!Number.isFinite(instant)) throw new Error('wallet_funding_rate_limited');
+    for (const [key, entry] of owners) if (entry.until <= instant && !entry.active) owners.delete(key);
+    let entry = owners.get(owner);
+    if (entry?.active) throw new Error('wallet_funding_request_pending');
+    if (entry?.requests.has(requestId)) throw new Error('wallet_funding_request_already_used');
+    if (entry && entry.requests.size >= 10) throw new Error('wallet_funding_rate_limited');
+    if (!entry) {
+      if (owners.size >= maximumOwners) throw new Error('wallet_funding_rate_limited');
+      entry = { until: instant + 10 * 60_000, requests: new Set(), active: false }; owners.set(owner, entry);
+    }
+    entry.requests.add(requestId); entry.active = true;
+    return () => { entry.active = false; };
+  };
+}
+const administrativePreflightGates = new WeakMap<FundingDatabase, ReturnType<typeof createAdministrativePreflightGate>>();
+function administrativePreflightGate(database: FundingDatabase) {
+  let gate = administrativePreflightGates.get(database);
+  if (!gate) { gate = createAdministrativePreflightGate(); administrativePreflightGates.set(database, gate); }
+  return gate;
+}
+
 function oneRow<T>(rows: unknown[], schema: z.ZodType<T>): T {
   if (rows.length !== 1) throw new Error('wallet_funding_unavailable');
   return schema.parse(rows[0]);
@@ -77,7 +110,7 @@ export async function createPersonalFundingIntent(database: FundingDatabase, raw
 }
 
 type FundingDiagnostic = { event: 'wallet_funding_provider_failure'; environment: 'sandbox';
-  phase: 'options' | 'session'; status: number | null; requestId?: string;
+  phase: 'options' | 'quote' | 'session'; status: number | null; requestId?: string;
   code: 'UPSTREAM_REJECTED' | 'INVALID_RESPONSE' | 'TRANSPORT_FAILURE' | 'METHOD_UNAVAILABLE' | 'AMOUNT_OUTSIDE_ROUTE_LIMITS';
   providerCode?: string; providerRequestId?: string };
 type Diagnostic = (event: FundingDiagnostic) => void;
@@ -150,12 +183,17 @@ export function normalizeAdministrativeSandboxRoutes(data: unknown, serviceProvi
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('wallet_funding_provider_unavailable');
     const route = value as Record<string, unknown>;
     if (route.partner !== serviceProvider) continue;
+    // Older sandbox catalogues omit this flag. Explicitly disabled hosted
+    // routes are never admitted; every accepted route still requires a quote.
+    if (route.checkoutSupported === false) continue;
     if (route.source !== sourceCurrencyCode || route.destination !== 'USDT_POLYGON' || !Array.isArray(route.paymentMethods)
       || route.paymentMethods.length > 64) throw new Error('wallet_funding_provider_unavailable');
     for (const value of route.paymentMethods) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('wallet_funding_provider_unavailable');
       const entry = value as Record<string, unknown>;
       if (typeof entry.name !== 'string' || !/^[A-Z0-9_]{2,40}$/.test(entry.name)) throw new Error('wallet_funding_provider_unavailable');
+      if (entry.checkoutSupported === false) continue;
+      if (sourceCurrencyCode === 'MXN' && !administrativeSourceSupported('MX', sourceCurrencyCode, serviceProvider, entry.name)) continue;
       if (entry.limits === null || entry.limits === undefined) continue;
       if (!entry.limits || typeof entry.limits !== 'object' || Array.isArray(entry.limits)) throw new Error('wallet_funding_provider_unavailable');
       const { currencyCode, min, max } = entry.limits as Record<string, unknown>;
@@ -219,6 +257,9 @@ export async function readAdministrativeSandboxOptions(rawInput: unknown, {
   environment = process.env, fetchImpl = fetch, diagnostic = defaultDiagnostic, requestId, signal,
 }: { environment?: FundingEnvironment; fetchImpl?: typeof fetch; diagnostic?: Diagnostic; requestId?: string; signal?: AbortSignal } = {}) {
   const input = administrativeOptionsInput.parse(rawInput);
+  if (!administrativeSourceSupported(input.country, input.sourceCurrencyCode, input.serviceProvider)) {
+    throw new Error('wallet_funding_invalid_currency');
+  }
   const key = sandboxCredential(environment);
   const deadline = fundingDeadline(signal, 8_000);
   try {
@@ -260,19 +301,59 @@ async function finishSandbox(database: FundingDatabase, subject: string, id: str
   if (rows.length !== 1 || (rows[0] as { finished?: unknown }).finished !== true) throw new Error('wallet_funding_unavailable');
 }
 
+/** A quote is a preflight only: it neither creates a checkout nor confirms money. */
+async function verifyAdministrativeSandboxQuote(input: z.infer<typeof administrativeFundingInput>, key: string,
+  fetchImpl: typeof fetch, signal: AbortSignal, diagnostic: Diagnostic) {
+  let response: Response;
+  try { response = await withFundingSignal(() => fetchImpl('https://api-sb.meld.io/payments/crypto/quote?includeSwap=false', {
+    method: 'POST', redirect: 'error', signal,
+    headers: { Authorization: `BASIC ${key}`, 'Content-Type': 'application/json', Accept: 'application/json', 'Meld-Version': '2026-02-03' },
+    body: JSON.stringify({ countryCode: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
+      destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: input.amount, paymentMethodType: input.paymentMethodType,
+      serviceProviders: [input.serviceProvider] }),
+  }), signal, value => cancelBody(value.body)); } catch {
+    diagnose(diagnostic, { phase: 'quote', status: null, code: 'TRANSPORT_FAILURE' });
+    throw new Error('wallet_funding_provider_unavailable');
+  }
+  const data = await boundedProviderJson(response, signal);
+  if (!response.ok) {
+    const metadata = providerMetadata(data);
+    diagnose(diagnostic, { phase: 'quote', status: response.status, code: 'UPSTREAM_REJECTED', ...metadata });
+    if (metadata.providerCode === 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION') {
+      throw new Error('wallet_funding_provider_authentication_unavailable');
+    }
+    throw new Error('wallet_funding_provider_unavailable');
+  }
+  const quotes = data && typeof data === 'object' && !Array.isArray(data) ? (data as { quotes?: unknown }).quotes : undefined;
+  const quote = Array.isArray(quotes) && quotes.length === 1 ? quotes[0] : null;
+  if (!quote || typeof quote !== 'object' || Array.isArray(quote)
+    || quote.serviceProvider !== input.serviceProvider || quote.paymentMethodType !== input.paymentMethodType
+    || (quote.countryCode !== undefined && quote.countryCode !== input.country)
+    || quote.sourceCurrencyCode !== input.sourceCurrencyCode || quote.destinationCurrencyCode !== 'USDT_POLYGON'
+    || quote.sourceAmount !== input.amount || typeof quote.destinationAmount !== 'number'
+    || !Number.isFinite(quote.destinationAmount) || quote.destinationAmount <= 0
+    || (quote.transactionType !== undefined && quote.transactionType !== 'CRYPTO_PURCHASE')) {
+    diagnose(diagnostic, { phase: 'quote', status: response.status, code: 'INVALID_RESPONSE' });
+    throw new Error('wallet_funding_provider_unavailable');
+  }
+}
+
 /** Sandbox sessions have their own store and never touch the commission ledger. */
 export async function createAdministrativeSandboxSession(database: FundingDatabase, rawInput: unknown, {
   subject, clientIp, environment = process.env, fetchImpl = fetch, diagnostic = defaultDiagnostic, signal,
 }: { subject: string; clientIp: string; environment?: FundingEnvironment; fetchImpl?: typeof fetch; diagnostic?: Diagnostic; signal?: AbortSignal }) {
-  // One budget includes assignment lookup, request persistence, route discovery,
+  // One budget includes assignment lookup, route/quote preflight, persistence,
   // widget creation and outcome persistence. A late/ambiguous provider result
   // never causes another session request or a false terminal settlement state.
   const deadline = fundingDeadline(signal, 15_000);
+  let releasePreflight = () => {};
   try { return await withFundingSignal(async () => {
   const owner = subjectInput.parse(subject);
   const input = administrativeFundingInput.parse(rawInput);
-  if (input.sourceCurrencyCode !== 'USD') throw new Error('wallet_funding_valuation_unavailable');
-  if (input.amount < 50 || input.amount > 25_000) throw new Error('wallet_funding_amount_unavailable');
+  if (!administrativeSourceSupported(input.country, input.sourceCurrencyCode, input.serviceProvider, input.paymentMethodType)) {
+    throw new Error('wallet_funding_valuation_unavailable');
+  }
+  if (input.sourceCurrencyCode === 'USD' && (input.amount < 50 || input.amount > 25_000)) throw new Error('wallet_funding_amount_unavailable');
   const key = sandboxCredential(environment);
   if (!isIP(clientIp)) throw new Error('wallet_funding_unconfigured');
   const wallet = await withFundingSignal(() => readAdministrativeWallet(database, { userId: owner }), deadline.signal);
@@ -284,28 +365,26 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
     throw new Error('wallet_funding_unconfigured');
   }
   const paymentMethod = input.paymentMethodType;
-  const rows = await withFundingSignal(() => database.execute(sql`SELECT * FROM payments.create_meld_sandbox_funding_attempt(
+  releasePreflight = administrativePreflightGate(database)(owner, input.requestId);
+    const options = await readAdministrativeSandboxOptions({ country: input.country, serviceProvider: input.serviceProvider, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, diagnostic, signal: deadline.signal });
+    if (!options.paymentMethods.includes(paymentMethod)) {
+      diagnose(diagnostic, { phase: 'options', status: null, code: 'METHOD_UNAVAILABLE' });
+      throw new Error('wallet_funding_method_unavailable');
+    }
+    if (!options.routes.some(route => route.paymentMethods.some(method => method.method === paymentMethod
+      && input.amount >= method.minimumAmount && input.amount <= method.maximumAmount))) {
+      diagnose(diagnostic, { phase: 'options', status: null, code: 'AMOUNT_OUTSIDE_ROUTE_LIMITS' });
+      throw new Error('wallet_funding_amount_unavailable');
+    }
+  await verifyAdministrativeSandboxQuote(input, key, fetchImpl, deadline.signal, diagnostic);
+  const rows = await withFundingSignal(() => database.execute(sql`SELECT * FROM payments.create_meld_sandbox_funding_attempt_v2(
     ${owner},${input.walletAddress.toLowerCase()},${input.country},${input.amount},${input.requestId}::uuid,
-    ${input.serviceProvider},${paymentMethod})`), deadline.signal);
+    ${input.serviceProvider},${paymentMethod},${input.sourceCurrencyCode})`), deadline.signal);
   const row = oneRow(rows, sandboxRow);
   if (row.id !== input.requestId) throw new Error('wallet_funding_unavailable');
   if (!row.created) throw new Error('wallet_funding_request_already_used');
   let outcomeWriteStarted = false;
   try {
-    const options = await readAdministrativeSandboxOptions({ country: input.country, serviceProvider: input.serviceProvider, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, diagnostic, requestId: row.id, signal: deadline.signal });
-    if (!options.paymentMethods.includes(paymentMethod)) {
-      outcomeWriteStarted = true;
-      await withFundingSignal(() => finishSandbox(database, owner, row.id, 'unavailable', null), deadline.signal);
-      diagnose(diagnostic, { phase: 'session', status: null, requestId: row.id, code: 'METHOD_UNAVAILABLE' });
-      throw new Error('wallet_funding_method_unavailable');
-    }
-    if (!options.routes.some(route => route.paymentMethods.some(method => method.method === paymentMethod
-      && input.amount >= method.minimumAmount && input.amount <= method.maximumAmount))) {
-      outcomeWriteStarted = true;
-      await withFundingSignal(() => finishSandbox(database, owner, row.id, 'unavailable', null), deadline.signal);
-      diagnose(diagnostic, { phase: 'session', status: null, requestId: row.id, code: 'AMOUNT_OUTSIDE_ROUTE_LIMITS' });
-      throw new Error('wallet_funding_amount_unavailable');
-    }
     const response = await withFundingSignal(() => fetchImpl('https://api-sb.meld.io/crypto/session/widget', {
       method: 'POST', redirect: 'error', signal: deadline.signal,
       headers: { Authorization: `BASIC ${key}`, 'Content-Type': 'application/json', Accept: 'application/json',
@@ -338,8 +417,8 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
     outcomeWriteStarted = true;
     await withFundingSignal(() => finishSandbox(database, owner, row.id, 'session_created', providerSession.id), deadline.signal);
     return { checkoutReference: row.id, walletKind: 'administrative' as const, environment: 'sandbox' as const,
-      provider: 'meld' as const, status: 'session_created' as const, checkoutUrl,
-      requestedAmount: input.amount, sourceCurrencyCode: 'USD' as const, createdAt: row.created_at.toISOString() };
+    provider: 'meld' as const, status: 'session_created' as const, checkoutUrl,
+      requestedAmount: input.amount, sourceCurrencyCode: input.sourceCurrencyCode, createdAt: row.created_at.toISOString() };
   } catch (error) {
     if (!outcomeWriteStarted && !deadline.signal.aborted) {
       await withFundingSignal(() => finishSandbox(database, owner, row.id, 'failed', null), deadline.signal);
@@ -347,7 +426,7 @@ export async function createAdministrativeSandboxSession(database: FundingDataba
     }
     throw error;
   }
-  }, deadline.signal); } finally { deadline.dispose(); }
+  }, deadline.signal); } finally { releasePreflight(); deadline.dispose(); }
 }
 
 const historyRow = z.object({
@@ -364,6 +443,8 @@ function validPersistedFundingSource(row: z.infer<typeof historyRow>, personal: 
   if (!personal && row.destination_currency !== 'USDT_POLYGON') return false;
   if (row.payment_method === 'VENMO' && !personal) return false;
   if (personal && ['VENMO', 'PAYPAL'].includes(row.payment_method || '') && (row.country_code !== 'US' || row.source_currency !== 'USD' || row.destination_currency !== 'USDT_POLYGON')) return false;
+  if (!personal && row.source_currency !== 'USD') return row.source_currency === 'MXN' && row.country_code === 'MX'
+    && ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'].includes(row.payment_method || '');
   return row.source_currency === 'USD'
     ? row.requested_amount >= (personal ? 20 : 50) && row.requested_amount <= 25_000
     : personal && (row.source_currency === 'MXN' ? row.country_code === 'MX' && isPersonalMxnFundingMethod(row.payment_method)
@@ -380,7 +461,7 @@ function fundingDestination(row: z.infer<typeof historyRow>) {
 export async function readWalletFundingHistory(database: FundingDatabase, subject: string, rawKind: unknown) {
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
-  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_history_v3(${owner},${walletKind})`);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_history_v4(${owner},${walletKind})`);
   if (rows.length > 20) throw new Error('wallet_funding_unavailable');
   const items = rows.map(value => {
     const row = historyRow.parse(value);
@@ -404,7 +485,7 @@ export async function readWalletFundingStatus(database: FundingDatabase, subject
   const owner = subjectInput.parse(subject);
   const walletKind = fundingKindInput.parse(rawKind);
   const reference = checkoutReferenceInput.parse(rawReference);
-  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status_v3(${owner},${walletKind},${reference}::uuid)`);
+  const rows = await database.execute(sql`SELECT * FROM payments.read_wallet_funding_status_v4(${owner},${walletKind},${reference}::uuid)`);
   if (!rows.length) throw new Error('wallet_funding_not_found');
   const row = oneRow(rows, historyRow);
   const personal = walletKind === 'personal';

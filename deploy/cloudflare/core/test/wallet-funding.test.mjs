@@ -239,3 +239,14 @@ test('Core admits only public personal USD30 to 15000 while retaining administra
     ...input, amount: 25000, serviceProvider: 'BANXA' }), env, resolve)).status, 200);
   assert.equal(calls, 4);
 });
+
+test('administrative MXN uses country-specific card/mobile rails with provider-owned minima instead of the personal931 floor', async () => {
+  const path='/api/member/wallet-funding/administrative/session';const resolve=()=>({fetch:async()=>new Response('ok')});
+  for(const [serviceProvider, paymentMethodType]of [['TRANSAK','CREDIT_DEBIT_CARD'],['TRANSAK','APPLE_PAY'],['TRANSAK','GOOGLE_PAY'],['BANXA','CREDIT_DEBIT_CARD']]){
+    assert.equal((await dispatchCore(request(path,{...input,country:'MX',sourceCurrencyCode:'MXN',amount:0.01,paymentMethodType,serviceProvider}),env,resolve)).status,200);
+  }
+  const never=async()=>assert.fail('unsupported admin source reached gateway');
+  for(const change of [{country:'US'},{country:'CO'},{sourceCurrencyCode:'COP'},{sourceCurrencyCode:'EUR'},{paymentMethodType:'SPEI'},{paymentMethodType:'PSE'},{serviceProvider:'BANXA',paymentMethodType:'APPLE_PAY'},{amount:0},{amount:0.001}]){
+    assert.equal((await dispatchCore(request(path,{...input,country:'MX',sourceCurrencyCode:'MXN',amount:93,paymentMethodType:'CREDIT_DEBIT_CARD',serviceProvider:'TRANSAK',...change}),env,never)).status,503);
+  }
+});

@@ -22,8 +22,8 @@ function signedRequest(path: string, body: string, extraHeaders: Record<string, 
     'x-vp-auth-client-ip': ip, 'x-vp-auth-timestamp': timestamp, 'x-vp-auth-signature': signature, ...extraHeaders }, body };
 }
 
-function application({ signedIn = true, execute = async () => [], fetchImpl }: {
-  signedIn?: boolean; execute?: (input: unknown) => Promise<unknown[]>; fetchImpl?: typeof fetch;
+function application({ signedIn = true, execute = async () => [], fetchImpl, runtimeEnvironment = {} }: {
+  signedIn?: boolean; execute?: (input: unknown) => Promise<unknown[]>; fetchImpl?: typeof fetch; runtimeEnvironment?: Record<string, string>;
 } = {}) {
   const app = new Hono<ApiEnvironment>();
   app.use('*', async (context, next) => {
@@ -32,7 +32,7 @@ function application({ signedIn = true, execute = async () => [], fetchImpl }: {
   });
   registerWalletFundingRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
     environment: { BETTER_AUTH_URL: origin,
-      BETTER_AUTH_TRUSTED_ORIGINS: `https://mindblisspower.com,${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret },
+      BETTER_AUTH_TRUSTED_ORIGINS: `https://mindblisspower.com,${administrativeOrigin},https://mindbliss-portal-rewon.devfidubit.workers.dev`, AUTH_BFF_SHARED_SECRET: secret, ...runtimeEnvironment },
     fetchImpl: fetchImpl || (async url => {
       expect(String(url)).toStartWith('https://api.meld.io/');
       return Response.json([{ partner: 'SWAPPED', source: 'USD', destination: 'USDT_POLYGON',
@@ -293,4 +293,49 @@ test('status requires native ownership, an exact reference query and uncached in
     expect(await response.json()).toEqual({ error: 'wallet_funding_not_found' });
     calls = 0;
   }
+});
+
+test('HTTP administrative sandbox validates exact MXN quotes before persistence and returns the original peso amount', async () => {
+  for (const paymentMethodType of ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY']) {
+    const amount = paymentMethodType === 'CREDIT_DEBIT_CARD' ? 93 : 560;
+    const outputs = [[{ status: 'assigned', address: input.walletAddress, address_family: 'EVM', asset: 'USDT',
+      checkout_reference: 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', assigned_at: new Date() }],
+      [{ id: input.requestId, created_at: new Date(), created: true, status: 'initiated' }], [{ finished: true }]];
+    let databaseCalls = 0; const providerCalls: string[] = [];
+    const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key' },
+      execute: async () => { databaseCalls++; return outputs.shift()!; }, fetchImpl: (async (target, init) => {
+        const url = String(target); providerCalls.push(url); expect(url).toStartWith('https://api-sb.meld.io/');
+        if (url.includes('/supported/routes/')) return Response.json([{ partner: 'TRANSAK', source: 'MXN', destination: 'USDT_POLYGON',
+          paymentMethods: [{ name: paymentMethodType, limits: { currencyCode: 'MXN', min: amount, max: 20000 } }] }]);
+        const body = JSON.parse(String(init?.body));
+        if (url.includes('/payments/crypto/quote')) {
+          expect(databaseCalls).toBe(1); expect(body).toMatchObject({ countryCode: 'MX', sourceCurrencyCode: 'MXN', sourceAmount: amount, paymentMethodType, serviceProviders: ['TRANSAK'] });
+          return Response.json({ quotes: [{ sourceCurrencyCode: 'MXN', destinationCurrencyCode: 'USDT_POLYGON', sourceAmount: amount,
+            destinationAmount: 4.2, serviceProvider: 'TRANSAK', paymentMethodType }] });
+        }
+        expect(databaseCalls).toBe(2); expect(body.sessionData).toMatchObject({ sourceCurrencyCode: 'MXN', sourceAmount: amount.toFixed(2), paymentMethodType });
+        return Response.json({ id: 'sandbox-session', widgetUrl: 'https://sb.meldcrypto.com/?wt=synthetic' });
+      }) as typeof fetch });
+    const response = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount, paymentMethodType, serviceProvider: 'TRANSAK' })));
+    expect(response.status).toBe(201); expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toMatchObject({ requestedAmount: amount, sourceCurrencyCode: 'MXN', walletKind: 'administrative', environment: 'sandbox', provider: 'meld', status: 'session_created' });
+    expect(databaseCalls).toBe(3); expect(providerCalls).toHaveLength(3);
+  }
+});
+
+test('HTTP administrative provider authentication failures expose only a safe code and consume no attempt', async () => {
+  let databaseCalls = 0, providerCalls = 0;
+  const app = application({ runtimeEnvironment: { MELD_ADMIN_SANDBOX_ENABLED: 'true', MELD_API_SANDBOX: 'synthetic-sandbox-key' },
+    execute: async () => { databaseCalls++; return [{ status: 'assigned', address: input.walletAddress, address_family: 'EVM', asset: 'USDT',
+      checkout_reference: 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44', assigned_at: new Date() }]; }, fetchImpl: (async target => {
+      providerCalls++; if (String(target).includes('/supported/routes/')) return Response.json([{ partner: 'BANXA', source: 'USD', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 20, max: 15000 } }] }]);
+      expect(String(target)).toContain('/payments/crypto/quote'); return Response.json({ code: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION', message: 'private-provider-secret' }, { status: 401 });
+    }) as typeof fetch });
+  const response = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'BANXA' })));
+  expect(response.status).toBe(503); expect(await response.json()).toEqual({ error: 'wallet_funding_provider_authentication_unavailable' });
+  expect(databaseCalls).toBe(1); expect(providerCalls).toBe(2);
+  const duplicate = await app.request(administrativePath, signedRequest(administrativePath, JSON.stringify({ ...input, serviceProvider: 'BANXA' })));
+  expect(duplicate.status).toBe(409); expect(await duplicate.json()).toEqual({ error: 'wallet_funding_request_already_used' });
+  expect(providerCalls).toBe(2);
 });
