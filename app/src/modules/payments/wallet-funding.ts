@@ -134,9 +134,10 @@ const meldCodes = new Set(['ACCOUNT_OFFRAMP_NOT_ENABLED', 'ACCOUNT_ONRAMP_NOT_EN
   'TRANSACTION_FAILED_GETTING_CRYPTO_QUOTE_FROM_PROVIDER', 'TRANSACTION_FAILED_GETTING_CRYPTO_QUOTE',
   'KYC_TOKEN_GENERATION_FAILED', 'PRIOR_AUTHENTICATION_ERROR']);
 // The widget OpenAPI includes a 24-character Crockford reference example.
-// Retain that bounded format and canonical UUID/ULID references only; arbitrary
-// provider strings and messages stay out of diagnostics.
+// Retain that bounded format, 32-character hex request IDs and canonical
+// UUID/ULID references only; arbitrary strings and messages stay private.
 const meldUuidReference = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const meldHexReference = /^[0-9a-f]{32}$/i;
 const meldDocumentedReference = /^[0-9A-HJKMNP-TV-Z]{24}$/;
 const meldUlidReference = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 function providerMetadata(value: unknown): Pick<FundingDiagnostic, 'providerCode' | 'providerRequestId'> {
@@ -144,6 +145,7 @@ function providerMetadata(value: unknown): Pick<FundingDiagnostic, 'providerCode
   const { code, requestId } = value as Record<string, unknown>;
   return { ...(typeof code === 'string' && meldCodes.has(code) ? { providerCode: code } : {}),
     ...(typeof requestId === 'string' && ((requestId.length === 36 && meldUuidReference.test(requestId))
+      || (requestId.length === 32 && meldHexReference.test(requestId))
       || (requestId.length === 24 && meldDocumentedReference.test(requestId))
       || (requestId.length === 26 && meldUlidReference.test(requestId)))
       ? { providerRequestId: requestId } : {}) };

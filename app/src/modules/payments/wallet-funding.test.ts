@@ -898,3 +898,32 @@ test('malformed successful sandbox quote JSON is a provider failure without an a
   expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'quote', status: 200, code: 'INVALID_RESPONSE' }]);
   expect(JSON.stringify(diagnostics)).not.toContain('private-token');
 });
+
+test('Meld top-level32hex quote references survive safe diagnostics without accepting private, nested or arbitrary fields', async () => {
+  const reference = '0123456789abcdef'.repeat(2), nestedReference = 'fedcba9876543210'.repeat(2);
+  for (const requestId of [reference, reference.toUpperCase()]) {
+    const db = queuedDatabase([[assignment]]), diagnostics: unknown[] = [];
+    await expect(createAdministrativeSandboxSession(db.database, { ...adminInput, serviceProvider: 'BANXA' }, {
+      subject: 'owner', clientIp: '192.0.2.1', environment, diagnostic: event => diagnostics.push(event),
+      fetchImpl: (async target => String(target).includes('/supported/routes/') ? Response.json([route('BANXA')])
+        : Response.json({ code: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION', requestId, message: 'private-user@example.invalid',
+          accountId: 'private-account', token: 'private-token', walletAddress: address, errors: ['private-error'],
+          serviceProviderDetails: { code: 'PRIVATE_CODE', requestId: nestedReference } }, { status: 401 })) as typeof fetch,
+    })).rejects.toThrow('wallet_funding_provider_authentication_unavailable');
+    expect(db.queries).toHaveLength(1);
+    expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'quote', status: 401,
+      code: 'UPSTREAM_REJECTED', providerCode: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION', providerRequestId: requestId }]);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/private|0x|@|fedcba|PRIVATE_CODE/);
+  }
+  for (const requestId of [undefined, reference + '\n', ' ' + reference, reference.slice(1), reference + '0',
+    'g' + reference.slice(1), { value: reference }, [reference], 'arbitrary-request-with-private-data']) {
+    const diagnostics: unknown[] = [];
+    await expect(readAdministrativeSandboxOptions({ country: 'US', serviceProvider: 'BANXA' }, { environment,
+      diagnostic: event => diagnostics.push(event), fetchImpl: (async () => Response.json({ code: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION',
+        requestId, headers: { requestId: reference }, payload: { requestId: reference }, serviceProviderDetails: { requestId: reference },
+        message: 'private-secret' }, { status: 500 })) as unknown as typeof fetch,
+    })).rejects.toThrow('wallet_funding_provider_unavailable');
+    expect(diagnostics).toEqual([{ event: 'wallet_funding_provider_failure', environment: 'sandbox', phase: 'options', status: 500,
+      code: 'UPSTREAM_REJECTED', providerCode: 'SERVICE_PROVIDER_AUTHENTICATION_EXCEPTION' }]);
+  }
+});
