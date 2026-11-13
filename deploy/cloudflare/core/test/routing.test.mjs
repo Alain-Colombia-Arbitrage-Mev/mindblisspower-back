@@ -320,6 +320,14 @@ test('external administrative ownership and off-ramp feature flags never forward
   assert.equal(inactive.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED, 'false'); assert.equal(inactive.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED, 'false');
 });
 
+test('member profile forwarding requires an explicit API-only feature flag without enabling a general business writer', () => {
+  for (const value of [undefined, '', 'false', 'TRUE', true, 'true']) {
+    const values = containerEnvironment('api', { ...apiSecrets(), MEMBER_PROFILE_ENABLED: value });
+    assert.equal(values.MEMBER_PROFILE_ENABLED, String(value === 'true'));
+    assert.equal(values.STRIPE_SECRET_KEY, undefined);
+  }
+});
+
 test('Meld onramp forwards only the environment-appropriate credential to the auth container', () => {
   const production = containerEnvironment('api', { ...apiSecrets(), CORE_ENV: 'production', MELD_API_KEY: 'live_synthetic_key',
     MELD_API_SANDBOX: 'must-not-reach-production' });
@@ -439,7 +447,8 @@ test('versioned environments have no public ingress, broad financial scheduler, 
     assert.equal(env.workers_dev, false); assert.equal(env.preview_urls, false); assert.deepEqual(env.routes, []);
     assert.equal(env.vars.CORE_SERVICES_ENABLED, 'false');
     assert.equal(env.vars.MELD_CHECKOUT_ENABLED, 'false');
-    for (const flag of ['ADMINISTRATIVE_WALLET_SIGNING_ENABLED', 'ADMINISTRATIVE_WALLET_BROADCAST_ENABLED', 'ADMINISTRATIVE_MELD_OFFRAMP_ENABLED']) assert.equal(env.vars[flag], 'false');
+    assert.equal(env.vars.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED, 'false');
+    for (const flag of ['ADMINISTRATIVE_WALLET_SIGNING_ENABLED', 'ADMINISTRATIVE_MELD_OFFRAMP_ENABLED', 'MEMBER_PROFILE_ENABLED']) assert.equal(env.vars[flag], name === 'production' ? 'true' : 'false');
     assert.equal(env.vars.AUTH_SERVICES_ENABLED, name === 'production' ? 'true' : 'false');
     assert.equal(env.vars.CORE_NETWORK_VERIFIED, 'false');
     assert.equal(env.vars.CORE_READINESS_PROBE_ENABLED, 'false');

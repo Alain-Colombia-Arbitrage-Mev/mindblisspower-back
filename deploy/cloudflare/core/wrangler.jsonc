@@ -18,6 +18,7 @@
       "routes": [],
       "vars": {
         "CORE_ENV": "staging",
+        "MEMBER_PROFILE_ENABLED": "false",
         "ADMINISTRATIVE_WALLET_SIGNING_ENABLED": "false",
         "ADMINISTRATIVE_WALLET_BROADCAST_ENABLED": "false",
         "ADMINISTRATIVE_MELD_OFFRAMP_ENABLED": "false",
@@ -71,6 +72,7 @@
       "triggers": { "crons": ["*/5 * * * *"] },
       "vars": {
         "CORE_ENV": "production",
+        "MEMBER_PROFILE_ENABLED": "true",
         "ADMINISTRATIVE_WALLET_SIGNING_ENABLED": "true",
         "ADMINISTRATIVE_WALLET_BROADCAST_ENABLED": "false",
         "ADMINISTRATIVE_MELD_OFFRAMP_ENABLED": "true",
@@ -114,7 +116,7 @@
         "CoreWithdrawals": { "type": "durable-object", "storage": "sqlite", "container": "core-withdrawals" }
       },
       "containers": [
-        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-wallet-sandbox:20261112-r25@sha256:37ddc1703285bdd55ce81c58b12abaf70235279ecc1259ab24d1b7682ebdff6e", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100, "observability": { "enabled": true, "logs": { "enabled": true } } },
+        { "name": "core-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/api-rewon-profile:20261113-r27@sha256:392d5d1165f67ee3986f3131ba91c630ea549c3789df96a5a971a18e4de9b62c", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100, "observability": { "enabled": true, "logs": { "enabled": true } } },
         { "name": "core-engine", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-engine@sha256:d3519b1cc8c05eb577fc147bf260bb7748dc389d11492095a0b010dcf21f61b6", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" },
         { "name": "core-payments", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/payments-manual-main-20261105@sha256:af2d54ba02a219219520044d59e26a7fbb5f78570ffa747d0375747114b82125", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 },
         { "name": "core-withdrawals", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/core-withdrawals@sha256:9e85980bffd307098978a84f6be7eacb9c68e921a17958587c5f45d1c7506650", "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "none" }

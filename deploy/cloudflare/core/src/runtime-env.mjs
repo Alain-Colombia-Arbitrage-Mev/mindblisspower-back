@@ -101,6 +101,7 @@ export function containerEnvironment(service, env) {
     }
   }
   if (service === 'api') {
+    values.MEMBER_PROFILE_ENABLED = String(env.MEMBER_PROFILE_ENABLED === 'true');
     values.ADMINISTRATIVE_WALLET_SIGNING_ENABLED = String(env.ADMINISTRATIVE_WALLET_SIGNING_ENABLED === 'true');
     values.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED = 'false';
     values.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED = String(env.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED === 'true');
