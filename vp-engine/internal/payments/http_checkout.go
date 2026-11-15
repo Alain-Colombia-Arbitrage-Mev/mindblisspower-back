@@ -77,7 +77,7 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "nowpayments-unavailable")
 		return
 	}
-	if provider == "nowpayments" {
+	if provider == "nowpayments" || h.permanentReferrals {
 		verifier, ok := h.verifier.(nowSubjectVerifier)
 		if !ok || r.Header.Get(actAsHeader) != "" {
 			writeErr(w, http.StatusUnauthorized, "invalid_id_token")
@@ -179,7 +179,14 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_preferred_side")
 		return
 	}
-	sponsor, referralCodeForIntent, preferredSideForIntent, err := h.resolveCheckoutPlacement(ctx, req.Email, buyer, req.Ref, req.PreferredSide)
+	sponsor, referralCodeForIntent, preferredSideForIntent, err := h.resolveCheckoutPlacement(ctx, req.Email, buyer, req.Ref, req.PreferredSide, req.authSubject)
+	if writePermanentReferralFailure(w, err) {
+		return
+	}
+	if errors.Is(err, ErrCheckoutIdentityReview) {
+		writeErr(w, http.StatusConflict, "checkout_identity_review_required")
+		return
+	}
 	if errors.Is(err, ErrInvalidReferralCode) {
 		writeErr(w, http.StatusBadRequest, "invalid_referral_code")
 		return
@@ -230,6 +237,9 @@ func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
 		Currency:           "usd",
 	})
 	if err != nil {
+		if writePermanentReferralFailure(w, err) {
+			return
+		}
 		h.log.Error().Err(err).Msg("create purchase intent")
 		if errors.Is(err, ErrNOWPaymentsOutstanding) {
 			writeErr(w, http.StatusConflict, "membership_payment_pending_review")
@@ -273,7 +283,7 @@ func (h *Handler) resolveCheckoutSponsor(ctx context.Context, email string, buye
 	return sponsor, referralCode, err
 }
 
-func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, buyer Buyer, ref, requestedSide string) (*int64, string, string, error) {
+func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, buyer Buyer, ref, requestedSide string, verifiedSubjects ...string) (*int64, string, string, error) {
 	// Sponsor: el del afiliado existente es autoritativo. Un ?ref=CODE sólo se
 	// usa para compradores aún no colocados; aplicar refs nuevos sobre afiliados
 	// existentes mezcla sesiones/navegadores y puede atribuir sponsors falsos.
@@ -281,6 +291,19 @@ func (h *Handler) resolveCheckoutPlacement(ctx context.Context, email string, bu
 	referralCode := strings.TrimSpace(ref)
 	referralCodeForIntent := ""
 	preferredSideForIntent := ""
+	if h.permanentReferrals && buyer.AffiliateID == nil {
+		if len(verifiedSubjects) != 1 || strings.TrimSpace(verifiedSubjects[0]) == "" {
+			return nil, "", "", ErrCheckoutIdentityReview
+		}
+		permanentSponsor, permanentCode, err := h.store.permanentCheckoutSponsor(ctx, verifiedSubjects[0], buyer.PersonID)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if permanentSponsor == nil {
+			return nil, "", "", ErrReferralSponsorNeedsPlacement
+		}
+		return permanentSponsor, permanentCode, "", nil
+	}
 
 	if buyer.AffiliateID == nil && sponsor == nil {
 		// The verified server hint is authoritative across browsers/devices.

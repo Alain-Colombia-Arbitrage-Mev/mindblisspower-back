@@ -61,6 +61,7 @@ export function containerEnvironment(service, env) {
   }
   const target = postgresTarget(values.DATABASE_URL);
   if (service === 'payments') {
+    values.MEMBER_REFERRAL_ENABLED = String(env.MEMBER_REFERRAL_ENABLED === 'true');
     values.STRIPE_CHECKOUT_ENABLED = String(env.STRIPE_CHECKOUT_ENABLED === 'true');
     // Capture has a separate, append-only database role. The report connection
     // remains a reader; no provider can create invoices or fulfil memberships.
@@ -102,6 +103,13 @@ export function containerEnvironment(service, env) {
   }
   if (service === 'api') {
     values.MEMBER_PROFILE_ENABLED = String(env.MEMBER_PROFILE_ENABLED === 'true');
+    values.MEMBER_REFERRAL_ENABLED = String(env.MEMBER_REFERRAL_ENABLED === 'true');
+    if (env.MEMBER_REFERRAL_ENABLED === 'true' && typeof env.PAYMENTS_ROOT_AFFILIATE_ID === 'string'
+      && /^[1-9][0-9]{0,15}$/.test(env.PAYMENTS_ROOT_AFFILIATE_ID) && Number.isSafeInteger(Number(env.PAYMENTS_ROOT_AFFILIATE_ID))) {
+      // Optional capture configuration cannot take the shared auth API down.
+      // Missing/invalid root still fails closed in the native capture handler.
+      values.REFERRAL_COMPANY_ROOT_AFFILIATE_ID = env.PAYMENTS_ROOT_AFFILIATE_ID;
+    }
     values.ADMINISTRATIVE_WALLET_SIGNING_ENABLED = String(env.ADMINISTRATIVE_WALLET_SIGNING_ENABLED === 'true');
     values.ADMINISTRATIVE_WALLET_BROADCAST_ENABLED = 'false';
     values.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED = String(env.ADMINISTRATIVE_MELD_OFFRAMP_ENABLED === 'true');

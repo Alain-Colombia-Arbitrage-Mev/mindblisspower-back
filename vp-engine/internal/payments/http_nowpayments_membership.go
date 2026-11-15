@@ -119,6 +119,9 @@ func (h *Handler) handleNOWMembershipCheckout(w http.ResponseWriter, r *http.Req
 		SponsorAffiliateID: sponsor, PreferredSide: side, PurchaseRequestID: req.PurchaseRequestID,
 	})
 	if err != nil {
+		if writePermanentReferralFailure(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, ErrNOWPurchaseRequestInvalid):
 			writeErr(w, http.StatusBadRequest, "invalid_purchase_request_id")

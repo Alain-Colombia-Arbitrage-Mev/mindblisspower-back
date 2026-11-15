@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ type Handler struct {
 	httpClient          *http.Client
 
 	stripeCheckoutEnabled bool
+	permanentReferrals    bool
 
 	// verifier re-verifica el id token Cognito reenviado por el BFF. nil ⇒ no hay
 	// verificación disponible (sólo el fallback por query/body, con warning).
@@ -111,13 +113,14 @@ func (h *Handler) SetCartConfig(resumeBaseURL, successURL string) {
 
 func NewHandler(store *Store, gw *StripeGateway, serviceToken string, adminEmails []string, companyRoot int64, log zerolog.Logger) *Handler {
 	return &Handler{
-		store:        store,
-		gw:           gw,
-		serviceToken: serviceToken,
-		adminEmails:  adminEmails,
-		companyRoot:  companyRoot,
-		log:          log.With().Str("component", "payments").Logger(),
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		store:              store,
+		gw:                 gw,
+		serviceToken:       serviceToken,
+		adminEmails:        adminEmails,
+		companyRoot:        companyRoot,
+		permanentReferrals: strings.TrimSpace(os.Getenv("MEMBER_REFERRAL_ENABLED")) == "true",
+		log:                log.With().Str("component", "payments").Logger(),
+		httpClient:         &http.Client{Timeout: 10 * time.Second},
 	}
 }
 

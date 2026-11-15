@@ -66,7 +66,9 @@ function acquire(database: Database, subject: string, write: boolean, now: numbe
 export async function readMemberProfile(database: Database, input: Principal,
   { environment = process.env, signal, timeoutMs, now = Date.now }: Dependencies = {}) {
   configuration(environment); const p = principal(input), release = acquire(database, p.subject, false, now());
-  try { return profile(await execute(database, sql`SELECT * FROM identity.read_member_profile(${p.subject},${p.nativeSessionId})`, signal, timeoutMs)); }
+  try { return profile(await execute(database, environment.MEMBER_REFERRAL_ENABLED === 'true'
+    ? sql`SELECT * FROM identity.read_member_profile_v2(${p.subject},${p.nativeSessionId})`
+    : sql`SELECT * FROM identity.read_member_profile(${p.subject},${p.nativeSessionId})`, signal, timeoutMs)); }
   finally { release(); }
 }
 export async function updateMemberProfile(database: Database, raw: unknown, input: Principal,
@@ -74,8 +76,9 @@ export async function updateMemberProfile(database: Database, raw: unknown, inpu
   configuration(environment); const value = memberProfileUpdateInput.parse(raw), p = principal(input);
   const release = acquire(database, p.subject, true, now());
   try {
-    const saved = profile(await execute(database, sql`SELECT * FROM identity.update_member_profile(
-      ${p.subject},${p.nativeSessionId},${value.name},${value.phone},${value.country ?? null})`, signal, timeoutMs));
+    const saved = profile(await execute(database, environment.MEMBER_REFERRAL_ENABLED === 'true'
+      ? sql`SELECT * FROM identity.update_member_profile_v2(${p.subject},${p.nativeSessionId},${value.name},${value.phone},${value.country ?? null})`
+      : sql`SELECT * FROM identity.update_member_profile(${p.subject},${p.nativeSessionId},${value.name},${value.phone},${value.country ?? null})`, signal, timeoutMs));
     if (cleanName([saved.first_name, saved.last_name].filter(Boolean).join(' ')) !== value.name
       || saved.phone !== value.phone || (value.country !== undefined && saved.country !== value.country)) throw Error('member_profile_outcome_unconfirmed');
     return { ok: true as const, profile: saved };
