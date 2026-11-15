@@ -50,6 +50,12 @@ historical base price and the explicit `until_revoked` term. It checks the live
 native session and canonical person binding. Identity/source evidence drift
 is held for review rather than silently assigning access to another person.
 
+Migration119 separates recognition eligibility from continuing access evidence.
+The active reporting-batch pointer and later manual/operational purchases gate
+new recognition only. They do not revoke an existing approved right. Reads
+continue to verify the original immutable import, catalog, identity and risk.
+Existing entitlement snapshots, hashes, grants and decision events are preserved.
+
 The existing `mlm.affiliate_package`, capacity, investment CD, PV, rank, ROI,
 commission, wallet and payment workflows do not consume these access rights.
 The UI does not merge them into `active_packages` or financial qualification.
@@ -83,6 +89,9 @@ All protected state remained identical within these transactions.
 - PostgreSQL: 145 network-isolated synthetic probes, including null-proof
   rejection, current disputes, ownership, pending users, concurrent idempotency,
   revoked-right replay, ACL/RLS and unchanged economic state.
+- Validity follow-up: 70 additional isolated PostgreSQL probes preserve existing
+  access after reporting-pointer or unrelated purchase changes, while keeping
+  source/identity/risk drift on hold and recognition gates enforced.
 - Native Bun1.4.4: 657 passed, 40 optional integrations skipped, zero failures.
 - Frontend: 1,960 passed; typecheck and scoped lint passed.
 - Core: 239 passed; only the explicit app-origin GET capability was added.
