@@ -103,6 +103,7 @@ export function containerEnvironment(service, env) {
   }
   if (service === 'api') {
     values.MEMBER_PROFILE_ENABLED = String(env.MEMBER_PROFILE_ENABLED === 'true');
+    values.MEMBER_PACKAGE_RIGHTS_ENABLED = String(env.MEMBER_PACKAGE_RIGHTS_ENABLED === 'true');
     values.MEMBER_REFERRAL_ENABLED = String(env.MEMBER_REFERRAL_ENABLED === 'true');
     if (env.MEMBER_REFERRAL_ENABLED === 'true' && typeof env.PAYMENTS_ROOT_AFFILIATE_ID === 'string'
       && /^[1-9][0-9]{0,15}$/.test(env.PAYMENTS_ROOT_AFFILIATE_ID) && Number.isSafeInteger(Number(env.PAYMENTS_ROOT_AFFILIATE_ID))) {

@@ -16,6 +16,7 @@ import { registerAdministrativeWalletSigningRoutes } from './http/administrative
 import { registerAdministrativeOfframpSessionRoutes } from './http/administrative-offramp-session-routes';
 import { registerMemberProfileRoutes } from './http/member-profile-routes';
 import { registerMemberReferralRoutes } from './http/member-referral-routes';
+import { registerMemberPackageRightsRoutes } from './http/member-package-rights-routes';
 import { registerPersonalCompanyPaymentRoutes } from './http/personal-company-payment-routes';
 import { registerPersonalPolygonRelayRoutes } from './http/personal-polygon-relay-routes';
 import { authDb } from './db/auth-client';
@@ -64,6 +65,7 @@ registerAdministrativeWalletSigningRoutes(app, { database: authDb });
 registerAdministrativeOfframpSessionRoutes(app, { database: authDb });
 registerMemberProfileRoutes(app, { database: authDb });
 registerMemberReferralRoutes(app, { database: authDb });
+registerMemberPackageRightsRoutes(app, { database: authDb });
 registerPersonalCompanyPaymentRoutes(app, { database: authDb });
 registerPersonalPolygonRelayRoutes(app, { database: authDb });
 registerOtpDiagnosticRoutes(app);
