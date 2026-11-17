@@ -31,7 +31,7 @@ zero refunded, no dispute and no Radar review. This distinction and its separate
 evidence digest are preserved in the decision reason; it is not represented as
 a normal fraud assessment.
 
-## Identity conflict retained for manual reconciliation
+## Identity conflict reconciled with existing manual access
 
 The remaining identity-conflict purchase has a unique metadata ID/email and
 verified Better Auth corroboration for person15451/affiliate115533. The old CSV
@@ -44,11 +44,38 @@ PaymentIntent, so equal package amounts do not prove whether these are separate
 payments. The original canary attempt stopped at the existing manual-overlap
 gate and rolled back completely: 541 prior rights, zero new decisions/runs.
 
-A new 188-purchase manifest excludes that purchase. It remains held pending the
-owner's clarification about the manual payment, alongside the three disputes.
-Do not bypass the manual-overlap gate or duplicate the manual access. The
-unused identity-review path is pinned to one PaymentIntent hash and one
-corroborated target; it does not grant authority to change financial identity.
+A new 188-purchase manifest excludes that purchase. On 17 November, the owner
+confirmed that the manual activation recognized **the same Stripe purchase**.
+One fresh, exact Stripe GET reconfirmed the captured payment, original metadata,
+zero refunds/disputes and no associated Radar review. A private identity-review
+decision now records the corroborated target and the existing manual order.
+
+Decision: `a73a9602-219e-4ec7-b794-953eaaa97599`. Its compact JSON reason records
+the owner confirmation dated 17 November, classification
+`same_purchase_already_active_manual`, manual order
+`32ed6355-c70b-4e32-a21c-1faa934e7085` and existing affiliate package265752. The
+operator verifies those relationships and the manual100/fee3/net97 accounting;
+the reason is audit evidence, not a foreign key or an authorization mechanism.
+
+Only the existing120 review-approval function was invoked, followed by an exact
+idempotency replay. No run registration, historical entitlement recognition,
+schema/API/frontend change, financial identity update or recalculation occurred.
+The manual-overlap gate still rejects new recognition for this PaymentIntent.
+The original purchase date and existing manual effective date remain distinct.
+
+This resolves189 of the192 reviewed cases:188 new rights and one purchase already
+covered by manual access. **729 historical rights remain unchanged; only the
+three disputed cases remain held.** Do not duplicate the manual access. The
+identity-review path is pinned to one PaymentIntent hash and one corroborated
+target; it grants no authority to change financial identity.
+
+The 17 November transaction verified all729 rights/runs/events, all188 previous
+review decisions, legacy financial/source/binding tables, authentication rows
+and function definitions/owners/ACLs unchanged before COMMIT. Exactly one new
+review decision was created; its replay created none. The manual order/package
+remain active. ROI, PV, bonuses, commissions, balances and accounting were not
+changed. Receipts and the amended per-row report are local under
+`.wrangler/stripe-manual-match-20261117/`; no private payment list is committed.
 
 ## Additive implementation and controls
 
