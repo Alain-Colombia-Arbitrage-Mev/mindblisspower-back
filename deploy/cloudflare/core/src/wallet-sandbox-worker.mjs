@@ -20,9 +20,7 @@ export class WalletSandboxApi extends Container {
 export default {
   async fetch(request, env) {
     if (!walletSandboxRequestAllowed(request)) return Response.json({ error: 'not_found' }, { status: 404 });
-    // Production uses its own instance identity and starts from the current deployed image.
-    const instance = env.WALLET_MELD_PRODUCTION_ENABLED === 'true' ? 'wallet-production-v2' : 'wallet-sandbox-v1';
-    try { return await getContainer(env.WALLET_SANDBOX_CONTAINER, instance).fetch(request); }
+    try { return await getContainer(env.WALLET_SANDBOX_CONTAINER, 'wallet-sandbox-v1').fetch(request); }
     catch { return Response.json({ error: 'sandbox_wallet_unavailable' }, { status: 503, headers: { 'Cache-Control': 'private, no-store' } }); }
   },
 };
