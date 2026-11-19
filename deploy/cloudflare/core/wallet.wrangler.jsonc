@@ -19,7 +19,7 @@
       "vars": { "WALLET_MELD_PRODUCTION_ENABLED": "true" },
       "durable_objects": { "bindings": [{ "name": "WALLET_SANDBOX_CONTAINER", "class_name": "WalletSandboxApi" }] },
       "exports": { "WalletSandboxApi": { "type": "durable-object", "storage": "sqlite", "container": "wallet-sandbox-api" } },
-      "containers": [{ "name": "wallet-sandbox-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/wallet-production-isolated:20261119-rampnow-us-card@sha256:01b0582c1516a121cf7a0d9c55c2cbcee7800c27f970da723a40466ec817abaf",
+      "containers": [{ "name": "wallet-sandbox-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/wallet-production-isolated:20261119-rampnow-mobile-pay@sha256:abc08e85f381dcf14dde87cbc73abe3005ed5395f0d20ee50d72888d150aa1a8",
         "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 }]
     }
   }

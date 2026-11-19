@@ -32,11 +32,15 @@ type Selection = { country: string; sourceCurrencyCode: string; amount: number; 
 export type ProductionRoute = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number; destinationCurrencyCodes?: ProductionAsset[] }[] };
 export const rampNowAssets = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'] as const;
 export const rampNowAsset = z.enum(rampNowAssets);
-export function isUsCardFunding(country: string, fiat: string, method: string) {
-  return country === 'US' && fiat === 'USD' && method === 'CREDIT_DEBIT_CARD';
+export const rampNowPaymentModes = { CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay' } as const;
+export function rampNowPaymentMode(method: string) {
+  return Object.hasOwn(rampNowPaymentModes, method) ? rampNowPaymentModes[method as keyof typeof rampNowPaymentModes] : undefined;
+}
+export function isUsRampNowFunding(country: string, fiat: string, method: string) {
+  return country === 'US' && fiat === 'USD' && rampNowPaymentMode(method) !== undefined;
 }
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
-  serviceProvider === 'RAMPNOW' ? isUsCardFunding(country, fiat, method) && rampNowAsset.safeParse(asset).success
+  serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && rampNowAsset.safeParse(asset).success
   : asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
     && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')
   || (asset === 'USDC_POLYGON' && serviceProvider === 'ONRAMPMONEY'

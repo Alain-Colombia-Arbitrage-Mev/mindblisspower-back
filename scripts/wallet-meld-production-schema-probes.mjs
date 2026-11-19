@@ -275,4 +275,29 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  deny(save({...bankProof,destinationCurrencyCode:'USDC_ARBITRUM',chainId:'42161'},bank.subject,bankId),'wallet_production_proof_context_mismatch');
  eq(oldRows,before.rows,false);
  console.log(JSON.stringify({walletRampNowSchema:'passed',verifiedUsUsdCard:true,preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
+
+ const beforeMobilePay=value(ledgerDigest,false);
+ psql(await readFile(new URL('../_meta/migration/126_wallet_meld_production_rampnow_mobile_pay.sql',import.meta.url),'utf8'));
+ eq(ledgerDigest,beforeMobilePay,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(legacyCreate,beforeLegacyCreate,false);
+ for(const method of ['APPLE_PAY','GOOGLE_PAY']){
+  deny(rampCreate('USDC_POLYGON',{method,country:'MX'}),'wallet_meld_production_attempt_destination_currency_check');
+  deny(rampCreate('USDT_POLYGON',{method}),'wallet_meld_production_attempt_destination_currency_check');
+  for(const [requestedAsset,requestedChain,deliveredAsset,deliveredChain] of requestedAndDelivered){
+   const id=randomUUID();
+   assert.equal(JSON.parse(value(rampCreate(requestedAsset,{id,method}))).created,true);
+   eq(finish(id,7),'t');
+   const arrived={...proof,transactionId:'transaction-'+id,sessionId:'session-'+id,externalSessionId:id,
+    externalCustomerId:bindings[7].binding_reference,serviceProvider:'RAMPNOW',paymentMethodType:method,sourceAmount:'100.00',
+    walletAddress:rampOwner.address,destinationCurrencyCode:deliveredAsset,chainId:deliveredChain,
+    providerStatus:'SETTLED',receivedAmount:'95.079123',providerUpdatedAt:new Date().toISOString()};
+   const saveMobile=changes=>save({...arrived,...changes},rampOwner.subject,id);
+   deny(saveMobile({paymentMethodType:method==='APPLE_PAY'?'GOOGLE_PAY':'APPLE_PAY'}),'wallet_production_proof_context_mismatch');
+   deny(saveMobile({walletAddress:arbOwner.address}),'wallet_production_proof_context_mismatch');
+   assert.deepEqual(JSON.parse(value(saveMobile({}))),arrived);
+   eq(`SELECT chain_id FROM ${table} WHERE id=${lit(id)};`,requestedChain,false);
+  }
+ }
+ console.log(JSON.stringify({walletRampNowMobilePaySchema:'passed',applePay:true,googlePay:true,providerCalls:0,actualCharges:0}));
 }

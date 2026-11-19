@@ -161,6 +161,46 @@ const rampRoutes = (asset: string) => [{ partner: 'RAMPNOW', source: 'USD', dest
   { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 10000 } },
 ] }];
 
+test('RampNow offers Apple and Google Pay on each verified network and rejects a wallet method changed by checkout', async () => {
+  const methods = ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'] as const;
+  const mobileCatalogue = { ...rampCatalogue, rows: rampCatalogue.rows.flatMap(row =>
+    methods.map(paymentMethodType => ({ ...row, paymentMethodType }))) };
+  const route = (asset: string) => [{ ...rampRoutes(asset)[0], paymentMethods: methods.map(name => ({
+    name, limits: { currencyCode: 'USD', min: 5, max: 10000 },
+  })) }];
+  const discovery = provider(cardNetworks.map(([asset]) => route(asset)));
+  const optionsResponse = await readProductionWalletOptions({ country: 'US', sourceCurrencyCode: 'USD' },
+    { environment, catalogue: mobileCatalogue, fetchImpl: discovery.fetchImpl });
+  expect(optionsResponse.routes[0]?.paymentMethods).toEqual(methods.map(method => ({
+    method, currencyCode: 'USD', minimumAmount: 50, maximumAmount: 10000,
+    destinationCurrencyCodes: cardNetworks.map(([asset]) => asset),
+  })));
+  for (const [asset, network, chainId] of cardNetworks) {
+    for (const paymentMethodType of ['APPLE_PAY', 'GOOGLE_PAY'] as const) {
+      const expectedMode = paymentMethodType.toLowerCase();
+      const prefill = new URLSearchParams({ orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: '100.00',
+        dstCurrency: 'USDC', dstChain: network, walletAddress: wallet, lockFields: 'walletAddress', paymentMode: expectedMode,
+        prefill: 'true', externalOrderId: widget.id,
+        returnUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}` });
+      const price = { quotes: [{ ...quote('RAMPNOW').quotes[0], sourceCurrencyCode: 'USD', sourceAmount: 100,
+        destinationCurrencyCode: asset, paymentMethodType }] };
+      for (const changeMode of [false, true]) {
+        if (changeMode) prefill.set('paymentMode', 'card');
+        const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+        const api = provider([route(asset), price, { ...widget, serviceProviderWidgetUrl: `https://app.rampnow.io/order/quote?${prefill}` }]);
+        const promise = createProductionWalletSession(db.database, { ...usCard, paymentMethodType, destinationCurrencyCode: asset },
+          { ...options, catalogue: mobileCatalogue, fetchImpl: api.fetchImpl });
+        if (changeMode) {
+          await expect(promise).rejects.toThrow('provider_unavailable');
+          expect(db.queries[2]?.params[3]).toBe('unavailable');
+        } else {
+          expect(await promise).toMatchObject({ paymentMethodType, destination: { chainId, address: wallet }, checkoutUrl: widget.widgetUrl });
+        }
+      }
+    }
+  }
+});
+
 test('RampNow discovers approved US card networks, preserves the chosen quote and validates the provider checkout', async () => {
   const discovery = provider(cardNetworks.map(([asset]) => rampRoutes(asset)));
   const result = await readProductionWalletOptions({ country: 'US', sourceCurrencyCode: 'USD' },

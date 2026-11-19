@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-19T22:52:00.077Z",
+  "verifiedAt": "2026-11-19T23:05:57.212Z",
   "rows": [
     {
       "country": "AD",
@@ -1620,6 +1620,84 @@
       "maximumAmount": 10000,
       "verifiedAmount": 100,
       "verifiedAt": "2026-11-19T22:52:00.077Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "APPLE_PAY",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-19T23:05:57.212Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "APPLE_PAY",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-19T23:05:57.212Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "APPLE_PAY",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-19T23:05:57.212Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "GOOGLE_PAY",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-19T23:05:57.212Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "GOOGLE_PAY",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-19T23:05:57.212Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "GOOGLE_PAY",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-19T23:05:57.212Z",
       "evidence": "quote_verified",
       "destinationCurrencyCode": "USDC"
     }

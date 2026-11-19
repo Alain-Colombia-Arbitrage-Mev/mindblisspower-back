@@ -9,7 +9,7 @@ import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-p
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits, coverageMethodsByProvider,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
-  isUsCardFunding, rampNowAsset, rampNowAssets, productionAssetDetails, productionCheckoutProviders,
+  isUsRampNowFunding, rampNowAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
   type ProductionAsset, type ProductionRoute } from './wallet-production-coverage';
 import { verifyRampNowDelivery, transactionHash } from './wallet-rampnow-delivery';
 
@@ -31,7 +31,7 @@ const quoteSchema = z.object(quoteFields).strict();
 type FundingSelection = z.infer<typeof quoteSchema>;
 const allowsSelection = (value: FundingSelection) =>
   (value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000))
-  && (value.destinationCurrencyCode === undefined || isUsCardFunding(value.country, value.sourceCurrencyCode, value.paymentMethodType));
+  && (value.destinationCurrencyCode === undefined || isUsRampNowFunding(value.country, value.sourceCurrencyCode, value.paymentMethodType));
 export const productionWalletQuoteInput = quoteSchema.refine(allowsSelection);
 export const productionWalletFundingInput = z.object({ ...quoteFields, requestId: uuid, serviceProvider: provider }).strict()
   .refine(value => allowsSelection(value) && productionCheckoutProviders.has(value.serviceProvider)
@@ -109,23 +109,26 @@ export async function readProductionWalletOptions(raw: unknown, { environment = 
     const [routes, ...networkRoutes] = await Promise.all([load(destinationCurrencyCode), ...alternatives.map(asset => load(asset).catch(() => []))]);
     if (scope.signal.aborted) throw Error('wallet_production_unavailable');
     if (discoverNetworks) {
-      let rail = routes.find(route => route.serviceProvider === 'RAMPNOW')?.paymentMethods[0];
-      if (rail) rail.destinationCurrencyCodes = [destinationCurrencyCode];
+      const primary = routes.find(route => route.serviceProvider === 'RAMPNOW');
+      const rails = primary?.paymentMethods ?? [];
+      for (const rail of rails) rail.destinationCurrencyCodes = [destinationCurrencyCode];
       for (const [index, asset] of alternatives.entries()) {
-        const other = networkRoutes[index]?.find(route => route.serviceProvider === 'RAMPNOW')?.paymentMethods[0];
-        if (!other) continue;
-        if (!rail) {
-          rail = { ...other, destinationCurrencyCodes: [asset] };
-          routes.push({ serviceProvider: 'RAMPNOW', paymentMethods: [rail] });
-          continue;
-        }
-        const minimum = Math.max(rail.minimumAmount, other.minimumAmount), maximum = Math.min(rail.maximumAmount, other.maximumAmount);
-        if (minimum <= maximum) {
-          rail.minimumAmount = minimum;
-          rail.maximumAmount = maximum;
-          rail.destinationCurrencyCodes!.push(asset);
+        const candidates = networkRoutes[index]?.find(route => route.serviceProvider === 'RAMPNOW')?.paymentMethods ?? [];
+        for (const other of candidates) {
+          const rail = rails.find(item => item.method === other.method);
+          if (!rail) {
+            rails.push({ ...other, destinationCurrencyCodes: [asset] });
+            continue;
+          }
+          const minimum = Math.max(rail.minimumAmount, other.minimumAmount), maximum = Math.min(rail.maximumAmount, other.maximumAmount);
+          if (minimum <= maximum) {
+            rail.minimumAmount = minimum;
+            rail.maximumAmount = maximum;
+            rail.destinationCurrencyCodes!.push(asset);
+          }
         }
       }
+      if (!primary && rails.length) routes.push({ serviceProvider: 'RAMPNOW', paymentMethods: rails });
     }
     return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, destinationCurrencyCode,
       paymentMethods: [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))], routes };
@@ -213,13 +216,14 @@ function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.in
   } catch { return false; }
 }
 
-export function rampNowPrefill(value: string | null | undefined, asset: ProductionAsset, amount: number, walletAddress: string, redirectUrl: string, sessionId: string) {
-  if (!value || !rampNowAsset.safeParse(asset).success) return false;
+export function rampNowPrefill(value: string | null | undefined, asset: ProductionAsset, amount: number, method: string, walletAddress: string, redirectUrl: string, sessionId: string) {
+  const paymentMode = rampNowPaymentMode(method);
+  if (!value || !paymentMode || !rampNowAsset.safeParse(asset).success) return false;
   try {
     const url = new URL(value), params = url.searchParams;
     const expected = { orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: amount.toFixed(2),
       dstCurrency: 'USDC', dstChain: asset === 'USDC_ARBITRUM' ? 'arbitrum-one' : productionAssetDetails[asset].network,
-      walletAddress, prefill: 'true', paymentMode: 'card', returnUrl: redirectUrl, externalOrderId: sessionId };
+      walletAddress, prefill: 'true', paymentMode, returnUrl: redirectUrl, externalOrderId: sessionId };
     return url.origin === 'https://app.rampnow.io' && url.pathname === '/order/quote' && !url.username && !url.password && !url.hash
       && [...params.keys()].every(key => params.getAll(key).length === 1)
       && Object.entries(expected).every(([key, expectedValue]) => params.get(key) === expectedValue)
@@ -344,7 +348,7 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
       // Only the opaque Meld URL goes to the browser. Verify the provider's
       // prefill separately so a mismapped fiat, network or recipient cannot open.
       const checkoutUrl = input.serviceProvider === 'RAMPNOW'
-        ? (rampNowPrefill(session.data.serviceProviderWidgetUrl, asset, input.amount, walletAddress, redirectUrl, session.data.id) ? hosted : null)
+        ? (rampNowPrefill(session.data.serviceProviderWidgetUrl, asset, input.amount, input.paymentMethodType, walletAddress, redirectUrl, session.data.id) ? hosted : null)
         : asset === 'USDC_POLYGON'
         ? (onrampUsdcPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
         : asset === 'USDC_ARBITRUM'
