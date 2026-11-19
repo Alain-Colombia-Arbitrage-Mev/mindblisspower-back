@@ -108,7 +108,7 @@ export function productionWalletCheckoutUrl(value: unknown, serviceProvider: str
     const url = new URL(value);
     if (url.username || url.password || url.port || url.hash || url.protocol !== 'https:') return null;
     if (url.origin === 'https://meldcrypto.com' && url.pathname === '/' && url.searchParams.size === 1 && url.searchParams.getAll('token').length === 1
-      && /^https:\/\/meldcrypto\.com\/\?token=[A-Za-z0-9_.~-]{1,7000}$/.test(value)) return value;
+      && /^https:\/\/meldcrypto\.com\/?\?token=[A-Za-z0-9_.~-]{1,7000}$/.test(value)) return url.href;
     if (serviceProvider === 'BANXA' && url.origin === 'https://meldshared.banxa.com' && url.pathname === '/papi/transit/'
       && value.startsWith('https://meldshared.banxa.com/papi/transit/?initId=') && url.searchParams.size === 1
       && url.searchParams.getAll('initId').length === 1 && /^[A-Za-z0-9._~+/-]{1,4096}={0,2}$/.test(url.searchParams.get('initId') || '')) return value;

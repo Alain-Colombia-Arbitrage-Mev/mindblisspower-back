@@ -90,3 +90,13 @@ These are provider minima in the selected fiat, not a claimed USD equivalent.
 The USD business range remains 50–25,000, further restricted by provider routes.
 At 50 USD the checked Banxa card quotes in US/MX/CO still rejected USDT Polygon
 with `INVALID_CRYPTO_CURRENCY`; increasing an amount does not fix that error.
+
+### Hosted checkout URL normalization
+
+The live Onramp Money preparation returned HTTP 200 with a valid session but a
+MELD fallback URL written as `https://meldcrypto.com?token=...`. The prior
+validator required the root slash and rejected this valid response after
+recording an unavailable attempt. Accept exactly the documented opaque token
+form with or without that slash, and return the canonical URL with `/` to the
+browser. All host, token, query, port, credential and fragment restrictions
+remain in force. No mutable Onramp Money destination URL is allowlisted.

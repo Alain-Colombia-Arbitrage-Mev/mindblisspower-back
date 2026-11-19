@@ -127,6 +127,32 @@ test('checkout rejects sandbox URLs, foreign references and opaque unknown hosts
   for (const url of ['https://meldcrypto.com:443/?token=a', 'https://user@meldcrypto.com/?token=a', 'https://meldcrypto.com/?token=a&token=b',
     'https://meldcrypto.com/?token=a#', 'https://meldcrypto.com/?token=%61', 'https://global-stg.transak.com/?apiKey=a&sessionId=b']) expect(productionWalletCheckoutUrl(url, 'BANXA')).toBeNull();
 });
+test('Meld opaque fallback canonicalizes the optional root slash without accepting another URL shape', () => {
+  const canonical = 'https://meldcrypto.com/?token=synthetic.token';
+  for (const value of [canonical, 'https://meldcrypto.com?token=synthetic.token'])
+    expect(productionWalletCheckoutUrl(value, 'ONRAMPMONEY')).toBe(canonical);
+  for (const value of ['https://meldcrypto.com:443?token=a', 'https://user@meldcrypto.com?token=a',
+    'https://meldcrypto.com.evil.test?token=a', 'http://meldcrypto.com?token=a', 'https://meldcrypto.com/other?token=a',
+    'https://meldcrypto.com?token=a&token=b', 'https://meldcrypto.com?token=a&redirect=https://evil.test',
+    'https://meldcrypto.com?%74oken=a', 'https://meldcrypto.com?token=%61', 'https://meldcrypto.com?token=a#',
+    'https://meldcrypto.com?token=a\n', 'https://onramp.money/main/buy/?walletAddress=editable'])
+    expect(productionWalletCheckoutUrl(value, 'ONRAMPMONEY')).toBeNull();
+});
+
+test('Onramp Money checkout uses the canonical Meld token fallback with immutable MXN SPEI facts', async () => {
+  const raw = { ...input, serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'SPEI' };
+  const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+  const api = provider([routes(['ONRAMPMONEY'], 'MXN', 'SPEI'),
+    { quotes: [{ ...quote('ONRAMPMONEY').quotes[0], paymentMethodType: 'SPEI' }] },
+    { ...widget, serviceProviderWidgetUrl: 'https://onramp.money/main/buy/?walletAddress=editable', widgetUrl: 'https://meldcrypto.com?token=synthetic.token' }]);
+  const result = await createProductionWalletSession(db.database, raw, { ...options, fetchImpl: api.fetchImpl });
+  expect(result).toMatchObject({ checkoutUrl: 'https://meldcrypto.com/?token=synthetic.token', serviceProvider: 'ONRAMPMONEY',
+    status: 'session_created', sourceCurrencyCode: 'MXN', requestedAmount: 2000, paymentMethodType: 'SPEI', destination: { address: wallet, chainId: 137 } });
+  expect(api.calls).toHaveLength(3);
+  expect(api.calls[2]!.body.sessionData).toMatchObject({ walletAddress: wallet, sourceCurrencyCode: 'MXN', sourceAmount: '2000.00', paymentMethodType: 'SPEI' });
+  expect(db.queries[2]!.params).toEqual([subject, nativeSessionId, id, 'session_created', 'vendor-session', 'vendor-customer']);
+});
+
 test('verified Banxa production transit URL is preferred and only its one opaque initId may vary', async () => {
   const direct = 'https://meldshared.banxa.com/papi/transit/?initId=opaque-production%2Bvalue%3D';
   const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]),
