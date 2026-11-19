@@ -80,3 +80,13 @@ does not rewrite their history or proof contracts.
 The merchant incident report remains an unsent local draft. No funds were
 sent, charged or credited by these checks. Private receipts and credentials
 remain outside tracked source.
+
+### Fiat minimum boundary checks
+
+Authenticated production quotes independently confirmed Onramp Money SPEI's
+minimum of 200 MXN and PSE's minimum of 42,300 COP. The exact minimum returned a
+valid quote; one cent below each minimum returned `INVALID_AMOUNT_TOO_LOW`.
+These are provider minima in the selected fiat, not a claimed USD equivalent.
+The USD business range remains 50–25,000, further restricted by provider routes.
+At 50 USD the checked Banxa card quotes in US/MX/CO still rejected USDT Polygon
+with `INVALID_CRYPTO_CURRENCY`; increasing an amount does not fix that error.
