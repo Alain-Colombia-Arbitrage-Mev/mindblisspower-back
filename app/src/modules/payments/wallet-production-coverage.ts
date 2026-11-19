@@ -22,7 +22,8 @@ type CoverageEnvironment = { MELD_PRODUCTION_API_KEYS?: string; MELD_PRODUCTION_
 type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string };
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
 const permitted = (row: Pick<CoverageRow, 'country' | 'sourceCurrencyCode' | 'serviceProvider' | 'paymentMethodType'>) =>
-  providers.has(row.serviceProvider) && !(row.country === 'MX' && row.sourceCurrencyCode === 'MXN'
+  providers.has(row.serviceProvider) && (row.serviceProvider !== 'ONMETA' || row.country === 'IN')
+  && !(row.country === 'MX' && row.sourceCurrencyCode === 'MXN'
     && row.serviceProvider === 'BANXA' && row.paymentMethodType === 'SPEI');
 const snapBinaryNoise = (scaled: number) => Math.abs(scaled - Math.round(scaled))
   <= Number.EPSILON * Math.max(1, Math.abs(scaled)) * 2 ? Math.round(scaled) : scaled;

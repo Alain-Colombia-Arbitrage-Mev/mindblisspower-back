@@ -105,8 +105,9 @@ remain in force. No mutable Onramp Money destination URL is allowlisted.
 ## Quote-verified compatibility policy
 
 `wallet-production-coverage-data.json` contains the reviewed positive results
-for the production merchant, USDT Polygon and each country's local default/USD
-pairs. Generic MELD country, fiat and route metadata is not sufficient to enable
+for the production merchant and USDT on Polygon. It includes the initial local
+default/USD audit and separately verified currency pairs. Generic MELD country,
+fiat and route metadata is not sufficient to enable
 a combination. Countries and currencies without a positive audited route are
 removed; live options are intersected by exact provider and method, with bounds
 rounded inward using that fiat's minor units. USD retains the 50–25,000 policy.
@@ -134,6 +135,12 @@ unknown rather than permanent incompatibilities; unknown rows are not enabled.
 The permitted merchant integrations returned no positive USD or card/mobile-pay
 quote for USDT Polygon. Those options, including US, are consequently absent.
 MX retains Onramp Money SPEI in MXN; CO retains its PSE and local transfer in COP.
+
+A follow-up audit of Onramp Money's bank payment limits verified EUR SEPA and
+Open Banking in Bulgaria, Czechia, Hungary, Ireland, Iceland, Liechtenstein,
+Lithuania, Romania and Sweden. A live quote succeeded at 10 EUR on each route.
+The form shows every fiat verified by the backend, including EUR alongside SEK
+for Sweden. Onmeta is restricted to India for new checkouts.
 
 Costa Rica had no permitted CRC route. Its USD Banxa card, Apple Pay and Google
 Pay routes all rejected USDT Polygon with `INVALID_CRYPTO_CURRENCY`; therefore

@@ -62,6 +62,14 @@ test('countries, currencies and precision expose only exact approved pairs witho
   expect([...coverageCurrencies(catalogue, 'CR')]).toEqual([]); expect(coverageMinorUnits(catalogue, 'MX', 'MXN')).toBe(2);
   expect(coverageMinorUnits(catalogue, 'MX', 'USD')).toBeUndefined();
 });
+test('Onmeta checkout scope is limited to India even if MELD advertises another country', () => {
+  const india = { ...row, country: 'IN', sourceCurrencyCode: 'INR', serviceProvider: 'ONMETA', paymentMethodType: 'UPI' };
+  const other = { ...india, country: 'ID', sourceCurrencyCode: 'IDR' };
+  expect(() => resolve(raw([india, other]))).toThrow('unconfigured');
+  const selection = { country: 'ID', sourceCurrencyCode: 'IDR', serviceProvider: 'ONMETA', paymentMethodType: 'UPI', amount: 200 };
+  expect(() => assertProductionCoverageSelection(raw([india, other]), selection)).toThrow('method_unavailable');
+  expect(() => assertProductionCoverageSelection(resolve(raw([india])), { ...selection, country: 'IN', sourceCurrencyCode: 'INR' })).not.toThrow();
+});
 test('intersection clips live limits inward per provider, leaves catalogue/live inputs unchanged, and excludes unknown facts', () => {
   const catalogue = resolve(raw([{ ...row, minimumAmount: 200.001, maximumAmount: 499999.999, verifiedAmount: 201 },
     { ...row, serviceProvider: 'TRANSAK', minimumAmount: 500, maximumAmount: 1000, verifiedAmount: 500 }]));
