@@ -67,6 +67,33 @@ test('USDC ACH records the asset and opens only an opaque checkout with matching
     }
   }
 });
+test('USDC COP PSE records the asset and opens only an opaque checkout with matching provider prefill', async () => {
+  const bank = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 42300, serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'PSE' };
+  const bankCatalogue = { ...catalogue, rows: [{ ...catalogue.rows[0], country: 'CO', sourceCurrencyCode: 'COP',
+    serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'PSE', minimumAmount: 50, verifiedAmount: 42300, destinationCurrencyCode: 'USDC_POLYGON' }] };
+  const rail = { partner: 'ONRAMPMONEY', source: 'COP', destination: 'USDC_POLYGON',
+    paymentMethods: [{ name: 'PSE', limits: { currencyCode: 'COP', min: 25, max: 50000 } }] };
+  const price = { quotes: [{ ...quote('ONRAMPMONEY').quotes[0], sourceCurrencyCode: 'COP',
+    sourceAmount: 42300, destinationCurrencyCode: 'USDC_POLYGON', paymentMethodType: 'PSE' }] };
+  const prefill = new URLSearchParams({ coinCode: 'usdc', network: 'matic20', walletAddress: wallet, fiatAmount: '42300.00',
+    fiatType: '9', paymentMethod: '2', redirectUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}` });
+  for (const badPrefill of [false, true]) {
+    const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+    const scoped = new URLSearchParams(prefill);
+    if (badPrefill) scoped.set('fiatType', '21');
+    const api = provider([[rail], price, { ...widget, serviceProviderWidgetUrl: `https://onramp.money/main/buy/?${scoped}` }]);
+    const session = createProductionWalletSession(db.database, bank, { ...options, catalogue: bankCatalogue, fetchImpl: api.fetchImpl });
+    if (badPrefill) {
+      await expect(session).rejects.toThrow('provider_unavailable');
+      expect(db.queries[2]!.params[3]).toBe('unavailable');
+    } else {
+      expect(await session).toMatchObject({ destinationCurrencyCode: 'USDC_POLYGON',
+        destination: { asset: 'USDC', address: wallet, chainId: 137 }, checkoutUrl: widget.widgetUrl });
+      expect(db.queries[1]!.params.at(-1)).toBe('USDC_POLYGON');
+      expect(api.calls[2]!.body.sessionData.destinationCurrencyCode).toBe('USDC_POLYGON');
+    }
+  }
+});
 test('production gate never borrows sandbox credentials and disabled flows make no DB/provider call', async () => {
   const db = database([]), api = provider([]);
   for (const env of [{}, { ...environment, WALLET_MELD_PRODUCTION_ENABLED: 'false' }, { MELD_API_SANDBOX: 'sandbox', MELD_ACCOUNT_ID: 'sb' },

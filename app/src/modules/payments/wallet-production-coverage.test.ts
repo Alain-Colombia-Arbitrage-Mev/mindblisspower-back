@@ -43,10 +43,10 @@ test('catalogue remains last-known compatibility policy rather than a timed pric
 });
 test('duplicate tuples and inconsistent currency precision fail closed', () => {
   expect(() => resolve(raw([{ ...row }, { ...row }]))).toThrow('unconfigured');
-  expect(() => resolve(raw([{ ...row }, { ...row, serviceProvider: 'TRANSAK', minorUnits: 1 }]))).toThrow('unconfigured');
+  expect(() => resolve(raw([{ ...row }, { ...row, serviceProvider: 'ALCHEMYPAY', minorUnits: 1 }]))).toThrow('unconfigured');
 });
 test('forbidden providers and exact Banxa MX/MXN/SPEI quarantine always win', () => {
-  for (const serviceProvider of ['MERCURYO', 'BINANCECONNECT', 'BINANCE_CONNECT', 'SWAPPED', 'BANXA']) {
+  for (const serviceProvider of ['MERCURYO', 'BINANCECONNECT', 'BINANCE_CONNECT', 'SWAPPED', 'TRANSAK', 'RAMPNOW', 'YELLOWCARD', 'BANXA']) {
     expect(() => resolve(raw([{ ...row, serviceProvider }]))).toThrow('unconfigured');
     const untrusted = raw([{ ...row, serviceProvider }]);
     expect(coverageCountries(untrusted).size).toBe(0); expect(coverageCurrencies(untrusted, 'MX').size).toBe(0);
@@ -57,7 +57,7 @@ test('forbidden providers and exact Banxa MX/MXN/SPEI quarantine always win', ()
 });
 test('countries, currencies and precision expose only exact approved pairs without implicit USD', () => {
   const catalogue = resolve(raw([{ ...row }, { ...row, country: 'CO', sourceCurrencyCode: 'COP', paymentMethodType: 'PSE', minimumAmount: 42300,
-    verifiedAmount: 42300 }, { ...row, country: 'US', sourceCurrencyCode: 'USD', maximumAmount: 25000, serviceProvider: 'TOPPER', paymentMethodType: 'CREDIT_DEBIT_CARD' }]));
+    verifiedAmount: 42300 }, { ...row, country: 'US', sourceCurrencyCode: 'USD', maximumAmount: 25000, serviceProvider: 'BANXA', paymentMethodType: 'CREDIT_DEBIT_CARD' }]));
   expect([...coverageCountries(catalogue)]).toEqual(['MX', 'CO', 'US']); expect([...coverageCurrencies(catalogue, 'MX')]).toEqual(['MXN']);
   expect([...coverageCurrencies(catalogue, 'CR')]).toEqual([]); expect(coverageMinorUnits(catalogue, 'MX', 'MXN')).toBe(2);
   expect(coverageMinorUnits(catalogue, 'MX', 'USD')).toBeUndefined();
@@ -72,21 +72,21 @@ test('Onmeta checkout scope is limited to India even if MELD advertises another 
 });
 test('intersection clips live limits inward per provider, leaves catalogue/live inputs unchanged, and excludes unknown facts', () => {
   const catalogue = resolve(raw([{ ...row, minimumAmount: 200.001, maximumAmount: 499999.999, verifiedAmount: 201 },
-    { ...row, serviceProvider: 'TRANSAK', minimumAmount: 500, maximumAmount: 1000, verifiedAmount: 500 }]));
-  const upstream = [live('ONRAMPMONEY', 199.999, 500001), live('TRANSAK', 600.001, 999.999), live('BANXA'), live('MERCURYO'),
+    { ...row, serviceProvider: 'ALCHEMYPAY', minimumAmount: 500, maximumAmount: 1000, verifiedAmount: 500 }]));
+  const upstream = [live('ONRAMPMONEY', 199.999, 500001), live('ALCHEMYPAY', 600.001, 999.999), live('BANXA'), live('MERCURYO'),
     live('ONRAMPMONEY', 200, 500000, 'APPLE_PAY'), live('ONRAMPMONEY', 200, 500000, 'SPEI', 'USD')];
   const before = JSON.stringify({ catalogue, upstream });
-  expect(intersectProductionCoverage(upstream, catalogue, 'MX', 'MXN')).toEqual([live('ONRAMPMONEY', 200.01, 499999.99), live('TRANSAK', 600.01, 999.99)]);
+  expect(intersectProductionCoverage(upstream, catalogue, 'MX', 'MXN')).toEqual([live('ONRAMPMONEY', 200.01, 499999.99), live('ALCHEMYPAY', 600.01, 999.99)]);
   expect(JSON.stringify({ catalogue, upstream })).toBe(before); expect(intersectProductionCoverage(upstream, catalogue, 'CO', 'MXN')).toEqual([]);
   expect(intersectProductionCoverage([live('ONRAMPMONEY', 500001)], catalogue, 'MX', 'MXN')).toEqual([]);
 });
 test('duplicate live intervals narrow rather than widening approved limits or filling gaps', () => {
-  const catalogue = resolve(raw([{ ...row, maximumAmount: 300 }, { ...row, serviceProvider: 'TRANSAK', minimumAmount: 500, maximumAmount: 700, verifiedAmount: 500 }]));
+  const catalogue = resolve(raw([{ ...row, maximumAmount: 300 }, { ...row, serviceProvider: 'ALCHEMYPAY', minimumAmount: 500, maximumAmount: 700, verifiedAmount: 500 }]));
   expect(intersectProductionCoverage([live('ONRAMPMONEY', 200, 280), live('ONRAMPMONEY', 250, 300)], catalogue, 'MX', 'MXN')).toEqual([live('ONRAMPMONEY', 250, 280)]);
   expect(intersectProductionCoverage([live('ONRAMPMONEY', 200, 220), live('ONRAMPMONEY', 250, 300)], catalogue, 'MX', 'MXN')).toEqual([]);
   expect(() => assertProductionCoverageSelection(catalogue, { ...selection, amount: 400 })).toThrow('amount_unavailable');
   expect(() => assertProductionCoverageSelection(catalogue, { ...selection, amount: 500, serviceProvider: 'ONRAMPMONEY' })).toThrow('amount_unavailable');
-  expect(() => assertProductionCoverageSelection(catalogue, { ...selection, amount: 500, serviceProvider: 'TRANSAK' })).not.toThrow();
+  expect(() => assertProductionCoverageSelection(catalogue, { ...selection, amount: 500, serviceProvider: 'ALCHEMYPAY' })).not.toThrow();
 });
 test('selection checks exact country, fiat, provider and method before amount', () => {
   const catalogue = resolve(); assertProductionCoverageSelection(catalogue, selection);

@@ -134,5 +134,15 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  assert.deepEqual(JSON.parse(value(save(bankProof,bank.subject,bankId))),bankProof);
  assert.equal(JSON.parse(value(bankRead())).destination_currency,'USDC_POLYGON');
  eq(oldRows,before.rows,false);
- console.log(JSON.stringify({walletUsdcSchema:'passed',preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
+ const beforeCopHistory=value(history(5));
+ psql(await readFile(new URL('../_meta/migration/123_wallet_meld_production_usdc_cop.sql',import.meta.url),'utf8'));
+ eq(history(5),beforeCopHistory);
+ const copInput=[bank.subject,bank.session,randomUUID(),'CO','42300','COP','PSE','ONRAMPMONEY','production-account'];
+ const copAttempt=JSON.parse(value(bankCreate(copInput)));
+ assert.equal(copAttempt.created,true);
+ assert.equal(copAttempt.address,bank.address);
+ for(const [fiat,method,provider] of [['USD','PSE','ONRAMPMONEY'],['COP','CREDIT_DEBIT_CARD','ONRAMPMONEY'],['COP','PSE','BANXA']]) {
+  deny(bankCreate([...copInput.slice(0,2),randomUUID(),'CO',fiat==='USD'?'50':'42300',fiat,method,provider,'production-account']),'destination_currency_check');
+ }
+ console.log(JSON.stringify({walletUsdcSchema:'passed',verifiedCopBankRails:true,preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
 }

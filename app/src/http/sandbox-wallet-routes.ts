@@ -56,6 +56,8 @@ export function registerSandboxWalletRoutes(app: ApiApplication, { database, env
     // A stale tab cannot apply its displayed wallet to another tab's new cookie.
     // This value is a comparison fence; only the actual native session owns SQL.
     if (!currentViewSubject(context.req.header('x-mindbliss-sandbox-subject'), session.user.id)) return context.json({ error: 'sandbox_wallet_forbidden' }, 403, noStore);
+    if (environment.WALLET_MELD_PRODUCTION_ENABLED === 'true' && (suffix === '/funding/options' || suffix === '/funding/session'))
+      return context.json({ error: 'sandbox_wallet_unconfigured' }, 503, noStore);
     return next();
   });
   for (const suffix of reads) app.get(`${prefix}${suffix}`, async context => {

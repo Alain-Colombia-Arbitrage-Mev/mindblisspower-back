@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-19T20:59:18.177Z",
+  "verifiedAt": "2026-11-19T21:27:19.008Z",
   "rows": [
     {
       "country": "AD",
@@ -279,8 +279,9 @@
       "minimumAmount": 42300,
       "maximumAmount": 59900000,
       "verifiedAmount": 42300,
-      "verifiedAt": "2026-11-19T17:35:12.969Z",
-      "evidence": "quote_verified"
+      "verifiedAt": "2026-11-19T21:27:19.008Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
     },
     {
       "country": "CO",
@@ -291,8 +292,9 @@
       "minimumAmount": 42300,
       "maximumAmount": 59900000,
       "verifiedAmount": 42300,
-      "verifiedAt": "2026-11-19T17:35:14.061Z",
-      "evidence": "quote_verified"
+      "verifiedAt": "2026-11-19T21:27:19.008Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
     },
     {
       "country": "CX",

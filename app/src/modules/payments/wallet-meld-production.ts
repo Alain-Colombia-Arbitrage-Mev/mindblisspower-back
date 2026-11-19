@@ -9,22 +9,22 @@ import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-p
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
-  type ProductionAsset } from './wallet-production-coverage';
+  productionCheckoutProviders, type ProductionAsset } from './wallet-production-coverage';
 
 const uuid = z.string().uuid().transform(value => value.toLowerCase()), country = z.string().regex(/^[A-Z]{2}$/), currency = z.string().regex(/^[A-Z]{3}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/).refine(value => value !== '.' && value !== '..');
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/), address = z.string().regex(/^0x[0-9a-f]{40}$/).refine(value => value !== `0x${'0'.repeat(40)}`);
 const preciseAmount = z.number().finite().min(0.01).max(1_000_000_000)
   .refine(value => Math.abs(value * 100 - Math.round(value * 100)) < 0.000001);
-// Both destination and token must be non-editable according to MELD's published
-// lockFields capability table. A quote alone does not provide that guarantee.
-export const productionLockedProviders = new Set(['ALCHEMYPAY', 'BANXA', 'BLOCKCHAINDOTCOM', 'BTCDIRECT', 'GUARDARIAN',
-  'KOYWE', 'KRYPTONIM', 'ONMETA', 'ONRAMPMONEY', 'ROBINHOOD', 'STRIPE', 'TOPPER', 'TRANSAK', 'UNLIMIT']);
-const provider = token.refine(value => productionLockedProviders.has(value));
+// Existing attempts retain their original provider when reading history or evidence.
+const recordedProviders = new Set([...productionCheckoutProviders, 'BLOCKCHAINDOTCOM', 'BTCDIRECT', 'GUARDARIAN',
+  'KOYWE', 'KRYPTONIM', 'ROBINHOOD', 'STRIPE', 'TOPPER', 'TRANSAK', 'UNLIMIT']);
+const provider = token.refine(value => recordedProviders.has(value));
 export const productionWalletOptionsInput = z.object({ country, sourceCurrencyCode: currency }).strict();
-export const productionWalletFundingInput = z.object({ requestId: uuid, country, sourceCurrencyCode: currency, amount: preciseAmount,
+const recordedFundingInput = z.object({ requestId: uuid, country, sourceCurrencyCode: currency, amount: preciseAmount,
   paymentMethodType: token, serviceProvider: provider }).strict()
   .refine(value => value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000));
+export const productionWalletFundingInput = recordedFundingInput.refine(value => productionCheckoutProviders.has(value.serviceProvider));
 export const productionWalletQuoteInput = z.object({ country, sourceCurrencyCode: currency, amount: preciseAmount, paymentMethodType: token }).strict()
   .refine(value => value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000));
 type Dependencies = { environment?: SandboxWalletEnvironment; fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; catalogue?: unknown };
@@ -49,7 +49,7 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
   for (const item of raw) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw Error('wallet_production_provider_unavailable');
     const value = item as Record<string, unknown>;
-    if (typeof value.partner !== 'string' || !productionLockedProviders.has(value.partner) || value.checkoutSupported === false) continue;
+    if (typeof value.partner !== 'string' || !productionCheckoutProviders.has(value.partner) || value.checkoutSupported === false) continue;
     if (value.source !== sourceCurrencyCode || value.destination !== asset || !Array.isArray(value.paymentMethods)
       || value.paymentMethods.length > 128) throw Error('wallet_production_provider_unavailable');
     let result = routes.get(value.partner); if (!result) { result = { serviceProvider: value.partner, paymentMethods: [] }; routes.set(value.partner, result); }
@@ -92,7 +92,7 @@ export async function readProductionWalletDiscovery(rawCountry: string | undefin
   const config = productionWalletConfiguration(environment), coverage = resolveProductionCoverage(environment, catalogue), scope = productionScope(signal, timeoutMs);
   try {
     if (rawCountry === undefined) {
-      const query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', partners: [...productionLockedProviders].join(',') });
+      const query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', partners: [...productionCheckoutProviders].join(',') });
       const result = await productionMeldJson(`/network-partner/supported/countries?${query}`, { ...config, fetchImpl, signal: scope.signal });
       const parsed = z.object({ countries: z.array(z.object({ countryCode: country, name: z.string().min(1).max(120) })).max(300) }).safeParse(result.data);
       if (!result.ok || !parsed.success || new Set(parsed.data.countries.map(item => item.countryCode)).size !== parsed.data.countries.length) throw Error('wallet_production_provider_unavailable');
@@ -120,7 +120,7 @@ export function productionWalletReturnUrl(reference: string) {
   return `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${uuid.parse(reference)}`;
 }
 export function productionWalletCheckoutUrl(value: unknown, serviceProvider: string) {
-  if (typeof value !== 'string' || value.length > 8192 || /[\\\u0000-\u0020\u007f]/.test(value) || value.includes('#')) return null;
+  if (!productionCheckoutProviders.has(serviceProvider) || typeof value !== 'string' || value.length > 8192 || /[\\\u0000-\u0020\u007f]/.test(value) || value.includes('#')) return null;
   try {
     const url = new URL(value);
     if (url.username || url.password || url.port || url.hash || url.protocol !== 'https:') return null;
@@ -129,9 +129,6 @@ export function productionWalletCheckoutUrl(value: unknown, serviceProvider: str
     if (serviceProvider === 'BANXA' && url.origin === 'https://meldshared.banxa.com' && url.pathname === '/papi/transit/'
       && value.startsWith('https://meldshared.banxa.com/papi/transit/?initId=') && url.searchParams.size === 1
       && url.searchParams.getAll('initId').length === 1 && /^[A-Za-z0-9._~+/-]{1,4096}={0,2}$/.test(url.searchParams.get('initId') || '')) return value;
-    if (serviceProvider === 'TRANSAK' && url.origin === 'https://global.transak.com' && url.pathname === '/' && url.searchParams.size === 2
-      && url.searchParams.getAll('apiKey').length === 1 && url.searchParams.getAll('sessionId').length === 1
-      && /^https:\/\/global\.transak\.com\/\?apiKey=[A-Za-z0-9_-]{1,256}&sessionId=[A-Za-z0-9._~-]{1,4096}$/.test(value)) return value;
   } catch { /* Never open an unknown provider or a sandbox host. */ }
   return null;
 }
@@ -140,10 +137,12 @@ function onrampUsdcPrefill(value: string | null | undefined, input: z.infer<type
   if (!value) return false;
   try {
     const url = new URL(value), params = url.searchParams;
-    // MELD's tested Onramp Money integration represents MXN as 4 and USD as 21.
+    const fiatTypes: Record<string, string> = { MXN: '4', COP: '9', USD: '21' };
+    const fiatType = fiatTypes[input.sourceCurrencyCode];
+    if (!fiatType) return false;
     const expected = {
       coinCode: 'usdc', network: 'matic20', walletAddress,
-      fiatAmount: input.amount.toFixed(2), fiatType: input.sourceCurrencyCode === 'MXN' ? '4' : '21',
+      fiatAmount: input.amount.toFixed(2), fiatType,
       paymentMethod: input.paymentMethodType === 'LOCAL_BANK_TRANSFER' ? '1' : '2', redirectUrl,
     };
     return url.origin === 'https://onramp.money' && !url.username && !url.password && !url.hash && url.pathname === '/main/buy/'
@@ -305,7 +304,7 @@ function readAttempt(raw: unknown, subject: string) {
   const parsed = attemptInput.safeParse(raw);
   if (!parsed.success || parsed.data.subject !== subject
     || !productionAssetAllowed(parsed.data.destination_currency, parsed.data.country_code, parsed.data.source_currency, parsed.data.service_provider, parsed.data.payment_method)
-    || !productionWalletFundingInput.safeParse({ requestId: parsed.data.id,
+    || !recordedFundingInput.safeParse({ requestId: parsed.data.id,
     country: parsed.data.country_code, amount: parsed.data.requested_amount, sourceCurrencyCode: parsed.data.source_currency,
     paymentMethodType: parsed.data.payment_method, serviceProvider: parsed.data.service_provider }).success) throw Error('wallet_production_unavailable');
   return parsed.data;

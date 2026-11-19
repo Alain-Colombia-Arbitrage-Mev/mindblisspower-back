@@ -2,8 +2,9 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 
 const scope = 'wallet-prod-20261119-v1';
-const providers = new Set(['ALCHEMYPAY', 'BANXA', 'BLOCKCHAINDOTCOM', 'BTCDIRECT', 'GUARDARIAN', 'KOYWE',
-  'KRYPTONIM', 'ONMETA', 'ONRAMPMONEY', 'ROBINHOOD', 'STRIPE', 'TOPPER', 'TRANSAK', 'UNLIMIT']);
+// Only connected providers with a compatible hosted checkout may create new attempts.
+// RampNow quotes and Yellow Card headless discovery do not establish those guarantees.
+export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'ONMETA', 'ONRAMPMONEY']);
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/);
 const instant = z.string().max(40).datetime({ offset: true });
 const positive = z.number().finite().positive().max(1_000_000_000);
@@ -27,10 +28,11 @@ type Route = { serviceProvider: string; paymentMethods: { method: string; curren
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
   asset === 'USDT_POLYGON' || (serviceProvider === 'ONRAMPMONEY'
     && ((country === 'MX' && fiat === 'MXN' && method === 'SPEI')
-      || (country === 'US' && fiat === 'USD' && ['ACH', 'LOCAL_BANK_TRANSFER'].includes(method))));
+      || (country === 'US' && fiat === 'USD' && ['ACH', 'LOCAL_BANK_TRANSFER'].includes(method))
+      || (country === 'CO' && fiat === 'COP' && ['PSE', 'LOCAL_BANK_TRANSFER'].includes(method))));
 const rowAsset = (row: CoverageRow) => row.destinationCurrencyCode ?? 'USDT_POLYGON';
 const permitted = (row: CoverageRow) =>
-  providers.has(row.serviceProvider) && (row.serviceProvider !== 'ONMETA' || row.country === 'IN')
+  productionCheckoutProviders.has(row.serviceProvider) && (row.serviceProvider !== 'ONMETA' || row.country === 'IN')
   && productionAssetAllowed(rowAsset(row), row.country, row.sourceCurrencyCode, row.serviceProvider, row.paymentMethodType)
   && !(row.country === 'MX' && row.sourceCurrencyCode === 'MXN'
     && row.serviceProvider === 'BANXA' && row.paymentMethodType === 'SPEI');
