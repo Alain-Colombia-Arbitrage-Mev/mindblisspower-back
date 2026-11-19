@@ -37,7 +37,7 @@ export function productionWalletCapabilities(environment: SandboxWalletEnvironme
 const one = (rows: unknown[]) => { if (rows.length !== 1) throw Error('wallet_production_unavailable'); return rows[0]; };
 const destination = (value: string) => ({ address: value, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const });
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
-export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string): Route[] {
+export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string, countryCode?: string): Route[] {
   if (!Array.isArray(raw) || raw.length > 256) throw Error('wallet_production_provider_unavailable');
   const routes = new Map<string, Route>();
   for (const item of raw) {
@@ -51,6 +51,9 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
       const parsed = z.object({ name: token, checkoutSupported: z.boolean().optional(), limits: z.object({ currencyCode: currency,
         min: z.number().finite().nonnegative(), max: z.number().finite().positive().max(1_000_000_000) }).nullish() }).safeParse(rawMethod);
       if (!parsed.success) throw Error('wallet_production_provider_unavailable'); const method = parsed.data;
+      // New preparations only: the live Banxa MX/MXN/SPEI checkout displayed
+      // USD for an MXN request. Historical destinations and proofs stay valid.
+      if (countryCode === 'MX' && sourceCurrencyCode === 'MXN' && value.partner === 'BANXA' && method.name === 'SPEI') continue;
       if (method.checkoutSupported === false || !method.limits) continue;
       const limit = method.limits; if (limit.currencyCode !== sourceCurrencyCode || limit.max < limit.min) throw Error('wallet_production_provider_unavailable');
       const minimumAmount = Math.ceil(Math.max(limit.min, sourceCurrencyCode === 'USD' ? 50 : 0.01) * 100) / 100;
@@ -69,7 +72,7 @@ export async function readProductionWalletOptions(raw: unknown, { environment = 
     const result = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/USDT_POLYGON`,
       { ...config, fetchImpl, signal: scope.signal });
     if (!result.ok && ![400, 404].includes(result.status)) throw Error('wallet_production_provider_unavailable');
-    const routes = result.ok ? normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode) : [];
+    const routes = result.ok ? normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country) : [];
     return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
       paymentMethods: [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))], routes };
   } finally { scope.close(); }

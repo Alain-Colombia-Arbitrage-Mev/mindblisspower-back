@@ -39,7 +39,7 @@ Real production API quotes passed the Native adapter and frontend contract for:
 
 | Country | Fiat | Method | Valid provider(s) |
 | --- | --- | --- | --- |
-| Mexico | MXN | SPEI | Banxa |
+| Mexico | MXN | SPEI | Onramp Money |
 | Colombia | COP | PSE | Onramp Money |
 | Spain | EUR | SEPA | Banxa, Onramp Money |
 | Chile | CLP | Khipu | Banxa |
@@ -63,8 +63,20 @@ listed as available integrations requiring their own production credentials.
 The portal uses only account-returned routes with documented destination locks
 and a valid quote. It does not borrow the Reown merchant or sandbox credentials.
 
-The operator also prepared one Banxa production checkout without payment or
-identity submission, confirming the documented nested payload, live merchant
-identifier and exact `meldshared.banxa.com/papi/transit/` handoff. No funds were
+The connected wallet was ownership-verified once by the user and its canonical
+address survived a full page reload, without another connect/activation CTA.
+AppKit's provider returned the numeric chain ID `137`; the client now strictly
+normalizes numeric, decimal and hexadecimal chain IDs before checking Polygon.
+
+One Banxa production checkout was prepared without payment or identity
+submission. The API and immutable journal consistently specified 2,000 MXN for
+SPEI and approximately 100.74 USDT, but the vendor checkout labelled the fiat
+total as 2,000 USD, even after selecting Mexico. Consequently new Banxa
+MX/MXN/SPEI quotes and preparations are quarantined before provider session
+creation. Onramp Money remains available for that route. Previously prepared
+attempts retain their original MXN facts and remain readable; this restriction
+does not rewrite their history or proof contracts.
+
+The merchant incident report remains an unsent local draft. No funds were
 sent, charged or credited by these checks. Private receipts and credentials
 remain outside tracked source.

@@ -9,16 +9,16 @@ import { productionMeldJson, productionScope } from './wallet-meld-production-ht
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23', customer = '7d492c47-80be-4e14-bc5f-54afaa56fc23', wallet = `0x${'1'.repeat(40)}`;
 const subject = 'synthetic-owner', nativeSessionId = 'synthetic-session', account = 'production-account', now = new Date();
 const environment = { WALLET_MELD_PRODUCTION_ENABLED: 'true', MELD_PRODUCTION_API_KEYS: 'synthetic-production-key', MELD_PRODUCTION_ACCOUNT_ID: account };
-const input = { requestId: id, country: 'MX', sourceCurrencyCode: 'MXN', amount: 2000, paymentMethodType: 'SPEI', serviceProvider: 'BANXA' };
+const input = { requestId: id, country: 'MX', sourceCurrencyCode: 'MXN', amount: 2000, paymentMethodType: 'CREDIT_DEBIT_CARD', serviceProvider: 'BANXA' };
 const options = { subject, nativeSessionId, clientIp: '192.0.2.1', environment };
 const binding = { address: wallet, binding_reference: customer };
 const row = { id, subject, address: wallet, country_code: 'MX', source_currency: 'MXN', requested_amount: 2000, service_provider: 'BANXA',
   payment_method: 'SPEI', status: 'session_created', created_at: now, customer_reference: customer, account_id: account,
   provider_session_id: 'vendor-session', provider_customer_id: 'vendor-customer', proof: null, checked_at: null };
-function routes(names = ['BANXA'], fiat = 'MXN', method = 'SPEI') { return names.map(partner => ({ partner, source: fiat,
+function routes(names = ['BANXA'], fiat = 'MXN', method = 'CREDIT_DEBIT_CARD') { return names.map(partner => ({ partner, source: fiat,
   destination: 'USDT_POLYGON', checkoutSupported: true, paymentMethods: [{ name: method, limits: { currencyCode: fiat, min: 1000, max: 50000 } }] })); }
 function quote(provider = 'BANXA') { return { quotes: [{ serviceProvider: provider, sourceCurrencyCode: 'MXN', sourceAmount: 2000,
-  destinationCurrencyCode: 'USDT_POLYGON', destinationAmount: 101.25, paymentMethodType: 'SPEI', transactionType: 'CRYPTO_PURCHASE', totalFee: 53, networkFee: 1 }] }; }
+  destinationCurrencyCode: 'USDT_POLYGON', destinationAmount: 101.25, paymentMethodType: 'CREDIT_DEBIT_CARD', transactionType: 'CRYPTO_PURCHASE', totalFee: 53, networkFee: 1 }] }; }
 const widget = { id: 'vendor-session', customerId: 'vendor-customer', externalSessionId: id, externalCustomerId: customer,
   serviceProviderWidgetUrl: 'https://unknown-provider.invalid/private', widgetUrl: 'https://meldcrypto.com/?token=synthetic.token' };
 function database(outputs: unknown[][]) {
@@ -48,10 +48,36 @@ test('production gate never borrows sandbox credentials and disabled flows make 
 });
 test('routes exclude forbidden or unlockable providers and preserve fiat limits without FX conversion', () => {
   const result = normalizeProductionWalletRoutes(routes(['BANXA', 'ONRAMPMONEY', 'MERCURYO', 'BINANCECONNECT', 'SWAPPED']), 'MXN');
-  expect(result.map(item => item.serviceProvider)).toEqual(['BANXA', 'ONRAMPMONEY']); expect(result[0]!.paymentMethods[0]).toEqual({ method: 'SPEI', currencyCode: 'MXN', minimumAmount: 1000, maximumAmount: 50000 });
+  expect(result.map(item => item.serviceProvider)).toEqual(['BANXA', 'ONRAMPMONEY']); expect(result[0]!.paymentMethods[0]).toEqual({ method: 'CREDIT_DEBIT_CARD', currencyCode: 'MXN', minimumAmount: 1000, maximumAmount: 50000 });
   expect(normalizeProductionWalletRoutes(routes(['BANXA'], 'USD'), 'USD')[0]!.paymentMethods[0]!.maximumAmount).toBe(25000);
   expect(() => normalizeProductionWalletRoutes([{ ...routes()[0], source: 'USD' }], 'MXN')).toThrow('provider_unavailable');
   expect(normalizeProductionWalletRoutes([{ ...routes()[0], checkoutSupported: false }], 'MXN')).toEqual([]);
+});
+test('only new Banxa MX/MXN/SPEI is quarantined; other providers, methods and country/currency contexts remain available', () => {
+  const raw = [...routes(['BANXA', 'ONRAMPMONEY'], 'MXN', 'SPEI'), ...routes(['BANXA'], 'MXN', 'CREDIT_DEBIT_CARD')];
+  const safe = normalizeProductionWalletRoutes(raw, 'MXN', 'MX');
+  expect(safe.find(item => item.serviceProvider === 'BANXA')!.paymentMethods.map(item => item.method)).toEqual(['CREDIT_DEBIT_CARD']);
+  expect(safe.find(item => item.serviceProvider === 'ONRAMPMONEY')!.paymentMethods.map(item => item.method)).toEqual(['SPEI']);
+  expect(normalizeProductionWalletRoutes(routes(['BANXA'], 'USD', 'SPEI'), 'USD', 'MX')).toHaveLength(1);
+  expect(normalizeProductionWalletRoutes(routes(['BANXA'], 'MXN', 'SPEI'), 'MXN', 'CO')).toHaveLength(1);
+  expect(normalizeProductionWalletRoutes(routes(['BANXA'], 'MXN', 'SPEI'), 'MXN', 'MX')).toEqual([]);
+});
+test('stale or injected Banxa SPEI selection cannot create a journal row or widget, while Onramp Money still quotes', async () => {
+  const raw = { ...input, paymentMethodType: 'SPEI' }, db = database([[binding]]), api = provider([routes(['BANXA'], 'MXN', 'SPEI')]);
+  await expect(createProductionWalletSession(db.database, raw, { ...options, fetchImpl: api.fetchImpl })).rejects.toThrow('method_unavailable');
+  expect(db.queries).toHaveLength(1); expect(api.calls).toHaveLength(1); // Binding SELECT and route GET only.
+  const mixed = database([[binding]]), upstream = provider([routes(['BANXA', 'ONRAMPMONEY'], 'MXN', 'SPEI'),
+    { quotes: [{ ...quote('ONRAMPMONEY').quotes[0], paymentMethodType: 'SPEI' }] }]);
+  const { requestId, serviceProvider, ...quoteInput } = raw;
+  expect((await quoteProductionWalletFunding(mixed.database, quoteInput, { ...options, fetchImpl: upstream.fetchImpl })).quotes.map(item => item.serviceProvider)).toEqual(['ONRAMPMONEY']);
+  expect(upstream.calls).toHaveLength(2); expect(upstream.calls[1]!.body.serviceProviders).toEqual(['ONRAMPMONEY']);
+});
+test('owned historical Banxa MX/MXN/SPEI attempts remain readable after quarantine, without any vendor call', async () => {
+  const db = database([[row]]), api = provider([]);
+  const result = await readProductionWalletHistory(db.database, { subject, nativeSessionId }, { environment, fetchImpl: api.fetchImpl });
+  expect(result.records).toHaveLength(1); expect(result.records[0]).toMatchObject({ checkoutReference: id, serviceProvider: 'BANXA',
+    country: 'MX', sourceCurrencyCode: 'MXN', requestedAmount: 2000, paymentMethodType: 'SPEI', destination: { address: wallet } });
+  expect(api.calls).toHaveLength(0); expect(db.queries).toHaveLength(1);
 });
 test('explicit quotes omit a provider that advertises a route but returns invalid quote; no journal is written', async () => {
   const db = database([[binding]]), api = provider([routes(['BANXA', 'ONRAMPMONEY', 'MERCURYO']), Response.json({ code: 'INVALID_CRYPTO_CURRENCY' }, { status: 400 }), quote('ONRAMPMONEY')]);
@@ -75,7 +101,7 @@ test('production mint uses permanent SQL binding, exact fresh quote and server-o
   const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
   const api = provider([routes(), quote(), widget]); const result = await createProductionWalletSession(db.database, input, { ...options, fetchImpl: api.fetchImpl });
   expect(result).toMatchObject({ environment: 'production', walletKind: 'personal', country: 'MX', serviceProvider: 'BANXA', checkoutUrl: widget.widgetUrl, destination: { address: wallet, chainId: 137 } });
-  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'MX', 2000, 'MXN', 'SPEI', 'BANXA', account]);
+  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'MX', 2000, 'MXN', 'CREDIT_DEBIT_CARD', 'BANXA', account]);
   const sent = api.calls[2]!.body; expect(sent.sessionData.walletAddress).toBe(wallet); expect(sent.sessionData.sourceAmount).toBe('2000.00');
   expect(sent.sessionData.lockFields).toContain('walletAddress'); expect(sent.sessionData.lockFields).toContain('destinationCurrencyCode');
   expect(sent.sessionData.redirectUrl).toEndWith(`?walletCheckoutReference=${id}`);
