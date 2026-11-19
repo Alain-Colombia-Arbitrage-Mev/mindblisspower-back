@@ -23,8 +23,16 @@ export function sandboxWalletConfiguration(environment: SandboxWalletEnvironment
   }
   return { key, account };
 }
+/** Ownership is independent of a payment merchant's environment. A production
+ * deposit does not borrow a sandbox API key or require another signing lease. */
+function walletBindingConfiguration(environment: SandboxWalletEnvironment) {
+  if (environment.WALLET_SANDBOX_REOWN_ENABLED === 'true' && environment.WALLET_MELD_PRODUCTION_ENABLED === 'true'
+    && /^[\x21-\x7e]{1,2048}$/.test(environment.MELD_PRODUCTION_API_KEYS || '')
+    && /^[A-Za-z0-9_-]{1,128}$/.test(environment.MELD_PRODUCTION_ACCOUNT_ID || '')) return;
+  sandboxWalletConfiguration(environment);
+}
 export function sandboxWalletCapabilities(environment: SandboxWalletEnvironment = process.env) {
-  let configured = false; try { sandboxWalletConfiguration(environment); configured = true; } catch { /* No secret metadata. */ }
+  let configured = false; try { walletBindingConfiguration(environment); configured = true; } catch { /* No secret metadata. */ }
   return { flow: 'sandbox_wallet' as const, configured, environment: 'sandbox' as const, asset: 'USDT' as const,
     network: 'polygon' as const, chainId: 137 as const, serviceProvider: 'TRANSAK' as const, canBroadcast: false as const };
 }
@@ -46,7 +54,7 @@ function projectBinding(raw: unknown, environment: SandboxWalletEnvironment, now
 function one(rows: unknown[]) { if (rows.length !== 1) throw Error('sandbox_wallet_unavailable'); return rows[0]; }
 export async function readSandboxWallet(database: SandboxWalletDatabase, input: SandboxWalletPrincipal,
   { environment = process.env, signal, now = Date.now, timeoutMs }: Dependencies = {}) {
-  sandboxWalletConfiguration(environment); const p = principal(input), scope = sandboxOperationScope(signal, timeoutMs);
+  walletBindingConfiguration(environment); const p = principal(input), scope = sandboxOperationScope(signal, timeoutMs);
   try { return projectBinding(one(await sandboxOperation(() => database.execute(sql`SELECT * FROM identity.read_sandbox_wallet_binding(
     ${p.subject},${p.nativeSessionId})`), scope.signal)), environment, now()); } finally { scope.close(); }
 }
@@ -79,7 +87,7 @@ export const sandboxWalletChallengeInput = z.object({ address: z.string().regex(
   .refine(value => value !== `0x${'0'.repeat(40)}`) }).strict();
 export async function createSandboxWalletChallenge(database: SandboxWalletDatabase, raw: unknown, input: SandboxWalletPrincipal,
   { environment = process.env, signal, now = Date.now, id = randomUUID, nonce = () => randomBytes(32).toString('hex'), timeoutMs }: Dependencies = {}) {
-  sandboxWalletConfiguration(environment); const value = sandboxWalletChallengeInput.parse(raw), p = principal(input), instant = now();
+  walletBindingConfiguration(environment); const value = sandboxWalletChallengeInput.parse(raw), p = principal(input), instant = now();
   const challengeId = uuid.parse(id()).toLowerCase(), nonceValue = digest.parse(nonce()), release = acquire(database, p, instant);
   const scope = sandboxOperationScope(signal, timeoutMs);
   try {
@@ -94,7 +102,7 @@ export async function createSandboxWalletChallenge(database: SandboxWalletDataba
 export const sandboxWalletVerifyInput = z.object({ challengeId: uuid, signature }).strict();
 export async function verifySandboxWallet(database: SandboxWalletDatabase, raw: unknown, input: SandboxWalletPrincipal,
   { environment = process.env, signal, now = Date.now, timeoutMs }: Dependencies = {}) {
-  sandboxWalletConfiguration(environment); const value = sandboxWalletVerifyInput.parse(raw), p = principal(input), instant = now();
+  walletBindingConfiguration(environment); const value = sandboxWalletVerifyInput.parse(raw), p = principal(input), instant = now();
   const release = acquire(database, p, instant), scope = sandboxOperationScope(signal, timeoutMs);
   try {
     const row = challenge(one(await sandboxOperation(() => database.execute(sql`SELECT * FROM identity.read_sandbox_wallet_challenge(

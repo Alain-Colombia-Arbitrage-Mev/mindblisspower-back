@@ -36,3 +36,20 @@ test('foreign portal, stale-subject envelope and impersonation are rejected with
     { 'x-mindbliss-sandbox-subject': '' }, { 'x-mindbliss-sandbox-subject': '%73ynthetic-owner' }, { 'x-mindbliss-sandbox-subject': 'has%20space' }, { 'x-vp-act-as': 'other' }])
     assert.equal(walletSandboxRequestAllowed(new Request(base + '/status', { headers: { ...headers, ...change } })), false);
 });
+test('production mode passes exactly its merchant/account and never forwards sandbox credentials or broadcast secrets', () => {
+  const result = walletSandboxEnvironment({ ...env(), WALLET_MELD_PRODUCTION_ENABLED: 'true', MELD_PRODUCTION_API_KEYS: 'production-synthetic',
+    MELD_PRODUCTION_ACCOUNT_ID: 'production-account', PIMLICO_API_KEY: 'never', MELD_API_KEY: 'legacy-never' });
+  assert.equal(result.ENV, 'production'); assert.equal(result.MELD_PRODUCTION_API_KEYS, 'production-synthetic');
+  assert.equal(result.MELD_PRODUCTION_ACCOUNT_ID, 'production-account'); assert.equal(result.MELD_ADMIN_SANDBOX_ENABLED, 'false');
+  for (const key of ['MELD_API_SANDBOX', 'MELD_ACCOUNT_ID', 'PIMLICO_API_KEY', 'MELD_API_KEY']) assert.equal(result[key], undefined);
+  assert.throws(() => walletSandboxEnvironment({ ...env(), WALLET_MELD_PRODUCTION_ENABLED: 'true' }), /configuration/);
+});
+test('production native namespace has separate owner fence, exact methods/query admission and no old personal payment APIs', () => {
+  const root = 'https://wallet.core.internal/api/member/wallet-funding', owner = { origin: headers.origin, 'x-mindbliss-wallet-subject': 'synthetic-owner' };
+  for (const path of ['/capabilities', '/discovery', '/discovery?country=ES', '/options?country=CO&sourceCurrencyCode=COP', '/history', '/status?checkoutReference=11111111-1111-4111-8111-111111111111'])
+    assert.equal(walletSandboxRequestAllowed(new Request(root + path, { headers: owner })), true, path);
+  for (const action of ['/quote', '/session']) assert.equal(walletSandboxRequestAllowed(new Request(root + action, { method: 'POST', headers: owner })), true);
+  for (const path of ['/discovery?country=MX&country=CO', '/options?country=US&sourceCurrencyCode=USD&provider=BANXA', '/history?owner=other', '/submit', '/session?walletAddress=other', '/options?country=%55%53&sourceCurrencyCode=USD', '/discovery?%63ountry=US'])
+    assert.equal(walletSandboxRequestAllowed(new Request(root + path, { headers: owner })), false, path);
+  assert.equal(walletSandboxRequestAllowed(new Request(root + '/capabilities', { headers })), false);
+});

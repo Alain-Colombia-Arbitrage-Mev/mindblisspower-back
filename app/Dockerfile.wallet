@@ -1,4 +1,5 @@
-# Isolated sandbox API. No dotenv, production merchant or relayer is copied.
+# Isolated Wallet API. Merchant credentials arrive only through runtime secrets;
+# no dotenv, credentials or relayer is copied into the image.
 FROM oven/bun:1.4.4-debian@sha256:93d5032fe06d163427822dc1598f420363759bb18155c9cc90eb1be05a64a19e AS builder
 WORKDIR /app
 COPY package.json bun.lock ./

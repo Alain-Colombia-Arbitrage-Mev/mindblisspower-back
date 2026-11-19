@@ -31,6 +31,17 @@ function provider(outputs: unknown[]) {
   return { calls, fetchImpl };
 }
 const options = { subject, nativeSessionId, clientIp: '192.0.2.1', environment };
+test('production migration can read cached owner-scoped sandbox history without borrowing either merchant for settlement', async () => {
+  const db = database([[row]]), prod = { WALLET_SANDBOX_REOWN_ENABLED: 'true', WALLET_MELD_PRODUCTION_ENABLED: 'true',
+    MELD_PRODUCTION_API_KEYS: 'synthetic-production-key', MELD_PRODUCTION_ACCOUNT_ID: 'synthetic-production-account' };
+  const result = await readSandboxWalletFundingHistory(db.database, { subject, nativeSessionId }, { environment: prod });
+  expect(result.environment).toBe('sandbox'); expect(result.settlement).toBe('unconfirmed'); expect(result.records).toHaveLength(1);
+  expect(db.queries[0]!.sql).toContain('payments.read_connected_wallet_sandbox_history');
+  expect(db.queries[0]!.params).toEqual([subject, nativeSessionId]); expect(db.queries).toHaveLength(1);
+  const missing = database([]);
+  await expect(readSandboxWalletFundingHistory(missing.database, { subject, nativeSessionId }, { environment: { ...prod, MELD_PRODUCTION_API_KEYS: '' } })).rejects.toThrow('unconfigured');
+  expect(missing.queries).toHaveLength(0);
+});
 test('new connected-wallet BUY locks verified server destination, sandbox, source units and Transak; never touches pool or production ledgers', async () => {
   const db = database([[binding], [{ id, address, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
   const api = provider([routes, quote, widget]);

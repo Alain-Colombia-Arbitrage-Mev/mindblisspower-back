@@ -2,7 +2,7 @@ import { isIP } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { readSandboxWallet, sandboxWalletConfiguration, type SandboxWalletDatabase, type SandboxWalletEnvironment,
+import { readSandboxWallet, sandboxWalletCapabilities, sandboxWalletConfiguration, type SandboxWalletDatabase, type SandboxWalletEnvironment,
   type SandboxWalletPrincipal } from '../identity/sandbox-wallet';
 import { createAdministrativePreflightGate, readAdministrativeSandboxOptions, sandboxProviderWidgetUrl } from './wallet-funding';
 import { sandboxMeldJson, sandboxOperation, sandboxOperationScope } from './meld-sandbox-http';
@@ -185,7 +185,10 @@ export async function readSandboxWalletFundingStatus(database: SandboxWalletData
 }
 export async function readSandboxWalletFundingHistory(database: SandboxWalletDatabase, input: SandboxWalletPrincipal,
   { environment = process.env, signal, timeoutMs }: Dependencies = {}) {
-  sandboxWalletConfiguration(environment); const scope = sandboxOperationScope(signal, timeoutMs);
+  // Historical cached test records need no upstream sandbox credential. They
+  // remain owner-scoped test results and never use the production merchant.
+  if (!sandboxWalletCapabilities(environment).configured) throw Error('sandbox_wallet_unconfigured');
+  const scope = sandboxOperationScope(signal, timeoutMs);
   try {
     const rows = await sandboxOperation(() => database.execute(sql`SELECT * FROM payments.read_connected_wallet_sandbox_history(
       ${input.subject},${input.nativeSessionId})`), scope.signal);

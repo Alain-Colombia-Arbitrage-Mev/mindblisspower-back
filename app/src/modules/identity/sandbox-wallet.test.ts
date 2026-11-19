@@ -63,3 +63,14 @@ test('new login can display existing immutable binding but cannot reuse a prior 
   expect(await readSandboxWallet(db.database, principal, options)).toMatchObject({ status: 'linked', address, verified: false });
   expect(await readSandboxWallet(db.database, principal, options)).toMatchObject({ status: 'unlinked', verified: false });
 });
+test('ownership activation works with the isolated production merchant and no sandbox secret; it still grants no broadcast capability', async () => {
+  const env = { WALLET_SANDBOX_REOWN_ENABLED: 'true', WALLET_MELD_PRODUCTION_ENABLED: 'true',
+    MELD_PRODUCTION_API_KEYS: 'synthetic-production-key', MELD_PRODUCTION_ACCOUNT_ID: 'production-account' };
+  const db = database([[challenge()], [challenge()], [binding], [binding]]);
+  expect(sandboxWalletCapabilities(env).configured).toBe(true);
+  expect((await createSandboxWalletChallenge(db.database, { address }, principal, { ...options, environment: env, id: () => id, nonce: () => nonce })).method).toBe('personal_sign');
+  expect(await verifySandboxWallet(db.database, { challengeId: id, signature: await signer.signMessage(challenge().message) }, principal, { ...options, environment: env }))
+    .toMatchObject({ address, verified: true, canBroadcast: false });
+  expect(await readSandboxWallet(db.database, principal, { ...options, environment: env })).toMatchObject({ address, verified: true });
+  expect(JSON.stringify(db.queries)).not.toMatch(/funding|production_attempt|wallet_movement/);
+});
