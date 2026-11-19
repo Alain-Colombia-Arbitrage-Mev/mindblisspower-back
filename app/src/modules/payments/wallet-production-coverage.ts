@@ -8,8 +8,13 @@ export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'ONME
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/);
 const instant = z.string().max(40).datetime({ offset: true });
 const positive = z.number().finite().positive().max(1_000_000_000);
-export const productionAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON']);
+export const productionAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON', 'USDC_ARBITRUM']);
 export type ProductionAsset = z.infer<typeof productionAsset>;
+export const productionAssetDetails = {
+  USDT_POLYGON: { asset: 'USDT', network: 'polygon', chainId: 137 },
+  USDC_POLYGON: { asset: 'USDC', network: 'polygon', chainId: 137 },
+  USDC_ARBITRUM: { asset: 'USDC', network: 'arbitrum', chainId: 42161 },
+} as const;
 const rowSchema = z.object({ country: z.string().regex(/^[A-Z]{2}$/), sourceCurrencyCode: z.string().regex(/^[A-Z]{3}$/),
   serviceProvider: token, paymentMethodType: token, minorUnits: z.number().int().min(0).max(2),
   minimumAmount: z.number().finite().nonnegative().max(1_000_000_000), maximumAmount: positive,
@@ -26,7 +31,9 @@ type CoverageEnvironment = { MELD_PRODUCTION_API_KEYS?: string; MELD_PRODUCTION_
 type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string };
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
-  asset === 'USDT_POLYGON' || (serviceProvider === 'ONRAMPMONEY'
+  asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
+    && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')
+  || (asset === 'USDC_POLYGON' && serviceProvider === 'ONRAMPMONEY'
     && ((country === 'MX' && fiat === 'MXN' && method === 'SPEI')
       || (country === 'US' && fiat === 'USD' && ['ACH', 'LOCAL_BANK_TRANSFER'].includes(method))
       || (country === 'CO' && fiat === 'COP' && ['PSE', 'LOCAL_BANK_TRANSFER'].includes(method))));

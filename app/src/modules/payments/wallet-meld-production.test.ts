@@ -3,7 +3,8 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { SandboxWalletDatabase } from '../identity/sandbox-wallet';
 import { createProductionWalletSession, normalizeProductionWalletRoutes, productionWalletCapabilities, productionWalletCheckoutUrl,
-  quoteProductionWalletFunding, readProductionWalletDiscovery, readProductionWalletOptions, readProductionWalletHistory, readProductionWalletStatus } from './wallet-meld-production';
+  quoteProductionWalletFunding, readProductionWalletDiscovery, readProductionWalletOptions, readProductionWalletHistory, readProductionWalletStatus,
+  validateProductionWalletTransaction } from './wallet-meld-production';
 import { productionMeldJson, productionScope } from './wallet-meld-production-http';
 import { syntheticCoverage as catalogue, coverageTestEnvironment } from './wallet-production-coverage-fixture';
 import { walletWidgetDiagnostic } from './wallet-production-diagnostic';
@@ -92,6 +93,58 @@ test('USDC COP PSE records the asset and opens only an opaque checkout with matc
       expect(db.queries[1]!.params.at(-1)).toBe('USDC_POLYGON');
       expect(api.calls[2]!.body.sessionData.destinationCurrencyCode).toBe('USDC_POLYGON');
     }
+  }
+});
+
+test('Alchemy Pay card in MX and EUR requires a matching signed Arbitrum prefill before exposing the opaque checkout', async () => {
+  const card = { ...input, sourceCurrencyCode: 'EUR', amount: 100, serviceProvider: 'ALCHEMYPAY' };
+  const mexico = { ...catalogue, rows: [{ ...catalogue.rows[0], country: 'MX', sourceCurrencyCode: 'EUR', serviceProvider: 'ALCHEMYPAY',
+    paymentMethodType: 'CREDIT_DEBIT_CARD', minimumAmount: 14, maximumAmount: 1879, verifiedAmount: 14, destinationCurrencyCode: 'USDC_ARBITRUM' }] };
+  const rail = { partner: 'ALCHEMYPAY', source: 'EUR', destination: 'USDC_ARBITRUM', paymentMethods: [
+    { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'EUR', min: 14, max: 1879 } },
+  ] };
+  const estimate = { quotes: [{ ...quote('ALCHEMYPAY').quotes[0], countryCode: 'MX', sourceCurrencyCode: 'EUR', sourceAmount: 100,
+    destinationCurrencyCode: 'USDC_ARBITRUM' }] };
+  const prefill = new URLSearchParams({ address: wallet, appId: 'fixture-app', callbackUrl: 'https://api.meld.io/webhooks/alchemypay/fixture',
+    country: 'MX', crypto: 'USDC', fiat: 'EUR', fiatAmount: '100.00', merchantOrderNo: 'fixture-order', network: 'ARBITRUM',
+    redirectUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}`,
+    showTable: 'buy', timestamp: '1795126019602', sign: `${'a'.repeat(43)}=` });
+  const { requestId, serviceProvider, ...quoteInput } = card;
+  const quoteDb = database([[binding]]), quoteApi = provider([[rail], estimate]);
+  const expected = { address: wallet, asset: 'USDC', network: 'arbitrum', chainId: 42161 };
+  expect(await quoteProductionWalletFunding(quoteDb.database, quoteInput, { ...options, catalogue: mexico, fetchImpl: quoteApi.fetchImpl }))
+    .toMatchObject({ destination: expected, quotes: [{ serviceProvider: 'ALCHEMYPAY', destinationCurrencyCode: 'USDC_ARBITRUM' }] });
+
+  for (const change of [null, ['address', `0x${'2'.repeat(40)}`], ['fiat', 'USD'], ['fiatAmount', '110.00'], ['network', 'POLYGON'],
+    ['payWayCode', '501'], ['sign', ''], ['callbackUrl', 'https://untrusted.invalid/webhooks/alchemypay/fixture']]) {
+    const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+    const parameters = new URLSearchParams(prefill);
+    if (change) parameters.set(change[0]!, change[1]!);
+    const api = provider([[rail], estimate, { ...widget, serviceProviderWidgetUrl: `https://ramp.alchemypay.org/?${parameters}` }]);
+    const checkout = createProductionWalletSession(db.database, card, { ...options, catalogue: mexico, fetchImpl: api.fetchImpl });
+    if (change) {
+      await expect(checkout).rejects.toThrow('provider_unavailable');
+      expect(db.queries[2]!.params[3]).toBe('unavailable');
+    } else {
+      expect(await checkout).toMatchObject({ destinationCurrencyCode: 'USDC_ARBITRUM', destination: expected, checkoutUrl: widget.widgetUrl });
+      expect(db.queries[1]!.params.at(-1)).toBe('USDC_ARBITRUM');
+      expect(api.calls[2]!.body.sessionData).toMatchObject({ serviceProvider, sourceCurrencyCode: 'EUR', sourceAmount: '100.00',
+        destinationCurrencyCode: 'USDC_ARBITRUM', paymentMethodType: 'CREDIT_DEBIT_CARD', walletAddress: wallet });
+    }
+  }
+});
+
+test('an Arbitrum card payment requires provider evidence from Arbitrum and the stored matching destination', () => {
+  const attempt = { ...row, service_provider: 'ALCHEMYPAY', source_currency: 'EUR', requested_amount: 100,
+    payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDC_ARBITRUM' as const, status: 'session_created' as const };
+  const raw = { transaction: { id: 'vendor-transaction', accountId: account, sessionId: 'vendor-session', customerId: 'vendor-customer',
+    externalSessionId: id, externalCustomerId: customer, serviceProvider: 'ALCHEMYPAY', transactionType: 'CRYPTO_PURCHASE',
+    countryCode: 'MX', sourceCurrencyCode: 'EUR', sourceAmount: 100, destinationCurrencyCode: 'USDC_ARBITRUM',
+    destinationAmount: 105.123456, paymentMethodType: 'CREDIT_DEBIT_CARD', status: 'SETTLED', updatedAt: now.toISOString(),
+    cryptoDetails: { destinationWalletAddress: wallet, chainId: 42161 } } };
+  expect(validateProductionWalletTransaction(raw, attempt, 'vendor-transaction')).toMatchObject({ destinationCurrencyCode: 'USDC_ARBITRUM', chainId: '42161', receivedAmount: '105.123456' });
+  for (const cryptoDetails of [{ ...raw.transaction.cryptoDetails, chainId: 137 }, { ...raw.transaction.cryptoDetails, destinationWalletAddress: `0x${'2'.repeat(40)}` }]) {
+    expect(() => validateProductionWalletTransaction({ transaction: { ...raw.transaction, cryptoDetails } }, attempt, 'vendor-transaction')).toThrow('provider_unavailable');
   }
 });
 test('production gate never borrows sandbox credentials and disabled flows make no DB/provider call', async () => {

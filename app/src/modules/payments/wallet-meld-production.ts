@@ -9,7 +9,7 @@ import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-p
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits, coverageMethodsByProvider,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
-  productionCheckoutProviders, type ProductionAsset } from './wallet-production-coverage';
+  productionAssetDetails, productionCheckoutProviders, type ProductionAsset } from './wallet-production-coverage';
 
 const uuid = z.string().uuid().transform(value => value.toLowerCase()), country = z.string().regex(/^[A-Z]{2}$/), currency = z.string().regex(/^[A-Z]{3}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/).refine(value => value !== '.' && value !== '..');
@@ -40,8 +40,7 @@ export function productionWalletCapabilities(environment: SandboxWalletEnvironme
     network: 'polygon' as const, chainId: 137 as const, canBroadcast: false as const };
 }
 const one = (rows: unknown[]) => { if (rows.length !== 1) throw Error('wallet_production_unavailable'); return rows[0]; };
-const destination = (value: string, asset: ProductionAsset) => ({ address: value,
-  asset: asset === 'USDC_POLYGON' ? 'USDC' as const : 'USDT' as const, network: 'polygon' as const, chainId: 137 as const });
+const destination = (value: string, asset: ProductionAsset) => ({ address: value, ...productionAssetDetails[asset] });
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
 export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string, countryCode?: string,
   asset: ProductionAsset = 'USDT_POLYGON', methodsByProvider?: ReadonlyMap<string, ReadonlySet<string>>): Route[] {
@@ -157,6 +156,26 @@ function onrampUsdcPrefill(value: string | null | undefined, input: z.infer<type
     };
     return url.origin === 'https://onramp.money' && !url.username && !url.password && !url.hash && url.pathname === '/main/buy/'
       && Object.entries(expected).every(([key, value]) => params.getAll(key).length === 1 && params.get(key) === value);
+  } catch { return false; }
+}
+
+function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, redirectUrl: string) {
+  if (!value || !productionAssetAllowed('USDC_ARBITRUM', input.country, input.sourceCurrencyCode, input.serviceProvider, input.paymentMethodType)) return false;
+  try {
+    const url = new URL(value), params = url.searchParams;
+    const expected = { address: walletAddress, country: 'MX', fiat: 'EUR', fiatAmount: input.amount.toFixed(2),
+      crypto: 'USDC', network: 'ARBITRUM', showTable: 'buy', redirectUrl };
+    const callback = new URL(params.get('callbackUrl') || '');
+    return url.origin === 'https://ramp.alchemypay.org' && url.pathname === '/' && !url.username && !url.password && !url.hash
+      && [...params.keys()].every(key => params.getAll(key).length === 1)
+      && Object.entries(expected).every(([key, value]) => params.get(key) === value)
+      && callback.origin === 'https://api.meld.io' && /^\/webhooks\/alchemypay\/[A-Za-z0-9_-]{1,128}$/.test(callback.pathname)
+      && !callback.username && !callback.password && !callback.search && !callback.hash
+      && /^[A-Za-z0-9_-]{1,128}$/.test(params.get('appId') || '')
+      && /^[A-Za-z0-9_-]{1,128}$/.test(params.get('merchantOrderNo') || '')
+      && /^\d{13}$/.test(params.get('timestamp') || '')
+      && /^[A-Za-z0-9+/]{43}=$/.test(params.get('sign') || '')
+      && (!params.has('payWayCode') || params.get('payWayCode') === '10001');
   } catch { return false; }
 }
 
@@ -276,7 +295,9 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
       // prefill separately so a mismapped fiat, network or recipient cannot open.
       const checkoutUrl = asset === 'USDC_POLYGON'
         ? (onrampUsdcPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
-        : productionWalletCheckoutUrl(session.data.serviceProviderWidgetUrl, input.serviceProvider) ?? hosted;
+        : asset === 'USDC_ARBITRUM'
+          ? (alchemyPayArbitrumPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
+          : productionWalletCheckoutUrl(session.data.serviceProviderWidgetUrl, input.serviceProvider) ?? hosted;
       if (!checkoutUrl) throw Error('wallet_production_provider_unavailable');
       finishing = true; stage = 'widget_finish'; await finish('session_created', session.data.id, session.data.customerId);
       return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
@@ -294,10 +315,11 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
 const statuses = z.enum(['PENDING_CREATED', 'PENDING', 'PROCESSING', 'AUTHORIZED', 'ACCEPTED', 'PARTIALLY_SETTLED',
   'SETTLING', 'TWO_FA_REQUIRED', 'TWO_FA_PROVIDED', 'ERROR', 'SETTLED', 'FAILED', 'DECLINED', 'CANCELLED', 'REFUNDED', 'VOIDED', 'AUTHORIZATION_EXPIRED']);
 const instant = z.string().datetime({ offset: true });
+const proofChainId = z.enum(['137', '42161']);
 const proofInput = z.object({ transactionId: identifier, accountId: identifier, sessionId: identifier, externalSessionId: uuid,
   externalCustomerId: uuid, serviceProvider: provider, countryCode: country, sourceCurrencyCode: currency, paymentMethodType: token,
   sourceAmount: z.string().regex(/^\d{1,10}\.\d{2}$/), destinationCurrencyCode: productionAsset, walletAddress: address,
-  chainId: z.literal('137'), providerStatus: statuses, providerUpdatedAt: instant,
+  chainId: proofChainId, providerStatus: statuses, providerUpdatedAt: instant,
   receivedAmount: z.string().regex(/^\d{1,12}(?:\.\d{1,6})?$/),
 }).strict().refine(value => value.providerStatus !== 'SETTLED' || Number(value.receivedAmount) > 0);
 type Confirmation = { state: 'unconfirmed' | 'pending' | 'confirmed' | 'failed'; source: 'none' | 'meld_production_api'; testMode: false;
@@ -323,7 +345,8 @@ function matchesProof(proof: z.infer<typeof proofInput>, row: Attempt) {
   return proof.externalSessionId === row.id && proof.accountId === row.account_id && proof.sessionId === row.provider_session_id
     && proof.externalCustomerId === row.customer_reference && proof.serviceProvider === row.service_provider && proof.countryCode === row.country_code
     && proof.sourceCurrencyCode === row.source_currency && proof.sourceAmount === row.requested_amount.toFixed(2)
-    && proof.paymentMethodType === row.payment_method && proof.walletAddress === row.address && proof.destinationCurrencyCode === row.destination_currency;
+    && proof.paymentMethodType === row.payment_method && proof.walletAddress === row.address && proof.destinationCurrencyCode === row.destination_currency
+    && proof.chainId === String(productionAssetDetails[row.destination_currency].chainId);
 }
 function cachedProof(row: Attempt) {
   if (row.proof === null) return null; const parsed = proofInput.safeParse(row.proof);
@@ -344,7 +367,7 @@ export function validateProductionWalletTransaction(raw: unknown, row: Attempt, 
     transactionType: z.literal('CRYPTO_PURCHASE'), countryCode: country, sourceCurrencyCode: currency, sourceAmount: preciseAmount,
     destinationCurrencyCode: productionAsset, destinationAmount: z.number().finite().nonnegative().max(1_000_000_000),
     paymentMethodType: token, status: z.string(), updatedAt: instant,
-    cryptoDetails: z.object({ destinationWalletAddress: z.string().regex(/^0x[0-9a-f]{40}$/i), chainId: z.union([z.literal('137'), z.literal(137)]) }) }) }).safeParse(raw);
+    cryptoDetails: z.object({ destinationWalletAddress: z.string().regex(/^0x[0-9a-f]{40}$/i), chainId: z.union([proofChainId, z.literal(137), z.literal(42161)]) }) }) }).safeParse(raw);
   if (!parsed.success) throw Error('wallet_production_provider_unavailable'); const item = parsed.data.transaction;
   if (item.id !== transactionId || item.customerId !== row.provider_customer_id
     || Math.abs(item.destinationAmount * 1e6 - Math.round(item.destinationAmount * 1e6)) > 0.00001) throw Error('wallet_production_provider_unavailable');
@@ -352,7 +375,7 @@ export function validateProductionWalletTransaction(raw: unknown, row: Attempt, 
     externalSessionId: item.externalSessionId, externalCustomerId: item.externalCustomerId, serviceProvider: item.serviceProvider,
     countryCode: item.countryCode, sourceCurrencyCode: item.sourceCurrencyCode, sourceAmount: item.sourceAmount.toFixed(2),
     paymentMethodType: item.paymentMethodType, destinationCurrencyCode: item.destinationCurrencyCode,
-    walletAddress: item.cryptoDetails.destinationWalletAddress.toLowerCase(), chainId: '137',
+    walletAddress: item.cryptoDetails.destinationWalletAddress.toLowerCase(), chainId: String(item.cryptoDetails.chainId),
     providerStatus: item.status === 'PENDING CREATED' ? 'PENDING_CREATED' : item.status, providerUpdatedAt: item.updatedAt,
     receivedAmount: item.destinationAmount.toFixed(6).replace(/\.?0+$/, '') || '0' });
   if (!proof.success || !matchesProof(proof.data, row)) throw Error('wallet_production_provider_unavailable');

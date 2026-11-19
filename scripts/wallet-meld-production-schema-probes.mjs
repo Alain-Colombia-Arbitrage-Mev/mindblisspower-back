@@ -145,4 +145,65 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
   deny(bankCreate([...copInput.slice(0,2),randomUUID(),'CO',fiat==='USD'?'50':'42300',fiat,method,provider,'production-account']),'destination_currency_check');
  }
  console.log(JSON.stringify({walletUsdcSchema:'passed',verifiedCopBankRails:true,preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
+
+ const ledgerDigest=`SELECT md5(coalesce(string_agg(to_jsonb(a)::text,E'\n' ORDER BY a.id),'')) FROM ${table} a;`;
+ const ledgerBeforeArbitrum=value(ledgerDigest,false);
+ const writerAndProof=['payments.create_wallet_meld_production_attempt(text,text,uuid,text,numeric,text,text,text,text,text)',
+  'payments.record_wallet_meld_production_proof(text,uuid,jsonb,text)'];
+ const accessSnapshot=`SELECT jsonb_agg(jsonb_build_array(oid,proowner,proacl,prosecdef,proconfig) ORDER BY oid)::text
+  FROM pg_proc WHERE oid IN(${writerAndProof.map(signature=>lit(signature)+'::regprocedure').join(',')});`;
+ const beforeAccess=value(accessSnapshot,false);
+ const legacyCreate="SELECT pg_get_functiondef('payments.create_wallet_meld_production_attempt(text,text,uuid,text,numeric,text,text,text,text)'::regprocedure);";
+ const beforeLegacyCreate=value(legacyCreate,false);
+ const beforeHistory=value(history(5));
+ psql(await readFile(new URL('../_meta/migration/124_wallet_meld_production_usdc_arbitrum.sql',import.meta.url),'utf8'));
+ eq(ledgerDigest,ledgerBeforeArbitrum,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(legacyCreate,beforeLegacyCreate,false);
+ eq(history(5),beforeHistory);
+ eq(oldRows,before.rows,false);
+
+ const arbOwner=users[6],arbId=randomUUID();
+ const arbCreate=(changes={},asset='USDC_ARBITRUM')=>{
+  const u={owner:arbOwner.subject,session:arbOwner.session,id:arbId,country:'MX',amount:'100',currency:'EUR',
+   method:'CREDIT_DEBIT_CARD',provider:'ALCHEMYPAY',account:'production-account',...changes};
+  return row('payments.create_wallet_meld_production_attempt',[u.owner,u.session,u.id,u.country,u.amount,u.currency,u.method,u.provider,u.account,asset]);
+ };
+ for(const change of [{country:'US'},{currency:'MXN'},{currency:'USD'},{provider:'BANXA'},{method:'APPLE_PAY'}]) {
+  deny(arbCreate({...change,id:randomUUID()}),'wallet_meld_production_attempt_destination_currency_check');
+ }
+ deny(arbCreate({id:randomUUID()},'USDC_ETHEREUM'),'wallet_production_invalid_request');
+ deny(arbCreate({id:randomUUID(),session:users[7].session}),'administrative_signing_forbidden');
+ const arbCreated=JSON.parse(value(arbCreate()));
+ assert.equal(arbCreated.created,true);
+ assert.equal(arbCreated.address,arbOwner.address);
+ assert.equal(arbCreated.customer_reference,bindings[6].binding_reference);
+ assert.equal(JSON.parse(value(arbCreate())).created,false);
+ deny(arbCreate({},'USDT_POLYGON'),'wallet_production_request_already_used');
+ const arbRead=(user=arbOwner)=>row('payments.read_wallet_meld_production_attempt_with_asset',[user.subject,user.session,arbId]);
+ eq(arbRead(users[7]),'');
+ assert.equal(JSON.parse(value(arbRead())).destination_currency,'USDC_ARBITRUM');
+ eq(`SELECT chain_id FROM ${table} WHERE id=${lit(arbId)};`,'42161',false);
+ const columns='id,subject,native_session_id,wallet_address,customer_reference,country_code,source_currency,requested_amount,service_provider,payment_method,account_id,destination_currency,chain_id,created_at,updated_at';
+ const invalidChainInsert=(source,chain)=>`INSERT INTO ${table} (${columns})
+  SELECT ${lit(randomUUID())},subject,native_session_id,wallet_address,customer_reference,country_code,source_currency,requested_amount,
+    service_provider,payment_method,account_id,destination_currency,${chain},created_at,updated_at FROM ${table} WHERE id=${lit(source)};`;
+ deny(invalidChainInsert(arbId,137),'wallet_meld_production_attempt_chain_id_check',false);
+ deny(invalidChainInsert(bankId,42161),'wallet_meld_production_attempt_chain_id_check',false);
+ deny(`UPDATE ${table} SET chain_id=137 WHERE id=${lit(arbId)};`,'wallet_production_attempt_immutable',false);
+ eq(finish(arbId,6),'t');
+ const arbProof={...proof,transactionId:'transaction-'+arbId,sessionId:'session-'+arbId,externalSessionId:arbId,
+  externalCustomerId:bindings[6].binding_reference,serviceProvider:'ALCHEMYPAY',countryCode:'MX',sourceCurrencyCode:'EUR',sourceAmount:'100.00',
+  destinationCurrencyCode:'USDC_ARBITRUM',walletAddress:arbOwner.address,chainId:'42161',providerStatus:'SETTLED',
+  providerUpdatedAt:new Date().toISOString(),receivedAmount:'105.690001',paymentMethodType:'CREDIT_DEBIT_CARD'};
+ for(const change of [{chainId:'137'},{destinationCurrencyCode:'USDC_POLYGON'},{sourceCurrencyCode:'MXN'},
+  {serviceProvider:'BANXA'},{paymentMethodType:'APPLE_PAY'},{walletAddress:users[7].address}]) {
+  deny(save({...arbProof,...change},arbOwner.subject,arbId),'wallet_production_proof_context_mismatch');
+ }
+ assert.deepEqual(JSON.parse(value(save(arbProof,arbOwner.subject,arbId))),arbProof);
+ assert.deepEqual(JSON.parse(value(arbRead())).proof,arbProof);
+ deny(save({...bankProof,chainId:'42161'},bank.subject,bankId),'wallet_production_proof_context_mismatch');
+ assert.deepEqual(JSON.parse(value(save(bankProof,bank.subject,bankId))),bankProof);
+ eq(oldRows,before.rows,false);
+ console.log(JSON.stringify({walletArbitrumSchema:'passed',verifiedMexicoEurCard:true,preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
 }

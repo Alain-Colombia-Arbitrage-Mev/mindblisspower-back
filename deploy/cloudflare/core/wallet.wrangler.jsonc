@@ -19,7 +19,7 @@
       "vars": { "WALLET_MELD_PRODUCTION_ENABLED": "true" },
       "durable_objects": { "bindings": [{ "name": "WALLET_SANDBOX_CONTAINER", "class_name": "WalletSandboxApi" }] },
       "exports": { "WalletSandboxApi": { "type": "durable-object", "storage": "sqlite", "container": "wallet-sandbox-api" } },
-      "containers": [{ "name": "wallet-sandbox-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/wallet-production-isolated:20261119-meld-route-filter@sha256:9d48698057f3f613be69dbb996b58f51b9a08d5a46500617f4393353ad4da310",
+      "containers": [{ "name": "wallet-sandbox-api", "image": "registry.cloudflare.com/ed805ed2b05218b41fc1d4d2440e658e/mindbliss/wallet-production-isolated:20261119-alchemy-eur-arbitrum@sha256:fb11421281ae3623f44e805dff694381a287db88f1c45c4e7d66de0e0db23dab",
         "instance_type": "basic", "max_instances": 1, "scheduling_policy": "default", "rollout_kind": "full_auto", "rollout_step_percentage": 100 }]
     }
   }

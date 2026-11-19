@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-19T21:27:19.008Z",
+  "verifiedAt": "2026-11-19T22:10:01.295Z",
   "rows": [
     {
       "country": "AD",
@@ -1111,6 +1111,19 @@
       "verifiedAmount": 2000,
       "verifiedAt": "2026-11-19T17:39:42.887Z",
       "evidence": "quote_verified"
+    },
+    {
+      "country": "MX",
+      "sourceCurrencyCode": "EUR",
+      "serviceProvider": "ALCHEMYPAY",
+      "paymentMethodType": "CREDIT_DEBIT_CARD",
+      "minorUnits": 2,
+      "minimumAmount": 14,
+      "maximumAmount": 1879,
+      "verifiedAmount": 14,
+      "verifiedAt": "2026-11-19T22:10:01.295Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
     },
     {
       "country": "MX",
