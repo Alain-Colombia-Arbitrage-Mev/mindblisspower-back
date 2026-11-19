@@ -321,6 +321,31 @@ test('live routes cannot enable a new method or expand the audited provider-spec
     .toMatchObject({ paymentMethods: ['SPEI'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ method: 'SPEI', minimumAmount: 200, maximumAmount: 1000 }] }] });
 });
 
+test('hosted route discovery ignores unapproved providers and methods and intersects duplicate live limits', async () => {
+  const paymentMethods = ['ACH', 'LOCAL_BANK_TRANSFER'];
+  const audited = { ...catalogue, rows: paymentMethods.map(paymentMethodType => ({ ...catalogue.rows[0],
+    country: 'US', sourceCurrencyCode: 'USD', serviceProvider: 'ONRAMPMONEY', paymentMethodType,
+    minimumAmount: 50, maximumAmount: 25000, verifiedAmount: 100, destinationCurrencyCode: 'USDC_POLYGON',
+  })) };
+  const bankRoute = (name: string, min: number, max: number) => ({ name, checkoutSupported: true, limits: { currencyCode: 'USD', min, max } });
+  const unrelated = { partner: 'BANXA', source: 'USD', destination: 'USDC_POLYGON', paymentMethods: [bankRoute('CREDIT_DEBIT_CARD', 0, 0)] };
+  for (const [narrowest, expected] of [[10000, ['ACH', 'LOCAL_BANK_TRANSFER']], [80, ['LOCAL_BANK_TRANSFER']]] as const) {
+    const supported = { partner: 'ONRAMPMONEY', source: 'USD', destination: 'USDC_POLYGON', paymentMethods: [
+      bankRoute('ACH', 100, 25000), bankRoute('ACH', 50, narrowest), bankRoute('LOCAL_BANK_TRANSFER', 50, 25000),
+      bankRoute('CREDIT_DEBIT_CARD', 0, 0),
+      { ...bankRoute('ACH', 25000, 25000), checkoutSupported: false },
+    ] };
+    const api = provider([[unrelated, supported]]);
+    const result = await readProductionWalletOptions({ country: 'US', sourceCurrencyCode: 'USD' }, { environment, fetchImpl: api.fetchImpl, catalogue: audited });
+    expect(result.paymentMethods).toEqual([...expected]);
+    expect(result.routes.map(route => route.serviceProvider)).toEqual(['ONRAMPMONEY']);
+    if (narrowest === 10000) expect(result.routes[0]!.paymentMethods[0]).toEqual({ method: 'ACH', currencyCode: 'USD', minimumAmount: 100, maximumAmount: 10000 });
+    const url = new URL(api.calls[0]!.url);
+    expect(url.pathname).toBe('/network-partner/supported/routes/CRYPTO_ONRAMP/US/USD/USDC_POLYGON');
+    expect(Object.fromEntries(url.searchParams)).toEqual({ partners: 'ONRAMPMONEY', checkout: 'true' });
+  }
+});
+
 test('unsupported country/fiat/method and fractional zero-decimal amounts stop before owner reads, quotes or journal writes', async () => {
   for (const patch of [{ country: 'CR', sourceCurrencyCode: 'USD', amount: 50 }, { sourceCurrencyCode: 'USD', amount: 50 },
     { country: 'JP', sourceCurrencyCode: 'JPY', paymentMethodType: 'LOCAL_BANK_TRANSFER', amount: 2000.5 }]) {

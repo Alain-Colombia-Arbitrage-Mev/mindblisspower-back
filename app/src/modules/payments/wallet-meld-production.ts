@@ -7,7 +7,7 @@ import { createAdministrativePreflightGate } from './wallet-funding';
 import { productionMeldJson, productionOperation, productionScope } from './wallet-meld-production-http';
 import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-production-diagnostic';
 import coverageSnapshot from './wallet-production-coverage-data.json';
-import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits,
+import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits, coverageMethodsByProvider,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
   productionCheckoutProviders, type ProductionAsset } from './wallet-production-coverage';
 
@@ -43,17 +43,22 @@ const one = (rows: unknown[]) => { if (rows.length !== 1) throw Error('wallet_pr
 const destination = (value: string, asset: ProductionAsset) => ({ address: value,
   asset: asset === 'USDC_POLYGON' ? 'USDC' as const : 'USDT' as const, network: 'polygon' as const, chainId: 137 as const });
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
-export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string, countryCode?: string, asset: ProductionAsset = 'USDT_POLYGON'): Route[] {
+export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string, countryCode?: string,
+  asset: ProductionAsset = 'USDT_POLYGON', methodsByProvider?: ReadonlyMap<string, ReadonlySet<string>>): Route[] {
   if (!Array.isArray(raw) || raw.length > 256) throw Error('wallet_production_provider_unavailable');
   const routes = new Map<string, Route>();
   for (const item of raw) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw Error('wallet_production_provider_unavailable');
     const value = item as Record<string, unknown>;
     if (typeof value.partner !== 'string' || !productionCheckoutProviders.has(value.partner) || value.checkoutSupported === false) continue;
+    const allowedMethods = methodsByProvider?.get(value.partner);
+    if (methodsByProvider && !allowedMethods) continue;
     if (value.source !== sourceCurrencyCode || value.destination !== asset || !Array.isArray(value.paymentMethods)
       || value.paymentMethods.length > 128) throw Error('wallet_production_provider_unavailable');
     let result = routes.get(value.partner); if (!result) { result = { serviceProvider: value.partner, paymentMethods: [] }; routes.set(value.partner, result); }
     for (const rawMethod of value.paymentMethods) {
+      if (allowedMethods && !allowedMethods.has(rawMethod?.name)) continue;
+      if (typeof rawMethod?.category === 'string' && rawMethod.category !== 'CRYPTO_ONRAMP') continue;
       const parsed = z.object({ name: token, checkoutSupported: z.boolean().optional(), limits: z.object({ currencyCode: currency,
         min: z.number().finite().nonnegative(), max: z.number().finite().positive().max(1_000_000_000) }).nullish() }).safeParse(rawMethod);
       if (!parsed.success) throw Error('wallet_production_provider_unavailable'); const method = parsed.data;
@@ -62,27 +67,32 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
       if (countryCode === 'MX' && sourceCurrencyCode === 'MXN' && value.partner === 'BANXA' && method.name === 'SPEI') continue;
       if (method.checkoutSupported === false || !method.limits) continue;
       const limit = method.limits; if (limit.currencyCode !== sourceCurrencyCode || limit.max < limit.min) throw Error('wallet_production_provider_unavailable');
-      const minimumAmount = Math.ceil(Math.max(limit.min, sourceCurrencyCode === 'USD' ? 50 : 0.01) * 100) / 100;
-      const maximumAmount = Math.floor(Math.min(limit.max, sourceCurrencyCode === 'USD' ? 25000 : 1_000_000_000) * 100) / 100;
-      if (maximumAmount < minimumAmount) continue;
+      const minimumAmount = Math.max(limit.min, sourceCurrencyCode === 'USD' ? 50 : 0.01);
+      const maximumAmount = Math.min(limit.max, sourceCurrencyCode === 'USD' ? 25000 : 1_000_000_000);
       const prior = result.paymentMethods.find(entry => entry.method === method.name);
-      if (prior && (prior.minimumAmount !== minimumAmount || prior.maximumAmount !== maximumAmount)) throw Error('wallet_production_provider_unavailable');
-      if (!prior) result.paymentMethods.push({ method: method.name, currencyCode: sourceCurrencyCode, minimumAmount, maximumAmount });
+      if (prior) {
+        prior.minimumAmount = Math.max(prior.minimumAmount, minimumAmount);
+        prior.maximumAmount = Math.min(prior.maximumAmount, maximumAmount);
+      } else result.paymentMethods.push({ method: method.name, currencyCode: sourceCurrencyCode, minimumAmount, maximumAmount });
     }
   }
-  return [...routes.values()].filter(route => route.paymentMethods.length);
+  return [...routes.values()].map(route => ({ ...route,
+    paymentMethods: route.paymentMethods.filter(method => method.minimumAmount <= method.maximumAmount),
+  })).filter(route => route.paymentMethods.length);
 }
 export async function readProductionWalletOptions(raw: unknown, { environment = process.env, fetchImpl = fetch, signal, timeoutMs, catalogue = coverageSnapshot }: Dependencies = {}) {
   const config = productionWalletConfiguration(environment), input = productionWalletOptionsInput.parse(raw);
   const coverage = resolveProductionCoverage(environment, catalogue), scope = productionScope(signal, timeoutMs);
   const destinationCurrencyCode = coverageAsset(coverage, input.country, input.sourceCurrencyCode);
   try {
-    if (!coverageCurrencies(coverage, input.country).has(input.sourceCurrencyCode))
+    const methodsByProvider = coverageMethodsByProvider(coverage, input.country, input.sourceCurrencyCode);
+    if (!methodsByProvider.size)
       return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, destinationCurrencyCode, paymentMethods: [], routes: [] };
-    const result = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/${destinationCurrencyCode}`,
+    const query = new URLSearchParams({ partners: [...methodsByProvider.keys()].join(','), checkout: 'true' });
+    const result = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/${destinationCurrencyCode}?${query}`,
       { ...config, fetchImpl, signal: scope.signal });
     if (!result.ok && ![400, 404].includes(result.status)) throw Error('wallet_production_provider_unavailable');
-    const routes = result.ok ? intersectProductionCoverage(normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country, destinationCurrencyCode),
+    const routes = result.ok ? intersectProductionCoverage(normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country, destinationCurrencyCode, methodsByProvider),
       coverage, input.country, input.sourceCurrencyCode) : [];
     return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, destinationCurrencyCode,
       paymentMethods: [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))], routes };

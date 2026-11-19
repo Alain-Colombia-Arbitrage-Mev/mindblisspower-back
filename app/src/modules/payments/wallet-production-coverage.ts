@@ -84,6 +84,15 @@ export function coverageCountries(catalogue: CoverageCatalogue): Set<string> {
 export function coverageCurrencies(catalogue: CoverageCatalogue, country: string): Set<string> {
   return new Set(catalogue.rows.filter(row => row.country === country && permitted(row)).map(row => row.sourceCurrencyCode));
 }
+export function coverageMethodsByProvider(catalogue: CoverageCatalogue, country: string, fiat: string) {
+  const providers = new Map<string, Set<string>>();
+  for (const row of selectedRows(catalogue, country, fiat)) {
+    const methods = providers.get(row.serviceProvider) ?? new Set<string>();
+    methods.add(row.paymentMethodType);
+    providers.set(row.serviceProvider, methods);
+  }
+  return providers;
+}
 export function coverageMinorUnits(catalogue: CoverageCatalogue, country: string, fiat: string): number | undefined {
   return selectedRows(catalogue, country, fiat)[0]?.minorUnits;
 }
