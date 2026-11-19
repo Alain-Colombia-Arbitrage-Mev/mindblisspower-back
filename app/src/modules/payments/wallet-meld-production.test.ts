@@ -147,6 +147,92 @@ test('an Arbitrum card payment requires provider evidence from Arbitrum and the 
     expect(() => validateProductionWalletTransaction({ transaction: { ...raw.transaction, cryptoDetails } }, attempt, 'vendor-transaction')).toThrow('provider_unavailable');
   }
 });
+
+const usCard = { ...input, country: 'US', sourceCurrencyCode: 'USD', amount: 100, serviceProvider: 'RAMPNOW' };
+const cardNetworks = [
+  ['USDC_POLYGON', 'polygon', 137],
+  ['USDC_ARBITRUM', 'arbitrum-one', 42161],
+  ['USDC', 'ethereum', 1],
+] as const;
+const rampCatalogue = { ...catalogue, rows: cardNetworks.map(([destinationCurrencyCode]) => ({ ...catalogue.rows[0],
+  country: 'US', sourceCurrencyCode: 'USD', serviceProvider: 'RAMPNOW', paymentMethodType: 'CREDIT_DEBIT_CARD',
+  minimumAmount: 50, maximumAmount: 10000, verifiedAmount: 100, destinationCurrencyCode })) };
+const rampRoutes = (asset: string) => [{ partner: 'RAMPNOW', source: 'USD', destination: asset, paymentMethods: [
+  { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 10000 } },
+] }];
+
+test('RampNow discovers approved US card networks, preserves the chosen quote and validates the provider checkout', async () => {
+  const discovery = provider(cardNetworks.map(([asset]) => rampRoutes(asset)));
+  const result = await readProductionWalletOptions({ country: 'US', sourceCurrencyCode: 'USD' },
+    { environment, catalogue: rampCatalogue, fetchImpl: discovery.fetchImpl });
+  expect(result.routes[0]?.paymentMethods[0]).toEqual({ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD',
+    minimumAmount: 50, maximumAmount: 10000, destinationCurrencyCodes: cardNetworks.map(([asset]) => asset) });
+  for (const [asset, network, chainId] of cardNetworks) {
+    const prefill = new URLSearchParams({ orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: '100.00',
+      dstCurrency: 'USDC', dstChain: network, walletAddress: wallet, lockFields: 'walletAddress', paymentMode: 'card',
+      prefill: 'true', externalOrderId: widget.id,
+      returnUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}` });
+    for (const locked of [true, false]) {
+      if (!locked) prefill.set('lockFields', 'dstAsset');
+      const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+      const price = { quotes: [{ ...quote('RAMPNOW').quotes[0], sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: asset }] };
+      const api = provider([rampRoutes(asset), price, { ...widget, serviceProviderWidgetUrl: `https://app.rampnow.io/order/quote?${prefill}` }]);
+      const checkout = createProductionWalletSession(db.database, { ...usCard, destinationCurrencyCode: asset },
+        { ...options, catalogue: rampCatalogue, fetchImpl: api.fetchImpl });
+      if (!locked) {
+        await expect(checkout).rejects.toThrow('provider_unavailable');
+        expect(db.queries[2]!.params[3]).toBe('unavailable');
+      } else {
+        expect(await checkout).toMatchObject({ destinationCurrencyCode: asset, destination: { chainId, address: wallet, asset: 'USDC' },
+          checkoutUrl: widget.widgetUrl });
+        expect(api.calls[1]!.body.destinationCurrencyCode).toBe(asset);
+        expect(api.calls[2]!.body.sessionData.destinationCurrencyCode).toBe(asset);
+      }
+    }
+  }
+});
+
+test('RampNow confirms a different compatible network only after final native USDC arrives at the bound address', async () => {
+  const attempt = { ...row, country_code: 'US', source_currency: 'USD', requested_amount: 100, service_provider: 'RAMPNOW',
+    payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDC_POLYGON' };
+  const hash = '0x' + 'a'.repeat(64), blockHash = '0x' + 'b'.repeat(64);
+  const price = { transaction: { id: 'vendor-transaction', accountId: account, sessionId: 'vendor-session', customerId: 'vendor-customer',
+    externalSessionId: id, externalCustomerId: customer, serviceProvider: 'RAMPNOW', transactionType: 'CRYPTO_PURCHASE',
+    countryCode: 'US', sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: 'USDC_ARBITRUM',
+    destinationAmount: 95.07, paymentMethodType: 'CREDIT_DEBIT_CARD', status: 'SETTLED', updatedAt: now.toISOString(),
+    cryptoDetails: { destinationWalletAddress: wallet, chainId: 42161, blockchainTransactionId: hash } } };
+  const word = (value: string) => '0x' + value.replace(/^0x/, '').padStart(64, '0');
+  const proof = { transactionHash: hash, blockHash, blockNumber: '0x100', status: '0x1',
+    logs: [{ address: '0xaf88d065e77c8cc2239327c5edb3a432268e5831', topics: [
+      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', word('2'), word(wallet)],
+    data: word((95070000).toString(16)) }] };
+  const rpc = (id: number, result: unknown) => ({ jsonrpc: '2.0', id, result });
+  const search = { transactions: [{ id: price.transaction.id }] };
+  for (const scenario of ['confirmed', 'not-final', 'wrong-recipient', 'wrong-token', 'wrong-receipt', 'missing-hash']) {
+    const db = database([[attempt]]);
+    const detail = structuredClone(price);
+    if (scenario === 'missing-hash') detail.transaction.cryptoDetails.blockchainTransactionId = '';
+    const transfer = structuredClone(proof);
+    if (scenario === 'wrong-recipient') transfer.logs[0]!.topics[2] = word('2');
+    if (scenario === 'wrong-token') transfer.logs[0]!.address = '0x' + '1'.repeat(40);
+    if (scenario === 'wrong-receipt') transfer.transactionHash = '0x' + 'c'.repeat(64);
+    const api = provider([search, detail, rpc(1, '0xa4b1'), rpc(2, transfer),
+      rpc(3, { hash: blockHash, number: scenario === 'not-final' ? '0xff' : '0x101' }),
+      rpc(4, { hash: blockHash, number: '0x100' })]);
+    const status = await readProductionWalletStatus(db.database, { subject, nativeSessionId, checkoutReference: id },
+      { environment, fetchImpl: api.fetchImpl });
+    if (scenario !== 'confirmed') {
+      expect(status.confirmation.state).toBe('pending');
+      expect(status.confirmedDestination).toBeUndefined();
+      expect(db.queries).toHaveLength(1);
+      continue;
+    }
+    expect(status).toMatchObject({ destination: { chainId: 137 }, confirmedDestination: { chainId: 42161, address: wallet },
+      confirmation: { state: 'confirmed', receivedAmount: '95.07' } });
+    expect(db.queries).toHaveLength(2);
+    expect(api.calls.slice(2).every(call => call.url === 'https://arb1.arbitrum.io/rpc' && !call.headers.has('authorization'))).toBe(true);
+  }
+});
 test('production gate never borrows sandbox credentials and disabled flows make no DB/provider call', async () => {
   const db = database([]), api = provider([]);
   for (const env of [{}, { ...environment, WALLET_MELD_PRODUCTION_ENABLED: 'false' }, { MELD_API_SANDBOX: 'sandbox', MELD_ACCOUNT_ID: 'sb' },

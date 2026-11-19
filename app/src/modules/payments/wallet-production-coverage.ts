@@ -3,17 +3,17 @@ import { z } from 'zod';
 
 const scope = 'wallet-prod-20261119-v1';
 // Only connected providers with a compatible hosted checkout may create new attempts.
-// RampNow quotes and Yellow Card headless discovery do not establish those guarantees.
-export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'ONMETA', 'ONRAMPMONEY']);
+export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'ONMETA', 'ONRAMPMONEY', 'RAMPNOW']);
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/);
 const instant = z.string().max(40).datetime({ offset: true });
 const positive = z.number().finite().positive().max(1_000_000_000);
-export const productionAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON', 'USDC_ARBITRUM']);
+export const productionAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON', 'USDC_ARBITRUM', 'USDC']);
 export type ProductionAsset = z.infer<typeof productionAsset>;
 export const productionAssetDetails = {
   USDT_POLYGON: { asset: 'USDT', network: 'polygon', chainId: 137 },
   USDC_POLYGON: { asset: 'USDC', network: 'polygon', chainId: 137 },
   USDC_ARBITRUM: { asset: 'USDC', network: 'arbitrum', chainId: 42161 },
+  USDC: { asset: 'USDC', network: 'ethereum', chainId: 1 },
 } as const;
 const rowSchema = z.object({ country: z.string().regex(/^[A-Z]{2}$/), sourceCurrencyCode: z.string().regex(/^[A-Z]{3}$/),
   serviceProvider: token, paymentMethodType: token, minorUnits: z.number().int().min(0).max(2),
@@ -28,10 +28,16 @@ export type Row = CoverageRow;
 export type CoverageCatalogue = z.infer<typeof catalogueSchema>;
 type CoverageEnvironment = { MELD_PRODUCTION_API_KEYS?: string; MELD_PRODUCTION_ACCOUNT_ID?: string;
   MELD_PRODUCTION_CATALOGUE_ATTESTATION?: string };
-type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string };
-type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
+type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string; destinationCurrencyCode?: ProductionAsset };
+export type ProductionRoute = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number; destinationCurrencyCodes?: ProductionAsset[] }[] };
+export const rampNowAssets = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'] as const;
+export const rampNowAsset = z.enum(rampNowAssets);
+export function isUsCardFunding(country: string, fiat: string, method: string) {
+  return country === 'US' && fiat === 'USD' && method === 'CREDIT_DEBIT_CARD';
+}
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
-  asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
+  serviceProvider === 'RAMPNOW' ? isUsCardFunding(country, fiat, method) && rampNowAsset.safeParse(asset).success
+  : asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
     && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')
   || (asset === 'USDC_POLYGON' && serviceProvider === 'ONRAMPMONEY'
     && ((country === 'MX' && fiat === 'MXN' && method === 'SPEI')
@@ -72,14 +78,16 @@ export function resolveProductionCoverage(environment: CoverageEnvironment, rawC
   if (!parsed.success || Date.parse(parsed.data.verifiedAt) > now) throw Error('wallet_production_unconfigured');
   const seen = new Set<string>(), precision = new Map<string, number>(), assets = new Map<string, ProductionAsset>();
   for (const row of parsed.data.rows) {
-    const id = [row.country, row.sourceCurrencyCode, row.serviceProvider, row.paymentMethodType].join('|');
+    const asset = rowAsset(row);
+    const id = [row.country, row.sourceCurrencyCode, row.serviceProvider, row.paymentMethodType, asset].join('|');
     const pair = `${row.country}|${row.sourceCurrencyCode}`, units = precision.get(pair), range = bounds(row);
     if (!permitted(row) || seen.has(id) || (units !== undefined && units !== row.minorUnits)
-      || (assets.has(pair) && assets.get(pair) !== rowAsset(row))
+      || (assets.has(pair) && assets.get(pair) !== asset && row.serviceProvider !== 'RAMPNOW')
       || Date.parse(row.verifiedAt) > now || range.minimum > range.maximum
       || !precise(row.verifiedAmount, row.minorUnits) || row.verifiedAmount < range.minimum || row.verifiedAmount > range.maximum)
       throw Error('wallet_production_unconfigured');
-    seen.add(id); precision.set(pair, row.minorUnits); assets.set(pair, rowAsset(row));
+    seen.add(id); precision.set(pair, row.minorUnits);
+    if (row.serviceProvider !== 'RAMPNOW') assets.set(pair, asset);
     Object.freeze(row);
   }
   Object.freeze(parsed.data.rows);
@@ -91,9 +99,10 @@ export function coverageCountries(catalogue: CoverageCatalogue): Set<string> {
 export function coverageCurrencies(catalogue: CoverageCatalogue, country: string): Set<string> {
   return new Set(catalogue.rows.filter(row => row.country === country && permitted(row)).map(row => row.sourceCurrencyCode));
 }
-export function coverageMethodsByProvider(catalogue: CoverageCatalogue, country: string, fiat: string) {
+export function coverageMethodsByProvider(catalogue: CoverageCatalogue, country: string, fiat: string, asset = coverageAsset(catalogue, country, fiat)) {
   const providers = new Map<string, Set<string>>();
   for (const row of selectedRows(catalogue, country, fiat)) {
+    if (rowAsset(row) !== asset) continue;
     const methods = providers.get(row.serviceProvider) ?? new Set<string>();
     methods.add(row.paymentMethodType);
     providers.set(row.serviceProvider, methods);
@@ -104,14 +113,16 @@ export function coverageMinorUnits(catalogue: CoverageCatalogue, country: string
   return selectedRows(catalogue, country, fiat)[0]?.minorUnits;
 }
 export function coverageAsset(catalogue: CoverageCatalogue, country: string, fiat: string): ProductionAsset {
-  const row = selectedRows(catalogue, country, fiat)[0];
+  const rows = selectedRows(catalogue, country, fiat);
+  const row = rows.find(item => item.serviceProvider !== 'RAMPNOW') ?? rows.find(item => rowAsset(item) === 'USDC_POLYGON') ?? rows[0];
   return row ? rowAsset(row) : catalogue.asset;
 }
 
 /** Intersect each exact provider/method separately, never fill gaps or widen an
  * approved range when upstream starts advertising more generous limits. */
-export function intersectProductionCoverage(liveRoutes: Route[], catalogue: CoverageCatalogue, country: string, fiat: string): Route[] {
-  const approved = selectedRows(catalogue, country, fiat), results = new Map<string, Route>();
+export function intersectProductionCoverage(liveRoutes: ProductionRoute[], catalogue: CoverageCatalogue, country: string, fiat: string,
+  asset = coverageAsset(catalogue, country, fiat)): ProductionRoute[] {
+  const approved = selectedRows(catalogue, country, fiat).filter(row => rowAsset(row) === asset), results = new Map<string, ProductionRoute>();
   for (const live of liveRoutes) for (const method of live.paymentMethods) {
     const row = approved.find(item => item.serviceProvider === live.serviceProvider && item.paymentMethodType === method.method);
     if (!row || method.currencyCode !== fiat || !Number.isFinite(method.minimumAmount) || method.minimumAmount < 0
@@ -131,7 +142,8 @@ export function intersectProductionCoverage(liveRoutes: Route[], catalogue: Cove
 }
 export function assertProductionCoverageSelection(catalogue: CoverageCatalogue, input: Selection): void {
   const matching = selectedRows(catalogue, input.country, input.sourceCurrencyCode).filter(row => row.paymentMethodType === input.paymentMethodType
-    && (input.serviceProvider === undefined || row.serviceProvider === input.serviceProvider));
+    && (input.serviceProvider === undefined || row.serviceProvider === input.serviceProvider)
+    && (input.destinationCurrencyCode === undefined || rowAsset(row) === input.destinationCurrencyCode));
   if (!matching.length) throw Error('wallet_production_method_unavailable');
   if (!matching.some(row => { const range = bounds(row); return precise(input.amount, row.minorUnits)
     && input.amount >= range.minimum && input.amount <= range.maximum; })) throw Error('wallet_production_amount_unavailable');

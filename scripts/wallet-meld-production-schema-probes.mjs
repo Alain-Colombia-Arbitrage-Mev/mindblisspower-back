@@ -206,4 +206,73 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  assert.deepEqual(JSON.parse(value(save(bankProof,bank.subject,bankId))),bankProof);
  eq(oldRows,before.rows,false);
  console.log(JSON.stringify({walletArbitrumSchema:'passed',verifiedMexicoEurCard:true,preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
+
+ const ledgerBeforeRampNow=value(ledgerDigest,false);
+ psql(await readFile(new URL('../_meta/migration/125_wallet_meld_production_rampnow.sql',import.meta.url),'utf8'));
+ eq(ledgerDigest,ledgerBeforeRampNow,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(legacyCreate,beforeLegacyCreate,false);
+
+ const rampOwner=users[7];
+ const rampCreate=(asset,changes={})=>{
+  const input={id:randomUUID(),country:'US',amount:'100',currency:'USD',method:'CREDIT_DEBIT_CARD',provider:'RAMPNOW',...changes};
+  return row('payments.create_wallet_meld_production_attempt',[rampOwner.subject,rampOwner.session,input.id,input.country,input.amount,
+   input.currency,input.method,input.provider,'production-account',asset]);
+ };
+ for(const asset of ['USDC_POLYGON','USDC_ARBITRUM','USDC']){
+  for(const change of [{country:'MX'},{currency:'EUR'},{method:'ACH'},{method:'APPLE_PAY'},{provider:'BANXA'},{provider:'ONRAMPMONEY'}]){
+   deny(rampCreate(asset,change),'wallet_meld_production_attempt_destination_currency_check');
+  }
+ }
+ deny(rampCreate('USDT_POLYGON'),'wallet_meld_production_attempt_destination_currency_check');
+ deny(create(7,randomUUID(),{provider:'RAMPNOW'}),'wallet_meld_production_attempt_destination_currency_check');
+
+ const requestedAndDelivered=[
+  ['USDC_ARBITRUM','42161','USDC_POLYGON','137'],
+  ['USDC_POLYGON','137','USDC','1'],
+  ['USDC','1','USDC_ARBITRUM','42161'],
+ ];
+ for(const [requestedAsset,requestedChain,deliveredAsset,deliveredChain] of requestedAndDelivered){
+  const id=randomUUID();
+  const rampCreated=JSON.parse(value(rampCreate(requestedAsset,{id})));
+  assert.equal(rampCreated.created,true);
+  assert.equal(rampCreated.address,rampOwner.address);
+  assert.equal(rampCreated.customer_reference,bindings[7].binding_reference);
+  assert.equal(JSON.parse(value(rampCreate(requestedAsset,{id}))).created,false);
+  deny(rampCreate(deliveredAsset,{id}),'wallet_production_request_already_used');
+  deny(rampCreate(requestedAsset,{id,amount:'150'}),'wallet_production_request_already_used');
+  deny(invalidChainInsert(id,deliveredChain),'wallet_meld_production_attempt_chain_id_check',false);
+  eq(finish(id,7),'t');
+
+  const createdAt=Date.now();
+  const processing={...proof,transactionId:'transaction-'+id,sessionId:'session-'+id,externalSessionId:id,
+   externalCustomerId:bindings[7].binding_reference,serviceProvider:'RAMPNOW',sourceAmount:'100.00',walletAddress:rampOwner.address,
+   destinationCurrencyCode:requestedAsset,chainId:requestedChain,providerUpdatedAt:new Date(createdAt).toISOString()};
+  const delivered={...processing,providerStatus:'SETTLED',receivedAmount:'98.617004',providerUpdatedAt:new Date(createdAt+1000).toISOString(),
+   destinationCurrencyCode:deliveredAsset,chainId:deliveredChain};
+  const saveRamp=p=>save(p,rampOwner.subject,id);
+  deny(saveRamp({...processing,destinationCurrencyCode:deliveredAsset,chainId:deliveredChain}),'wallet_production_proof_context_mismatch');
+  assert.deepEqual(JSON.parse(value(saveRamp(processing))),processing);
+  for(const change of [{accountId:'sandbox-account'},{sessionId:'other-session'},{externalSessionId:randomUUID()},
+   {externalCustomerId:bindings[6].binding_reference},{serviceProvider:'BANXA'},{countryCode:'MX'},{sourceCurrencyCode:'EUR'},
+   {sourceAmount:'101.00'},{walletAddress:arbOwner.address},{paymentMethodType:'APPLE_PAY'},
+   {destinationCurrencyCode:'USDC_ETH',chainId:'1'},{destinationCurrencyCode:'USDT_POLYGON',chainId:'137'},{chainId:requestedChain}]){
+   deny(saveRamp({...delivered,...change}),'wallet_production_proof_context_mismatch');
+  }
+  deny(save(delivered,arbOwner.subject,id),'wallet_production_proof_context_mismatch');
+  assert.deepEqual(JSON.parse(value(saveRamp(delivered))),delivered);
+  assert.deepEqual(JSON.parse(value(saveRamp(delivered))),delivered);
+  const beforeAlternate={...delivered,providerUpdatedAt:new Date(createdAt+2000).toISOString()};
+  deny(saveRamp({...beforeAlternate,destinationCurrencyCode:requestedAsset,chainId:requestedChain}),'wallet_production_proof_context_mismatch');
+  const refunded={...beforeAlternate,providerStatus:'REFUNDED'};
+  assert.deepEqual(JSON.parse(value(saveRamp(refunded))),refunded);
+  const snapshot=JSON.parse(value(row('payments.read_wallet_meld_production_attempt_with_asset',[rampOwner.subject,rampOwner.session,id])));
+  assert.equal(snapshot.destination_currency,requestedAsset);
+  assert.deepEqual(snapshot.proof,refunded);
+  eq(`SELECT chain_id FROM ${table} WHERE id=${lit(id)};`,requestedChain,false);
+ }
+ deny(save({...arbProof,destinationCurrencyCode:'USDC_POLYGON',chainId:'137'},arbOwner.subject,arbId),'wallet_production_proof_context_mismatch');
+ deny(save({...bankProof,destinationCurrencyCode:'USDC_ARBITRUM',chainId:'42161'},bank.subject,bankId),'wallet_production_proof_context_mismatch');
+ eq(oldRows,before.rows,false);
+ console.log(JSON.stringify({walletRampNowSchema:'passed',verifiedUsUsdCard:true,preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
 }

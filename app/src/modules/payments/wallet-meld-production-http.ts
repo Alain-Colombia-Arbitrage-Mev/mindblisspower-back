@@ -27,6 +27,9 @@ export async function productionMeldJson(path: string, { key, account, fetchImpl
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }), signal, value => { void value.body?.cancel().catch(() => {}); });
+  return { status: response.status, ok: response.ok, data: await readProductionJson(response, signal) };
+}
+export async function readProductionJson(response: Response, signal: AbortSignal): Promise<unknown> {
   const length = response.headers.get('content-length');
   if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '') || !response.body
     || (length !== null && (!/^\d+$/.test(length) || Number(length) > 262_144))) {
@@ -37,7 +40,7 @@ export async function productionMeldJson(path: string, { key, account, fetchImpl
   try {
     for (;;) { const chunk = await productionOperation(() => reader.read(), signal); if (chunk.done) break;
       size += chunk.value.length; if (size > 262_144) throw Error('wallet_production_provider_unavailable'); parts.push(chunk.value); }
-    try { return { status: response.status, ok: response.ok, data: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts))) as unknown }; }
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts))) as unknown; }
     catch { throw Error('wallet_production_provider_unavailable'); }
   } finally { signal.removeEventListener('abort', cancel); cancel(); try { reader.releaseLock(); } catch { /* cancelled pending read */ } }
 }
