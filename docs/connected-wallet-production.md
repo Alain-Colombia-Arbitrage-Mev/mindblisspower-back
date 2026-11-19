@@ -11,7 +11,8 @@ checkout callback authenticates a user or proves a payment.
 - Private API: `mindbliss-wallet-core`, `wallet.wrangler.jsonc --env wallet`.
 - Native entrypoint: `Dockerfile.wallet`, `src/sandbox-wallet-server.ts`.
 - Runtime-only secrets: `MELD_PRODUCTION_API_KEYS`,
-  `MELD_PRODUCTION_ACCOUNT_ID`. Set `WALLET_MELD_PRODUCTION_ENABLED=true`.
+  `MELD_PRODUCTION_ACCOUNT_ID`, `MELD_PRODUCTION_CATALOGUE_ATTESTATION`.
+  Set `WALLET_MELD_PRODUCTION_ENABLED=true`.
 - Do not deploy the shared `mindbliss-core-production` or change `main`/`rewon`.
 - The production process does not receive sandbox merchant or relayer secrets.
 
@@ -100,3 +101,47 @@ recording an unavailable attempt. Accept exactly the documented opaque token
 form with or without that slash, and return the canonical URL with `/` to the
 browser. All host, token, query, port, credential and fragment restrictions
 remain in force. No mutable Onramp Money destination URL is allowlisted.
+
+## Quote-verified compatibility policy
+
+`wallet-production-coverage-data.json` contains the reviewed positive results
+for the production merchant, USDT Polygon and each country's local default/USD
+pairs. Generic MELD country, fiat and route metadata is not sufficient to enable
+a combination. Countries and currencies without a positive audited route are
+removed; live options are intersected by exact provider and method, with bounds
+rounded inward using that fiat's minor units. USD retains the 50–25,000 policy.
+
+The private attestation is SHA256 of the catalogue scope, account and API key,
+joined with newlines. It binds the reviewed policy to the current production
+credential generation. Store it only as a secret on `mindbliss-wallet-core`;
+never commit the attestation, credentials or their private fingerprints.
+Credential changes require reviewed coverage and a matching new attestation.
+The catalogue contains only public route facts and audit timestamps.
+
+This is last-known compatibility configuration, not cached pricing, a checkout
+guarantee or settlement evidence. It has no timer that disables the portal.
+Every quote and preparation still validates current routes, the exact selected
+amount and a fresh provider quote. A transport failure or provider outage is
+not treated as evidence that a country is permanently unsupported. New routes
+must be audited before being enabled. History, status and existing payment
+proofs do not depend on catalogue approval and remain readable independently.
+
+The November 19 audit covered 205 countries, 385 local-default/USD pairs and
+1,008 generic provider/method quotes without customer data or checkout sessions.
+It approved 110 combinations in 62 countries and 21 fiat currencies. There were
+894 deterministic rejections and four generic Onmeta quote failures retained as
+unknown rather than permanent incompatibilities; unknown rows are not enabled.
+The permitted merchant integrations returned no positive USD or card/mobile-pay
+quote for USDT Polygon. Those options, including US, are consequently absent.
+MX retains Onramp Money SPEI in MXN; CO retains its PSE and local transfer in COP.
+
+Costa Rica had no permitted CRC route. Its USD Banxa card, Apple Pay and Google
+Pay routes all rejected USDT Polygon with `INVALID_CRYPTO_CURRENCY`; therefore
+CR is absent from this release's verified policy. The independent Banxa
+MX/MXN/SPEI quarantine remains in effect even when that provider returns a quote.
+
+The frontend discards countries, currencies or providers withdrawn by a current
+response, rejects late responses from an earlier selection and checks each
+provider's own amount range before enabling checkout. No replacement country,
+currency or provider is silently chosen. Provider diagnostics expose only
+bounded stage/status/code classifications, never bodies, addresses or tokens.

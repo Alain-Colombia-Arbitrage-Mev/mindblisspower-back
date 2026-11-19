@@ -5,6 +5,10 @@ import { z } from 'zod';
 import type { SandboxWalletDatabase, SandboxWalletEnvironment, SandboxWalletPrincipal } from '../identity/sandbox-wallet';
 import { createAdministrativePreflightGate } from './wallet-funding';
 import { productionMeldJson, productionOperation, productionScope } from './wallet-meld-production-http';
+import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-production-diagnostic';
+import coverageSnapshot from './wallet-production-coverage-data.json';
+import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits,
+  intersectProductionCoverage, assertProductionCoverageSelection } from './wallet-production-coverage';
 
 const uuid = z.string().uuid().transform(value => value.toLowerCase()), country = z.string().regex(/^[A-Z]{2}$/), currency = z.string().regex(/^[A-Z]{3}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/).refine(value => value !== '.' && value !== '..');
@@ -22,7 +26,7 @@ export const productionWalletFundingInput = z.object({ requestId: uuid, country,
   .refine(value => value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000));
 export const productionWalletQuoteInput = z.object({ country, sourceCurrencyCode: currency, amount: preciseAmount, paymentMethodType: token }).strict()
   .refine(value => value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000));
-type Dependencies = { environment?: SandboxWalletEnvironment; fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number };
+type Dependencies = { environment?: SandboxWalletEnvironment; fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; catalogue?: unknown };
 export function productionWalletConfiguration(environment: SandboxWalletEnvironment) {
   const key = environment.MELD_PRODUCTION_API_KEYS, account = environment.MELD_PRODUCTION_ACCOUNT_ID;
   if (environment.WALLET_MELD_PRODUCTION_ENABLED !== 'true' || !key || !/^[\x21-\x7e]{1,2048}$/.test(key)
@@ -66,37 +70,47 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
   }
   return [...routes.values()].filter(route => route.paymentMethods.length);
 }
-export async function readProductionWalletOptions(raw: unknown, { environment = process.env, fetchImpl = fetch, signal, timeoutMs }: Dependencies = {}) {
-  const config = productionWalletConfiguration(environment), input = productionWalletOptionsInput.parse(raw), scope = productionScope(signal, timeoutMs);
+export async function readProductionWalletOptions(raw: unknown, { environment = process.env, fetchImpl = fetch, signal, timeoutMs, catalogue = coverageSnapshot }: Dependencies = {}) {
+  const config = productionWalletConfiguration(environment), input = productionWalletOptionsInput.parse(raw);
+  const coverage = resolveProductionCoverage(environment, catalogue), scope = productionScope(signal, timeoutMs);
   try {
+    if (!coverageCurrencies(coverage, input.country).has(input.sourceCurrencyCode))
+      return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, paymentMethods: [], routes: [] };
     const result = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/USDT_POLYGON`,
       { ...config, fetchImpl, signal: scope.signal });
     if (!result.ok && ![400, 404].includes(result.status)) throw Error('wallet_production_provider_unavailable');
-    const routes = result.ok ? normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country) : [];
+    const routes = result.ok ? intersectProductionCoverage(normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country),
+      coverage, input.country, input.sourceCurrencyCode) : [];
     return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
       paymentMethods: [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))], routes };
   } finally { scope.close(); }
 }
-export async function readProductionWalletDiscovery(rawCountry: string | undefined, { environment = process.env, fetchImpl = fetch, signal, timeoutMs }: Dependencies = {}) {
-  const config = productionWalletConfiguration(environment), scope = productionScope(signal, timeoutMs);
+export async function readProductionWalletDiscovery(rawCountry: string | undefined, { environment = process.env, fetchImpl = fetch, signal, timeoutMs, catalogue = coverageSnapshot }: Dependencies = {}) {
+  const config = productionWalletConfiguration(environment), coverage = resolveProductionCoverage(environment, catalogue), scope = productionScope(signal, timeoutMs);
   try {
     if (rawCountry === undefined) {
       const query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', cryptoCurrency: 'USDT_POLYGON', partners: [...productionLockedProviders].join(',') });
       const result = await productionMeldJson(`/network-partner/supported/countries?${query}`, { ...config, fetchImpl, signal: scope.signal });
       const parsed = z.object({ countries: z.array(z.object({ countryCode: country, name: z.string().min(1).max(120) })).max(300) }).safeParse(result.data);
       if (!result.ok || !parsed.success || new Set(parsed.data.countries.map(item => item.countryCode)).size !== parsed.data.countries.length) throw Error('wallet_production_provider_unavailable');
-      return { countries: parsed.data.countries.map(item => ({ code: item.countryCode, name: item.name })) };
+      const eligibleCountries = coverageCountries(coverage);
+      return { countries: parsed.data.countries.filter(item => eligibleCountries.has(item.countryCode)).map(item => ({ code: item.countryCode, name: item.name })) };
     }
-    const selected = country.parse(rawCountry), query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', country: selected, type: 'FIAT' });
+    const selected = country.parse(rawCountry), eligibleCurrencies = coverageCurrencies(coverage, selected);
+    if (!eligibleCurrencies.size) return { country: selected, currencies: [], defaultCurrencyCode: null };
+    const query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', country: selected, type: 'FIAT' });
     const result = await productionMeldJson(`/network-partner/supported/currencies?${query}`, { ...config, fetchImpl, signal: scope.signal });
     const parsed = z.object({ currencies: z.array(z.object({ currencyCode: currency, name: z.string().min(1).max(120),
       decimalPlaces: z.number().int().min(0).max(18), type: z.literal('FIAT') })).max(200) }).safeParse(result.data);
     if (!result.ok || !parsed.success || new Set(parsed.data.currencies.map(item => item.currencyCode)).size !== parsed.data.currencies.length) throw Error('wallet_production_provider_unavailable');
     // Defaults are suggestions, never an implicit country or an invented rate.
     const defaults = await productionMeldJson(`/network-partner/defaults/${selected}/CRYPTO_ONRAMP`, { ...config, fetchImpl, signal: scope.signal });
-    const list = parsed.data.currencies.filter(item => item.decimalPlaces <= 2).map(item => ({ code: item.currencyCode, name: item.name, decimalPlaces: item.decimalPlaces }));
+    const list = parsed.data.currencies.filter(item => eligibleCurrencies.has(item.currencyCode)
+      && item.decimalPlaces === coverageMinorUnits(coverage, selected, item.currencyCode))
+      .map(item => ({ code: item.currencyCode, name: item.name, decimalPlaces: item.decimalPlaces }));
     const defaultValue = defaults.ok && defaults.data && typeof defaults.data === 'object' ? (defaults.data as Record<string, unknown>).currencyCode : undefined;
-    return { country: selected, currencies: list, defaultCurrencyCode: typeof defaultValue === 'string' && list.some(item => item.code === defaultValue) ? defaultValue : null };
+    return { country: selected, currencies: list, defaultCurrencyCode: typeof defaultValue === 'string' && list.some(item => item.code === defaultValue)
+      ? defaultValue : list.length === 1 ? list[0]!.code : null };
   } finally { scope.close(); }
 }
 export function productionWalletReturnUrl(reference: string) {
@@ -148,14 +162,15 @@ const quoteGates = new WeakMap<SandboxWalletDatabase, ReturnType<typeof createAd
 /** Manual quote discovery. Each candidate is requested at most once and failed
  * candidates are removed; an available route is never presented as a quote. */
 export async function quoteProductionWalletFunding(database: SandboxWalletDatabase, raw: unknown,
-  { subject, nativeSessionId, clientIp, environment = process.env, fetchImpl = fetch, signal, timeoutMs }: SandboxWalletPrincipal & Dependencies & { clientIp: string }) {
+  { subject, nativeSessionId, clientIp, environment = process.env, fetchImpl = fetch, signal, timeoutMs, catalogue = coverageSnapshot }: SandboxWalletPrincipal & Dependencies & { clientIp: string }) {
   const config = productionWalletConfiguration(environment), input = productionWalletQuoteInput.parse(raw);
   if (!isIP(clientIp)) throw Error('wallet_production_unconfigured');
+  assertProductionCoverageSelection(resolveProductionCoverage(environment, catalogue), input);
   let gate = quoteGates.get(database); if (!gate) { gate = createAdministrativePreflightGate(); quoteGates.set(database, gate); }
   const release = gate(subject, randomUUID()), scope = productionScope(signal, timeoutMs);
   try {
     const binding = await readDepositBinding(database, { subject, nativeSessionId }, scope.signal);
-    const options = await readProductionWalletOptions({ country: input.country, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, signal: scope.signal });
+    const options = await readProductionWalletOptions({ country: input.country, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, signal: scope.signal, catalogue });
     const matching = options.routes.filter(route => route.paymentMethods.some(rail => rail.method === input.paymentMethodType));
     if (!matching.length) throw Error('wallet_production_method_unavailable');
     const candidates = matching.filter(route => route.paymentMethods.some(rail => rail.method === input.paymentMethodType
@@ -180,15 +195,17 @@ export async function quoteProductionWalletFunding(database: SandboxWalletDataba
 }
 /** Only an explicit user request creates one vendor session; never signs or sends funds. */
 export async function createProductionWalletSession(database: SandboxWalletDatabase, raw: unknown,
-  { subject, nativeSessionId, clientIp, environment = process.env, fetchImpl = fetch, signal, timeoutMs }: SandboxWalletPrincipal & Dependencies & { clientIp: string }) {
+  { subject, nativeSessionId, clientIp, environment = process.env, fetchImpl = fetch, signal, timeoutMs, catalogue = coverageSnapshot }: SandboxWalletPrincipal & Dependencies & { clientIp: string }) {
   const config = productionWalletConfiguration(environment), input = productionWalletFundingInput.parse(raw);
   if (!isIP(clientIp)) throw Error('wallet_production_unconfigured');
+  const coverage = resolveProductionCoverage(environment, catalogue);
+  assertProductionCoverageSelection(coverage, input);
   const release = acquire(database, subject, input.requestId), scope = productionScope(signal, timeoutMs);
   try {
     // SQL checks the native session and permanently verified ownership binding;
     // browser-supplied addresses, customer IDs and destinations are not accepted.
     const binding = await readDepositBinding(database, { subject, nativeSessionId }, scope.signal), walletAddress = binding.address;
-    const options = await readProductionWalletOptions({ country: input.country, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, signal: scope.signal });
+    const options = await readProductionWalletOptions({ country: input.country, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, signal: scope.signal, catalogue });
     const method = options.routes.find(route => route.serviceProvider === input.serviceProvider)?.paymentMethods.find(rail => rail.method === input.paymentMethodType);
     if (!method) throw Error('wallet_production_method_unavailable');
     if (input.amount < method.minimumAmount || input.amount > method.maximumAmount) throw Error('wallet_production_amount_unavailable');
@@ -205,27 +222,38 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
         ${subject},${nativeSessionId},${row.id}::uuid,${status},${providerSession},${customer}) AS finished`), scope.signal);
       if (rows.length !== 1 || (rows[0] as { finished?: unknown }).finished !== true) throw Error('wallet_production_unavailable');
     };
-    let finishing = false;
+    let finishing = false, stage: WalletWidgetStage = 'widget_transport', upstreamStatus: number | undefined, upstreamBody: unknown;
     try {
-      const result = await productionMeldJson('/crypto/session/widget', { ...config, fetchImpl, signal: scope.signal,
+      const widgetFetch = (async (target: string | Request | URL, init?: RequestInit) => {
+        const response = await fetchImpl(target, init); upstreamStatus = response.status; return response;
+      }) as unknown as typeof fetch;
+      const result = await productionMeldJson('/crypto/session/widget', { ...config, fetchImpl: widgetFetch, signal: scope.signal,
         body: { sessionType: 'BUY', externalSessionId: row.id, externalCustomerId: row.customer_reference,
           sessionData: { serviceProvider: input.serviceProvider, countryCode: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
-            sourceAmount: input.amount.toFixed(2), destinationCurrencyCode: 'USDT_POLYGON', walletAddress, paymentMethodType: input.paymentMethodType,
+            sourceAmount: input.amount.toFixed(coverageMinorUnits(coverage, input.country, input.sourceCurrencyCode) ?? 2), destinationCurrencyCode: 'USDT_POLYGON', walletAddress, paymentMethodType: input.paymentMethodType,
             clientIpAddress: clientIp, redirectUrl: productionWalletReturnUrl(row.id),
             lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } } });
+      stage = 'widget_http'; upstreamBody = result.data;
+      if (!result.ok) throw Error('wallet_production_provider_unavailable');
+      stage = 'widget_schema';
       const session = z.object({ id: identifier, customerId: identifier, externalSessionId: uuid, externalCustomerId: uuid,
         serviceProvider: token.optional(), serviceProviderWidgetUrl: z.string().max(8192).nullish(), widgetUrl: z.string().max(8192).nullish() }).safeParse(result.data);
-      if (!result.ok || !session.success || session.data.externalSessionId !== row.id || session.data.externalCustomerId !== row.customer_reference
+      if (!session.success || session.data.externalSessionId !== row.id || session.data.externalCustomerId !== row.customer_reference
         || (session.data.serviceProvider !== undefined && session.data.serviceProvider !== input.serviceProvider)) throw Error('wallet_production_provider_unavailable');
+      stage = 'widget_url';
       const checkoutUrl = productionWalletCheckoutUrl(session.data.serviceProviderWidgetUrl, input.serviceProvider)
         ?? productionWalletCheckoutUrl(session.data.widgetUrl, input.serviceProvider);
       if (!checkoutUrl) throw Error('wallet_production_provider_unavailable');
-      finishing = true; await finish('session_created', session.data.id, session.data.customerId);
+      finishing = true; stage = 'widget_finish'; await finish('session_created', session.data.id, session.data.customerId);
       return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
         serviceProvider: input.serviceProvider, status: 'session_created' as const, country: input.country, requestedAmount: input.amount, sourceCurrencyCode: input.sourceCurrencyCode,
         destinationCurrencyCode: 'USDT_POLYGON' as const, destination: destination(walletAddress), paymentMethodType: input.paymentMethodType,
         checkoutUrl, createdAt: row.created_at.toISOString() };
-    } catch (error) { if (!finishing && !scope.signal.aborted) await finish('unavailable', null, null); throw error; }
+    } catch (error) {
+      recordWalletWidgetDiagnostic(error, stage, upstreamStatus, upstreamBody);
+      if (!finishing && !scope.signal.aborted) { try { await finish('unavailable', null, null); } catch { /* Preserve the original failure and its safe diagnostic. */ } }
+      throw error;
+    }
   } finally { scope.close(); release(); }
 }
 

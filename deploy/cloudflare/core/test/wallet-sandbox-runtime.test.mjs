@@ -38,9 +38,11 @@ test('foreign portal, stale-subject envelope and impersonation are rejected with
 });
 test('production mode passes exactly its merchant/account and never forwards sandbox credentials or broadcast secrets', () => {
   const result = walletSandboxEnvironment({ ...env(), WALLET_MELD_PRODUCTION_ENABLED: 'true', MELD_PRODUCTION_API_KEYS: 'production-synthetic',
-    MELD_PRODUCTION_ACCOUNT_ID: 'production-account', PIMLICO_API_KEY: 'never', MELD_API_KEY: 'legacy-never' });
+    MELD_PRODUCTION_ACCOUNT_ID: 'production-account', MELD_PRODUCTION_CATALOGUE_ATTESTATION: 'c'.repeat(64), PIMLICO_API_KEY: 'never', MELD_API_KEY: 'legacy-never' });
   assert.equal(result.ENV, 'production'); assert.equal(result.MELD_PRODUCTION_API_KEYS, 'production-synthetic');
   assert.equal(result.MELD_PRODUCTION_ACCOUNT_ID, 'production-account'); assert.equal(result.MELD_ADMIN_SANDBOX_ENABLED, 'false');
+  assert.equal(result.MELD_PRODUCTION_CATALOGUE_ATTESTATION, 'c'.repeat(64));
+  assert.equal(walletSandboxEnvironment({ ...env(), MELD_PRODUCTION_CATALOGUE_ATTESTATION: 'c'.repeat(64) }).MELD_PRODUCTION_CATALOGUE_ATTESTATION, undefined);
   for (const key of ['MELD_API_SANDBOX', 'MELD_ACCOUNT_ID', 'PIMLICO_API_KEY', 'MELD_API_KEY']) assert.equal(result[key], undefined);
   assert.throws(() => walletSandboxEnvironment({ ...env(), WALLET_MELD_PRODUCTION_ENABLED: 'true' }), /configuration/);
 });

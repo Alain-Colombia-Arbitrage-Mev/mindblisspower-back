@@ -3,14 +3,16 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { SandboxWalletDatabase } from '../identity/sandbox-wallet';
 import { createProductionWalletSession, normalizeProductionWalletRoutes, productionWalletCapabilities, productionWalletCheckoutUrl,
-  quoteProductionWalletFunding, readProductionWalletDiscovery, readProductionWalletHistory, readProductionWalletStatus } from './wallet-meld-production';
+  quoteProductionWalletFunding, readProductionWalletDiscovery, readProductionWalletOptions, readProductionWalletHistory, readProductionWalletStatus } from './wallet-meld-production';
 import { productionMeldJson, productionScope } from './wallet-meld-production-http';
+import { syntheticCoverage as catalogue, coverageTestEnvironment } from './wallet-production-coverage-fixture';
+import { walletWidgetDiagnostic } from './wallet-production-diagnostic';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23', customer = '7d492c47-80be-4e14-bc5f-54afaa56fc23', wallet = `0x${'1'.repeat(40)}`;
 const subject = 'synthetic-owner', nativeSessionId = 'synthetic-session', account = 'production-account', now = new Date();
-const environment = { WALLET_MELD_PRODUCTION_ENABLED: 'true', MELD_PRODUCTION_API_KEYS: 'synthetic-production-key', MELD_PRODUCTION_ACCOUNT_ID: account };
+const environment = coverageTestEnvironment({ WALLET_MELD_PRODUCTION_ENABLED: 'true', MELD_PRODUCTION_API_KEYS: 'synthetic-production-key', MELD_PRODUCTION_ACCOUNT_ID: account });
 const input = { requestId: id, country: 'MX', sourceCurrencyCode: 'MXN', amount: 2000, paymentMethodType: 'CREDIT_DEBIT_CARD', serviceProvider: 'BANXA' };
-const options = { subject, nativeSessionId, clientIp: '192.0.2.1', environment };
+const options = { subject, nativeSessionId, clientIp: '192.0.2.1', environment, catalogue };
 const binding = { address: wallet, binding_reference: customer };
 const row = { id, subject, address: wallet, country_code: 'MX', source_currency: 'MXN', requested_amount: 2000, service_provider: 'BANXA',
   payment_method: 'SPEI', status: 'session_created', created_at: now, customer_reference: customer, account_id: account,
@@ -65,7 +67,7 @@ test('only new Banxa MX/MXN/SPEI is quarantined; other providers, methods and co
 test('stale or injected Banxa SPEI selection cannot create a journal row or widget, while Onramp Money still quotes', async () => {
   const raw = { ...input, paymentMethodType: 'SPEI' }, db = database([[binding]]), api = provider([routes(['BANXA'], 'MXN', 'SPEI')]);
   await expect(createProductionWalletSession(db.database, raw, { ...options, fetchImpl: api.fetchImpl })).rejects.toThrow('method_unavailable');
-  expect(db.queries).toHaveLength(1); expect(api.calls).toHaveLength(1); // Binding SELECT and route GET only.
+  expect(db.queries).toHaveLength(0); expect(api.calls).toHaveLength(0); // Policy rejects before the binding, route GET or any write.
   const mixed = database([[binding]]), upstream = provider([routes(['BANXA', 'ONRAMPMONEY'], 'MXN', 'SPEI'),
     { quotes: [{ ...quote('ONRAMPMONEY').quotes[0], paymentMethodType: 'SPEI' }] }]);
   const { requestId, serviceProvider, ...quoteInput } = raw;
@@ -153,6 +155,16 @@ test('Onramp Money checkout uses the canonical Meld token fallback with immutabl
   expect(db.queries[2]!.params).toEqual([subject, nativeSessionId, id, 'session_created', 'vendor-session', 'vendor-customer']);
 });
 
+test('integer fiat uses its verified minor units in the widget payload without changing canonical ledger amount facts', async () => {
+  const raw = { ...input, country: 'JP', sourceCurrencyCode: 'JPY', paymentMethodType: 'LOCAL_BANK_TRANSFER' };
+  const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+  const api = provider([routes(['BANXA'], 'JPY', 'LOCAL_BANK_TRANSFER'),
+    { quotes: [{ ...quote().quotes[0], sourceCurrencyCode: 'JPY', paymentMethodType: 'LOCAL_BANK_TRANSFER' }] }, widget]);
+  expect((await createProductionWalletSession(db.database, raw, { ...options, fetchImpl: api.fetchImpl })).sourceCurrencyCode).toBe('JPY');
+  expect(api.calls[2]!.body.sessionData.sourceAmount).toBe('2000');
+  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'JP', 2000, 'JPY', 'LOCAL_BANK_TRANSFER', 'BANXA', account]);
+});
+
 test('verified Banxa production transit URL is preferred and only its one opaque initId may vary', async () => {
   const direct = 'https://meldshared.banxa.com/papi/transit/?initId=opaque-production%2Bvalue%3D';
   const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]),
@@ -164,6 +176,34 @@ test('verified Banxa production transit URL is preferred and only its one opaque
     direct.replace('/papi/transit/', '/papi/other/'), direct.replace('initId=', '%69nitId='), direct + '&initId=second', direct + '&redirect=https://evil.test',
     direct + '#', direct.replace('opaque-production%2Bvalue%3D', '%2F%2Fevil.test%3Furl%3Dx')])
     expect(productionWalletCheckoutUrl(url, 'BANXA')).toBeNull();
+});
+test('widget failures identify transport, HTTP, schema and URL stages without retaining vendor private data', async () => {
+  const cases = [
+    { response: new Response('<html>private</html>', { status: 403, headers: { 'content-type': 'text/html' } }), stage: 'widget_transport', status: 403 },
+    { response: Response.json({ code: 'INVALID_CLIENT_IP', serviceProviderDetails: { code: 'PROVIDER_REJECTED', message: wallet }, requestId: customer }, { status: 400 }), stage: 'widget_http', status: 400 },
+    { response: { ...widget, externalCustomerId: id }, stage: 'widget_schema', status: 200 },
+    { response: { ...widget, widgetUrl: 'https://private.invalid/?token=secret' }, stage: 'widget_url', status: 200 },
+  ] as const;
+  for (const item of cases) {
+    const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]),
+      api = provider([routes(), quote(), item.response]);
+    let failure: unknown; try { await createProductionWalletSession(db.database, input, { ...options, fetchImpl: api.fetchImpl }); } catch (error) { failure = error; }
+    expect((failure as Error).message).toBe('wallet_production_provider_unavailable');
+    expect(walletWidgetDiagnostic(failure)).toMatchObject({ stage: item.stage, upstreamStatus: item.status });
+    expect(JSON.stringify(walletWidgetDiagnostic(failure))).not.toMatch(/private|https:|0x|requestId|customer|wallet/i);
+  }
+});
+test('failed cleanup preserves the original diagnostic; primary finish authorization errors keep their original mapping', async () => {
+  for (const primaryFinish of [false, true]) {
+    const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }]]), execute = db.database.execute;
+    db.database.execute = (async (query: SQL) => {
+      if (new PgDialect().sqlToQuery(query).sql.includes('finish_wallet_meld_production_attempt')) throw Error('administrative_signing_forbidden'); return execute(query);
+    }) as unknown as typeof execute;
+    const api = provider([routes(), quote(), primaryFinish ? widget : Response.json({ code: 'PROVIDER_ERROR' }, { status: 400 })]);
+    let failure: unknown; try { await createProductionWalletSession(db.database, input, { ...options, fetchImpl: api.fetchImpl }); } catch (error) { failure = error; }
+    expect((failure as Error).message).toBe(primaryFinish ? 'administrative_signing_forbidden' : 'wallet_production_provider_unavailable');
+    expect(walletWidgetDiagnostic(failure)).toMatchObject({ stage: primaryFinish ? 'widget_finish' : 'widget_http', upstreamStatus: primaryFinish ? 200 : 400 });
+  }
 });
 function transaction(change: Record<string, unknown> = {}) { return { transaction: { id: 'tx-valid', accountId: account,
   sessionId: row.provider_session_id, customerId: row.provider_customer_id, externalSessionId: id, externalCustomerId: customer,
@@ -198,9 +238,50 @@ test('ambiguous search and dot path identifiers cannot trigger a guessed transac
 test('discovery is account-scoped and returns only metadata, no guessed currency default or secret', async () => {
   const api = provider([{ countries: [{ countryCode: 'CO', name: 'Colombia' }, { countryCode: 'ES', name: 'Spain' }] },
     { currencies: [{ currencyCode: 'COP', name: 'Colombian Peso', decimalPlaces: 2, type: 'FIAT' }] }, { currencyCode: 'COP' }]);
-  expect(await readProductionWalletDiscovery(undefined, { environment, fetchImpl: api.fetchImpl })).toEqual({ countries: [{ code: 'CO', name: 'Colombia' }, { code: 'ES', name: 'Spain' }] });
-  expect(await readProductionWalletDiscovery('CO', { environment, fetchImpl: api.fetchImpl })).toEqual({ country: 'CO', currencies: [{ code: 'COP', name: 'Colombian Peso', decimalPlaces: 2 }], defaultCurrencyCode: 'COP' });
+  expect(await readProductionWalletDiscovery(undefined, { environment, fetchImpl: api.fetchImpl, catalogue })).toEqual({ countries: [{ code: 'CO', name: 'Colombia' }, { code: 'ES', name: 'Spain' }] });
+  expect(await readProductionWalletDiscovery('CO', { environment, fetchImpl: api.fetchImpl, catalogue })).toEqual({ country: 'CO', currencies: [{ code: 'COP', name: 'Colombian Peso', decimalPlaces: 2 }], defaultCurrencyCode: 'COP' });
   expect(api.calls.every(call => call.headers.get('meld-account-id') === account)).toBe(true);
+});
+
+test('discovery removes unverified countries and fiats instead of presenting every generic MELD entry', async () => {
+  const api = provider([{ countries: [{ countryCode: 'CR', name: 'Costa Rica' }, { countryCode: 'MX', name: 'Mexico' },
+    { countryCode: 'CO', name: 'Colombia' }, { countryCode: 'US', name: 'United States' }] },
+  { currencies: ['MXN', 'USD', 'COP'].map(currencyCode => ({ currencyCode, name: currencyCode, type: 'FIAT', decimalPlaces: 2 })) },
+  { currencyCode: 'USD' }]);
+  const deps = { environment, fetchImpl: api.fetchImpl, catalogue };
+  expect((await readProductionWalletDiscovery(undefined, deps)).countries).toEqual([{ code: 'MX', name: 'Mexico' }, { code: 'CO', name: 'Colombia' }]);
+  expect(await readProductionWalletDiscovery('MX', deps)).toEqual({ country: 'MX', currencies: [{ code: 'MXN', name: 'MXN', decimalPlaces: 2 }], defaultCurrencyCode: 'MXN' });
+  expect(await readProductionWalletDiscovery('CR', deps)).toEqual({ country: 'CR', currencies: [], defaultCurrencyCode: null });
+  expect((await readProductionWalletOptions({ country: 'CR', sourceCurrencyCode: 'USD' }, deps)).routes).toEqual([]);
+  expect(api.calls).toHaveLength(3); // Rejected pairs perform no extra upstream discovery.
+});
+
+test('live routes cannot enable a new method or expand the audited provider-specific range', async () => {
+  const restricted = { ...catalogue, rows: catalogue.rows.map(item => item.country === 'MX' && item.paymentMethodType === 'SPEI'
+    ? { ...item, minimumAmount: 200, maximumAmount: 1000, verifiedAmount: 200 } : item) };
+  const raw = [...routes(['ONRAMPMONEY'], 'MXN', 'SPEI'), ...routes(['BANXA'], 'MXN', 'APPLE_PAY')];
+  raw[0]!.paymentMethods[0]!.limits = { currencyCode: 'MXN', min: 100, max: 5000 };
+  const api = provider([raw]);
+  expect(await readProductionWalletOptions({ country: 'MX', sourceCurrencyCode: 'MXN' }, { environment, fetchImpl: api.fetchImpl, catalogue: restricted }))
+    .toMatchObject({ paymentMethods: ['SPEI'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: [{ method: 'SPEI', minimumAmount: 200, maximumAmount: 1000 }] }] });
+});
+
+test('unsupported country/fiat/method and fractional zero-decimal amounts stop before owner reads, quotes or journal writes', async () => {
+  for (const patch of [{ country: 'CR', sourceCurrencyCode: 'USD', amount: 50 }, { sourceCurrencyCode: 'USD', amount: 50 },
+    { country: 'JP', sourceCurrencyCode: 'JPY', paymentMethodType: 'LOCAL_BANK_TRANSFER', amount: 2000.5 }]) {
+    const raw = { ...input, ...patch }, db = database([]), api = provider([]), { requestId, serviceProvider, ...quoteInput } = raw;
+    await expect(quoteProductionWalletFunding(db.database, quoteInput, { ...options, fetchImpl: api.fetchImpl })).rejects.toThrow(/(?:method|amount)_unavailable/);
+    await expect(createProductionWalletSession(db.database, raw, { ...options, fetchImpl: api.fetchImpl })).rejects.toThrow(/(?:method|amount)_unavailable/);
+    expect(db.queries).toHaveLength(0); expect(api.calls).toHaveLength(0);
+  }
+});
+
+test('missing catalogue attestation blocks new preparations while owned historical status remains readable', async () => {
+  const unverified = { ...environment, MELD_PRODUCTION_CATALOGUE_ATTESTATION: undefined }, db = database([]), api = provider([]);
+  await expect(createProductionWalletSession(db.database, input, { ...options, environment: unverified, fetchImpl: api.fetchImpl })).rejects.toThrow('unconfigured');
+  expect(db.queries).toHaveLength(0); expect(api.calls).toHaveLength(0);
+  const historyDb = database([[row]]);
+  expect((await readProductionWalletHistory(historyDb.database, { subject, nativeSessionId }, { environment: unverified, fetchImpl: api.fetchImpl })).records).toHaveLength(1);
 });
 test('hung body/transport obey bounded abort even if the vendor ignores cancellation', async () => {
   const scope = productionScope(undefined, 5), fetchImpl = (async () => new Response(new ReadableStream({ pull() { return new Promise(() => {}); }, cancel() { return new Promise(() => {}); } }), { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;

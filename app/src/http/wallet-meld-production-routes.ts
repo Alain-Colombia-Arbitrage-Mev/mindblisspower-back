@@ -5,6 +5,7 @@ import { createProductionWalletSession, productionWalletCapabilities, quoteProdu
   readProductionWalletOptions, readProductionWalletStatus } from '../modules/payments/wallet-meld-production';
 import { readAdministrativeRequestBody } from './administrative-request-body';
 import { verifyAuthProxyEnvelope } from './auth-proxy-context';
+import { walletWidgetDiagnostic } from '../modules/payments/wallet-production-diagnostic';
 
 const prefix = '/api/member/wallet-funding', noStore = { 'Cache-Control': 'private, no-store', Vary: 'Cookie' };
 function subjectMatches(encoded: string | undefined, actual: string) {
@@ -41,8 +42,8 @@ function acquireRead(database: SandboxWalletDatabase, subject: string) {
   if (!item) { item = { active: 0, count: 0, until: now + 60000 }; owners.set(subject, item); }
   item.active++; item.count++; let released = false; return () => { if (!released) { released = true; item!.active--; } };
 }
-export function registerProductionWalletFundingRoutes(app: ApiApplication, { database, environment = process.env, fetchImpl = fetch }: {
-  database: SandboxWalletDatabase; environment?: SandboxWalletEnvironment; fetchImpl?: typeof fetch;
+export function registerProductionWalletFundingRoutes(app: ApiApplication, { database, environment = process.env, fetchImpl = fetch, catalogue }: {
+  database: SandboxWalletDatabase; environment?: SandboxWalletEnvironment; fetchImpl?: typeof fetch; catalogue?: unknown;
 }) {
   const readPaths = ['/capabilities', '/discovery', '/options', '/status', '/history'];
   for (const suffix of [...readPaths, '/session', '/quote']) app.use(`${prefix}${suffix}`, async (c, next) => {
@@ -63,7 +64,7 @@ export function registerProductionWalletFundingRoutes(app: ApiApplication, { dat
         return c.json(productionWalletCapabilities(environment), 200, noStore);
       }
       release = acquireRead(database, input.subject);
-      const dependencies = { environment, fetchImpl, signal: c.req.raw.signal };
+      const dependencies = { environment, fetchImpl, signal: c.req.raw.signal, catalogue };
       if (suffix === '/discovery') {
         if (query.size > 1 || query.size === 1 && query.getAll('country').length !== 1) return c.json({ error: 'invalid_request' }, 400, noStore);
         return c.json(await readProductionWalletDiscovery(query.get('country') ?? undefined, dependencies), 200, noStore);
@@ -92,12 +93,13 @@ export function registerProductionWalletFundingRoutes(app: ApiApplication, { dat
         signature: c.req.header('x-vp-auth-signature') || '', cookie: c.req.header('cookie') || '', body })) return c.json({ error: 'invalid_auth_proxy' }, 403, noStore);
       const session = c.get('session')!;
       if (suffix === '/quote') return c.json(await quoteProductionWalletFunding(database, JSON.parse(body), { subject: session.user.id,
-        nativeSessionId: session.session.id, clientIp, environment, fetchImpl, signal: c.req.raw.signal }), 200, noStore);
+        nativeSessionId: session.session.id, clientIp, environment, fetchImpl, signal: c.req.raw.signal, catalogue }), 200, noStore);
       return c.json(await createProductionWalletSession(database, JSON.parse(body), { subject: session.user.id, nativeSessionId: session.session.id,
-        clientIp, environment, fetchImpl, signal: c.req.raw.signal }), 201, noStore);
+        clientIp, environment, fetchImpl, signal: c.req.raw.signal, catalogue }), 201, noStore);
     } catch (error) {
       if (error instanceof RangeError && error.message === 'request_too_large') return c.json({ error: 'request_too_large' }, 413, noStore);
-      const result = failure(error); return c.json({ error: result.error }, result.status, noStore);
+      const result = failure(error), diagnostic = walletWidgetDiagnostic(error);
+      return c.json({ error: result.error, ...(diagnostic ? { diagnostic } : {}) }, result.status, noStore);
     }
   });
 }
