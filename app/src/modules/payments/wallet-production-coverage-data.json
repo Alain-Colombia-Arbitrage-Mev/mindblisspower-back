@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-19T18:58:47.027Z",
+  "verifiedAt": "2026-11-19T20:59:18.177Z",
   "rows": [
     {
       "country": "AD",
@@ -1119,8 +1119,9 @@
       "minimumAmount": 200,
       "maximumAmount": 500000,
       "verifiedAmount": 200,
-      "verifiedAt": "2026-11-19T17:39:47.154Z",
-      "evidence": "quote_verified"
+      "verifiedAt": "2026-11-19T20:59:18.177Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
     },
     {
       "country": "MY",
@@ -1541,6 +1542,32 @@
       "verifiedAmount": 200,
       "verifiedAt": "2026-11-19T17:43:34.677Z",
       "evidence": "quote_verified"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "ONRAMPMONEY",
+      "paymentMethodType": "ACH",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 25000,
+      "verifiedAmount": 50,
+      "verifiedAt": "2026-11-19T20:59:18.177Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "ONRAMPMONEY",
+      "paymentMethodType": "LOCAL_BANK_TRANSFER",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 25000,
+      "verifiedAmount": 50,
+      "verifiedAt": "2026-11-19T20:59:18.177Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
     }
   ]
 }

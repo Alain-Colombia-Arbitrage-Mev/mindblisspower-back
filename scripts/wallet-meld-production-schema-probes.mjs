@@ -113,4 +113,26 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
   oldFunctionsAndFinancialRowsUnchanged:true,sandbox116Unchanged:true,persistentBindingDepositOnly:true,productionConnections:0,providerCalls:0,actualCharges:0,broadcasts:0,externalNetwork:'none'};
  await mkdir(new URL('../.wrangler/',import.meta.url),{recursive:true});await writeFile(new URL('../.wrangler/wallet-meld-production-funding-121-manifest.json',import.meta.url),JSON.stringify(manifest,null,2));
  console.log(JSON.stringify({walletMeldProductionSchema:'passed',probes,newPrivateTables:1,newFunctions:7,oldRowsUnchanged:true,sandbox116Unchanged:true,productionConnections:0,providerCalls:0,actualCharges:0,broadcasts:0}));
+
+ const previousHistory=value(history());
+ psql(await readFile(new URL('../_meta/migration/122_wallet_meld_production_usdc.sql',import.meta.url),'utf8'));
+ eq(history(),previousHistory);
+ const bankId=randomUUID(),bank=users[5],bankInput=[bank.subject,bank.session,bankId,'US','50','USD','ACH','ONRAMPMONEY','production-account'];
+ const bankCreate=(input=bankInput,asset='USDC_POLYGON')=>row('payments.create_wallet_meld_production_attempt',[...input,asset]);
+ const bankRead=(user=bank)=>row('payments.read_wallet_meld_production_attempt_with_asset',[user.subject,user.session,bankId]);
+ const inserted=JSON.parse(value(bankCreate()));
+ assert.equal(inserted.created,true);
+ assert.equal(inserted.address,bank.address);
+ assert.equal(JSON.parse(value(bankCreate())).created,false);
+ deny(bankCreate(bankInput,'USDT_POLYGON'),'wallet_production_request_already_used');
+ deny(bankCreate([...bankInput.slice(0,2),randomUUID(),...bankInput.slice(3,6),'CREDIT_DEBIT_CARD',...bankInput.slice(7)]),'destination_currency_check');
+ eq(bankRead(users[6]),'');
+ eq(finish(bankId,5),'t');
+ const bankProof={...proof,transactionId:'transaction-'+bankId,sessionId:'session-'+bankId,externalSessionId:bankId,externalCustomerId:bindings[5].binding_reference,
+   serviceProvider:'ONRAMPMONEY',destinationCurrencyCode:'USDC_POLYGON',walletAddress:bank.address,paymentMethodType:'ACH'};
+ deny(save({...bankProof,destinationCurrencyCode:'USDT_POLYGON'},bank.subject,bankId),'wallet_production_proof_context_mismatch');
+ assert.deepEqual(JSON.parse(value(save(bankProof,bank.subject,bankId))),bankProof);
+ assert.equal(JSON.parse(value(bankRead())).destination_currency,'USDC_POLYGON');
+ eq(oldRows,before.rows,false);
+ console.log(JSON.stringify({walletUsdcSchema:'passed',preservesLegacyHistory:true,providerCalls:0,actualCharges:0}));
 }

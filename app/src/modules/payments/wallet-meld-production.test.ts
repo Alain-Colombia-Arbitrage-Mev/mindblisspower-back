@@ -15,6 +15,7 @@ const input = { requestId: id, country: 'MX', sourceCurrencyCode: 'MXN', amount:
 const options = { subject, nativeSessionId, clientIp: '192.0.2.1', environment, catalogue };
 const binding = { address: wallet, binding_reference: customer };
 const row = { id, subject, address: wallet, country_code: 'MX', source_currency: 'MXN', requested_amount: 2000, service_provider: 'BANXA',
+  destination_currency: 'USDT_POLYGON',
   payment_method: 'SPEI', status: 'session_created', created_at: now, customer_reference: customer, account_id: account,
   provider_session_id: 'vendor-session', provider_customer_id: 'vendor-customer', proof: null, checked_at: null };
 function routes(names = ['BANXA'], fiat = 'MXN', method = 'CREDIT_DEBIT_CARD') { return names.map(partner => ({ partner, source: fiat,
@@ -39,6 +40,33 @@ function provider(outputs: unknown[]) {
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
+test('USDC ACH records the asset and opens only an opaque checkout with matching provider prefill', async () => {
+  const bank = { ...input, country: 'US', sourceCurrencyCode: 'USD', amount: 100, serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'ACH' };
+  const bankCatalogue = { ...catalogue, rows: [{ ...catalogue.rows[0], country: 'US', sourceCurrencyCode: 'USD',
+    serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'ACH', minimumAmount: 50, verifiedAmount: 100, destinationCurrencyCode: 'USDC_POLYGON' }] };
+  const rail = { partner: 'ONRAMPMONEY', source: 'USD', destination: 'USDC_POLYGON',
+    paymentMethods: [{ name: 'ACH', limits: { currencyCode: 'USD', min: 25, max: 50000 } }] };
+  const price = { quotes: [{ ...quote('ONRAMPMONEY').quotes[0], sourceCurrencyCode: 'USD',
+    sourceAmount: 100, destinationCurrencyCode: 'USDC_POLYGON', paymentMethodType: 'ACH' }] };
+  const prefill = new URLSearchParams({ coinCode: 'usdc', network: 'matic20', walletAddress: wallet, fiatAmount: '100.00',
+    fiatType: '21', paymentMethod: '2', redirectUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}` });
+  for (const badPrefill of [false, true]) {
+    const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+    const scoped = new URLSearchParams(prefill);
+    if (badPrefill) scoped.set('coinCode', 'usdt');
+    const api = provider([[rail], price, { ...widget, serviceProviderWidgetUrl: `https://onramp.money/main/buy/?${scoped}` }]);
+    const session = createProductionWalletSession(db.database, bank, { ...options, catalogue: bankCatalogue, fetchImpl: api.fetchImpl });
+    if (badPrefill) {
+      await expect(session).rejects.toThrow('provider_unavailable');
+      expect(db.queries[2]!.params[3]).toBe('unavailable');
+    } else {
+      expect(await session).toMatchObject({ destinationCurrencyCode: 'USDC_POLYGON',
+        destination: { asset: 'USDC', address: wallet, chainId: 137 }, checkoutUrl: widget.widgetUrl });
+      expect(db.queries[1]!.params.at(-1)).toBe('USDC_POLYGON');
+      expect(api.calls[2]!.body.sessionData.destinationCurrencyCode).toBe('USDC_POLYGON');
+    }
+  }
+});
 test('production gate never borrows sandbox credentials and disabled flows make no DB/provider call', async () => {
   const db = database([]), api = provider([]);
   for (const env of [{}, { ...environment, WALLET_MELD_PRODUCTION_ENABLED: 'false' }, { MELD_API_SANDBOX: 'sandbox', MELD_ACCOUNT_ID: 'sb' },
@@ -103,7 +131,7 @@ test('production mint uses permanent SQL binding, exact fresh quote and server-o
   const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
   const api = provider([routes(), quote(), widget]); const result = await createProductionWalletSession(db.database, input, { ...options, fetchImpl: api.fetchImpl });
   expect(result).toMatchObject({ environment: 'production', walletKind: 'personal', country: 'MX', serviceProvider: 'BANXA', checkoutUrl: widget.widgetUrl, destination: { address: wallet, chainId: 137 } });
-  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'MX', 2000, 'MXN', 'CREDIT_DEBIT_CARD', 'BANXA', account]);
+  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'MX', 2000, 'MXN', 'CREDIT_DEBIT_CARD', 'BANXA', account, 'USDT_POLYGON']);
   const sent = api.calls[2]!.body; expect(sent.sessionData.walletAddress).toBe(wallet); expect(sent.sessionData.sourceAmount).toBe('2000.00');
   expect(sent.sessionData.lockFields).toContain('walletAddress'); expect(sent.sessionData.lockFields).toContain('destinationCurrencyCode');
   expect(sent.sessionData.redirectUrl).toEndWith(`?walletCheckoutReference=${id}`);
@@ -162,7 +190,7 @@ test('integer fiat uses its verified minor units in the widget payload without c
     { quotes: [{ ...quote().quotes[0], sourceCurrencyCode: 'JPY', paymentMethodType: 'LOCAL_BANK_TRANSFER' }] }, widget]);
   expect((await createProductionWalletSession(db.database, raw, { ...options, fetchImpl: api.fetchImpl })).sourceCurrencyCode).toBe('JPY');
   expect(api.calls[2]!.body.sessionData.sourceAmount).toBe('2000');
-  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'JP', 2000, 'JPY', 'LOCAL_BANK_TRANSFER', 'BANXA', account]);
+  expect(db.queries[1]!.params).toEqual([subject, nativeSessionId, id, 'JP', 2000, 'JPY', 'LOCAL_BANK_TRANSFER', 'BANXA', account, 'USDT_POLYGON']);
 });
 
 test('verified Banxa production transit URL is preferred and only its one opaque initId may vary', async () => {

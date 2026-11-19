@@ -27,8 +27,16 @@ authorized by this receiving permission.
 SQL121 records immutable production attempts separately from sandbox. It never
 credits an internal balance, commission, ROI, PV or bonus. Status confirmation
 requires an independent production transaction read matching owner references,
-merchant, provider, session, country, fiat amount/method and USDT Polygon
-destination. Sandbox callbacks and cached test results cannot satisfy it.
+merchant, provider, session, country, fiat amount/method and the stored Polygon
+destination asset. Sandbox callbacks and cached test results cannot satisfy it.
+
+SQL122 adds native USDC on Polygon for Onramp Money MXN/SPEI and USD/ACH or local
+bank transfer. Other verified routes use USDT. Previous USDT attempts keep
+their original asset and proof. For USDC, the backend checks the Onramp Money
+prefill against the immutable wallet, fiat, amount, method and network, then
+hands off only the opaque MELD checkout URL. The provider handles authentication
+and payment. Card, Apple Pay and Google Pay are excluded until their checkout
+can enforce the selected asset and the verified destination.
 
 No production webhook profile/signing key was available at release. Status
 verification is explicit or follows the owned checkout return. Do not attach

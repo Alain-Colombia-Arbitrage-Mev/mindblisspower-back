@@ -8,7 +8,8 @@ import { productionMeldJson, productionOperation, productionScope } from './wall
 import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-production-diagnostic';
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits,
-  intersectProductionCoverage, assertProductionCoverageSelection } from './wallet-production-coverage';
+  intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
+  type ProductionAsset } from './wallet-production-coverage';
 
 const uuid = z.string().uuid().transform(value => value.toLowerCase()), country = z.string().regex(/^[A-Z]{2}$/), currency = z.string().regex(/^[A-Z]{3}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/).refine(value => value !== '.' && value !== '..');
@@ -39,16 +40,17 @@ export function productionWalletCapabilities(environment: SandboxWalletEnvironme
     network: 'polygon' as const, chainId: 137 as const, canBroadcast: false as const };
 }
 const one = (rows: unknown[]) => { if (rows.length !== 1) throw Error('wallet_production_unavailable'); return rows[0]; };
-const destination = (value: string) => ({ address: value, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const });
+const destination = (value: string, asset: ProductionAsset) => ({ address: value,
+  asset: asset === 'USDC_POLYGON' ? 'USDC' as const : 'USDT' as const, network: 'polygon' as const, chainId: 137 as const });
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
-export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string, countryCode?: string): Route[] {
+export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode: string, countryCode?: string, asset: ProductionAsset = 'USDT_POLYGON'): Route[] {
   if (!Array.isArray(raw) || raw.length > 256) throw Error('wallet_production_provider_unavailable');
   const routes = new Map<string, Route>();
   for (const item of raw) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw Error('wallet_production_provider_unavailable');
     const value = item as Record<string, unknown>;
     if (typeof value.partner !== 'string' || !productionLockedProviders.has(value.partner) || value.checkoutSupported === false) continue;
-    if (value.source !== sourceCurrencyCode || value.destination !== 'USDT_POLYGON' || !Array.isArray(value.paymentMethods)
+    if (value.source !== sourceCurrencyCode || value.destination !== asset || !Array.isArray(value.paymentMethods)
       || value.paymentMethods.length > 128) throw Error('wallet_production_provider_unavailable');
     let result = routes.get(value.partner); if (!result) { result = { serviceProvider: value.partner, paymentMethods: [] }; routes.set(value.partner, result); }
     for (const rawMethod of value.paymentMethods) {
@@ -73,15 +75,16 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
 export async function readProductionWalletOptions(raw: unknown, { environment = process.env, fetchImpl = fetch, signal, timeoutMs, catalogue = coverageSnapshot }: Dependencies = {}) {
   const config = productionWalletConfiguration(environment), input = productionWalletOptionsInput.parse(raw);
   const coverage = resolveProductionCoverage(environment, catalogue), scope = productionScope(signal, timeoutMs);
+  const destinationCurrencyCode = coverageAsset(coverage, input.country, input.sourceCurrencyCode);
   try {
     if (!coverageCurrencies(coverage, input.country).has(input.sourceCurrencyCode))
-      return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, paymentMethods: [], routes: [] };
-    const result = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/USDT_POLYGON`,
+      return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, destinationCurrencyCode, paymentMethods: [], routes: [] };
+    const result = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${input.country}/${input.sourceCurrencyCode}/${destinationCurrencyCode}`,
       { ...config, fetchImpl, signal: scope.signal });
     if (!result.ok && ![400, 404].includes(result.status)) throw Error('wallet_production_provider_unavailable');
-    const routes = result.ok ? intersectProductionCoverage(normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country),
+    const routes = result.ok ? intersectProductionCoverage(normalizeProductionWalletRoutes(result.data, input.sourceCurrencyCode, input.country, destinationCurrencyCode),
       coverage, input.country, input.sourceCurrencyCode) : [];
-    return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
+    return { environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode, destinationCurrencyCode,
       paymentMethods: [...new Set(routes.flatMap(route => route.paymentMethods.map(method => method.method)))], routes };
   } finally { scope.close(); }
 }
@@ -89,7 +92,7 @@ export async function readProductionWalletDiscovery(rawCountry: string | undefin
   const config = productionWalletConfiguration(environment), coverage = resolveProductionCoverage(environment, catalogue), scope = productionScope(signal, timeoutMs);
   try {
     if (rawCountry === undefined) {
-      const query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', cryptoCurrency: 'USDT_POLYGON', partners: [...productionLockedProviders].join(',') });
+      const query = new URLSearchParams({ category: 'CRYPTO_ONRAMP', partners: [...productionLockedProviders].join(',') });
       const result = await productionMeldJson(`/network-partner/supported/countries?${query}`, { ...config, fetchImpl, signal: scope.signal });
       const parsed = z.object({ countries: z.array(z.object({ countryCode: country, name: z.string().min(1).max(120) })).max(300) }).safeParse(result.data);
       if (!result.ok || !parsed.success || new Set(parsed.data.countries.map(item => item.countryCode)).size !== parsed.data.countries.length) throw Error('wallet_production_provider_unavailable');
@@ -133,15 +136,30 @@ export function productionWalletCheckoutUrl(value: unknown, serviceProvider: str
   return null;
 }
 
+function onrampUsdcPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, redirectUrl: string) {
+  if (!value) return false;
+  try {
+    const url = new URL(value), params = url.searchParams;
+    // MELD's tested Onramp Money integration represents MXN as 4 and USD as 21.
+    const expected = {
+      coinCode: 'usdc', network: 'matic20', walletAddress,
+      fiatAmount: input.amount.toFixed(2), fiatType: input.sourceCurrencyCode === 'MXN' ? '4' : '21',
+      paymentMethod: input.paymentMethodType === 'LOCAL_BANK_TRANSFER' ? '1' : '2', redirectUrl,
+    };
+    return url.origin === 'https://onramp.money' && !url.username && !url.password && !url.hash && url.pathname === '/main/buy/'
+      && Object.entries(expected).every(([key, value]) => params.getAll(key).length === 1 && params.get(key) === value);
+  } catch { return false; }
+}
+
 const createRow = z.object({ id: uuid, address, customer_reference: uuid, created: z.boolean(),
   status: z.enum(['initiated', 'session_created', 'unavailable']), created_at: z.coerce.date() });
 const gates = new WeakMap<SandboxWalletDatabase, ReturnType<typeof createAdministrativePreflightGate>>();
 function acquire(database: SandboxWalletDatabase, subject: string, id: string) {
   let gate = gates.get(database); if (!gate) { gate = createAdministrativePreflightGate(); gates.set(database, gate); } return gate(subject, id);
 }
-function assertQuote(raw: unknown, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, account: string) {
+function assertQuote(raw: unknown, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, account: string, asset: ProductionAsset) {
   const parsed = z.object({ quotes: z.array(z.object({ serviceProvider: token, sourceCurrencyCode: currency, sourceAmount: preciseAmount,
-    destinationCurrencyCode: z.literal('USDT_POLYGON'), destinationAmount: z.number().finite().positive(), paymentMethodType: token,
+    destinationCurrencyCode: z.literal(asset), destinationAmount: z.number().finite().positive(), paymentMethodType: token,
     totalFee: z.number().finite().nonnegative(), networkFee: z.number().finite().nonnegative(),
     rampIntelligence: z.object({ rampScore: z.number().finite().nullish() }).nullish(),
     transactionType: z.literal('CRYPTO_PURCHASE'), countryCode: country.optional(), accountId: identifier.optional(), walletAddress: z.string().optional() })).length(1) }).safeParse(raw);
@@ -171,6 +189,7 @@ export async function quoteProductionWalletFunding(database: SandboxWalletDataba
   try {
     const binding = await readDepositBinding(database, { subject, nativeSessionId }, scope.signal);
     const options = await readProductionWalletOptions({ country: input.country, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, signal: scope.signal, catalogue });
+    const asset = options.destinationCurrencyCode;
     const matching = options.routes.filter(route => route.paymentMethods.some(rail => rail.method === input.paymentMethodType));
     if (!matching.length) throw Error('wallet_production_method_unavailable');
     const candidates = matching.filter(route => route.paymentMethods.some(rail => rail.method === input.paymentMethodType
@@ -180,17 +199,17 @@ export async function quoteProductionWalletFunding(database: SandboxWalletDataba
       try {
         const result = await productionMeldJson('/payments/crypto/quote?includeSwap=false', { ...config, fetchImpl, signal: scope.signal,
           body: { countryCode: input.country, sourceCurrencyCode: input.sourceCurrencyCode, sourceAmount: input.amount,
-            destinationCurrencyCode: 'USDT_POLYGON', paymentMethodType: input.paymentMethodType, serviceProviders: [route.serviceProvider],
+            destinationCurrencyCode: asset, paymentMethodType: input.paymentMethodType, serviceProviders: [route.serviceProvider],
             walletAddress: binding.address, clientIpAddress: clientIp } });
         if (!result.ok) return null;
-        return assertQuote(result.data, { ...input, requestId: randomUUID(), serviceProvider: route.serviceProvider }, binding.address, config.account);
+        return assertQuote(result.data, { ...input, requestId: randomUUID(), serviceProvider: route.serviceProvider }, binding.address, config.account, asset);
       } catch { return null; }
     }));
     if (scope.signal.aborted) throw Error('wallet_production_unavailable');
     const quotes = outcomes.filter(item => item !== null).sort((a, b) => (b.rampScore ?? -Infinity) - (a.rampScore ?? -Infinity));
     if (!quotes.length) throw Error('wallet_production_quote_unavailable');
     return { walletKind: 'personal' as const, environment: 'production' as const, country: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
-      requestedAmount: input.amount, paymentMethodType: input.paymentMethodType, destination: destination(binding.address), quotes };
+      requestedAmount: input.amount, paymentMethodType: input.paymentMethodType, destination: destination(binding.address, asset), quotes };
   } finally { scope.close(); release(); }
 }
 /** Only an explicit user request creates one vendor session; never signs or sends funds. */
@@ -206,15 +225,16 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
     // browser-supplied addresses, customer IDs and destinations are not accepted.
     const binding = await readDepositBinding(database, { subject, nativeSessionId }, scope.signal), walletAddress = binding.address;
     const options = await readProductionWalletOptions({ country: input.country, sourceCurrencyCode: input.sourceCurrencyCode }, { environment, fetchImpl, signal: scope.signal, catalogue });
+    const asset = options.destinationCurrencyCode;
     const method = options.routes.find(route => route.serviceProvider === input.serviceProvider)?.paymentMethods.find(rail => rail.method === input.paymentMethodType);
     if (!method) throw Error('wallet_production_method_unavailable');
     if (input.amount < method.minimumAmount || input.amount > method.maximumAmount) throw Error('wallet_production_amount_unavailable');
     const quote = await productionMeldJson('/payments/crypto/quote?includeSwap=false', { ...config, fetchImpl, signal: scope.signal,
       body: { countryCode: input.country, sourceCurrencyCode: input.sourceCurrencyCode, sourceAmount: input.amount,
-        destinationCurrencyCode: 'USDT_POLYGON', paymentMethodType: input.paymentMethodType, serviceProviders: [input.serviceProvider], walletAddress, clientIpAddress: clientIp } });
-    if (!quote.ok) throw Error('wallet_production_provider_unavailable'); assertQuote(quote.data, input, walletAddress, config.account);
+        destinationCurrencyCode: asset, paymentMethodType: input.paymentMethodType, serviceProviders: [input.serviceProvider], walletAddress, clientIpAddress: clientIp } });
+    if (!quote.ok) throw Error('wallet_production_provider_unavailable'); assertQuote(quote.data, input, walletAddress, config.account, asset);
     const parsed = createRow.safeParse(one(await productionOperation(() => database.execute(sql`SELECT * FROM payments.create_wallet_meld_production_attempt(
-      ${subject},${nativeSessionId},${input.requestId}::uuid,${input.country},${input.amount},${input.sourceCurrencyCode},${input.paymentMethodType},${input.serviceProvider},${config.account})`), scope.signal)));
+      ${subject},${nativeSessionId},${input.requestId}::uuid,${input.country},${input.amount},${input.sourceCurrencyCode},${input.paymentMethodType},${input.serviceProvider},${config.account},${asset})`), scope.signal)));
     if (!parsed.success) throw Error('wallet_production_unavailable'); const row = parsed.data;
     if (row.id !== input.requestId || row.address !== walletAddress || !row.created || row.status !== 'initiated') throw Error('wallet_production_request_already_used');
     const finish = async (status: 'session_created' | 'unavailable', providerSession: string | null, customer: string | null) => {
@@ -224,14 +244,15 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
     };
     let finishing = false, stage: WalletWidgetStage = 'widget_transport', upstreamStatus: number | undefined, upstreamBody: unknown;
     try {
+      const redirectUrl = productionWalletReturnUrl(row.id);
       const widgetFetch = (async (target: string | Request | URL, init?: RequestInit) => {
         const response = await fetchImpl(target, init); upstreamStatus = response.status; return response;
       }) as unknown as typeof fetch;
       const result = await productionMeldJson('/crypto/session/widget', { ...config, fetchImpl: widgetFetch, signal: scope.signal,
         body: { sessionType: 'BUY', externalSessionId: row.id, externalCustomerId: row.customer_reference,
           sessionData: { serviceProvider: input.serviceProvider, countryCode: input.country, sourceCurrencyCode: input.sourceCurrencyCode,
-            sourceAmount: input.amount.toFixed(coverageMinorUnits(coverage, input.country, input.sourceCurrencyCode) ?? 2), destinationCurrencyCode: 'USDT_POLYGON', walletAddress, paymentMethodType: input.paymentMethodType,
-            clientIpAddress: clientIp, redirectUrl: productionWalletReturnUrl(row.id),
+            sourceAmount: input.amount.toFixed(coverageMinorUnits(coverage, input.country, input.sourceCurrencyCode) ?? 2), destinationCurrencyCode: asset, walletAddress, paymentMethodType: input.paymentMethodType,
+            clientIpAddress: clientIp, redirectUrl,
             lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } } });
       stage = 'widget_http'; upstreamBody = result.data;
       if (!result.ok) throw Error('wallet_production_provider_unavailable');
@@ -241,13 +262,17 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
       if (!session.success || session.data.externalSessionId !== row.id || session.data.externalCustomerId !== row.customer_reference
         || (session.data.serviceProvider !== undefined && session.data.serviceProvider !== input.serviceProvider)) throw Error('wallet_production_provider_unavailable');
       stage = 'widget_url';
-      const checkoutUrl = productionWalletCheckoutUrl(session.data.serviceProviderWidgetUrl, input.serviceProvider)
-        ?? productionWalletCheckoutUrl(session.data.widgetUrl, input.serviceProvider);
+      const hosted = productionWalletCheckoutUrl(session.data.widgetUrl, input.serviceProvider);
+      // Only the opaque Meld URL goes to the browser. Verify the provider's
+      // prefill separately so a mismapped fiat, network or recipient cannot open.
+      const checkoutUrl = asset === 'USDC_POLYGON'
+        ? (onrampUsdcPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
+        : productionWalletCheckoutUrl(session.data.serviceProviderWidgetUrl, input.serviceProvider) ?? hosted;
       if (!checkoutUrl) throw Error('wallet_production_provider_unavailable');
       finishing = true; stage = 'widget_finish'; await finish('session_created', session.data.id, session.data.customerId);
       return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
         serviceProvider: input.serviceProvider, status: 'session_created' as const, country: input.country, requestedAmount: input.amount, sourceCurrencyCode: input.sourceCurrencyCode,
-        destinationCurrencyCode: 'USDT_POLYGON' as const, destination: destination(walletAddress), paymentMethodType: input.paymentMethodType,
+        destinationCurrencyCode: asset, destination: destination(walletAddress, asset), paymentMethodType: input.paymentMethodType,
         checkoutUrl, createdAt: row.created_at.toISOString() };
     } catch (error) {
       recordWalletWidgetDiagnostic(error, stage, upstreamStatus, upstreamBody);
@@ -262,7 +287,7 @@ const statuses = z.enum(['PENDING_CREATED', 'PENDING', 'PROCESSING', 'AUTHORIZED
 const instant = z.string().datetime({ offset: true });
 const proofInput = z.object({ transactionId: identifier, accountId: identifier, sessionId: identifier, externalSessionId: uuid,
   externalCustomerId: uuid, serviceProvider: provider, countryCode: country, sourceCurrencyCode: currency, paymentMethodType: token,
-  sourceAmount: z.string().regex(/^\d{1,10}\.\d{2}$/), destinationCurrencyCode: z.literal('USDT_POLYGON'), walletAddress: address,
+  sourceAmount: z.string().regex(/^\d{1,10}\.\d{2}$/), destinationCurrencyCode: productionAsset, walletAddress: address,
   chainId: z.literal('137'), providerStatus: statuses, providerUpdatedAt: instant,
   receivedAmount: z.string().regex(/^\d{1,12}(?:\.\d{1,6})?$/),
 }).strict().refine(value => value.providerStatus !== 'SETTLED' || Number(value.receivedAmount) > 0);
@@ -270,6 +295,7 @@ type Confirmation = { state: 'unconfirmed' | 'pending' | 'confirmed' | 'failed';
   receivedAmount?: string; confirmedAt?: string; transactionId?: string; providerStatus?: string };
 const unconfirmed = (): Confirmation => ({ state: 'unconfirmed', source: 'none', testMode: false });
 const attemptInput = z.object({ id: uuid, subject: z.string().min(1).max(255), address, country_code: country,
+  destination_currency: productionAsset,
   source_currency: currency, requested_amount: z.coerce.number().finite().positive().max(1_000_000_000),
   service_provider: provider, payment_method: token, status: z.enum(['initiated', 'session_created', 'unavailable']), created_at: z.coerce.date(),
   customer_reference: uuid, account_id: identifier, provider_session_id: identifier.nullable(), provider_customer_id: identifier.nullable(),
@@ -277,7 +303,9 @@ const attemptInput = z.object({ id: uuid, subject: z.string().min(1).max(255), a
 type Attempt = z.infer<typeof attemptInput>;
 function readAttempt(raw: unknown, subject: string) {
   const parsed = attemptInput.safeParse(raw);
-  if (!parsed.success || parsed.data.subject !== subject || !productionWalletFundingInput.safeParse({ requestId: parsed.data.id,
+  if (!parsed.success || parsed.data.subject !== subject
+    || !productionAssetAllowed(parsed.data.destination_currency, parsed.data.country_code, parsed.data.source_currency, parsed.data.service_provider, parsed.data.payment_method)
+    || !productionWalletFundingInput.safeParse({ requestId: parsed.data.id,
     country: parsed.data.country_code, amount: parsed.data.requested_amount, sourceCurrencyCode: parsed.data.source_currency,
     paymentMethodType: parsed.data.payment_method, serviceProvider: parsed.data.service_provider }).success) throw Error('wallet_production_unavailable');
   return parsed.data;
@@ -286,7 +314,7 @@ function matchesProof(proof: z.infer<typeof proofInput>, row: Attempt) {
   return proof.externalSessionId === row.id && proof.accountId === row.account_id && proof.sessionId === row.provider_session_id
     && proof.externalCustomerId === row.customer_reference && proof.serviceProvider === row.service_provider && proof.countryCode === row.country_code
     && proof.sourceCurrencyCode === row.source_currency && proof.sourceAmount === row.requested_amount.toFixed(2)
-    && proof.paymentMethodType === row.payment_method && proof.walletAddress === row.address;
+    && proof.paymentMethodType === row.payment_method && proof.walletAddress === row.address && proof.destinationCurrencyCode === row.destination_currency;
 }
 function cachedProof(row: Attempt) {
   if (row.proof === null) return null; const parsed = proofInput.safeParse(row.proof);
@@ -305,7 +333,7 @@ export function validateProductionWalletTransaction(raw: unknown, row: Attempt, 
   const parsed = z.object({ transaction: z.object({ id: identifier, accountId: identifier, sessionId: identifier,
     customerId: identifier, externalSessionId: uuid, externalCustomerId: uuid, serviceProvider: provider,
     transactionType: z.literal('CRYPTO_PURCHASE'), countryCode: country, sourceCurrencyCode: currency, sourceAmount: preciseAmount,
-    destinationCurrencyCode: z.literal('USDT_POLYGON'), destinationAmount: z.number().finite().nonnegative().max(1_000_000_000),
+    destinationCurrencyCode: productionAsset, destinationAmount: z.number().finite().nonnegative().max(1_000_000_000),
     paymentMethodType: token, status: z.string(), updatedAt: instant,
     cryptoDetails: z.object({ destinationWalletAddress: z.string().regex(/^0x[0-9a-f]{40}$/i), chainId: z.union([z.literal('137'), z.literal(137)]) }) }) }).safeParse(raw);
   if (!parsed.success) throw Error('wallet_production_provider_unavailable'); const item = parsed.data.transaction;
@@ -351,13 +379,13 @@ export async function readProductionWalletStatus(database: SandboxWalletDatabase
   { environment = process.env, fetchImpl = fetch, signal, timeoutMs }: Dependencies = {}) {
   productionWalletConfiguration(environment); const reference = uuid.parse(input.checkoutReference), scope = productionScope(signal, timeoutMs);
   try {
-    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.read_wallet_meld_production_attempt(
+    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.read_wallet_meld_production_attempt_with_asset(
       ${input.subject},${input.nativeSessionId},${reference}::uuid)`), scope.signal);
     if (!rows.length) throw Error('wallet_production_not_found'); const row = readAttempt(one(rows), input.subject);
     if (row.id !== reference) throw Error('wallet_production_unavailable');
     return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
       serviceProvider: row.service_provider, requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency,
-      paymentMethodType: row.payment_method, country: row.country_code, requestStatus: row.status, destination: destination(row.address),
+      paymentMethodType: row.payment_method, country: row.country_code, requestStatus: row.status, destination: destination(row.address, row.destination_currency),
       confirmation: await reconcile(database, row, { environment, fetchImpl }, scope.signal) };
   } finally { scope.close(); }
 }
@@ -365,13 +393,13 @@ export async function readProductionWalletHistory(database: SandboxWalletDatabas
   { environment = process.env, signal, timeoutMs }: Dependencies = {}) {
   const config = productionWalletConfiguration(environment), scope = productionScope(signal, timeoutMs);
   try {
-    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.read_wallet_meld_production_history(
+    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.read_wallet_meld_production_history_with_asset(
       ${input.subject},${input.nativeSessionId})`), scope.signal);
     if (rows.length > 50) throw Error('wallet_production_unavailable');
     const records = rows.map(value => { const row = readAttempt(value, input.subject);
       if (row.account_id !== config.account) throw Error('wallet_production_unavailable');
       return { checkoutReference: row.id, provider: 'meld' as const, serviceProvider: row.service_provider, status: row.status,
-        country: row.country_code, requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency, destination: destination(row.address),
+        country: row.country_code, requestedAmount: row.requested_amount, sourceCurrencyCode: row.source_currency, destination: destination(row.address, row.destination_currency),
         paymentMethodType: row.payment_method, createdAt: row.created_at.toISOString(), ...(row.proof !== null ? { confirmation: confirmation(cachedProof(row)) } : {}) }; });
     if (new Set(records.map(row => row.checkoutReference)).size !== records.length) throw Error('wallet_production_unavailable');
     return { walletKind: 'personal' as const, environment: 'production' as const, settlement: 'unconfirmed' as const, records };

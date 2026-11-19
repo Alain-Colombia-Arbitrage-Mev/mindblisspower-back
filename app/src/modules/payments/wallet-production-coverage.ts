@@ -7,10 +7,13 @@ const providers = new Set(['ALCHEMYPAY', 'BANXA', 'BLOCKCHAINDOTCOM', 'BTCDIRECT
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/);
 const instant = z.string().max(40).datetime({ offset: true });
 const positive = z.number().finite().positive().max(1_000_000_000);
+export const productionAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON']);
+export type ProductionAsset = z.infer<typeof productionAsset>;
 const rowSchema = z.object({ country: z.string().regex(/^[A-Z]{2}$/), sourceCurrencyCode: z.string().regex(/^[A-Z]{3}$/),
   serviceProvider: token, paymentMethodType: token, minorUnits: z.number().int().min(0).max(2),
   minimumAmount: z.number().finite().nonnegative().max(1_000_000_000), maximumAmount: positive,
-  verifiedAmount: positive, verifiedAt: instant, evidence: z.literal('quote_verified') }).strict();
+  verifiedAmount: positive, verifiedAt: instant, evidence: z.literal('quote_verified'),
+  destinationCurrencyCode: productionAsset.optional() }).strict();
 const catalogueSchema = z.object({ schemaVersion: z.literal(1), scope: z.literal(scope), environment: z.literal('production'),
   asset: z.literal('USDT_POLYGON'), chainId: z.literal(137), verifiedAt: instant, rows: z.array(rowSchema).min(1).max(10_000) }).strict();
 
@@ -21,8 +24,14 @@ type CoverageEnvironment = { MELD_PRODUCTION_API_KEYS?: string; MELD_PRODUCTION_
   MELD_PRODUCTION_CATALOGUE_ATTESTATION?: string };
 type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string };
 type Route = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number }[] };
-const permitted = (row: Pick<CoverageRow, 'country' | 'sourceCurrencyCode' | 'serviceProvider' | 'paymentMethodType'>) =>
+export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
+  asset === 'USDT_POLYGON' || (serviceProvider === 'ONRAMPMONEY'
+    && ((country === 'MX' && fiat === 'MXN' && method === 'SPEI')
+      || (country === 'US' && fiat === 'USD' && ['ACH', 'LOCAL_BANK_TRANSFER'].includes(method))));
+const rowAsset = (row: CoverageRow) => row.destinationCurrencyCode ?? 'USDT_POLYGON';
+const permitted = (row: CoverageRow) =>
   providers.has(row.serviceProvider) && (row.serviceProvider !== 'ONMETA' || row.country === 'IN')
+  && productionAssetAllowed(rowAsset(row), row.country, row.sourceCurrencyCode, row.serviceProvider, row.paymentMethodType)
   && !(row.country === 'MX' && row.sourceCurrencyCode === 'MXN'
     && row.serviceProvider === 'BANXA' && row.paymentMethodType === 'SPEI');
 const snapBinaryNoise = (scaled: number) => Math.abs(scaled - Math.round(scaled))
@@ -52,15 +61,16 @@ export function resolveProductionCoverage(environment: CoverageEnvironment, rawC
   if (!timingSafeEqual(Buffer.from(attestation, 'hex'), expected)) throw Error('wallet_production_unconfigured');
   const parsed = catalogueSchema.safeParse(rawCatalogue);
   if (!parsed.success || Date.parse(parsed.data.verifiedAt) > now) throw Error('wallet_production_unconfigured');
-  const seen = new Set<string>(), precision = new Map<string, number>();
+  const seen = new Set<string>(), precision = new Map<string, number>(), assets = new Map<string, ProductionAsset>();
   for (const row of parsed.data.rows) {
     const id = [row.country, row.sourceCurrencyCode, row.serviceProvider, row.paymentMethodType].join('|');
     const pair = `${row.country}|${row.sourceCurrencyCode}`, units = precision.get(pair), range = bounds(row);
     if (!permitted(row) || seen.has(id) || (units !== undefined && units !== row.minorUnits)
+      || (assets.has(pair) && assets.get(pair) !== rowAsset(row))
       || Date.parse(row.verifiedAt) > now || range.minimum > range.maximum
       || !precise(row.verifiedAmount, row.minorUnits) || row.verifiedAmount < range.minimum || row.verifiedAmount > range.maximum)
       throw Error('wallet_production_unconfigured');
-    seen.add(id); precision.set(pair, row.minorUnits);
+    seen.add(id); precision.set(pair, row.minorUnits); assets.set(pair, rowAsset(row));
     Object.freeze(row);
   }
   Object.freeze(parsed.data.rows);
@@ -74,6 +84,10 @@ export function coverageCurrencies(catalogue: CoverageCatalogue, country: string
 }
 export function coverageMinorUnits(catalogue: CoverageCatalogue, country: string, fiat: string): number | undefined {
   return selectedRows(catalogue, country, fiat)[0]?.minorUnits;
+}
+export function coverageAsset(catalogue: CoverageCatalogue, country: string, fiat: string): ProductionAsset {
+  const row = selectedRows(catalogue, country, fiat)[0];
+  return row ? rowAsset(row) : catalogue.asset;
 }
 
 /** Intersect each exact provider/method separately, never fill gaps or widen an
