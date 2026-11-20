@@ -214,9 +214,9 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  eq(legacyCreate,beforeLegacyCreate,false);
 
  const rampOwner=users[7];
- const rampCreate=(asset,changes={})=>{
+ const rampCreate=(asset,changes={},owner=rampOwner)=>{
   const input={id:randomUUID(),country:'US',amount:'100',currency:'USD',method:'CREDIT_DEBIT_CARD',provider:'RAMPNOW',...changes};
-  return row('payments.create_wallet_meld_production_attempt',[rampOwner.subject,rampOwner.session,input.id,input.country,input.amount,
+  return row('payments.create_wallet_meld_production_attempt',[owner.subject,owner.session,input.id,input.country,input.amount,
    input.currency,input.method,input.provider,'production-account',asset]);
  };
  for(const asset of ['USDC_POLYGON','USDC_ARBITRUM','USDC']){
@@ -300,4 +300,54 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
   }
  }
  console.log(JSON.stringify({walletRampNowMobilePaySchema:'passed',applePay:true,googlePay:true,providerCalls:0,actualCharges:0}));
+
+ const rampBankOwner=users[3];
+ const rampBankMethods=['ACH','LOCAL_BANK_TRANSFER'];
+ const destinationConstraint='wallet_meld_production_attempt_destination_currency_check';
+ for(const method of rampBankMethods)deny(rampCreate('USDC_POLYGON',{method},rampBankOwner),destinationConstraint);
+ const bankMigration=await readFile(new URL('../_meta/migration/127_wallet_meld_production_rampnow_bank.sql',import.meta.url),'utf8');
+ const beforeRampBank=value(ledgerDigest,false);
+ psql(bankMigration);
+ eq(ledgerDigest,beforeRampBank,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(legacyCreate,beforeLegacyCreate,false);
+
+ for(const method of rampBankMethods){
+  deny(rampCreate('USDC_POLYGON',{method,country:'MX'},rampBankOwner),destinationConstraint);
+  deny(rampCreate('USDC_POLYGON',{method,currency:'EUR'},rampBankOwner),destinationConstraint);
+  deny(rampCreate('USDT_POLYGON',{method},rampBankOwner),destinationConstraint);
+  for(const [requestedAsset,requestedChain,deliveredAsset,deliveredChain] of requestedAndDelivered){
+   const id=randomUUID();
+   const createBankAttempt=rampCreate(requestedAsset,{id,method},rampBankOwner);
+   const created=JSON.parse(value(createBankAttempt));
+   assert.equal(created.created,true);
+   assert.equal(created.address,rampBankOwner.address);
+   assert.equal(JSON.parse(value(createBankAttempt)).created,false);
+   deny(rampCreate(deliveredAsset,{id,method},rampBankOwner),'wallet_production_request_already_used');
+   eq(finish(id,3),'t');
+
+   const checkedAt=Date.now();
+   const delivered={...proof,transactionId:'transaction-'+id,sessionId:'session-'+id,externalSessionId:id,
+    externalCustomerId:bindings[3].binding_reference,serviceProvider:'RAMPNOW',paymentMethodType:method,sourceAmount:'100.00',
+    walletAddress:rampBankOwner.address,destinationCurrencyCode:deliveredAsset,chainId:deliveredChain,
+    providerStatus:'SETTLED',receivedAmount:'95.079123',providerUpdatedAt:new Date(checkedAt).toISOString()};
+   const saveBankProof=changes=>save({...delivered,...changes},rampBankOwner.subject,id);
+   for(const change of [{paymentMethodType:'CREDIT_DEBIT_CARD'},{walletAddress:arbOwner.address},
+    {serviceProvider:'ONRAMPMONEY'},{chainId:requestedChain},{providerStatus:'PROCESSING'}]){
+    deny(saveBankProof(change),'wallet_production_proof_context_mismatch');
+   }
+   assert.deepEqual(JSON.parse(value(saveBankProof({}))),delivered);
+   eq(`SELECT chain_id FROM ${table} WHERE id=${lit(id)};`,requestedChain,false);
+   deny(saveBankProof({providerStatus:'REFUNDED',providerUpdatedAt:new Date(checkedAt+1000).toISOString(),
+    destinationCurrencyCode:requestedAsset,chainId:requestedChain}),'wallet_production_proof_context_mismatch');
+  }
+ }
+ deny(rampCreate('USDC_POLYGON',{method:'CASH_APP'},rampBankOwner),destinationConstraint);
+ deny(save({...bankProof,destinationCurrencyCode:'USDC_ARBITRUM',chainId:'42161'},bank.subject,bankId),'wallet_production_proof_context_mismatch');
+ const beforeRampBankReapply=value(ledgerDigest,false);
+ psql(bankMigration);
+ eq(ledgerDigest,beforeRampBankReapply,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(oldRows,before.rows,false);
+ console.log(JSON.stringify({walletRampNowBankSchema:'passed',methods:rampBankMethods,deliveryNetworks:3,providerCalls:0,actualCharges:0}));
 }

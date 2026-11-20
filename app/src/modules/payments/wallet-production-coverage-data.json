@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-19T23:05:57.212Z",
+  "verifiedAt": "2026-11-20T00:47:04.863Z",
   "rows": [
     {
       "country": "AD",
@@ -1685,6 +1685,84 @@
       "maximumAmount": 10000,
       "verifiedAmount": 100,
       "verifiedAt": "2026-11-19T23:05:57.212Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "ACH",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-20T00:47:04.863Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "ACH",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-20T00:47:04.863Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "ACH",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-20T00:47:04.863Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "LOCAL_BANK_TRANSFER",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-20T00:47:04.863Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "LOCAL_BANK_TRANSFER",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-20T00:47:04.863Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
+    },
+    {
+      "country": "US",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "RAMPNOW",
+      "paymentMethodType": "LOCAL_BANK_TRANSFER",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 10000,
+      "verifiedAmount": 100,
+      "verifiedAt": "2026-11-20T00:47:04.863Z",
       "evidence": "quote_verified",
       "destinationCurrencyCode": "USDC"
     }

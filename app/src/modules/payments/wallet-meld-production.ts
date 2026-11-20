@@ -9,7 +9,7 @@ import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-p
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits, coverageMethodsByProvider,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
-  isUsRampNowFunding, rampNowAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
+  isUsBankFunding, isUsRampNowFunding, rampNowAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
   type ProductionAsset, type ProductionRoute } from './wallet-production-coverage';
 import { verifyRampNowDelivery, transactionHash } from './wallet-rampnow-delivery';
 
@@ -35,7 +35,10 @@ const allowsSelection = (value: FundingSelection) =>
 export const productionWalletQuoteInput = quoteSchema.refine(allowsSelection);
 export const productionWalletFundingInput = z.object({ ...quoteFields, requestId: uuid, serviceProvider: provider }).strict()
   .refine(value => allowsSelection(value) && productionCheckoutProviders.has(value.serviceProvider)
-    && (value.serviceProvider === 'RAMPNOW') === (value.destinationCurrencyCode !== undefined));
+    && (value.serviceProvider === 'RAMPNOW' ? value.destinationCurrencyCode !== undefined
+      : value.destinationCurrencyCode === undefined
+        || (value.serviceProvider === 'ONRAMPMONEY' && value.destinationCurrencyCode === 'USDC_POLYGON'
+          && isUsBankFunding(value.country, value.sourceCurrencyCode, value.paymentMethodType))));
 type Dependencies = { environment?: SandboxWalletEnvironment; fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; catalogue?: unknown };
 export function productionWalletConfiguration(environment: SandboxWalletEnvironment) {
   const key = environment.MELD_PRODUCTION_API_KEYS, account = environment.MELD_PRODUCTION_ACCOUNT_ID;

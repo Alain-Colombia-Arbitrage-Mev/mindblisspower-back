@@ -32,20 +32,25 @@ type Selection = { country: string; sourceCurrencyCode: string; amount: number; 
 export type ProductionRoute = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number; destinationCurrencyCodes?: ProductionAsset[] }[] };
 export const rampNowAssets = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'] as const;
 export const rampNowAsset = z.enum(rampNowAssets);
-export const rampNowPaymentModes = { CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay' } as const;
+export const rampNowPaymentModes = {
+  CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay', ACH: 'ach', LOCAL_BANK_TRANSFER: 'wire',
+} as const;
 export function rampNowPaymentMode(method: string) {
   return Object.hasOwn(rampNowPaymentModes, method) ? rampNowPaymentModes[method as keyof typeof rampNowPaymentModes] : undefined;
 }
 export function isUsRampNowFunding(country: string, fiat: string, method: string) {
   return country === 'US' && fiat === 'USD' && rampNowPaymentMode(method) !== undefined;
 }
+export const isUsBankFunding = (country: string, fiat: string, method: string) =>
+  country === 'US' && fiat === 'USD' && (method === 'ACH' || method === 'LOCAL_BANK_TRANSFER');
+
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
   serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && rampNowAsset.safeParse(asset).success
   : asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
     && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')
   || (asset === 'USDC_POLYGON' && serviceProvider === 'ONRAMPMONEY'
     && ((country === 'MX' && fiat === 'MXN' && method === 'SPEI')
-      || (country === 'US' && fiat === 'USD' && ['ACH', 'LOCAL_BANK_TRANSFER'].includes(method))
+      || isUsBankFunding(country, fiat, method)
       || (country === 'CO' && fiat === 'COP' && ['PSE', 'LOCAL_BANK_TRANSFER'].includes(method))));
 const rowAsset = (row: CoverageRow) => row.destinationCurrencyCode ?? 'USDT_POLYGON';
 const permitted = (row: CoverageRow) =>

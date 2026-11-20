@@ -3,7 +3,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { SandboxWalletDatabase } from '../identity/sandbox-wallet';
 import { createProductionWalletSession, normalizeProductionWalletRoutes, productionWalletCapabilities, productionWalletCheckoutUrl,
-  quoteProductionWalletFunding, readProductionWalletDiscovery, readProductionWalletOptions, readProductionWalletHistory, readProductionWalletStatus,
+  productionWalletFundingInput, quoteProductionWalletFunding, readProductionWalletDiscovery, readProductionWalletOptions, readProductionWalletHistory, readProductionWalletStatus,
   validateProductionWalletTransaction } from './wallet-meld-production';
 import { productionMeldJson, productionScope } from './wallet-meld-production-http';
 import { syntheticCoverage as catalogue, coverageTestEnvironment } from './wallet-production-coverage-fixture';
@@ -162,8 +162,10 @@ const rampRoutes = (asset: string) => [{ partner: 'RAMPNOW', source: 'USD', dest
   { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 10000 } },
 ] }];
 
-test('RampNow offers Apple and Google Pay on each verified network and rejects a wallet method changed by checkout', async () => {
-  const methods = ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'] as const;
+test('RampNow quotes and opens each supported payment method on the verified network and rejects a changed method', async () => {
+  const methodModes = { CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay',
+    ACH: 'ach', LOCAL_BANK_TRANSFER: 'wire' } as const;
+  const methods = Object.keys(methodModes) as (keyof typeof methodModes)[];
   const mobileCatalogue = { ...rampCatalogue, rows: rampCatalogue.rows.flatMap(row =>
     methods.map(paymentMethodType => ({ ...row, paymentMethodType }))) };
   const route = (asset: string) => [{ ...rampRoutes(asset)[0], paymentMethods: methods.map(name => ({
@@ -177,8 +179,8 @@ test('RampNow offers Apple and Google Pay on each verified network and rejects a
     destinationCurrencyCodes: cardNetworks.map(([asset]) => asset),
   })));
   for (const [asset, network, chainId] of cardNetworks) {
-    for (const paymentMethodType of ['APPLE_PAY', 'GOOGLE_PAY'] as const) {
-      const expectedMode = paymentMethodType.toLowerCase();
+    for (const paymentMethodType of methods) {
+      const expectedMode = methodModes[paymentMethodType];
       const prefill = new URLSearchParams({ orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: '100.00',
         dstCurrency: 'USDC', dstChain: network, walletAddress: wallet, lockFields: 'walletAddress', paymentMode: expectedMode,
         prefill: 'true', externalOrderId: widget.id,
@@ -186,7 +188,7 @@ test('RampNow offers Apple and Google Pay on each verified network and rejects a
       const price = { quotes: [{ ...quote('RAMPNOW').quotes[0], sourceCurrencyCode: 'USD', sourceAmount: 100,
         destinationCurrencyCode: asset, paymentMethodType }] };
       for (const changeMode of [false, true]) {
-        if (changeMode) prefill.set('paymentMode', 'card');
+        if (changeMode) prefill.set('paymentMode', expectedMode === 'card' ? 'wire' : 'card');
         const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
         const api = provider([route(asset), price, { ...widget, serviceProviderWidgetUrl: `https://app.rampnow.io/order/quote?${prefill}` }]);
         const promise = createProductionWalletSession(db.database, { ...usCard, paymentMethodType, destinationCurrencyCode: asset },
@@ -200,6 +202,28 @@ test('RampNow offers Apple and Google Pay on each verified network and rejects a
       }
     }
   }
+});
+
+test('US banking keeps both Polygon providers for an explicit quote and restricts Onramp Money to Polygon', async () => {
+  const bank = { ...usCard, paymentMethodType: 'ACH', destinationCurrencyCode: 'USDC_POLYGON' };
+  const { requestId, serviceProvider, ...request } = bank;
+  const onramp = { ...bank, serviceProvider: 'ONRAMPMONEY' };
+  const providerNames = [serviceProvider, onramp.serviceProvider];
+  const routesForBank = providerNames.map(partner => ({ ...rampRoutes(bank.destinationCurrencyCode)[0], partner,
+    paymentMethods: [{ name: bank.paymentMethodType, limits: { currencyCode: 'USD', min: 5, max: 10000 } }] }));
+  const bankCatalogue = { ...rampCatalogue, rows: providerNames.map(serviceProvider => ({
+    ...rampCatalogue.rows[0], serviceProvider, paymentMethodType: bank.paymentMethodType,
+  })) };
+  const quotes = providerNames.map(name => ({ quotes: [{ ...quote(name).quotes[0], sourceAmount: bank.amount,
+    sourceCurrencyCode: bank.sourceCurrencyCode, destinationCurrencyCode: bank.destinationCurrencyCode, paymentMethodType: bank.paymentMethodType }] }));
+  const db = database([[binding]]);
+  const api = provider([routesForBank, ...quotes]);
+  const result = await quoteProductionWalletFunding(db.database, request, { ...options, catalogue: bankCatalogue, fetchImpl: api.fetchImpl });
+  expect(result.quotes.map(item => item.serviceProvider)).toEqual(providerNames);
+  expect(productionWalletFundingInput.safeParse(onramp).success).toBe(true);
+  expect(productionWalletFundingInput.safeParse({ ...onramp, destinationCurrencyCode: 'USDC' }).success).toBe(false);
+  expect(productionWalletFundingInput.safeParse({ ...onramp, paymentMethodType: 'GOOGLE_PAY' }).success).toBe(false);
+  expect(productionWalletFundingInput.safeParse({ ...bank, paymentMethodType: 'CASH_APP' }).success).toBe(false);
 });
 
 test('RampNow discovers approved US card networks, preserves the chosen quote and validates the provider checkout', async () => {
