@@ -3,7 +3,7 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { IdentityDatabase } from '../identity/model';
 import { readAppMeldFundingHistory, readAppMeldFundingStatus } from './app-meld-funding-status';
-import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
+import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, ETHEREUM_USDC_TOKEN, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
 const customer = 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44';
@@ -122,6 +122,26 @@ test('App USDC reconciliation requires the registered Polygon asset and its actu
   const proof = { ...receipt, logs: [{ ...receipt.logs[0]!, address: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359' }] };
   const confirmed = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail, proof).fetchImpl });
   expect(confirmed).toMatchObject({ destination: { address: wallet, asset: 'USDC', chainId: 137 }, confirmation: { state: 'confirmed' } });
+});
+
+test('App retains retired RampNow history on alternate networks and confirms Mercuryo only to the bound USDC recipient', async () => {
+  for (const [provider, asset, chainId, token] of [['RAMPNOW', 'USDC_ARBITRUM', 42161, ARBITRUM_USDC_TOKEN],
+    ['RAMPNOW', 'USDC', 1, ETHEREUM_USDC_TOKEN], ['MERCURYO', 'USDC', 1, ETHEREUM_USDC_TOKEN]] as const) {
+    const attempt = { ...row, destination_currency: asset, chain_id: chainId, source_currency: 'USD', country_code: 'US',
+      requested_amount: '100.00', payment_method: 'APPLE_PAY', service_provider: provider };
+    const detail = { ...transaction, destinationCurrencyCode: asset, sourceCurrencyCode: 'USD', countryCode: 'US',
+      sourceAmount: 100, serviceProvider: provider, paymentMethodType: 'APPLE_PAY',
+      cryptoDetails: { ...transaction.cryptoDetails, chainId: String(chainId) } };
+    const proof = { ...receipt, logs: [{ ...receipt.logs[0]!, address: token }] };
+    const { db } = database([attempt]);
+    expect(await readAppMeldFundingHistory(db, row.subject)).toMatchObject([{ serviceProvider: provider,
+      destination: { address: wallet, asset: 'USDC', chainId } }]);
+    const confirmed = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail, proof).fetchImpl });
+    expect(confirmed).toMatchObject({ destination: { address: wallet, asset: 'USDC', chainId }, confirmation: { state: 'confirmed' } });
+    const wrong = { ...detail, paymentMethodType: 'GOOGLE_PAY' };
+    await expect(readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(wrong, proof).fetchImpl }))
+      .rejects.toThrow('wallet_funding_provider_unavailable');
+  }
 });
 
 test('Brazil Pix confirms only native USDC on Arbitrum in the linked wallet', async () => {

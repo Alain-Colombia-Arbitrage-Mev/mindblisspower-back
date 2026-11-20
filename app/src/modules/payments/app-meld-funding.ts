@@ -5,7 +5,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { createAdministrativePreflightGate, personalFundingInput } from './wallet-funding';
 import { additionalAppMeldOnrampParameters } from './app-meld-additional-markets';
 import { productionMeldJson, productionOperation, productionScope } from './meld-production-http';
-import { appMeldAmountFitsPrecision, appMeldAsset, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, appMeldRouteBounds, rampNowPaymentModes,
+import { appMeldAmountFitsPrecision, appMeldAsset, appMeldCheckoutProvider, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, appMeldRouteBounds,
   type AppMeldAsset, type AppMeldProvider } from './app-meld-funding-policy';
 
 export const APP_MELD_ORIGIN = 'https://app.mindblisspower.com';
@@ -80,14 +80,15 @@ export async function readAppMeldOptions(country: string, sourceCurrencyCode: st
   } finally { scope.close(); }
 }
 
-const quoteSchema = z.object({ quotes: z.array(z.object({ serviceProvider: appMeldProvider, countryCode: z.string().optional(),
+const quoteSchema = z.object({ quotes: z.array(z.object({ serviceProvider: appMeldCheckoutProvider, countryCode: z.string().optional(),
   sourceCurrencyCode: z.string(), sourceAmount: z.number(), paymentMethodType: z.string(), destinationCurrencyCode: appMeldAsset,
   destinationAmount: z.number().finite().positive(), totalFee: z.number().finite().nonnegative(), transactionType: z.literal('CRYPTO_PURCHASE'),
   walletAddress: z.string().optional(), accountId: identifier.optional() })).length(1) });
 const widget = z.object({ id: identifier, customerId: identifier, externalSessionId: z.string().uuid(), externalCustomerId: z.string().uuid(),
-  serviceProvider: appMeldProvider.optional(), widgetUrl: z.string().max(8192).nullish(), serviceProviderWidgetUrl: z.string().max(8192).nullish() });
+  serviceProvider: appMeldCheckoutProvider.optional(), widgetUrl: z.string().max(8192).nullish(), serviceProviderWidgetUrl: z.string().max(8192).nullish() });
 const reserved = z.object({ id: z.string().uuid(), wallet_address: address, customer_reference: z.string().uuid(), created: z.boolean(),
   status: z.literal('initiated'), created_at: z.coerce.date() });
+const mercuryoWidgetMethods = new Map([['CREDIT_DEBIT_CARD', 'card'], ['APPLE_PAY', 'apple'], ['GOOGLE_PAY', 'google']]);
 
 function checkoutUrl(value: string | null | undefined) {
   return value && /^https:\/\/meldcrypto\.com\/?\?token=[A-Za-z0-9_.~-]{1,7000}$/.test(value) ? new URL(value).href : null;
@@ -117,10 +118,13 @@ function matchesWidget(link: string | null | undefined, provider: AppMeldProvide
     const destination = appMeldDestination(asset, wallet);
     const token = destination.asset, network = destination.network.toUpperCase();
     if (provider === 'MERCURYO') {
+      const method = mercuryoWidgetMethods.get(paymentMethodType);
+      if (!method || (method !== 'card' && (country !== 'US' || fiat !== 'USD'))) return false;
       return url.origin === 'https://exchange.mercuryo.io' && url.pathname === '/'
+        && !query.has('address_map') && (method !== 'apple' || query.get('fix_payment_method') === 'true')
         && matches({ type: 'buy', currency: token, network, fix_currency: 'true', country_code: country,
           fiat_currency: fiat, fiat_amount: amount.toFixed(2), fix_fiat_currency: 'true', fix_fiat_amount: 'true',
-          payment_method: 'card', address: wallet, redirect_url: redirectUrl, merchant_transaction_id: id })
+          payment_method: method, address: wallet, redirect_url: redirectUrl, merchant_transaction_id: id })
         && z.string().uuid().safeParse(query.get('widget_id')).success && /^v2:[a-f0-9]{128}$/i.test(query.get('signature') || '');
     }
     if (provider === 'ALCHEMYPAY') {
@@ -146,13 +150,7 @@ function matchesWidget(link: string | null | undefined, provider: AppMeldProvide
         && (fiatType === undefined ? /^\d{1,3}$/.test(query.get('fiatType') ?? '') : query.get('fiatType') === fiatType)
         && (paymentMethod === undefined ? /^\d{1,3}$/.test(query.get('paymentMethod') ?? '') : query.get('paymentMethod') === paymentMethod);
     }
-    if (provider !== 'RAMPNOW') return false;
-    const paymentMode = (rampNowPaymentModes as Record<string, string>)[paymentMethodType];
-    return Boolean(paymentMode) && url.origin === 'https://app.rampnow.io' && url.pathname === '/order/quote'
-      && matches({ orderType: 'buy', srcCurrency: fiat, srcChain: 'fiat', srcAmount: amount.toFixed(2),
-        dstCurrency: token, dstChain: asset === 'USDC_ARBITRUM' ? 'arbitrum-one' : destination.network, walletAddress: wallet, prefill: 'true', paymentMode: paymentMode!,
-        returnUrl: redirectUrl, externalOrderId: id })
-      && query.get('lockFields')?.split(',').includes('walletAddress') === true;
+    return false;
   } catch { return false; }
 }
 const limits = new WeakMap<Database, ReturnType<typeof createAdministrativePreflightGate>>();
@@ -163,11 +161,13 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
   const input = appMeldInput.parse(raw);
   const market = appMeldMarket(input.country, input.sourceCurrencyCode);
   const asset = input.destinationCurrencyCode ?? market?.asset;
-  if (!market || !asset || !market.rows.some(row => row.destinationCurrencyCode === asset
-    && row.paymentMethodType === input.paymentMethodType && (!input.serviceProvider || row.serviceProvider === input.serviceProvider))) {
-    throw Error('wallet_funding_method_unavailable');
-  }
-  if (!appMeldAmountFitsPrecision(input.amount, market.minorUnits)) throw Error('wallet_funding_amount_unavailable');
+  const approved = market?.rows.filter(row => row.destinationCurrencyCode === asset
+    && row.paymentMethodType === input.paymentMethodType && (!input.serviceProvider || row.serviceProvider === input.serviceProvider));
+  if (!market || !asset || !approved?.length) throw Error('wallet_funding_method_unavailable');
+  if (!appMeldAmountFitsPrecision(input.amount, market.minorUnits) || !approved.some(row => {
+    const { minimumAmount, maximumAmount } = appMeldRouteBounds(row);
+    return input.amount >= minimumAmount && input.amount <= maximumAmount;
+  })) throw Error('wallet_funding_amount_unavailable');
   const config = configuration(environment);
   if (!isIP(clientIp) || !nativeSessionId) throw Error('wallet_funding_unconfigured');
   let limiter = limits.get(database);

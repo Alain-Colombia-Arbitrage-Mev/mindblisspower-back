@@ -63,14 +63,18 @@ test('App MELD reads forward the native marker for exact personal options, statu
   assert.equal((await dispatchCore(unmarked, appMeld, never)).status, 503);
 });
 
-test('App MELD passes canonical country, currency, provider, amount and Polygon destination to native intent validation', async () => {
+test('App MELD passes canonical country, currency, provider, amount and destination to native intent validation', async () => {
   const mexico = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount: 2000,
     serviceProvider: 'MERCURYO', destinationCurrencyCode: 'USDC_POLYGON' };
   const us = { ...input, sourceCurrencyCode: 'USD', paymentMethodType: 'LOCAL_BANK_TRANSFER',
-    serviceProvider: 'RAMPNOW', destinationCurrencyCode: 'USDC_POLYGON' };
+    serviceProvider: 'ONRAMPMONEY', destinationCurrencyCode: 'USDC_POLYGON' };
+  const usMercuryo = { ...us, serviceProvider: 'MERCURYO' };
+  const usCards = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'].flatMap(destinationCurrencyCode =>
+    [['CREDIT_DEBIT_CARD', 16000], ['APPLE_PAY', 2000], ['GOOGLE_PAY', 2000]].map(([paymentMethodType, amount]) =>
+      ({ ...usMercuryo, paymentMethodType, amount, destinationCurrencyCode })));
   const co = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 170000, paymentMethodType: 'PSE',
     serviceProvider: 'ONRAMPMONEY', destinationCurrencyCode: 'USDC_POLYGON' };
-  for (const data of [mexico, { ...mexico, sourceCurrencyCode: 'USD', amount: 100 }, us, co,
+  for (const data of [mexico, { ...mexico, sourceCurrencyCode: 'USD', amount: 100 }, us, ...usCards, co,
     { ...mexico, serviceProvider: undefined, destinationCurrencyCode: undefined }]) {
     const incoming = request(path, data, appHeaders);
     const result = await dispatchCore(incoming, appMeld, () => ({ fetch: async forwarded => {
@@ -81,8 +85,12 @@ test('App MELD passes canonical country, currency, provider, amount and Polygon 
     } }));
     assert.equal(result.status, 201);
   }
-
   const never = () => assert.fail('Unapproved App MELD intent reached the container');
+  for (const card of usCards) for (const change of [{ serviceProvider: 'RAMPNOW' }, { amount: card.amount + 0.01 },
+    { destinationCurrencyCode: 'USDT_POLYGON' }, { paymentMethodType: 'ACH' }]) {
+    assert.equal((await dispatchCore(request(path, { ...card, ...change }, appHeaders), appMeld, never)).status, 503);
+  }
+
   for (const change of [{ amount: 520.02 }, { amount: '2000' }, { amount: 2000.001 }, { country: 'US' },
     { paymentMethodType: 'NETELLER' }, { serviceProvider: 'TOPPER' }, { destinationCurrencyCode: 'USDT_POLYGON' },
     { redirectUrl: 'https://example.test' }, { walletAddress: null }, { requestId: [input.requestId] }]) {

@@ -6,16 +6,15 @@ import { PERSONAL_FUNDING_MAXIMUM_COP, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FU
   PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD } from './reown-funding-options';
 
 export const appMeldAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON', 'USDC_ARBITRUM', 'USDC']);
-export const appMeldProvider = z.enum(['MERCURYO', 'ONRAMPMONEY', 'RAMPNOW', 'ALCHEMYPAY', 'BANXA', 'ONMETA']);
+export const appMeldCheckoutProvider = z.enum(['MERCURYO', 'ONRAMPMONEY', 'ALCHEMYPAY', 'BANXA', 'ONMETA']);
+export const appMeldProvider = appMeldCheckoutProvider.or(z.literal('RAMPNOW'));
 export const appMeldCountry = z.string().regex(/^[A-Z]{2}$/);
 export const appMeldCurrency = z.string().regex(/^[A-Z]{3}$/);
 export const appMeldMethod = z.string().regex(/^[A-Z0-9_]{2,40}$/);
 export type AppMeldAsset = z.infer<typeof appMeldAsset>;
 export type AppMeldProvider = z.infer<typeof appMeldProvider>;
 
-export const rampNowPaymentModes = {
-  CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay', ACH: 'ach', LOCAL_BANK_TRANSFER: 'wire',
-} as const;
+const historicalRampNowMethods = new Set(['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'ACH', 'LOCAL_BANK_TRANSFER']);
 
 type HistoricalMarket = {
   country: z.infer<typeof appMeldCountry>;
@@ -40,7 +39,6 @@ const historicalMarkets: readonly HistoricalMarket[] = [
     { provider: 'ONRAMPMONEY', methods: ['SPEI'], minimum: PERSONAL_FUNDING_MINIMUM_MXN, maximum: 500_000 },
   ] },
   { country: 'US', currency: 'USD', asset: 'USDC_POLYGON', rails: [
-    { provider: 'RAMPNOW', methods: ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'ACH', 'LOCAL_BANK_TRANSFER'], minimum: 50, maximum: 10_000 },
     { provider: 'ONRAMPMONEY', methods: ['ACH', 'LOCAL_BANK_TRANSFER'], minimum: 50, maximum: PERSONAL_FUNDING_MAXIMUM_USD },
   ] },
   { country: 'CO', currency: 'COP', asset: 'USDC_POLYGON', rails: [
@@ -54,7 +52,7 @@ const historicalMarkets: readonly HistoricalMarket[] = [
 ];
 
 const coverageRow = z.object({
-  country: appMeldCountry, sourceCurrencyCode: appMeldCurrency, serviceProvider: appMeldProvider,
+  country: appMeldCountry, sourceCurrencyCode: appMeldCurrency, serviceProvider: appMeldCheckoutProvider,
   paymentMethodType: appMeldMethod, minorUnits: z.union([z.literal(0), z.literal(2)]),
   minimumAmount: z.number().finite().nonnegative(), maximumAmount: z.number().finite().positive().max(1_000_000_000),
   destinationCurrencyCode: appMeldAsset.default('USDT_POLYGON'),
@@ -91,8 +89,7 @@ for (const row of z.array(coverageRow).min(1).max(10_000).parse(walletCoverage.r
   rowsByPair.set(key, rows);
 }
 for (const [key, rows] of rowsByPair) {
-  const preferred = rows.find(row => row.serviceProvider !== 'RAMPNOW')
-    ?? rows.find(row => row.destinationCurrencyCode === 'USDC_POLYGON') ?? rows[0]!;
+  const preferred = rows.find(row => row.destinationCurrencyCode === 'USDC_POLYGON') ?? rows[0]!;
   markets.set(key, { minorUnits: preferred.minorUnits, asset: preferred.destinationCurrencyCode, rows: Object.freeze(rows) });
 }
 
@@ -101,6 +98,8 @@ export function appMeldMarket(country: string, currency: string) {
 }
 
 export function appMeldRecordedRoute(country: string, currency: string, provider: string, method: string, asset: AppMeldAsset, amount: number) {
+  if (provider === 'RAMPNOW') return country === 'US' && currency === 'USD' && asset !== 'USDT_POLYGON'
+    && historicalRampNowMethods.has(method) && appMeldAmountFitsPrecision(amount, 2) && amount >= 50 && amount <= 10_000;
   const market = appMeldMarket(country, currency);
   if (market && appMeldAmountFitsPrecision(amount, market.minorUnits) && market.rows.some(row => {
     const range = appMeldRouteBounds(row);

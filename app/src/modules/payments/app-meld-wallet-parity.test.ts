@@ -53,7 +53,8 @@ test('App exposes every Wallet catalog rail on its exact network with independen
     count += actual.length;
   }
   expect(pairs.size).toBe(74);
-  expect(count).toBe(149);
+  expect(count).toBe(143);
+  expect(walletCoverage.rows.some(row => row.serviceProvider === 'RAMPNOW')).toBe(false);
   expect(calls.size).toBe(76);
 });
 

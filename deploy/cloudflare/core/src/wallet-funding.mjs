@@ -28,8 +28,7 @@ for (const row of walletCoverage.rows) {
   else APP_MELD_MARKETS.set(key, { rows: [row], asset: walletCoverage.asset });
 }
 for (const market of APP_MELD_MARKETS.values()) {
-  const preferred = market.rows.find(row => row.serviceProvider !== 'RAMPNOW')
-    ?? market.rows.find(row => row.destinationCurrencyCode === 'USDC_POLYGON') ?? market.rows[0];
+  const preferred = market.rows.find(row => row.destinationCurrencyCode === 'USDC_POLYGON') ?? market.rows[0];
   market.asset = preferred.destinationCurrencyCode ?? walletCoverage.asset;
 }
 

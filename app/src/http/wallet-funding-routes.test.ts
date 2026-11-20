@@ -527,7 +527,10 @@ test('a signed App card request reserves its linked USDC address before minting 
     destination: { address: input.walletAddress, chainId: 137 }, checkoutUrl: 'https://meldcrypto.com/?token=synthetic.token' });
 });
 
-test('App discovers only the approved live US and Colombian methods and preserves local fiat bounds', async () => {
+const usMercuryoRails = [['CREDIT_DEBIT_CARD', 'card', 16_000], ['APPLE_PAY', 'apple', 2_000], ['GOOGLE_PAY', 'google', 2_000]] as const;
+const usMercuryoNetworks = [['USDC_POLYGON', 'POLYGON', 137], ['USDC_ARBITRUM', 'ARBITRUM', 42161], ['USDC', 'ETHEREUM', 1]] as const;
+
+test('App discovers the approved Mercuryo options and retains independent US and Colombia bank routes', async () => {
   const calls: string[] = [];
   const app = application({ runtimeEnvironment: { APP_MELD_PRODUCTION_ENABLED: 'true',
     MELD_PRODUCTION_API_KEYS: 'synthetic-merchant', MELD_PRODUCTION_ACCOUNT_ID: 'app-prod-account' },
@@ -535,16 +538,14 @@ test('App discovers only the approved live US and Colombian methods and preserve
   fetchImpl: (async target => {
     const url = new URL(String(target)); calls.push(url.pathname);
     const colombia = url.pathname.includes('/CO/COP/'), fiat = colombia ? 'COP' : 'USD';
-    const methods = colombia ? ['PSE', 'LOCAL_BANK_TRANSFER', 'GOOGLE_PAY'] : ['ACH', 'LOCAL_BANK_TRANSFER', 'APPLE_PAY', 'CREDIT_DEBIT_CARD', 'PAYPAL'];
-    const route = (partner: string, destination = 'USDC_POLYGON') => ({ partner, source: fiat, destination,
+    const methods = colombia ? ['PSE', 'LOCAL_BANK_TRANSFER', 'GOOGLE_PAY']
+      : ['ACH', 'LOCAL_BANK_TRANSFER', 'APPLE_PAY', 'CREDIT_DEBIT_CARD', 'GOOGLE_PAY', 'PAYPAL'];
+    const destination = url.pathname.split('/').at(-1);
+    const route = (partner: string) => ({ partner, source: fiat, destination,
       paymentMethods: methods.map(name => ({ name, limits: { currencyCode: fiat, min: colombia ? 42300 : 20, max: 50_000_000 } })) });
-    const asset = url.pathname.split('/').at(-1);
-    if (asset !== 'USDC_POLYGON') {
-      expect(url.searchParams.get('partners')).toBe('RAMPNOW');
-      return Response.json([]);
-    }
-    expect(url.searchParams.get('partners')).toBe(colombia ? 'ONRAMPMONEY' : 'ONRAMPMONEY,RAMPNOW');
-    return Response.json([route('ONRAMPMONEY'), route('RAMPNOW'), route('BANXA'), route('RAMPNOW', 'USDC_ARBITRUM')]);
+    const expected = colombia ? 'ONRAMPMONEY' : destination === 'USDC_POLYGON' ? 'ONRAMPMONEY,MERCURYO' : 'MERCURYO';
+    expect(url.searchParams.get('partners')).toBe(expected);
+    return Response.json([route('ONRAMPMONEY'), route('MERCURYO'), route('BANXA'), route('RAMPNOW')]);
   }) as typeof fetch });
   const headers = { origin, 'x-mindbliss-funding-provider': 'meld' };
   const path = '/api/member/wallet-funding/personal/options';
@@ -552,11 +553,11 @@ test('App discovers only the approved live US and Colombian methods and preserve
   const co = await app.request(path + '?country=CO&sourceCurrencyCode=COP', { headers });
   expect(us.status).toBe(200); expect(co.status).toBe(200);
   expect(await us.json()).toMatchObject({ destinationCurrencyCode: 'USDC_POLYGON', chainId: 137,
-    paymentMethods: ['ACH', 'LOCAL_BANK_TRANSFER', 'CREDIT_DEBIT_CARD', 'APPLE_PAY'], routes: [
-      { serviceProvider: 'ONRAMPMONEY', paymentMethods: ['ACH', 'LOCAL_BANK_TRANSFER']
+    paymentMethods: ['ACH', 'LOCAL_BANK_TRANSFER', ...usMercuryoRails.map(([method]) => method)], routes: [
+      { serviceProvider: 'ONRAMPMONEY', destinationCurrencyCode: 'USDC_POLYGON', paymentMethods: ['ACH', 'LOCAL_BANK_TRANSFER']
         .map(method => ({ method, currencyCode: 'USD', minimumAmount: 50, maximumAmount: 25_000 })) },
-      { serviceProvider: 'RAMPNOW', paymentMethods: ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'ACH', 'LOCAL_BANK_TRANSFER']
-        .map(method => ({ method, currencyCode: 'USD', minimumAmount: 50, maximumAmount: 10_000 })) },
+      ...usMercuryoNetworks.map(([destinationCurrencyCode, _network, chainId]) => ({ serviceProvider: 'MERCURYO', destinationCurrencyCode, chainId,
+        paymentMethods: usMercuryoRails.map(([method, _mode, maximumAmount]) => ({ method, currencyCode: 'USD', minimumAmount: 50, maximumAmount })) })),
     ] });
   expect(await co.json()).toMatchObject({ destinationCurrencyCode: 'USDC_POLYGON', chainId: 137,
     paymentMethods: ['LOCAL_BANK_TRANSFER', 'PSE'], routes: [{ serviceProvider: 'ONRAMPMONEY', paymentMethods: ['LOCAL_BANK_TRANSFER', 'PSE']
@@ -567,51 +568,62 @@ test('App discovers only the approved live US and Colombian methods and preserve
     '/network-partner/supported/routes/CRYPTO_ONRAMP/CO/COP/USDC_POLYGON']);
 });
 
-test('App RampNow verifies the exact checkout method, destination and address lock', async () => {
-  const account = 'app-prod-account', provider = 'RAMPNOW', asset = 'USDC_POLYGON', paymentMethodType = 'GOOGLE_PAY';
-  const customer = '7d492c47-80be-4e14-bc5f-54afaa56fc23', sessionId = 'merchant-session';
-  for (const wrongLock of [false, true]) {
-    const calls: string[] = [];
-    const app = application({ runtimeEnvironment: { APP_MELD_PRODUCTION_ENABLED: 'true',
-      MELD_PRODUCTION_API_KEYS: 'synthetic-merchant', MELD_PRODUCTION_ACCOUNT_ID: account },
-    execute: async () => {
-      calls.push('db');
-      return calls.length === 2 ? [{ id: input.requestId, wallet_address: input.walletAddress, customer_reference: customer,
-        created: true, status: 'initiated', created_at: new Date() }] : [{ finished: true }];
-    },
-    fetchImpl: (async (target, init) => {
-      const path = new URL(String(target)).pathname;
-      calls.push(path.split('/').at(-1)!);
-      if (path.includes('/routes/')) return Response.json([{ partner: provider, source: 'USD', destination: asset,
-        paymentMethods: ['CREDIT_DEBIT_CARD', paymentMethodType].map(name => ({ name, limits: { currencyCode: 'USD', min: 30, max: 10000 } })) }]);
-      const payload = JSON.parse(String(init?.body));
-      if (path.endsWith('/quote')) {
-        expect(payload).toMatchObject({ countryCode: 'US', sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: asset,
-          paymentMethodType, serviceProviders: [provider], walletAddress: input.walletAddress });
-        return Response.json({ quotes: [{ serviceProvider: provider, transactionType: 'CRYPTO_PURCHASE', sourceCurrencyCode: 'USD',
-          sourceAmount: 100, paymentMethodType, destinationCurrencyCode: asset, destinationAmount: 95, totalFee: 5 }] });
+test('App US Mercuryo opens only an authoritative prefill for the exact method, linked recipient and selected USDC network', async () => {
+  const account = 'app-prod-account', provider = 'MERCURYO';
+  const customer = '7d492c47-80be-4e14-bc5f-54afaa56fc23', sessionId = 'merchant-session-synthetic';
+  const headers = { 'x-mindbliss-funding-provider': 'meld' };
+  for (const [asset, network, chainId] of usMercuryoNetworks) for (const [paymentMethodType, vendorMethod, maximum] of usMercuryoRails) {
+    const mutations = [null, ['address', '0x' + 'b'.repeat(40)], ['address_map', '{}'], ['network', 'AVALANCHE'],
+      ['payment_method', 'mobile_pay'], ['fiat_currency', 'EUR'], ['fiat_amount', '99.99'],
+      ...(vendorMethod === 'apple' ? [['fix_payment_method', 'false']] : [])];
+    for (const mutation of mutations) {
+      const calls: string[] = [];
+      const app = application({ runtimeEnvironment: { APP_MELD_PRODUCTION_ENABLED: 'true',
+        MELD_PRODUCTION_API_KEYS: 'synthetic-merchant', MELD_PRODUCTION_ACCOUNT_ID: account },
+      execute: async () => {
+        calls.push('db');
+        return calls.length === 2 ? [{ id: input.requestId, wallet_address: input.walletAddress, customer_reference: customer,
+          created: true, status: 'initiated', created_at: new Date() }] : [{ finished: true }];
+      },
+      fetchImpl: (async (target, init) => {
+        const path = new URL(String(target)).pathname;
+        calls.push(path.split('/').at(-1)!);
+        if (path.includes('/routes/')) return Response.json([{ partner: provider, source: 'USD', destination: asset,
+          paymentMethods: [{ name: paymentMethodType, limits: { currencyCode: 'USD', min: 28.04, max: 16821.71 } }] }]);
+        const payload = JSON.parse(String(init?.body));
+        if (path.endsWith('/quote')) {
+          expect(payload).toMatchObject({ countryCode: 'US', sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: asset,
+            paymentMethodType, serviceProviders: [provider], walletAddress: input.walletAddress });
+          return Response.json({ quotes: [{ serviceProvider: provider, transactionType: 'CRYPTO_PURCHASE', sourceCurrencyCode: 'USD',
+            sourceAmount: 100, paymentMethodType, destinationCurrencyCode: asset, destinationAmount: 95, totalFee: 5, networkFee: null }] });
+        }
+        expect(payload.sessionData).toMatchObject({ paymentMethodType, walletAddress: input.walletAddress, destinationCurrencyCode: asset,
+          lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] });
+        const params = new URLSearchParams({ type: 'buy', currency: 'USDC', network, country_code: 'US',
+          fix_currency: 'true', fiat_currency: 'USD', fix_fiat_currency: 'true', fiat_amount: '100.00', fix_fiat_amount: 'true',
+          payment_method: vendorMethod, address: input.walletAddress, redirect_url: payload.sessionData.redirectUrl, merchant_transaction_id: sessionId,
+          widget_id: customer, signature: 'v2:' + 'd'.repeat(128) });
+        if (vendorMethod === 'apple') params.set('fix_payment_method', 'true');
+        if (mutation) params.set(mutation[0]!, mutation[1]!);
+        return Response.json({ id: sessionId, customerId: 'provider-customer', externalSessionId: input.requestId,
+          externalCustomerId: customer, widgetUrl: 'https://meldcrypto.com/?token=synthetic.token',
+          serviceProviderWidgetUrl: 'https://exchange.mercuryo.io/?' + params.toString() });
+      }) as typeof fetch });
+      const request = { ...input, country: 'US', paymentMethodType, serviceProvider: provider, destinationCurrencyCode: asset };
+      for (const invalid of [{ destinationCurrencyCode: 'USDT_POLYGON' }, { serviceProvider: 'RAMPNOW' }, { amount: maximum + 0.01 }]) {
+        expect((await app.request(personalPath, signedRequest(personalPath, JSON.stringify({ ...request, ...invalid }), headers))).status).toBe(409);
       }
-      expect(payload.sessionData).toMatchObject({ paymentMethodType, walletAddress: input.walletAddress, destinationCurrencyCode: asset });
-      const params = new URLSearchParams({ orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: '100.00',
-        dstCurrency: 'USDC', dstChain: 'polygon', walletAddress: input.walletAddress, prefill: 'true', paymentMode: 'google_pay',
-        returnUrl: payload.sessionData.redirectUrl, externalOrderId: sessionId, lockFields: wrongLock ? 'paymentMode' : 'walletAddress' });
-      return Response.json({ id: sessionId, customerId: 'provider-customer', externalSessionId: input.requestId,
-        externalCustomerId: customer, serviceProvider: provider, widgetUrl: 'https://meldcrypto.com/?token=synthetic.token',
-        serviceProviderWidgetUrl: 'https://app.rampnow.io/order/quote?' + params.toString() });
-    }) as typeof fetch });
-    const headers = { 'x-mindbliss-funding-provider': 'meld' };
-    const request = { ...input, country: 'US', paymentMethodType, serviceProvider: provider, destinationCurrencyCode: asset };
-    expect((await app.request(personalPath, signedRequest(personalPath, JSON.stringify({ ...request, destinationCurrencyCode: 'USDT_POLYGON' }), headers))).status).toBe(409);
-    expect(calls).toHaveLength(0);
-    const response = await app.request(personalPath, signedRequest(personalPath, JSON.stringify(request), headers));
-    expect(calls).toEqual(['USDC_POLYGON', 'db', 'quote', 'widget', 'db']);
-    if (wrongLock) {
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: 'wallet_funding_provider_unavailable' });
-    } else {
-      expect(response.status).toBe(201);
-      expect(await response.json()).toMatchObject({ serviceProvider: provider, status: 'session_created',
-        paymentMethodType, destination: { address: input.walletAddress, asset: 'USDC', chainId: 137 } });
+      expect(calls).toHaveLength(0);
+      const response = await app.request(personalPath, signedRequest(personalPath, JSON.stringify(request), headers));
+      expect(calls).toEqual([asset, 'db', 'quote', 'widget', 'db']);
+      if (mutation) {
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'wallet_funding_provider_unavailable' });
+      } else {
+        expect(response.status).toBe(201);
+        expect(await response.json()).toMatchObject({ serviceProvider: provider, status: 'session_created',
+          paymentMethodType, destination: { address: input.walletAddress, asset: 'USDC', chainId }, checkoutUrl: 'https://meldcrypto.com/?token=synthetic.token' });
+      }
     }
   }
 });
