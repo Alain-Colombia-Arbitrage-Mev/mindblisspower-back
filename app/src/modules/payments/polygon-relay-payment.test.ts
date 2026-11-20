@@ -12,6 +12,7 @@ import { preparePersonalPolygonRelay, submitPersonalPolygonRelay, verifyPersonal
 import { inspectPolygonRelayReceipt } from './polygon-relay-proof';
 import { createPolygonAaRelayer, prepareSignedPolygonRelayOperation } from './polygon-relay-aa';
 import { POLYGON_USDC_DOMAIN, POLYGON_USDC_IMPLEMENTATION, polygonUsdcTypedData } from './polygon-usdc-authorization';
+import { runAppPagarAccounting, runAppPagarInvestment } from './app-pagar-accounting';
 
 export const id = '11111111-1111-4111-8111-111111111111', attempt = '22222222-2222-4222-8222-222222222222';
 const lease = '33333333-3333-4333-8333-333333333333', wallet = new Wallet(`0x${'2'.repeat(64)}`);
@@ -77,6 +78,110 @@ test('relay projections are owner-bound, never leak ciphertext/lease/signatures 
   await expect(readPersonalPolygonRelay(databaseFor(() => [stored]).database, 'other', id)).rejects.toThrow('polygon_relay_unavailable');
   expect((await readPersonalPolygonRelayHistory(databaseFor(() => [stored]).database, 'owner')).payments).toHaveLength(1);
   expect(db.queries.every(query => !/ledger|membership|administrative|company_payment_v3/.test(query.sql))).toBe(true);
+});
+
+test('only fresh production App preparations bind an accounting intent inside the prepare statement', async () => {
+  for (const [env, allowUsdc, bind] of [
+    ['production', true, true], ['production', false, false], ['staging', true, false],
+  ] as const) {
+    const db = databaseFor(({ sql }) => {
+      if (sql.includes('FROM auth.user')) return [{ subject: 'owner', user_id: 'owner',
+        auth_email: 'owner@example.invalid', person_email: 'owner@example.invalid',
+        email_verified: true, person_id: '1', public_id: '1', blacklisted: false, access_restricted: false, person_status: 'active' }];
+      if (sql.includes('FROM identity.wallet_binding')) return [{ address: sender, chain_id: 1, verified_at: created }];
+      return sql.includes('prepare_personal_polygon_relay') ? [{ ...relayBase, accounting_intent: bind }] : [];
+    });
+    const counter = { quotes: 0, signs: 0 };
+    const prepared = await preparePersonalPolygonRelay(db.database, { requestId: id, amountAtomic: amount }, 'owner', {
+      environment: { ...relayEnvironment, ENV: env, APP_PAGAR_ACCOUNTING_ENABLED: 'true' },
+      fetchImpl: readFetch([]), createRelayer: fakeRelayer(counter), allowUsdc,
+    });
+    const statements = db.queries.filter(query => query.sql.includes('register_app_pagar_intent_v1'));
+    expect(statements).toHaveLength(bind ? 1 : 0);
+    if (bind) expect(statements[0]!.sql).toContain('WITH draft AS MATERIALIZED');
+    expect(prepared.status).toBe('prepared');
+    expect(Object.hasOwn(prepared, 'accounting_intent')).toBeFalse();
+    expect(counter).toEqual({ quotes: 0, signs: 0 });
+  }
+});
+
+test('Pagar accounting verifies finality and the original MELD lot before recording the real gross', async () => {
+  const inboundHash = '0x' + 'f'.repeat(64), outboundHash = '0x' + 'e'.repeat(64);
+  const inboundBlockHash = '0x' + 'c'.repeat(64), externalCustomerId = '55555555-5555-4555-8555-555555555555';
+  const amountReceived = 30_000_000, providerId = 'fixture-settlement';
+  const deposit = { id: attempt, subject: 'owner', wallet_address: sender, customer_reference: externalCustomerId,
+    country_code: 'MX', source_currency: 'MXN', destination_currency: 'USDT_POLYGON', chain_id: 137,
+    requested_amount: '1000.00', payment_method: 'CREDIT_DEBIT_CARD', service_provider: 'MERCURYO',
+    account_id: 'fixture-account', status: 'session_created', provider_session_id: 'fixture-session',
+    provider_customer_id: 'fixture-customer', created_at: created };
+  const base = { ...await authorized(), status: 'confirmed', attempt_id: lease, user_operation_hash: '0x' + 'b'.repeat(64),
+    transaction_hash: outboundHash, block_number: '272', block_hash: blockHash, confirmations: 12, confirmed_at: created };
+  const confirmedMeld = { id: providerId, accountId: deposit.account_id, sessionId: deposit.provider_session_id, externalSessionId: attempt,
+    customer: { id: deposit.provider_customer_id }, externalCustomerId, transactionType: 'CRYPTO_PURCHASE', serviceProvider: 'MERCURYO',
+    countryCode: 'MX', sourceCurrencyCode: 'MXN', sourceAmount: 1000, destinationCurrencyCode: 'USDT_POLYGON',
+    destinationAmount: 30, paymentMethodType: 'CREDIT_DEBIT_CARD', fiatAmountInUsd: 50, updatedAt: created.toISOString(),
+    cryptoDetails: { destinationWalletAddress: sender, chainId: '137', blockchainTransactionId: inboundHash } };
+  for (const [latest, providerStatus, records] of [
+    ['0x111', 'SETTLED', 1], ['0x10f', 'SETTLED', 0], ['0x111', 'REFUNDED', 0],
+  ] as const) {
+    const db = databaseFor(({ sql }) => {
+      if (sql.includes('read_app_pagar_pending_v1')) return [{ subject: 'owner', payment_id: id }];
+      if (sql.includes('read_app_pagar_candidates_v1')) return [{ attempt_id: attempt, meld_transaction_id: providerId,
+        gross_usd_minor: '5000', received_atomic: String(amountReceived), blockchain_tx_hash: inboundHash,
+        block_number: '256', block_hash: inboundBlockHash, transfer_log_index: 0 }];
+      if (sql.includes('read_personal_polygon_relay')) return [base];
+      if (sql.includes('read_app_meld_funding_v3')) return [deposit];
+      if (sql.includes('record_app_pagar_accounting_v1')) return [{ recorded: true }];
+      throw Error('unexpected SQL');
+    });
+    const fetchImpl = (async (input, init) => {
+      const url = new URL(String(input));
+      if (url.origin === 'https://api.meld.io') {
+        expect(init?.method).toBe('GET');
+        return url.pathname === '/payments/transactions'
+          ? Response.json({ transactions: [{ id: providerId }] })
+          : Response.json({ transaction: { ...confirmedMeld, status: providerStatus } });
+      }
+      expect(url.origin).toBe('https://rpc.walletconnect.org');
+      const request = JSON.parse(String(init?.body));
+      let result: unknown;
+      if (request.method === 'eth_chainId') result = '0x89';
+      else if (request.method === 'eth_getBlockByNumber') {
+        const number = request.params[0] === 'finalized' ? latest : request.params[0];
+        result = { number, hash: number === '0x100' ? inboundBlockHash : blockHash };
+      } else if (request.method === 'eth_getTransactionReceipt') {
+        expect(request.params).toEqual([inboundHash]);
+        result = { transactionHash: inboundHash, blockHash: inboundBlockHash, blockNumber: '0x100', status: '0x1',
+          logs: [{ address: LEGACY_POLYGON_TOKEN, topics: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+            '0x' + '0'.repeat(64), '0x' + sender.slice(2).padStart(64, '0')], logIndex: '0x0',
+          data: '0x' + amountReceived.toString(16).padStart(64, '0') }] };
+      } else throw Error('unexpected RPC method');
+      return Response.json({ jsonrpc: '2.0', id: request.id, result });
+    }) as typeof fetch;
+    const env = { ...relayEnvironment, ENV: 'production', APP_PAGAR_ACCOUNTING_ENABLED: 'true',
+      PERSONAL_COMPANY_PAYMENTS_ENABLED: 'true',
+      MELD_PRODUCTION_API_KEYS: 'fixture', MELD_PRODUCTION_ACCOUNT_ID: deposit.account_id };
+    const result = await runAppPagarAccounting(db.database, { environment: env, fetchImpl });
+    expect(result).toEqual({ recorded: records });
+    const postings = db.queries.filter(query => query.sql.includes('record_app_pagar_accounting_v1'));
+    expect(postings).toHaveLength(records);
+    if (records) expect(postings[0]!.params).toEqual(['owner', id, '273', attempt]);
+  }
+});
+
+test('the Pagar investment job only reaches its own writer under both explicit production flags', async () => {
+  const db = databaseFor(({ sql }) => {
+    expect(sql).toContain('payments.run_app_pagar_roi_v1()');
+    return [{ activated: 1, accrued_days: 0 }];
+  });
+  const flag = { ENV: 'production', APP_PAGAR_ACCOUNTING_ENABLED: 'true', APP_PAGAR_INVESTMENT_ENABLED: 'true' };
+  for (const environment of [{ ...flag, ENV: 'staging' }, { ...flag, APP_PAGAR_ACCOUNTING_ENABLED: 'false' },
+    { ...flag, APP_PAGAR_INVESTMENT_ENABLED: 'false' }]) {
+    await expect(runAppPagarInvestment(db.database, { environment })).resolves.toEqual({ activated: 0, accrued_days: 0 });
+  }
+  expect(db.queries).toHaveLength(0);
+  await expect(runAppPagarInvestment(db.database, { environment: flag })).resolves.toEqual({ activated: 1, accrued_days: 0 });
+  expect(db.queries).toHaveLength(1);
 });
 
 test('no signed operation or sponsorship occurs without first SQL lease; persisted replay cannot trigger a send', async () => {

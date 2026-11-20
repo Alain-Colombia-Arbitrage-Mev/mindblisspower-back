@@ -10,10 +10,14 @@ const database = 'mindbliss_curated_20261025';
 const runtime = 'mindbliss_auth_core_v1';
 const owner = 'meld_settlement_test_owner';
 const observer = 'meld_settlement_observer';
+const relayOwner = 'meld_settlement_relay_owner';
 const label = 'app-meld-settlement-138';
 const image = 'postgres:18.6-alpine3.23@sha256:dec395d8c09c45609d6deb5c2388a07882d64fa59b1d98c1895792e085f57888';
 const literal = value => value === null ? 'NULL' : "'" + String(value).replaceAll("'", "''") + "'";
 const hash = value => '0x' + value.repeat(64);
+const wallet = user => '0x' + ({ alice: '7', bob: '2', carol: '8', dave: '9' })[user].repeat(40);
+const usdc = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
+const usdt = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
 const docker = (args, input) => spawnSync('docker', args, { input, encoding: 'utf8', shell: false, maxBuffer: 32 * 1024 * 1024 });
 const databaseArgs = ['exec', '-i', container, 'psql', '-X', '-w', '-qAt', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1'];
 const as = (role, query) => (role ? 'SET ROLE ' + role + ';' : '') + query;
@@ -68,7 +72,7 @@ function parallel(source) {
 }
 function createAttempt({ subject = 'alice', currency = 'USD', amount, finish = true } = {}) {
   const id = randomUUID(), session = subject + '-old', usd = currency === 'USD';
-  const address = '0x' + (subject === 'alice' ? '7' : '2').repeat(40);
+  const address = wallet(subject);
   const args = [subject, session, id, address, 'MX', currency, amount ?? (usd ? 100 : 931),
     usd ? 'CREDIT_DEBIT_CARD' : 'SPEI', usd ? 'MERCURYO' : 'ONRAMPMONEY', 'merchant-test', 'USDC_POLYGON'];
   assert.equal(query('SELECT created FROM payments.reserve_app_meld_funding_v3(' + args.map(literal).join(',') + ');', runtime), 't');
@@ -82,6 +86,67 @@ function createAttempt({ subject = 'alice', currency = 'USD', amount, finish = t
 function readOne(id) {
   return JSON.parse(query(read('alice', 'alice-new', id), runtime));
 }
+function pagarRegistration(id, subject = 'carol') {
+  return 'SELECT payments.register_app_pagar_intent_v1(' + [subject, id].map(literal).join(',') + ');';
+}
+function pagarPrepare(id, { subject = 'carol', amount = 143000000, asset = usdc, app = true } = {}) {
+  const sql = 'SELECT * FROM payments.prepare_synthetic_pagar(' +
+    [id, subject, wallet(subject), amount, asset].map(literal).join(',') + ')';
+  if (!app) return sql + ';';
+  return 'WITH draft AS MATERIALIZED(' + sql + ') SELECT payments.register_app_pagar_intent_v1(' +
+    literal(subject) + ',d.id) FROM draft d;';
+}
+function pagarConfirm(id, { block = 97670050, confirmations = 12 } = {}) {
+  query("UPDATE payments.personal_polygon_relay SET status='confirmed',confirmed_at=clock_timestamp(),confirmations=" +
+    confirmations + ',block_number=' + literal(block) + ',block_hash=' + literal(hash('a')) +
+    ",user_operation_hash='0x'||replace(id::text,'-','')||repeat('2',32)" +
+    ",transaction_hash='0x'||replace(id::text,'-','')||repeat('1',32) WHERE id=" + literal(id) + ';');
+}
+const pendingPagar = "SELECT coalesce(jsonb_agg(to_jsonb(i)),'[]') FROM payments.read_app_pagar_pending_v1() i;";
+function pagarCandidates(id, subject = 'carol') {
+  return "SELECT coalesce(jsonb_agg(to_jsonb(i)),'[]') FROM payments.read_app_pagar_candidates_v1(" +
+    [subject, id].map(literal).join(',') + ') i;';
+}
+function pagarAllocate(id, ids, { subject = 'carol', finalized = 97670060 } = {}) {
+  return "SELECT coalesce(jsonb_agg(to_jsonb(i)),'[]') FROM payments.allocate_app_pagar_basis_v1(" +
+    [subject, id, finalized].map(literal).join(',') + ',ARRAY[' + ids.map(literal).join(',') + ']::uuid[]) i;';
+}
+function pagarAccounting(id, ids, { subject = 'carol', finalized = 97670060 } = {}) {
+  return 'SELECT payments.record_app_pagar_accounting_v1(' +
+    [subject, id, finalized].map(literal).join(',') + ',ARRAY[' + ids.map(literal).join(',') + ']::uuid[]);';
+}
+const syntheticRelay = [
+  'CREATE ROLE ' + relayOwner + ' NOLOGIN NOSUPERUSER NOBYPASSRLS;',
+  'GRANT USAGE ON SCHEMA auth,identity,payments TO ' + relayOwner + ';',
+  'GRANT SELECT ON identity.wallet_binding TO ' + relayOwner + ';',
+  "INSERT INTO auth.\"user\"(id) VALUES ('carol'),('dave');",
+  "INSERT INTO identity.wallet_binding(subject,address) VALUES ('carol'," + literal(wallet('carol')) +
+    "),('dave'," + literal(wallet('dave')) + ');',
+  "INSERT INTO auth.session(id,user_id,expires_at) VALUES ('carol-old','carol',now()+interval '1 hour'),('carol-new','carol',now()+interval '1 hour')," +
+    "('dave-old','dave',now()+interval '1 hour'),('dave-new','dave',now()+interval '1 hour');",
+  'CREATE TABLE payments.personal_polygon_relay(' +
+    'id uuid PRIMARY KEY,subject text NOT NULL,wallet_address text NOT NULL,token_address text NOT NULL,amount_atomic text NOT NULL,' +
+    "chain_id integer NOT NULL DEFAULT 137,token_decimals smallint NOT NULL DEFAULT 6,recipient_address text NOT NULL DEFAULT '0x0a600b03ef5f8e7f3e182b83440c6d292033db0e'," +
+    "status text NOT NULL DEFAULT 'prepared',created_at timestamptz NOT NULL DEFAULT clock_timestamp(),expires_at timestamptz NOT NULL DEFAULT clock_timestamp()+interval '5 minutes'," +
+    'confirmed_at timestamptz,confirmations integer NOT NULL DEFAULT 0,block_number text,block_hash text,user_operation_hash text,transaction_hash text);',
+  'ALTER TABLE payments.personal_polygon_relay ENABLE ROW LEVEL SECURITY;',
+  'ALTER TABLE payments.personal_polygon_relay OWNER TO ' + relayOwner + ';',
+  'CREATE VIEW payments.personal_polygon_relay_internal AS SELECT * FROM payments.personal_polygon_relay;',
+  'ALTER VIEW payments.personal_polygon_relay_internal OWNER TO ' + relayOwner + ';',
+  'CREATE FUNCTION payments.read_personal_polygon_relay(p_subject text,p_payment uuid)' +
+    ' RETURNS SETOF payments.personal_polygon_relay_internal LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$' +
+    ' BEGIN RETURN QUERY SELECT r.* FROM payments.personal_polygon_relay_internal r' +
+    ' JOIN identity.wallet_binding b ON b.subject=r.subject AND b.address=r.wallet_address' +
+    " WHERE r.id=p_payment AND r.subject=p_subject; IF NOT FOUND THEN RAISE SQLSTATE 'P0002'; END IF; END $$;",
+  'ALTER FUNCTION payments.read_personal_polygon_relay(text,uuid) OWNER TO ' + relayOwner + ';',
+  'REVOKE ALL ON FUNCTION payments.read_personal_polygon_relay(text,uuid) FROM PUBLIC,' + observer + ';',
+  'CREATE FUNCTION payments.prepare_synthetic_pagar(uuid,text,text,text,text) RETURNS SETOF payments.personal_polygon_relay' +
+    ' LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS $$ INSERT INTO payments.personal_polygon_relay(id,subject,wallet_address,amount_atomic,token_address)' +
+    ' VALUES($1,$2,$3,$4,$5) RETURNING * $$;',
+  'ALTER FUNCTION payments.prepare_synthetic_pagar(uuid,text,text,text,text) OWNER TO ' + relayOwner + ';',
+  'REVOKE ALL ON FUNCTION payments.prepare_synthetic_pagar(uuid,text,text,text,text) FROM PUBLIC,' + observer + ';',
+  'GRANT EXECUTE ON FUNCTION payments.prepare_synthetic_pagar(uuid,text,text,text,text) TO ' + runtime + ';',
+].join('\n');
 const legacyFingerprint = "SELECT md5(coalesce(jsonb_agg(to_jsonb(a) ORDER BY id)::text,'[]')) FROM payments.app_meld_funding_attempt a;";
 const prerequisites = [
   'CREATE ROLE ' + runtime + ' NOLOGIN;',
@@ -286,7 +351,135 @@ try {
   assert.equal(query(finishSchedule(expired.id, expired.lease_id, 'pending'), runtime), 'f');
   assert.equal(query(finishSchedule(renewed.id, renewed.lease_id, 'pending'), runtime), 't');
   assert.equal(query(legacyFingerprint), attemptsBeforeSchedule);
-  console.log('App MELD settlement, package, and scheduled reconciliation SQL passed (isolated PostgreSQL, no provider or chain calls).');
+
+  query(syntheticRelay);
+  query(await readFile(new URL('../_meta/migration/141_app_pagar_allocation.sql', import.meta.url), 'utf8'));
+  const carolFirst = createAttempt({ subject: 'carol' });
+  const carolSecond = createAttempt({ subject: 'carol', amount: 50 });
+  const carolReceipt = { session: 'carol-new', transaction: 'carol-first', tx: hash('f'), gross: 10000, fee: 500, received: 95000000 };
+  assert.equal(query(record(carolFirst, carolReceipt), runtime), 't');
+  assert.equal(query(record(carolSecond, { ...carolReceipt, transaction: 'carol-second', log: 43, gross: 5000, fee: 200, received: 48000000 }), runtime), 't');
+
+  const payment = randomUUID(), retryPayment = randomUUID(), historical = randomUUID(), insufficient = randomUUID(), wrongAsset = randomUUID();
+  query(pagarPrepare(historical, { app: false }), runtime);
+  assert.equal(query(pagarRegistration(historical), runtime), 'f');
+  pagarConfirm(historical);
+  assert.equal(query(pagarRegistration(historical), runtime), 'f');
+  assert.equal(query(pagarAllocate(historical, [carolFirst, carolSecond]), runtime), '[]');
+
+  assert.equal(query(pagarPrepare(insufficient, { amount: 94999999 }), runtime), 't');
+  assert.equal(query(pagarCandidates(insufficient), runtime), '[]');
+  assert.equal(query(pagarPrepare(wrongAsset, { asset: usdt }), runtime), 't');
+  assert.equal(query(pagarCandidates(wrongAsset), runtime), '[]');
+  assert.equal(query(pagarPrepare(payment), runtime), 't');
+  assert.equal(query(pagarPrepare(retryPayment), runtime), 't');
+  assert.equal(query(pagarCandidates(retryPayment), runtime), '[]');
+  assert.equal(query(pagarRegistration(payment), runtime), 't');
+  assert.deepEqual(JSON.parse(query(pagarCandidates(payment), runtime)), [
+    { attempt_id: carolFirst, meld_transaction_id: 'carol-first', gross_usd_minor: 10000, received_atomic: 95000000,
+      blockchain_tx_hash: hash('f'), block_number: receipts.block, block_hash: receipts.blockHash, transfer_log_index: receipts.log },
+    { attempt_id: carolSecond, meld_transaction_id: 'carol-second', gross_usd_minor: 5000, received_atomic: 48000000,
+      blockchain_tx_hash: hash('f'), block_number: receipts.block, block_hash: receipts.blockHash, transfer_log_index: 43 },
+  ]);
+  assert.equal(query(pagarCandidates(payment, 'bob'), runtime), '[]');
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolSecond]), runtime), '[]');
+  const carolLate = createAttempt({ subject: 'carol', amount: 50 });
+  assert.equal(query(record(carolLate, { ...carolReceipt, transaction: 'carol-late', log: 44, gross: 5000, fee: 100, received: 49000000 }), runtime), 't');
+
+  pagarConfirm(payment, { confirmations: 11 });
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolSecond]), runtime), '[]');
+  pagarConfirm(payment, { block: receipts.block });
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolSecond]), runtime), '[]');
+  pagarConfirm(payment);
+  const latePayment = randomUUID(), recycledPayment = randomUUID();
+  assert.equal(query(pagarPrepare(latePayment, { amount: 49000000 }), runtime), 't');
+  assert.deepEqual(JSON.parse(query(pagarCandidates(latePayment), runtime)).map(row => row.attempt_id), [carolLate]);
+  query("UPDATE payments.personal_polygon_relay SET status='expired' WHERE id=" + literal(latePayment) + ';');
+  assert.equal(query(pagarPrepare(recycledPayment, { amount: 49000000 }), runtime), 't');
+  assert.deepEqual(JSON.parse(query(pagarCandidates(recycledPayment), runtime)).map(row => row.attempt_id), [carolLate]);
+  query("UPDATE payments.personal_polygon_relay SET status='submitted',user_operation_hash=" + literal(hash('c'))
+    + ' WHERE id=' + literal(recycledPayment) + ';');
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolSecond], { finalized: 97670049 }), runtime), '[]');
+  assert.equal(query(pagarAllocate(payment, [carolFirst]), runtime), '[]');
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolFirst]), runtime), '[]');
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolLate]), runtime), '[]');
+  assert.equal(query(pagarAllocate(payment, [carolFirst, carolSecond], { subject: 'bob' }), runtime), '[]');
+  assert.deepEqual(JSON.parse(query(pendingPagar, runtime)), [
+    { subject: 'carol', payment_id: payment }, { subject: 'carol', payment_id: recycledPayment },
+  ]);
+  assert.equal(query(pendingPagar, runtime), '[]');
+
+  const applied = (await Promise.all([
+    parallel(pagarAllocate(payment, [carolFirst, carolSecond])),
+    parallel(pagarAllocate(payment, [carolSecond, carolFirst])),
+  ])).map(JSON.parse);
+  assert.deepEqual(applied[0], applied[1]);
+  assert.deepEqual(new Set(applied[0].map(row => row.attempt_id)), new Set([carolFirst, carolSecond]));
+  assert.equal(applied[0].reduce((gross, row) => gross + row.gross_usd_minor, 0), 15000);
+  assert.equal(applied[0].reduce((net, row) => net + row.received_atomic, 0), 143000000);
+  pagarConfirm(retryPayment);
+  assert.equal(query(pagarAllocate(retryPayment, [carolFirst, carolSecond]), runtime), '[]');
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_allocation;'), '2');
+  reject('DELETE FROM payments.app_pagar_allocation;', /app_pagar_evidence_retained/, '');
+  reject('TRUNCATE payments.app_pagar_candidate CASCADE;', /app_pagar_evidence_retained/, '');
+  reject('SELECT * FROM payments.app_pagar_allocation;', /permission denied/);
+  reject(pendingPagar, /permission denied/, observer);
+  reject(pagarCandidates(payment), /permission denied/, observer);
+
+  query(await readFile(new URL('../_meta/migration/142_app_pagar_accounting.sql', import.meta.url), 'utf8'));
+  reject(pagarAllocate(payment, [carolFirst, carolSecond]), /permission denied/);
+  assert.equal(query(pagarAccounting(recycledPayment, [carolLate]), runtime), 'f');
+  assert.equal(query(pagarAccounting(payment, [carolFirst, carolSecond]), runtime), 't');
+  assert.equal(query(pagarAccounting(payment, [carolSecond, carolFirst]), runtime), 't');
+  pagarConfirm(recycledPayment);
+  assert.equal(query(pagarAccounting(recycledPayment, [carolLate]), runtime), 't');
+  assert.equal(query(pagarAccounting(recycledPayment, [carolLate]), runtime), 't');
+  assert.deepEqual(query(
+    "SELECT concat_ws('|',gross_usd_minor,treasury_received_atomic,allocated_received_atomic,cumulative_gross_usd_minor,pv_delta) " +
+    "FROM payments.app_pagar_accounting_receipt WHERE subject='carol' ORDER BY cumulative_gross_usd_minor;",
+  ).split(/\r?\n/), ['15000|143000000|143000000|15000|150','5000|49000000|49000000|20000|50']);
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_allocation;'), '3');
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_accounting_receipt;'), '2');
+
+  const unmatchedReceipt = createAttempt({ subject: 'carol', amount: 50 });
+  assert.equal(query(record(unmatchedReceipt, { ...carolReceipt, transaction: 'carol-reused-chain-proof', log: 45,
+    gross: 5000, fee: 100, received: 49000000 }), runtime), 't');
+  const reusedProof = randomUUID();
+  assert.equal(query(pagarPrepare(reusedProof, { amount: 49000000 }), runtime), 't');
+  pagarConfirm(reusedProof);
+  query('UPDATE payments.personal_polygon_relay SET user_operation_hash=(SELECT user_operation_hash FROM payments.personal_polygon_relay WHERE id=' +
+    literal(payment) + ') WHERE id=' + literal(reusedProof) + ';');
+  reject(pagarAccounting(reusedProof, [unmatchedReceipt]), /duplicate key.*user_operation_hash/);
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_allocation WHERE attempt_id=' + literal(unmatchedReceipt) + ';'), '0');
+
+  // A sole established provider checkout can be frozen before its successful
+  // delivery is recorded, and cannot be shared with another live draft.
+  const oldCheckout = createAttempt({ subject: 'dave' });
+  const firstDeferred = randomUUID(), competingDeferred = randomUUID();
+  assert.equal(query(pagarPrepare(firstDeferred, { subject: 'dave', amount: 95000000 }), runtime), 't');
+  assert.equal(query(pagarCandidates(firstDeferred, 'dave'), runtime), '[]');
+  assert.equal(query('SELECT concat_ws(\'|\',attempt_id,deferred) FROM payments.app_pagar_candidate WHERE payment_id=' +
+    literal(firstDeferred) + ';'), oldCheckout + '|t');
+  assert.equal(query(pagarPrepare(competingDeferred, { subject: 'dave', amount: 95000000 }), runtime), 't');
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_candidate WHERE payment_id=' + literal(competingDeferred) + ';'), '0');
+  const newCheckout = createAttempt({ subject: 'dave' });
+  const newProof = { ...receipts, session: 'dave-new', gross: 10000, fee: 500, received: 95000000 };
+  assert.equal(query(record(newCheckout, { ...newProof, transaction: 'dave-new', tx: hash('8') }), runtime), 't');
+  assert.equal(query(pagarCandidates(firstDeferred, 'dave'), runtime), '[]');
+  pagarConfirm(firstDeferred, { block: receipts.block });
+  assert.equal(query(pagarAccounting(firstDeferred, [newCheckout], { subject: 'dave' }), runtime), 'f');
+  assert.equal(query(record(oldCheckout, { ...newProof, transaction: 'dave-old', tx: hash('9') }), runtime), 't');
+  assert.deepEqual(JSON.parse(query(pagarCandidates(firstDeferred, 'dave'), runtime)).map(row => row.attempt_id), [oldCheckout]);
+  assert.equal(query(pagarAccounting(firstDeferred, [oldCheckout], { subject: 'dave' }), runtime), 'f');
+  pagarConfirm(firstDeferred);
+  pagarConfirm(competingDeferred);
+  assert.equal(query(pagarAccounting(firstDeferred, [newCheckout], { subject: 'dave' }), runtime), 'f');
+  assert.equal(query(pagarAccounting(firstDeferred, [oldCheckout], { subject: 'dave' }), runtime), 't');
+  assert.equal(query(pagarAccounting(competingDeferred, [oldCheckout], { subject: 'dave' }), runtime), 'f');
+  assert.equal(query(pagarAccounting(firstDeferred, [oldCheckout], { subject: 'dave' }), runtime), 't');
+  assert.equal(query("SELECT count(*) FROM payments.app_pagar_allocation WHERE attempt_id=" + literal(oldCheckout) + ';'), '1');
+  assert.equal(query("SELECT gross_usd_minor FROM payments.app_pagar_accounting_receipt WHERE subject='dave';"), '10000');
+  console.log('App MELD settlement, package, scheduled reconciliation, Pagar allocation and accounting SQL passed (isolated PostgreSQL, no provider or chain calls).');
 } finally {
   const inspected = docker(['inspect', '--format', '{{ index .Config.Labels "mindbliss.synthetic" }} {{.HostConfig.NetworkMode}}', container]);
   if (inspected.status === 0 && inspected.stdout.trim() === label + ' none') {

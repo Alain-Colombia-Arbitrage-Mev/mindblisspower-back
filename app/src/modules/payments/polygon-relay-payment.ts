@@ -153,12 +153,21 @@ export async function preparePersonalPolygonRelay(database: Database, raw: unkno
     createRelayer(environment, fetchImpl, signal, now * 1000, usdc ? usdcValidBefore : undefined),
   ]);
   active(signal); const policy = polygonRelayPolicy(environment);
-  const rows = usdc ? await database.execute(sql`SELECT * FROM payments.prepare_personal_polygon_usdc_relay(${owner},${sender},${input.amountAtomic},${input.requestId}::uuid,
+  const prepare = usdc ? sql`SELECT * FROM payments.prepare_personal_polygon_usdc_relay(${owner},${sender},${input.amountAtomic},${input.requestId}::uuid,
     ${snapshot.authorizationNonce},${snapshot.authorizationDigest},${relayer.relayerAddress},${usdcValidBefore}::bigint,
-    ${policy.maxFeeWei},${policy.ownerDailyCapWei},${policy.globalDailyCapWei})`)
-    : await database.execute(sql`SELECT * FROM payments.prepare_personal_polygon_relay(${owner},${sender},${input.amountAtomic},${input.requestId}::uuid,
+    ${policy.maxFeeWei},${policy.ownerDailyCapWei},${policy.globalDailyCapWei})`
+    : sql`SELECT * FROM payments.prepare_personal_polygon_relay(${owner},${sender},${input.amountAtomic},${input.requestId}::uuid,
     ${snapshot.authorizationNonce},${snapshot.authorizationDigest},${relayer.relayerAddress},${POLYGON_RELAY_ENTRY_POINT},${snapshot.domainSeparator},${POLYGON_RELAY_IMPLEMENTATION},
-    ${policy.maxFeeWei},${policy.ownerDailyCapWei},${policy.globalDailyCapWei})`);
+    ${policy.maxFeeWei},${policy.ownerDailyCapWei},${policy.globalDailyCapWei})`;
+  // The App origin is already established by the authenticated relay route.
+  // The same database statement freezes the accounting lots before a signature
+  // can be requested. Older prepared payment IDs only take the replay path.
+  const registerAccounting = allowUsdc && environment.ENV === 'production' && environment.APP_PAGAR_ACCOUNTING_ENABLED === 'true';
+  const rows = await database.execute(registerAccounting ? sql`
+    WITH draft AS MATERIALIZED (${prepare})
+    SELECT draft.*,payments.register_app_pagar_intent_v1(draft.subject,draft.id) AS accounting_intent FROM draft
+  ` : prepare);
+  if (registerAccounting && typeof rows[0]?.accounting_intent !== 'boolean') throw new Error('polygon_relay_unavailable');
   const row = one(rows, owner, input.requestId);
   if (row.token_address !== tokenAddress || row.authorization_nonce !== snapshot.authorizationNonce || row.amount_atomic !== input.amountAtomic
     || row.wallet_address !== sender || row.relayer_address !== relayer.relayerAddress

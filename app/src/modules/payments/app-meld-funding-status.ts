@@ -41,6 +41,8 @@ const attempt = z.object({ id: uuid, subject: ownerInput, wallet_address: wallet
 });
 type Attempt = z.infer<typeof attempt>;
 type ProofOwner = { nativeSessionId: string } | { leaseId: string };
+type ExpectedAccountingSettlement = { transactionId: string; grossUsdMinor: string; receivedAtomic: string; transactionHash: string;
+  blockNumber: string; blockHash: string; logIndex: number };
 
 function ownedAttempt(value: unknown, owner: string) {
   const parsed = attempt.safeParse(value);
@@ -124,16 +126,21 @@ async function deliveredOnNetwork(row: Attempt, hash: string, amountReceived: bi
 
 const reconcileGates = new WeakMap<Database, ReturnType<typeof createAdministrativePreflightGate>>();
 async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwner | undefined,
-  environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal) {
+  environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal, expected?: ExpectedAccountingSettlement) {
   if (row.status !== 'session_created' || row.provider_session_id === null || row.provider_customer_id === null) return unconfirmed();
   const key = environment.MELD_PRODUCTION_API_KEYS;
   const account = identifier.safeParse(environment.MELD_PRODUCTION_ACCOUNT_ID);
   if (!key || !/^[\x21-\x7e]{1,2048}$/.test(key) || !account.success) throw Error('wallet_funding_unconfigured');
   if (row.account_id !== account.data) throw unavailable();
   const transport = { key, account: account.data, fetchImpl, signal };
-  let gate = reconcileGates.get(database);
-  if (!gate) { gate = createAdministrativePreflightGate(); reconcileGates.set(database, gate); }
-  const release = gate(row.subject, randomUUID());
+  // The private accounting batch has its own bounded claim and sequential reads.
+  // Public status checks keep their independent per-owner rate limit.
+  let release: (() => void) | undefined;
+  if (!expected) {
+    let gate = reconcileGates.get(database);
+    if (!gate) { gate = createAdministrativePreflightGate(); reconcileGates.set(database, gate); }
+    release = gate(row.subject, randomUUID());
+  }
   try {
     const query = new URLSearchParams({ externalSessionIds: row.id, sessionIds: row.provider_session_id,
       externalCustomerIds: row.customer_reference, serviceProviders: row.service_provider, types: 'CRYPTO_PURCHASE', limit: '2' });
@@ -165,8 +172,12 @@ async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwne
     const delivered = received > 0n && hash.success
       ? await deliveredOnNetwork(row, hash.data, received, environment, fetchImpl, signal).catch(() => null) : null;
     if (!delivered) return { ...metadata, state: 'pending' as const, providerStatus: 'SETTLING' as const };
+    const grossUsd = usdMinor(item.sourceCurrencyCode === 'USD' ? item.sourceAmount : item.fiatAmountInUsd);
+    if (expected && (expected.transactionId !== id || !hash.success || expected.transactionHash !== hash.data
+      || expected.grossUsdMinor !== grossUsd?.toString() || expected.receivedAtomic !== received.toString()
+      || expected.blockNumber !== delivered.blockNumber.toString() || expected.blockHash !== delivered.blockHash
+      || expected.logIndex !== delivered.logIndex)) throw unavailable();
     if (proofOwner && hash.success) {
-      const grossUsd = usdMinor(item.sourceCurrencyCode === 'USD' ? item.sourceAmount : item.fiatAmountInUsd);
       const reportedFeeUsd = usdMinor(item.cryptoDetails.totalFeeInUsd, true);
       const feeUsd = grossUsd !== null && reportedFeeUsd !== null && reportedFeeUsd > grossUsd ? null : reportedFeeUsd;
       const evidence = sql`${id},${hash.data},${delivered.logIndex}::integer,${delivered.blockNumber.toString()}::bigint,
@@ -179,7 +190,19 @@ async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwne
       if (stored.length !== 1 || stored[0]?.recorded !== true) throw unavailable();
     }
     return { ...metadata, state: 'confirmed' as const, receivedAmount: fixedAmount.replace(/\.?0+$/, ''), confirmedAt: item.updatedAt };
-  } finally { release(); }
+  } finally { release?.(); }
+}
+
+/** A financial lot must still agree with fresh provider detail and its finalized chain credit. */
+export async function verifyAppMeldAccountingLot(database: Database, subject: string, reference: string,
+  expected: ExpectedAccountingSettlement, environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal) {
+  const owner = ownerInput.parse(subject), requestId = uuid.parse(reference);
+  const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.read_app_meld_funding_v3(${owner},${requestId}::uuid)`), signal);
+  if (rows.length !== 1) return false;
+  const row = ownedAttempt(rows[0], owner);
+  if (row.id !== requestId) return false;
+  const proof = await reconcile(database, row, undefined, environment, fetchImpl, signal, expected);
+  return proof.state === 'confirmed';
 }
 
 /** Owned App reference reconciled against the production MELD session and its delivery chain. */

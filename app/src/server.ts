@@ -23,6 +23,7 @@ import { registerPersonalPolygonRelayRoutes } from './http/personal-polygon-rela
 import { authDb } from './db/auth-client';
 import { MELD_WEBHOOK_MAX_BYTES, MELD_WEBHOOK_PATH } from './modules/payments/meld-webhook';
 import { runAppMeldReconciliation } from './modules/payments/app-meld-funding-status';
+import { runAppPagarAccounting, runAppPagarInvestment } from './modules/payments/app-pagar-accounting';
 import { authProxyContext } from './http/auth-proxy-context';
 import { OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy, registerOtpDiagnosticRoutes, registerOtpTraceReadiness } from './http/otp-diagnostic-routes';
 import type { ApiEnvironment } from './http/types';
@@ -30,7 +31,12 @@ import type { ApiEnvironment } from './http/types';
 const app = new Hono<ApiEnvironment>();
 app.onError(apiErrorHandler);
 registerOtpTraceReadiness(app);
-registerAppMeldReconciliation(app, { database: authDb, reconcile: runAppMeldReconciliation });
+registerAppMeldReconciliation(app, { database: authDb, async reconcile(database, options) {
+  const [funding] = await Promise.all([
+    runAppMeldReconciliation(database, options), runAppPagarAccounting(database, options), runAppPagarInvestment(database, options),
+  ]);
+  return funding;
+} });
 // Include failures returned by the shared session gate in private/no-store.
 app.use(OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy);
 app.use('/api/auth/*', bodyLimit({ maxSize: 32 * 1024,

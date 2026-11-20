@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { IdentityDatabase } from '../identity/model';
-import { readAppMeldFundingHistory, readAppMeldFundingStatus, runAppMeldReconciliation } from './app-meld-funding-status';
+import { readAppMeldFundingHistory, readAppMeldFundingStatus, runAppMeldReconciliation, verifyAppMeldAccountingLot } from './app-meld-funding-status';
 import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, ETHEREUM_USDC_TOKEN, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
@@ -145,6 +145,24 @@ test('unsettled, ambiguous delivery and failed persistence never produce a recor
   await expect(readAppMeldFundingStatus(database([row], false).db, row.subject, id,
     { nativeSessionId: 'current-session', environment, fetchImpl: upstream().fetchImpl }))
     .rejects.toThrow('wallet_funding_provider_unavailable');
+});
+
+test('before accounting, MELD must still report settled and agree with the locked gross and net lot', async () => {
+  const { db, queries } = database([row]);
+  const signal = new AbortController().signal;
+  const expected = { transactionId: transaction.id, grossUsdMinor: '5000', receivedAtomic: '48706979', transactionHash: txHash,
+    blockNumber: '256', blockHash, logIndex: 1 };
+  const detail = { ...transaction, fiatAmountInUsd: 50 };
+  await expect(verifyAppMeldAccountingLot(db, row.subject, id, expected, environment,
+    upstream(detail).fetchImpl, signal)).resolves.toBeTrue();
+  await expect(verifyAppMeldAccountingLot(db, row.subject, id, expected, environment,
+    upstream({ ...detail, status: 'REFUNDED' }).fetchImpl, signal)).resolves.toBeFalse();
+  for (const conflict of [{ grossUsdMinor: '4900' }, { receivedAtomic: '48706978' }, { logIndex: 2 }]) {
+    await expect(verifyAppMeldAccountingLot(db, row.subject, id, { ...expected, ...conflict }, environment,
+      upstream(detail).fetchImpl, signal)).rejects.toThrow('wallet_funding_provider_unavailable');
+  }
+  expect(queries).toHaveLength(5);
+  expect(queries.every(query => query.sql.includes('read_app_meld_funding_v3'))).toBeTrue();
 });
 
 test('background reconciliation uses a leased production attempt and the same finalized proof without a user session', async () => {

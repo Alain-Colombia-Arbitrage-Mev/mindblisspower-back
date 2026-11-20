@@ -171,6 +171,10 @@ export function containerEnvironment(service, env) {
     values.MELD_CHECKOUT_ENABLED = String(env.MELD_CHECKOUT_ENABLED === 'true');
     if (env.CORE_ENV === 'production' && env.APP_MELD_PRODUCTION_ENABLED === 'true') {
       values.APP_MELD_PRODUCTION_ENABLED = 'true';
+      if (polygonRelayEnabled && env.APP_PAGAR_ACCOUNTING_ENABLED === 'true') {
+        values.APP_PAGAR_ACCOUNTING_ENABLED = 'true';
+        if (env.APP_PAGAR_INVESTMENT_ENABLED === 'true') values.APP_PAGAR_INVESTMENT_ENABLED = 'true';
+      }
       if (/^[\x21-\x7e]{1,2048}$/.test(env.MELD_PRODUCTION_API_KEYS || '') && /^[A-Za-z0-9_-]{1,128}$/.test(env.MELD_PRODUCTION_ACCOUNT_ID || '')) {
         values.MELD_PRODUCTION_API_KEYS = env.MELD_PRODUCTION_API_KEYS;
         values.MELD_PRODUCTION_ACCOUNT_ID = env.MELD_PRODUCTION_ACCOUNT_ID;
