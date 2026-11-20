@@ -233,7 +233,8 @@ test('native USDC on Arbitrum is an App-only balance read and cannot be used to 
   seen.length = 0;
   const apex = await app.request(path, signed(path, 'GET', '', { origin: 'https://mindblisspower.com' }));
   expect(apex.status).toBe(200);
-  expect((await apex.json()).balances.some((balance: { chainId: number }) => balance.chainId === 42161)).toBeFalse();
+  const apexBody = await apex.json() as { balances: { chainId: number }[] };
+  expect(apexBody.balances.some(balance => balance.chainId === 42161)).toBeFalse();
   expect(seen.some(call => call.startsWith('42161:'))).toBeFalse();
   const prepare = PREFIX + '/prepare';
   const raw = JSON.stringify({ requestId: id, amountAtomic: '1000000', chainId: 42161 });

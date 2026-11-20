@@ -136,7 +136,9 @@ export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amou
 }
 // Network snapshots remain separate; selecting a payment network never combines their balances.
 export async function readPersonalWalletNetworkBalances(rpc: WalletReadRpc, address: string) {
-  if (!companyPaymentNetwork(rpc.policy.chainId, rpc.policy.tokenAddress) || !ADDRESS.test(address)) throw unavailable();
+  const { chainId, tokenAddress } = rpc.policy;
+  const arbitrumUsdc = chainId === ARBITRUM_USDC_CHAIN_ID && tokenAddress === ARBITRUM_USDC_TOKEN;
+  if ((!arbitrumUsdc && !companyPaymentNetwork(chainId, tokenAddress)) || !ADDRESS.test(address)) throw unavailable();
   await checkCompanyPaymentChain(rpc);
   const [decimals, balance, nativeBalance] = await Promise.all([
     rpc.call('eth_call', [{ to: rpc.policy.tokenAddress, data: '0x313ce567' }, 'latest']),
