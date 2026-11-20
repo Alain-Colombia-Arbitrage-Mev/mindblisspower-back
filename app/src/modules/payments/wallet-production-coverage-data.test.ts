@@ -21,6 +21,15 @@ test('shipped production compatibility catalogue contains only scoped quote-veri
     ['ALCHEMYPAY', new Set(['PIX'])], ['MERCURYO', new Set(['CREDIT_DEBIT_CARD'])],
   ]));
   expect(coverageMethodsByProvider(coverage, 'BR', 'BRL', 'USDC_POLYGON').size).toBe(0);
+  const usCards = ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'];
+  expect(coverageAsset(coverage, 'US', 'USD')).toBe('USDC_POLYGON');
+  expect(coverageMethodsByProvider(coverage, 'US', 'USD')).toEqual(new Map([
+    ['ONRAMPMONEY', new Set(['ACH', 'LOCAL_BANK_TRANSFER'])], ['MERCURYO', new Set(usCards)],
+  ]));
+  for (const asset of ['USDC_ARBITRUM', 'USDC'] as const) {
+    expect(coverageMethodsByProvider(coverage, 'US', 'USD', asset)).toEqual(new Map([['MERCURYO', new Set(usCards)]]));
+  }
+  expect(coverage.rows.some(row => row.serviceProvider === 'RAMPNOW')).toBe(false);
   expect(coverage.rows.every(row => row.evidence === 'quote_verified')).toBe(true);
   expect(JSON.stringify(snapshot)).not.toMatch(/walletAddress|customerId|apiKey|attestation|accountId|checkoutUrl/);
 });

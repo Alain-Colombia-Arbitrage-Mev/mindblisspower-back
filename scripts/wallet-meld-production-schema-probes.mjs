@@ -440,4 +440,40 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  eq(ledgerDigest,beforeBrazilReapply,false);
  eq(accessSnapshot,beforeAccess,false);
  console.log(JSON.stringify({walletBrazilSchema:'passed',fiat:'BRL',network:'arbitrum',providers:['ALCHEMYPAY','MERCURYO'],providerCalls:0,actualCharges:0}));
+
+ const usMercuryoMigration=await readFile(new URL('../_meta/migration/136_wallet_meld_us_mercuryo.sql',import.meta.url),'utf8');
+ const beforeUsMercuryo=value(ledgerDigest,false), rampHistory=value(history(7));
+ psql(usMercuryoMigration);
+ eq(ledgerDigest,beforeUsMercuryo,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(proofDefinition,unchangedProof,false);
+ eq(history(7),rampHistory);
+ for(const [asset,chain,ownerIndex] of [['USDC_POLYGON','137',0],['USDC_ARBITRUM','42161',5],['USDC','1',6]]){
+  const usOwner=users[ownerIndex];
+  for(const method of ['CREDIT_DEBIT_CARD','APPLE_PAY','GOOGLE_PAY','ACH','LOCAL_BANK_TRANSFER']){
+   deny(rampCreate(asset,{method}),'wallet_production_method_unavailable');
+  }
+  for(const [index,method] of ['CREDIT_DEBIT_CARD','APPLE_PAY','GOOGLE_PAY'].entries()){
+   const id=randomUUID(), amount=index===0?'50.00':'16821.71';
+   const created=JSON.parse(value(rampCreate(asset,{id,country:'US',currency:'USD',amount,provider:'MERCURYO',method},usOwner)));
+   assert.equal(created.created,true);
+   assert.equal(created.address,usOwner.address);
+   eq(`SELECT chain_id FROM ${table} WHERE id=${lit(id)};`,chain,false);
+   eq(finish(id,ownerIndex),'t');
+   const evidence={...proof,transactionId:'transaction-'+id,sessionId:'session-'+id,externalSessionId:id,
+    externalCustomerId:bindings[ownerIndex].binding_reference,serviceProvider:'MERCURYO',countryCode:'US',sourceCurrencyCode:'USD',sourceAmount:amount,
+    paymentMethodType:method,walletAddress:usOwner.address,destinationCurrencyCode:asset,chainId:chain,
+    providerStatus:'SETTLED',receivedAmount:'47.00',providerUpdatedAt:new Date().toISOString()};
+   deny(save({...evidence,paymentMethodType:'ACH'},usOwner.subject,id),'wallet_production_proof_context_mismatch');
+   assert.deepEqual(JSON.parse(value(save(evidence,usOwner.subject,id))),evidence);
+  }
+ }
+ for(const [asset,fiat,amount,method,error] of [['USDC_POLYGON','USD','49.99','CREDIT_DEBIT_CARD','wallet_production_invalid_request'],
+  ['USDC_POLYGON','USD','16821.72','CREDIT_DEBIT_CARD',destinationConstraint],['USDC_ARBITRUM','USD','50','ACH',destinationConstraint],
+  ['USDC_POLYGON','BRL','50','APPLE_PAY',destinationConstraint],['USDT_POLYGON','USD','50','GOOGLE_PAY',destinationConstraint]]){
+  deny(mercuryoCreate({id:randomUUID(),country:'US',currency:fiat,amount,method},asset),error);
+ }
+ eq(history(7),rampHistory);
+ eq(oldRows,before.rows,false);
+ console.log(JSON.stringify({walletUsMercuryoSchema:'passed',newRampNowBlocked:true,historicalRampNowPreserved:true,providerCalls:0,actualCharges:0}));
 }

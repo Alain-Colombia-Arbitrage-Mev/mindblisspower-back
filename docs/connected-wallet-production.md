@@ -63,7 +63,7 @@ change. Discovery metadata is not a guarantee: providers with invalid quotes
 are removed before checkout. In particular, Banxa advertised card/mobile-wallet
 routes but returned `INVALID_CRYPTO_CURRENCY` for the checked USDT Polygon
 card quotes, including USD. More successful USD/card providers require merchant
-enablement/correction. Mercuryo and Binance Connect are excluded.
+enablement/correction. Binance Connect remains excluded.
 
 The production dashboard has Alchemy Pay, Banxa, Mercuryo, Onmeta, Onramp Money,
 Rampnow and Yellow Card connected. This does not mean each offers a working
@@ -71,6 +71,17 @@ USDT Polygon route. Transak was connected in sandbox; Topper and Transak were
 listed as available integrations requiring their own production credentials.
 The portal uses only account-returned routes with documented destination locks
 and a valid quote. It does not borrow the Reown merchant or sandbox credentials.
+
+### United States USD funding
+
+Mercuryo routes for card, Apple Pay and Google Pay quote 50–16,821.71 USD in
+Wallet for native USDC on Polygon, Arbitrum or Ethereum. The backend checks the
+signed provider prefill for the exact method, amount, fiat, chain and linked
+address before returning the MELD checkout. Confirmation requires the precise
+purchase evidence and a finalized USDC transfer to that address and network.
+Onramp Money continues to serve ACH and local bank transfer on Polygon.
+Migration 136 preserves prior RampNow records and their reconciliation while
+blocking new RampNow attempts.
 
 The connected wallet was ownership-verified once by the user and its canonical
 address survived a full page reload, without another connect/activation CTA.

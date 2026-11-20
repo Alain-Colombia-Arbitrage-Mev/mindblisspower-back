@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 const scope = 'wallet-prod-20261119-v1';
 // Only connected providers with a compatible hosted checkout may create new attempts.
-export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'MERCURYO', 'ONMETA', 'ONRAMPMONEY', 'RAMPNOW']);
+export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'MERCURYO', 'ONMETA', 'ONRAMPMONEY']);
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/);
 const instant = z.string().max(40).datetime({ offset: true });
 const positive = z.number().finite().positive().max(1_000_000_000);
@@ -30,33 +30,31 @@ type CoverageEnvironment = { MELD_PRODUCTION_API_KEYS?: string; MELD_PRODUCTION_
   MELD_PRODUCTION_CATALOGUE_ATTESTATION?: string };
 type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string; destinationCurrencyCode?: ProductionAsset };
 export type ProductionRoute = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number; destinationCurrencyCodes?: ProductionAsset[] }[] };
-export const rampNowAssets = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'] as const;
-export const walletUsdcAsset = z.enum(rampNowAssets);
-export const rampNowPaymentModes = {
-  CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay', ACH: 'ach', LOCAL_BANK_TRANSFER: 'wire',
-} as const;
-export function rampNowPaymentMode(method: string) {
-  return Object.hasOwn(rampNowPaymentModes, method) ? rampNowPaymentModes[method as keyof typeof rampNowPaymentModes] : undefined;
-}
-export function isUsRampNowFunding(country: string, fiat: string, method: string) {
-  return country === 'US' && fiat === 'USD' && rampNowPaymentMode(method) !== undefined;
-}
+export const walletUsdcAssets = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'] as const;
+export const walletUsdcAsset = z.enum(walletUsdcAssets);
+const historicalRampNowMethods = new Set(['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'ACH', 'LOCAL_BANK_TRANSFER']);
 export const isUsBankFunding = (country: string, fiat: string, method: string) =>
   country === 'US' && fiat === 'USD' && (method === 'ACH' || method === 'LOCAL_BANK_TRANSFER');
 
 export const isMexicoMercuryoCard = (country: string | undefined, fiat: string, method: string) =>
   country === 'MX' && (fiat === 'MXN' || fiat === 'USD') && method === 'CREDIT_DEBIT_CARD';
 
+export const usMercuryoMethods = ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY'] as const;
+export const isUsMercuryo = (country: string | undefined, fiat: string, method: string) =>
+  country === 'US' && fiat === 'USD' && usMercuryoMethods.some(value => value === method);
+
 export const isBrazilPix = (country: string, fiat: string, method: string) =>
   country === 'BR' && fiat === 'BRL' && method === 'PIX';
 export const isBrazilMercuryoCard = (country: string | undefined, fiat: string, method: string) =>
   country === 'BR' && fiat === 'BRL' && method === 'CREDIT_DEBIT_CARD';
 
+/** The journal still accepts the exact original RampNow routes for historical reads and proof. */
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
   country === 'BR' ? asset === 'USDC_ARBITRUM' && ((serviceProvider === 'ALCHEMYPAY' && isBrazilPix(country, fiat, method))
     || (serviceProvider === 'MERCURYO' && isBrazilMercuryoCard(country, fiat, method)))
-  : serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && walletUsdcAsset.safeParse(asset).success
-  : serviceProvider === 'MERCURYO' ? asset === 'USDC_POLYGON' && isMexicoMercuryoCard(country, fiat, method)
+  : serviceProvider === 'RAMPNOW' ? country === 'US' && fiat === 'USD' && historicalRampNowMethods.has(method) && walletUsdcAsset.safeParse(asset).success
+  : serviceProvider === 'MERCURYO' ? (asset === 'USDC_POLYGON' && isMexicoMercuryoCard(country, fiat, method))
+    || (isUsMercuryo(country, fiat, method) && walletUsdcAsset.safeParse(asset).success)
   : asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
     && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')
   || (asset === 'USDC_POLYGON' && serviceProvider === 'ONRAMPMONEY'
@@ -101,13 +99,14 @@ export function resolveProductionCoverage(environment: CoverageEnvironment, rawC
     const asset = rowAsset(row);
     const id = [row.country, row.sourceCurrencyCode, row.serviceProvider, row.paymentMethodType, asset].join('|');
     const pair = `${row.country}|${row.sourceCurrencyCode}`, units = precision.get(pair), range = bounds(row);
+    const alternate = row.serviceProvider === 'MERCURYO' && isUsMercuryo(row.country, row.sourceCurrencyCode, row.paymentMethodType);
     if (!permitted(row) || seen.has(id) || (units !== undefined && units !== row.minorUnits)
-      || (assets.has(pair) && assets.get(pair) !== asset && row.serviceProvider !== 'RAMPNOW')
+      || (!alternate && assets.has(pair) && assets.get(pair) !== asset)
       || Date.parse(row.verifiedAt) > now || range.minimum > range.maximum
       || !precise(row.verifiedAmount, row.minorUnits) || row.verifiedAmount < range.minimum || row.verifiedAmount > range.maximum)
       throw Error('wallet_production_unconfigured');
     seen.add(id); precision.set(pair, row.minorUnits);
-    if (row.serviceProvider !== 'RAMPNOW') assets.set(pair, asset);
+    if (!alternate) assets.set(pair, asset);
     Object.freeze(row);
   }
   Object.freeze(parsed.data.rows);
@@ -134,7 +133,7 @@ export function coverageMinorUnits(catalogue: CoverageCatalogue, country: string
 }
 export function coverageAsset(catalogue: CoverageCatalogue, country: string, fiat: string): ProductionAsset {
   const rows = selectedRows(catalogue, country, fiat);
-  const row = rows.find(item => item.serviceProvider !== 'RAMPNOW') ?? rows.find(item => rowAsset(item) === 'USDC_POLYGON') ?? rows[0];
+  const row = rows.find(item => rowAsset(item) === 'USDC_POLYGON') ?? rows[0];
   return row ? rowAsset(row) : catalogue.asset;
 }
 

@@ -213,109 +213,81 @@ test('Brazil Pix stays pending until the exact USDC credit reaches the linked ad
   }
 });
 
-const usCard = { ...input, country: 'US', sourceCurrencyCode: 'USD', amount: 100, serviceProvider: 'RAMPNOW' };
-const cardNetworks = [
-  ['USDC_POLYGON', 'polygon', 137],
-  ['USDC_ARBITRUM', 'arbitrum-one', 42161],
-  ['USDC', 'ethereum', 1],
-] as const;
-const rampCatalogue = { ...catalogue, rows: cardNetworks.map(([destinationCurrencyCode]) => ({ ...catalogue.rows[0],
-  country: 'US', sourceCurrencyCode: 'USD', serviceProvider: 'RAMPNOW', paymentMethodType: 'CREDIT_DEBIT_CARD',
-  minimumAmount: 50, maximumAmount: 10000, verifiedAmount: 100, destinationCurrencyCode })) };
-const rampRoutes = (asset: string) => [{ partner: 'RAMPNOW', source: 'USD', destination: asset, paymentMethods: [
-  { name: 'CREDIT_DEBIT_CARD', limits: { currencyCode: 'USD', min: 5, max: 10000 } },
-] }];
+const usCard = { ...input, country: 'US', sourceCurrencyCode: 'USD', amount: 100, serviceProvider: 'MERCURYO' };
+const usNetworks = [['USDC_POLYGON', 'POLYGON', 137], ['USDC_ARBITRUM', 'ARBITRUM', 42161], ['USDC', 'ETHEREUM', 1]] as const;
+const usMethods = [['CREDIT_DEBIT_CARD', 'card'], ['APPLE_PAY', 'apple'], ['GOOGLE_PAY', 'google']] as const;
+const usBanks = ['ACH', 'LOCAL_BANK_TRANSFER'] as const;
+const usCatalogue = { ...catalogue, rows: [
+  ...usNetworks.flatMap(([destinationCurrencyCode]) => usMethods.map(([paymentMethodType]) => ({ ...catalogue.rows[0],
+    country: 'US', sourceCurrencyCode: 'USD', serviceProvider: 'MERCURYO', paymentMethodType,
+    minimumAmount: 28.04, maximumAmount: 16821.71, verifiedAmount: 50, destinationCurrencyCode }))),
+  ...usBanks.map(paymentMethodType => ({ ...catalogue.rows[0], country: 'US', sourceCurrencyCode: 'USD', serviceProvider: 'ONRAMPMONEY',
+    paymentMethodType, minimumAmount: 50, maximumAmount: 25000, verifiedAmount: 50, destinationCurrencyCode: 'USDC_POLYGON' })),
+] };
+const usVendor = (asset: string, partner: string, methods: readonly string[]) => ({ partner, source: 'USD', destination: asset,
+  paymentMethods: methods.map(name => ({ name, limits: { currencyCode: 'USD', min: 5, max: 50000 } })) });
 
-test('RampNow quotes and opens each supported payment method on the verified network and rejects a changed method', async () => {
-  const methodModes = { CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay',
-    ACH: 'ach', LOCAL_BANK_TRANSFER: 'wire' } as const;
-  const methods = Object.keys(methodModes) as (keyof typeof methodModes)[];
-  const mobileCatalogue = { ...rampCatalogue, rows: rampCatalogue.rows.flatMap(row =>
-    methods.map(paymentMethodType => ({ ...row, paymentMethodType }))) };
-  const route = (asset: string) => [{ ...rampRoutes(asset)[0], paymentMethods: methods.map(name => ({
-    name, limits: { currencyCode: 'USD', min: 5, max: 10000 },
-  })) }];
-  const discovery = provider(cardNetworks.map(([asset]) => route(asset)));
-  const optionsResponse = await readProductionWalletOptions({ country: 'US', sourceCurrencyCode: 'USD' },
-    { environment, catalogue: mobileCatalogue, fetchImpl: discovery.fetchImpl });
-  expect(optionsResponse.routes[0]?.paymentMethods).toEqual(methods.map(method => ({
-    method, currencyCode: 'USD', minimumAmount: 50, maximumAmount: 10000,
-    destinationCurrencyCodes: cardNetworks.map(([asset]) => asset),
-  })));
-  for (const [asset, network, chainId] of cardNetworks) {
-    for (const paymentMethodType of methods) {
-      const expectedMode = methodModes[paymentMethodType];
-      const prefill = new URLSearchParams({ orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: '100.00',
-        dstCurrency: 'USDC', dstChain: network, walletAddress: wallet, lockFields: 'walletAddress', paymentMode: expectedMode,
-        prefill: 'true', externalOrderId: widget.id,
-        returnUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}` });
-      const price = { quotes: [{ ...quote('RAMPNOW').quotes[0], sourceCurrencyCode: 'USD', sourceAmount: 100,
-        destinationCurrencyCode: asset, paymentMethodType }] };
-      for (const changeMode of [false, true]) {
-        if (changeMode) prefill.set('paymentMode', expectedMode === 'card' ? 'wire' : 'card');
-        const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
-        const api = provider([route(asset), price, { ...widget, serviceProviderWidgetUrl: `https://app.rampnow.io/order/quote?${prefill}` }]);
-        const promise = createProductionWalletSession(db.database, { ...usCard, paymentMethodType, destinationCurrencyCode: asset },
-          { ...options, catalogue: mobileCatalogue, fetchImpl: api.fetchImpl });
-        if (changeMode) {
-          await expect(promise).rejects.toThrow('provider_unavailable');
-          expect(db.queries[2]?.params[3]).toBe('unavailable');
-        } else {
-          expect(await promise).toMatchObject({ paymentMethodType, destination: { chainId, address: wallet }, checkoutUrl: widget.widgetUrl });
-        }
-      }
-    }
-  }
-});
-
-test('US banking keeps both Polygon providers for an explicit quote and restricts Onramp Money to Polygon', async () => {
-  const bank = { ...usCard, paymentMethodType: 'ACH', destinationCurrencyCode: 'USDC_POLYGON' };
-  const { requestId, serviceProvider, ...request } = bank;
-  const onramp = { ...bank, serviceProvider: 'ONRAMPMONEY' };
-  const providerNames = [serviceProvider, onramp.serviceProvider];
-  const routesForBank = providerNames.map(partner => ({ ...rampRoutes(bank.destinationCurrencyCode)[0], partner,
-    paymentMethods: [{ name: bank.paymentMethodType, limits: { currencyCode: 'USD', min: 5, max: 10000 } }] }));
-  const bankCatalogue = { ...rampCatalogue, rows: providerNames.map(serviceProvider => ({
-    ...rampCatalogue.rows[0], serviceProvider, paymentMethodType: bank.paymentMethodType,
-  })) };
-  const quotes = providerNames.map(name => ({ quotes: [{ ...quote(name).quotes[0], sourceAmount: bank.amount,
-    sourceCurrencyCode: bank.sourceCurrencyCode, destinationCurrencyCode: bank.destinationCurrencyCode, paymentMethodType: bank.paymentMethodType }] }));
-  const db = database([[binding]]);
-  const api = provider([routesForBank, ...quotes]);
-  const result = await quoteProductionWalletFunding(db.database, request, { ...options, catalogue: bankCatalogue, fetchImpl: api.fetchImpl });
-  expect(result.quotes.map(item => item.serviceProvider)).toEqual(providerNames);
-  expect(productionWalletFundingInput.safeParse(onramp).success).toBe(true);
-  expect(productionWalletFundingInput.safeParse({ ...onramp, destinationCurrencyCode: 'USDC' }).success).toBe(false);
-  expect(productionWalletFundingInput.safeParse({ ...onramp, paymentMethodType: 'GOOGLE_PAY' }).success).toBe(false);
-  expect(productionWalletFundingInput.safeParse({ ...bank, paymentMethodType: 'CASH_APP' }).success).toBe(false);
-});
-
-test('RampNow discovers approved US card networks, preserves the chosen quote and validates the provider checkout', async () => {
-  const discovery = provider(cardNetworks.map(([asset]) => rampRoutes(asset)));
+test('US discovery returns only checked Mercuryo networks and Onramp Money banks; RampNow cannot quote or prepare', async () => {
+  const discovery = provider(usNetworks.map(([asset]) => [usVendor(asset, 'RAMPNOW', ['CREDIT_DEBIT_CARD', ...usBanks]),
+    usVendor(asset, 'MERCURYO', [...usMethods.map(([name]) => name), 'ACH']), usVendor(asset, 'ONRAMPMONEY', usBanks)]));
   const result = await readProductionWalletOptions({ country: 'US', sourceCurrencyCode: 'USD' },
-    { environment, catalogue: rampCatalogue, fetchImpl: discovery.fetchImpl });
-  expect(result.routes[0]?.paymentMethods[0]).toEqual({ method: 'CREDIT_DEBIT_CARD', currencyCode: 'USD',
-    minimumAmount: 50, maximumAmount: 10000, destinationCurrencyCodes: cardNetworks.map(([asset]) => asset) });
-  for (const [asset, network, chainId] of cardNetworks) {
-    const prefill = new URLSearchParams({ orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: '100.00',
-      dstCurrency: 'USDC', dstChain: network, walletAddress: wallet, lockFields: 'walletAddress', paymentMode: 'card',
-      prefill: 'true', externalOrderId: widget.id,
-      returnUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}` });
-    for (const locked of [true, false]) {
-      if (!locked) prefill.set('lockFields', 'dstAsset');
+    { environment, catalogue: usCatalogue, fetchImpl: discovery.fetchImpl });
+  expect(result.destinationCurrencyCode).toBe('USDC_POLYGON');
+  expect(result.routes).toEqual([
+    { serviceProvider: 'MERCURYO', paymentMethods: usMethods.map(([method]) => ({ method, currencyCode: 'USD',
+      minimumAmount: 50, maximumAmount: 16821.71, destinationCurrencyCodes: usNetworks.map(([asset]) => asset) })) },
+    { serviceProvider: 'ONRAMPMONEY', paymentMethods: usBanks.map(method => ({ method, currencyCode: 'USD',
+      minimumAmount: 50, maximumAmount: 25000 })) },
+  ]);
+  expect(discovery.calls.every(call => !new URL(call.url).searchParams.get('partners')?.includes('RAMPNOW'))).toBe(true);
+  const db = database([]), api = provider([]);
+  for (const paymentMethodType of ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', ...usBanks]) {
+    await expect(createProductionWalletSession(db.database, { ...usCard, serviceProvider: 'RAMPNOW', paymentMethodType, destinationCurrencyCode: 'USDC_POLYGON' },
+      { ...options, catalogue: usCatalogue, fetchImpl: api.fetchImpl })).rejects.toThrow();
+  }
+  const { requestId: _unused, ...invalidQuote } = { ...usCard, serviceProvider: 'RAMPNOW' };
+  await expect(quoteProductionWalletFunding(db.database, invalidQuote,
+    { ...options, catalogue: usCatalogue, fetchImpl: api.fetchImpl })).rejects.toThrow();
+  expect(db.queries).toHaveLength(0);
+  expect(api.calls).toHaveLength(0);
+  expect(productionWalletCheckoutUrl(widget.widgetUrl, 'RAMPNOW')).toBeNull();
+  expect(productionWalletFundingInput.safeParse({ ...usCard, serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'ACH', destinationCurrencyCode: 'USDC_POLYGON' }).success).toBe(true);
+  expect(productionWalletFundingInput.safeParse({ ...usCard, serviceProvider: 'ONRAMPMONEY', paymentMethodType: 'ACH', destinationCurrencyCode: 'USDC' }).success).toBe(false);
+  expect(productionWalletFundingInput.safeParse({ ...usCard, paymentMethodType: 'ACH' }).success).toBe(false);
+});
+
+test('US Mercuryo validates each issued card and mobile method prefill on the chosen USDC network', async () => {
+  for (const [asset, network, chainId] of usNetworks) for (const [paymentMethodType, paymentMethod] of usMethods) {
+    const selected = { ...usCard, paymentMethodType, destinationCurrencyCode: asset };
+    const { requestId, serviceProvider, ...selection } = selected;
+    const quoteData = { quotes: [{ ...quote('MERCURYO').quotes[0], sourceCurrencyCode: 'USD', sourceAmount: 100,
+      destinationCurrencyCode: asset, paymentMethodType, networkFee: null }] };
+    const route = [usVendor(asset, 'MERCURYO', [paymentMethodType])];
+    const lookup = provider([route, quoteData]);
+    await expect(quoteProductionWalletFunding(database([[binding]]).database, selection, { ...options, catalogue: usCatalogue, fetchImpl: lookup.fetchImpl }))
+      .resolves.toMatchObject({ destination: { chainId, address: wallet }, paymentMethodType, quotes: [{ serviceProvider }] });
+    const expected = new URLSearchParams({ widget_id: customer, type: 'buy', currency: 'USDC', network, fix_currency: 'true',
+      country_code: 'US', fiat_currency: 'USD', fiat_amount: '100.00', fix_fiat_currency: 'true', fix_fiat_amount: 'true',
+      payment_method: paymentMethod, address: wallet, signature: 'v2:' + 'b'.repeat(128), merchant_transaction_id: widget.id,
+      redirect_url: 'https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=' + requestId });
+    if (paymentMethod === 'apple') expected.set('fix_payment_method', 'true');
+    const mutations = [null, ['network', 'AVALANCHE'], ['payment_method', 'mobile_pay'],
+      ['address', '0x' + '2'.repeat(40)], ['address_map', '{}'], ['country_code', 'CA'], ['fiat_amount', '99.00'],
+      ...(paymentMethod === 'apple' ? [['fix_payment_method', 'false']] : [])];
+    for (const mutation of mutations) {
+      const params = new URLSearchParams(expected);
+      if (mutation) params.set(mutation[0]!, mutation[1]!);
       const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
-      const price = { quotes: [{ ...quote('RAMPNOW').quotes[0], sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: asset }] };
-      const api = provider([rampRoutes(asset), price, { ...widget, serviceProviderWidgetUrl: `https://app.rampnow.io/order/quote?${prefill}` }]);
-      const checkout = createProductionWalletSession(db.database, { ...usCard, destinationCurrencyCode: asset },
-        { ...options, catalogue: rampCatalogue, fetchImpl: api.fetchImpl });
-      if (!locked) {
-        await expect(checkout).rejects.toThrow('provider_unavailable');
+      const api = provider([route, quoteData, { ...widget, serviceProviderWidgetUrl: 'https://exchange.mercuryo.io/?' + params }]);
+      const prepared = createProductionWalletSession(db.database, selected, { ...options, catalogue: usCatalogue, fetchImpl: api.fetchImpl });
+      if (mutation) {
+        await expect(prepared).rejects.toThrow('provider_unavailable');
         expect(db.queries[2]!.params[3]).toBe('unavailable');
       } else {
-        expect(await checkout).toMatchObject({ destinationCurrencyCode: asset, destination: { chainId, address: wallet, asset: 'USDC' },
-          checkoutUrl: widget.widgetUrl });
-        expect(api.calls[1]!.body.destinationCurrencyCode).toBe(asset);
-        expect(api.calls[2]!.body.sessionData.destinationCurrencyCode).toBe(asset);
+        await expect(prepared).resolves.toMatchObject({ checkoutUrl: widget.widgetUrl, destinationCurrencyCode: asset,
+          destination: { chainId, address: wallet }, serviceProvider, paymentMethodType });
+        expect(api.calls[2]!.body.sessionData).toMatchObject({ walletAddress: wallet, paymentMethodType, destinationCurrencyCode: asset,
+          lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] });
       }
     }
   }
