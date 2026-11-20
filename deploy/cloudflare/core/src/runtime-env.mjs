@@ -168,6 +168,13 @@ export function containerEnvironment(service, env) {
     }
     values.MELD_ADMIN_SANDBOX_ENABLED = String(env.MELD_ADMIN_SANDBOX_ENABLED === 'true');
     values.MELD_CHECKOUT_ENABLED = String(env.MELD_CHECKOUT_ENABLED === 'true');
+    if (env.CORE_ENV === 'production' && env.APP_MELD_PRODUCTION_ENABLED === 'true') {
+      values.APP_MELD_PRODUCTION_ENABLED = 'true';
+      if (/^[\x21-\x7e]{1,2048}$/.test(env.MELD_PRODUCTION_API_KEYS || '') && /^[A-Za-z0-9_-]{1,128}$/.test(env.MELD_PRODUCTION_ACCOUNT_ID || '')) {
+        values.MELD_PRODUCTION_API_KEYS = env.MELD_PRODUCTION_API_KEYS;
+        values.MELD_PRODUCTION_ACCOUNT_ID = env.MELD_PRODUCTION_ACCOUNT_ID;
+      }
+    }
     if (env.MELD_ADMIN_SANDBOX_ENABLED === 'true') {
       const sandboxKey = env.MELD_API_SANDBOX;
       if (typeof sandboxKey !== 'string' || !sandboxKey || sandboxKey.length > 2048 || /\s/.test(sandboxKey)) {

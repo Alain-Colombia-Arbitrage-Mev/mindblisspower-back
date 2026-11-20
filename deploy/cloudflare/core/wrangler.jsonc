@@ -74,6 +74,7 @@
       "triggers": { "crons": ["*/5 * * * *"] },
       "vars": {
         "CORE_ENV": "production",
+        "APP_MELD_PRODUCTION_ENABLED": "true",
         "MEMBER_PROFILE_ENABLED": "true",
         "MEMBER_PACKAGE_RIGHTS_ENABLED": "true",
         "MEMBER_REFERRAL_ENABLED": "true",

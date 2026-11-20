@@ -1,10 +1,13 @@
 import { z } from 'zod';
+import { bodyLimit } from 'hono/body-limit';
 import { createAdministrativeSandboxSession, createPersonalFundingIntent, fundingKindInput,
   readAdministrativeSandboxOptions, readWalletFundingHistory, readWalletFundingStatus } from '../modules/payments/wallet-funding';
 import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiApplication } from './types';
 import { authProxyContext } from './auth-proxy-context';
 import { readReownProductionOptions } from '../modules/payments/reown-funding-options';
+import { APP_MELD_ORIGIN, createAppMeldFunding, readAppMeldOptions } from '../modules/payments/app-meld-funding';
+import { readAppMeldFundingHistory, readAppMeldFundingStatus } from '../modules/payments/app-meld-funding-status';
 import { createMeldSandboxCheckout, meldCheckoutCapabilities } from '../modules/payments/meld-sandbox-checkout';
 import { readMeldCheckoutStatus, readMeldCheckoutHistory } from '../modules/payments/meld-sandbox-checkout-reconciliation';
 
@@ -49,6 +52,7 @@ function failure(error: unknown) {
 export function registerWalletFundingRoutes(app: ApiApplication, {
   database, environment = process.env, fetchImpl = fetch,
 }: Dependencies) {
+  const appMeld = (origin: string | undefined) => environment.APP_MELD_PRODUCTION_ENABLED === 'true' && origin === APP_MELD_ORIGIN;
   const checkoutPath = '/api/member/wallet-funding/administrative/checkout';
   app.get(`${checkoutPath}/capabilities`, async context => {
     if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
@@ -106,10 +110,24 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
       : '/api/member/wallet-funding/administrative/session';
     app.post(path, async (context, next) => {
       context.header('Cache-Control', 'private, no-store');
-      if (kind !== 'administrative') return next();
+      const native = kind === 'personal' && appMeld(context.req.header('origin'));
+      if (kind !== 'administrative' && !native) {
+        if (context.req.header('x-mindbliss-funding-provider') === 'meld') return context.json({ error: 'wallet_funding_unconfigured' }, 503, noStore);
+        return next();
+      }
+      if (native && (context.req.header('x-mindbliss-funding-provider') !== 'meld' || context.req.raw.headers.has('x-vp-act-as')))
+        return context.json({ error: 'invalid_request' }, 403, noStore);
       if (!context.get('session')?.user.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
       const secret = environment.AUTH_BFF_SHARED_SECRET;
       if (!secret || secret.length < 32) return context.json({ error: 'wallet_funding_unconfigured' }, 503, noStore);
+      if (native) {
+        if (new URL(context.req.url).search) return context.json({ error: 'invalid_request' }, 400, noStore);
+        if (context.req.header('content-encoding') || !/^application\/json(?:\s*;|$)/i.test(context.req.header('content-type') || ''))
+          return context.json({ error: 'json_required' }, 415, noStore);
+        if (!allowedOrigin('personal', context.req.header('origin') || '', environment)) return context.json({ error: 'invalid_origin' }, 403, noStore);
+        return bodyLimit({ maxSize: 4096, onError: c => c.json({ error: 'request_too_large' }, 413, noStore) })(context,
+          async () => { const response = await authProxyContext(secret)(context, next); if (response) context.res = response; });
+      }
       return authProxyContext(secret)(context, next);
     }, async context => {
       const subject = context.get('session')?.user.id;
@@ -124,7 +142,10 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         const raw = await context.req.text();
         if (Buffer.byteLength(raw, 'utf8') > 4096) return context.json({ error: 'request_too_large' }, 413, noStore);
         const input: unknown = JSON.parse(raw);
-        const result = kind === 'personal' ? await createPersonalFundingIntent(database, input, subject, { fetchImpl, signal: context.req.raw.signal })
+        const result = kind === 'personal' ? appMeld(context.req.header('origin'))
+          ? await createAppMeldFunding(database, input, { subject, nativeSessionId: context.get('session')?.session?.id || '',
+            clientIp: context.req.header('x-vp-auth-client-ip') || '', environment, fetchImpl, signal: context.req.raw.signal })
+          : await createPersonalFundingIntent(database, input, subject, { fetchImpl, signal: context.req.raw.signal })
           : await createAdministrativeSandboxSession(database, input, {
             subject, clientIp: context.req.header('x-vp-auth-client-ip') || '', environment, fetchImpl, signal: context.req.raw.signal,
             preferProviderCheckout: context.req.header('x-mindbliss-sandbox-contract') === 'v2',
@@ -145,6 +166,13 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         || !/^[A-Z]{2}$/.test(country || '') || !/^[A-Z]{3}$/.test(sourceCurrencyCode)) {
         return context.json({ error: 'invalid_request' }, 400, noStore);
       }
+      const origin = context.req.header('origin');
+      if (appMeld(origin)) {
+        if (context.req.raw.headers.has('x-vp-act-as') || !allowedOrigin('personal', origin!, environment))
+          return context.json({ error: 'invalid_origin' }, 403, noStore);
+        return context.json(await readAppMeldOptions(country!, sourceCurrencyCode, { environment, fetchImpl, signal: context.req.raw.signal }), 200, noStore);
+      }
+      if (context.req.header('x-mindbliss-funding-provider') === 'meld') return context.json({ error: 'wallet_funding_unconfigured' }, 503, noStore);
       return context.json(await readReownProductionOptions(country!, { fetchImpl, signal: context.req.raw.signal, sourceCurrencyCode }), 200, noStore);
     } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
   });
@@ -170,7 +198,12 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
       const query = new URL(context.req.url).searchParams;
       if ([...query.keys()].length !== 1 || !query.has('walletKind')) return context.json({ error: 'invalid_request' }, 400, noStore);
       const walletKind = fundingKindInput.parse(query.get('walletKind'));
-      return context.json(await readWalletFundingHistory(database, subject, walletKind), 200, noStore);
+      const history = await readWalletFundingHistory(database, subject, walletKind);
+      if (walletKind !== 'personal' || !appMeld(context.req.header('origin'))) return context.json(history, 200, noStore);
+      if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+      const native = await readAppMeldFundingHistory(database, subject);
+      const records = [...native, ...history.records].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20);
+      return context.json({ ...history, records }, 200, noStore);
     } catch (error) { const next = failure(error); return context.json({ error: next.error }, next.status, noStore); }
   });
 
@@ -182,6 +215,12 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         const query = new URL(context.req.url).searchParams;
         if ([...query.keys()].length !== 1 || query.getAll('checkoutReference').length !== 1) {
           return context.json({ error: 'invalid_request' }, 400, noStore);
+        }
+        if (walletKind === 'personal' && appMeld(context.req.header('origin'))) {
+          if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+          const status = await readAppMeldFundingStatus(database, subject, query.get('checkoutReference')!,
+            { environment, fetchImpl, signal: context.req.raw.signal });
+          if (status) return context.json(status, 200, noStore);
         }
         // Existing JS/BFF releases accept only the original unconfirmed shape.
         // Their reads must neither expose v2 proof nor initiate provider work.

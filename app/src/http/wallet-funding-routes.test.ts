@@ -27,7 +27,7 @@ function application({ signedIn = true, execute = async () => [], fetchImpl, run
 } = {}) {
   const app = new Hono<ApiEnvironment>();
   app.use('*', async (context, next) => {
-    context.set('session', signedIn ? { user: { id: 'synthetic-owner' } } as never : null);
+    context.set('session', signedIn ? { user: { id: 'synthetic-owner' }, session: { id: 'synthetic-session' } } as never : null);
     await next();
   });
   registerWalletFundingRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
@@ -458,4 +458,71 @@ test('warm or non-v2 clients retain the original unconfirmed sandbox status with
     { headers: { 'x-mindbliss-sandbox-contract': 'v2' } });
   expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ confirmation: { state: 'unconfirmed', source: 'none', testMode: false } });
   expect(reads).toBe(1);
+});
+
+test('APP direct MELD uses only the commercial production routes and blocks unsigned or legacy checkouts', async () => {
+  const calls: Array<{ url: URL; auth: string | null }> = [];
+  const app = application({ runtimeEnvironment: { APP_MELD_PRODUCTION_ENABLED: 'true',
+    MELD_PRODUCTION_API_KEYS: 'synthetic-merchant', MELD_PRODUCTION_ACCOUNT_ID: 'app-prod-account' },
+    execute: async () => { throw Error('unexpected database call'); },
+    fetchImpl: (async (input, init) => {
+      calls.push({ url: new URL(String(input)), auth: new Headers(init?.headers).get('authorization') });
+      return Response.json([{ partner: 'MERCURYO', source: 'MXN', destination: 'USDT_POLYGON',
+        paymentMethods: ['CREDIT_DEBIT_CARD', 'APPLE_PAY'].map(name => ({ name, limits: { currencyCode: 'MXN', min: 520.03, max: 100000 } })) },
+      { partner: 'ONRAMPMONEY', source: 'MXN', destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: 'SPEI', limits: { currencyCode: 'MXN', min: 400, max: 20000 } }] }]);
+    }) as typeof fetch });
+  const header = { origin, 'x-mindbliss-funding-provider': 'meld' };
+  const path = '/api/member/wallet-funding/personal/options';
+  const response = await app.request(path + '?country=MX&sourceCurrencyCode=MXN', { headers: header });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ provider: 'meld', destinationCurrencyCode: 'USDT_POLYGON',
+    paymentMethods: ['CREDIT_DEBIT_CARD', 'SPEI'], routes: [
+      { serviceProvider: 'MERCURYO', paymentMethods: [{ minimumAmount: 931 }] }, { serviceProvider: 'ONRAMPMONEY' },
+    ] });
+  expect(calls[0]?.auth).toBe('BASIC synthetic-merchant');
+  expect(calls[0]?.url.searchParams.get('partners')).toBe('MERCURYO,ONRAMPMONEY');
+  const unsupported = await app.request(path + '?country=US&sourceCurrencyCode=USD', { headers: header });
+  expect(await unsupported.json()).toMatchObject({ paymentMethods: [], routes: [] });
+  expect(calls).toHaveLength(1);
+  const body = JSON.stringify({ ...input, country: 'MX', amount: 1000, sourceCurrencyCode: 'MXN' });
+  expect((await app.request(personalPath, signedRequest(personalPath, body))).status).toBe(403);
+  expect((await app.request(personalPath, { method: 'POST', body, headers: { ...header, 'content-type': 'application/json' } })).status).toBe(403);
+});
+
+test('a signed App card request reserves its linked USDT address before minting a production MELD session', async () => {
+  const fiat = 'MXN', card = 'CREDIT_DEBIT_CARD', account = 'app-prod-account', provider = 'MERCURYO';
+  const customer = '7d492c47-80be-4e14-bc5f-54afaa56fc23', sessionId = 'merchant-session';
+  const request = { ...input, country: 'MX', amount: 1000, sourceCurrencyCode: fiat };
+  const calls: string[] = [];
+  const app = application({ runtimeEnvironment: { APP_MELD_PRODUCTION_ENABLED: 'true',
+    MELD_PRODUCTION_API_KEYS: 'synthetic-merchant', MELD_PRODUCTION_ACCOUNT_ID: account },
+    execute: async () => {
+      calls.push('db');
+      return calls.length === 2 ? [{ id: input.requestId, wallet_address: input.walletAddress, customer_reference: customer,
+        created: true, status: 'initiated', created_at: new Date() }] : [{ finished: true }];
+    },
+    fetchImpl: (async (target, init) => {
+      const path = new URL(String(target)).pathname;
+      calls.push(path.split('/').at(-1)!);
+      if (path.includes('/routes/')) return Response.json([{ partner: provider, source: fiat, destination: 'USDT_POLYGON',
+        paymentMethods: [{ name: card, limits: { currencyCode: fiat, min: 520.03, max: 20000 } }] }]);
+      if (path.endsWith('/quote')) return Response.json({ quotes: [{ serviceProvider: provider, transactionType: 'CRYPTO_PURCHASE',
+        sourceCurrencyCode: fiat, sourceAmount: request.amount, paymentMethodType: card, destinationCurrencyCode: 'USDT_POLYGON',
+        destinationAmount: 49, totalFee: 50 }] });
+      const payload = JSON.parse(String(init?.body));
+      expect(payload.sessionData.walletAddress).toBe(input.walletAddress);
+      const params = new URLSearchParams({ widget_id: customer, type: 'buy', currency: 'USDT', network: 'POLYGON', fix_currency: 'true',
+        country_code: 'MX', fiat_currency: fiat, fiat_amount: '1000.00', fix_fiat_currency: 'true', fix_fiat_amount: 'true',
+        payment_method: 'card', address: input.walletAddress, redirect_url: payload.sessionData.redirectUrl,
+        merchant_transaction_id: sessionId, signature: 'v2:' + 'a'.repeat(128) });
+      return Response.json({ id: sessionId, customerId: 'provider-customer', externalSessionId: input.requestId, externalCustomerId: customer,
+        serviceProvider: provider, widgetUrl: 'https://meldcrypto.com/?token=synthetic.token',
+        serviceProviderWidgetUrl: 'https://exchange.mercuryo.io?' + params.toString() });
+    }) as typeof fetch });
+  const response = await app.request(personalPath, signedRequest(personalPath, JSON.stringify(request), { 'x-mindbliss-funding-provider': 'meld' }));
+  expect(response.status).toBe(201);
+  expect(calls).toEqual(['USDT_POLYGON', 'db', 'quote', 'widget', 'db']);
+  expect(await response.json()).toMatchObject({ provider: 'meld', serviceProvider: provider, status: 'session_created',
+    destination: { address: input.walletAddress, chainId: 137 }, checkoutUrl: 'https://meldcrypto.com/?token=synthetic.token' });
 });
