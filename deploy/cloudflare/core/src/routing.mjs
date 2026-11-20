@@ -11,6 +11,7 @@ import { ADMINISTRATIVE_ACTION_MAX_BODY, administrativeWalletActionNamespace, ad
 import { MEMBER_PROFILE_MAX_BODY, memberProfileNamespace, memberProfileRequest } from './member-profile.mjs';
 import { MEMBER_REFERRAL_MAX_BODY, memberReferralNamespace, memberReferralRequest } from './member-referral.mjs';
 import { memberPackageRightsNamespace, memberPackageRightsRequest } from './member-package-rights.mjs';
+import { APP_MELD_RECONCILIATION_PATH } from './app-meld-scheduled.mjs';
 export { nowpaymentsOperationalReady } from './nowpayments-operation.mjs';
 
 export const SERVICES = Object.freeze({
@@ -37,7 +38,8 @@ const ADMINISTRATIVE_ACTION_SERVICE_ERRORS = new Set(['administrative_signing_un
   'administrative_transfer_unavailable', 'administrative_offramp_unconfigured', 'administrative_offramp_unavailable', 'administrative_offramp_provider_unavailable']);
 const MEMBER_PROFILE_SERVICE_ERRORS = new Set(['member_profile_unconfigured', 'member_profile_unavailable', 'member_profile_outcome_unconfirmed']);
 const MEMBER_REFERRAL_SERVICE_ERRORS = new Set(['member_referral_unconfigured', 'member_referral_unavailable']);
-const MEMBER_PACKAGE_RIGHTS_SERVICE_ERRORS = new Set(['member_package_rights_unconfigured', 'member_package_rights_unavailable']);
+const MEMBER_PACKAGE_RIGHTS_SERVICE_ERRORS = new Set(['member_package_rights_unconfigured', 'member_package_rights_unavailable',
+  'member_recharge_package_unavailable']);
 const COMPANY_PAYMENT_SERVICE_ERRORS = new Set(['company_payment_unconfigured', 'company_payment_rpc_unavailable', 'company_payment_unavailable']);
 const POLYGON_RELAY_SERVICE_ERRORS = new Set(['polygon_relay_unconfigured', 'polygon_relay_unavailable',
   'polygon_relay_provider_unavailable', 'polygon_relay_sponsorship_rejected', 'polygon_relay_budget_unavailable',
@@ -285,6 +287,12 @@ export async function dispatchCore(request, env, resolve) {
     }
   } catch { return failure('not_found', 404); }
   checkoutPath = checkoutPath.replace(/\/+/g, '/').replace(/\/+$/, '');
+  // This route is reserved for the scheduler's direct Container call.
+  if (checkoutPath.includes('app-meld-reconcile')) {
+    const normalized = new URL(checkoutPath.replace(/[\\/]+/g, '/'), url.origin).pathname;
+    if (normalized === APP_MELD_RECONCILIATION_PATH || normalized.startsWith(`${APP_MELD_RECONCILIATION_PATH}/`))
+      return failure('not_found', 404);
+  }
   // This capability is a signed admin read, not a generic auth/admin write.
   // Bun verifies the full-path HMAC, native session and live canonical role.
   // Encoded aliases, query selectors and broad-Core fallthrough stay closed.

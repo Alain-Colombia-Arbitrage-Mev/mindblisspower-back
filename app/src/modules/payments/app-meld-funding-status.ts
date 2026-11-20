@@ -9,7 +9,7 @@ import { appMeldAsset, appMeldCountry, appMeldCurrency, appMeldDestination, appM
 
 type Database = Pick<IdentityDatabase, 'execute'>;
 type Environment = Record<string, string | undefined>;
-type Dependencies = { environment?: Environment; fetchImpl?: typeof fetch; signal?: AbortSignal };
+type Dependencies = { nativeSessionId?: string; environment?: Environment; fetchImpl?: typeof fetch; signal?: AbortSignal };
 
 const ownerInput = z.string().min(1).max(255);
 const uuid = z.string().uuid().transform(value => value.toLowerCase());
@@ -40,6 +40,7 @@ const attempt = z.object({ id: uuid, subject: ownerInput, wallet_address: wallet
       row.destination_currency, row.requested_amount);
 });
 type Attempt = z.infer<typeof attempt>;
+type ProofOwner = { nativeSessionId: string } | { leaseId: string };
 
 function ownedAttempt(value: unknown, owner: string) {
   const parsed = attempt.safeParse(value);
@@ -66,19 +67,28 @@ export async function readAppMeldFundingHistory(database: Database, subject: str
 
 const search = z.object({ transactions: z.array(z.object({ id: identifier })).max(1) });
 const result = z.object({ transaction: z.object({
-  id: identifier, accountId: identifier, sessionId: identifier, externalSessionId: uuid, customerId: identifier,
+  id: identifier, accountId: identifier, sessionId: identifier, externalSessionId: uuid,
+  customerId: identifier.nullish(), customer: z.object({ id: identifier }).nullish(),
   externalCustomerId: uuid, transactionType: z.literal('CRYPTO_PURCHASE'), serviceProvider: appMeldProvider, countryCode: appMeldCountry,
   sourceCurrencyCode: appMeldCurrency, sourceAmount: amount, destinationCurrencyCode: appMeldAsset,
   destinationAmount: z.number().finite().nonnegative().max(1_000_000_000), paymentMethodType: appMeldMethod,
   status: providerStatus, updatedAt: z.string().datetime({ offset: true }),
+  fiatAmountInUsd: z.unknown().optional(),
   cryptoDetails: z.object({ destinationWalletAddress: wallet, chainId: z.union([z.literal('137'), z.literal('42161'), z.literal('1'), chainId]).transform(Number),
-    blockchainTransactionId: z.unknown().optional() }),
+    blockchainTransactionId: z.unknown().optional(), totalFeeInUsd: z.unknown().optional() }),
 }) });
 
 const block = z.object({ hash: hexWord, number: hexQuantity });
 const receipt = z.object({ transactionHash: hexWord, blockHash: hexWord, blockNumber: hexQuantity, status: z.literal('0x1'),
   logs: z.array(z.unknown()).max(1024) });
-const transfer = z.object({ address: wallet, topics: z.tuple([hexWord, hexWord, hexWord]), data: hexWord, removed: z.boolean().optional() });
+const transfer = z.object({ address: wallet, topics: z.tuple([hexWord, hexWord, hexWord]), data: hexWord,
+  logIndex: hexQuantity, removed: z.boolean().optional() });
+
+function usdMinor(value: unknown, allowZero = false) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000_000) return null;
+  const cents = BigInt(value.toFixed(2).replace('.', ''));
+  return cents > 0n || allowZero ? cents : null;
+}
 
 /** A settled provider transaction alone cannot prove delivery to the owned wallet. */
 async function deliveredOnNetwork(row: Attempt, hash: string, amountReceived: bigint, environment: Environment,
@@ -93,24 +103,28 @@ async function deliveredOnNetwork(row: Attempt, hash: string, amountReceived: bi
     ]);
     const mined = receipt.safeParse(rawReceipt), finalized = block.safeParse(rawFinalized);
     if (!mined.success || !finalized.success || mined.data.transactionHash !== hash
-      || BigInt(mined.data.blockNumber) > BigInt(finalized.data.number)) return false;
+      || BigInt(mined.data.blockNumber) > BigInt(finalized.data.number)) return null;
     const receiver = '0x' + row.wallet_address.slice(2).padStart(64, '0');
     const token = rpc.policy.tokenAddress;
-    const matched = mined.data.logs.some(value => {
+    const matches = mined.data.logs.flatMap(value => {
       const event = transfer.safeParse(value);
-      return event.success && !event.data.removed && event.data.address === token
-        && event.data.topics[0] === COMPANY_PAYMENT_TRANSFER_TOPIC && event.data.topics[2] === receiver
-        && BigInt(event.data.data) === amountReceived;
+      if (!event.success || event.data.removed || event.data.address !== token
+        || event.data.topics[0] !== COMPANY_PAYMENT_TRANSFER_TOPIC || event.data.topics[2] !== receiver
+        || BigInt(event.data.data) !== amountReceived || BigInt(event.data.logIndex) > 2_147_483_647n) return [];
+      return [Number(BigInt(event.data.logIndex))];
     });
-    if (!matched) return false;
+    const blockNumber = BigInt(mined.data.blockNumber);
+    if (matches.length !== 1 || blockNumber > 9_223_372_036_854_775_807n) return null;
     const canonical = block.safeParse(await rpc.call('eth_getBlockByNumber', [mined.data.blockNumber, false]));
-    return canonical.success && canonical.data.hash === mined.data.blockHash
-      && BigInt(canonical.data.number) === BigInt(mined.data.blockNumber);
+    if (!canonical.success || canonical.data.hash !== mined.data.blockHash
+      || BigInt(canonical.data.number) !== blockNumber) return null;
+    return { blockNumber, blockHash: mined.data.blockHash, logIndex: matches[0]! };
   } finally { rpc.dispose(); }
 }
 
 const reconcileGates = new WeakMap<Database, ReturnType<typeof createAdministrativePreflightGate>>();
-async function reconcile(database: Database, row: Attempt, environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal) {
+async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwner | undefined,
+  environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal) {
   if (row.status !== 'session_created' || row.provider_session_id === null || row.provider_customer_id === null) return unconfirmed();
   const key = environment.MELD_PRODUCTION_API_KEYS;
   const account = identifier.safeParse(environment.MELD_PRODUCTION_ACCOUNT_ID);
@@ -132,8 +146,10 @@ async function reconcile(database: Database, row: Attempt, environment: Environm
     const parsed = result.safeParse(fetched.data);
     if (!fetched.ok || !parsed.success) throw unavailable();
     const item = parsed.data.transaction;
+    const providerCustomerId = item.customer?.id ?? item.customerId;
     if (item.id !== id || item.accountId !== row.account_id || item.sessionId !== row.provider_session_id
-      || item.externalSessionId !== row.id || item.customerId !== row.provider_customer_id || item.externalCustomerId !== row.customer_reference
+      || item.externalSessionId !== row.id || providerCustomerId !== row.provider_customer_id
+      || (item.customerId != null && item.customerId !== providerCustomerId) || item.externalCustomerId !== row.customer_reference
       || item.serviceProvider !== row.service_provider || item.countryCode !== row.country_code
       || item.sourceCurrencyCode !== row.source_currency || item.sourceAmount !== row.requested_amount || item.destinationCurrencyCode !== row.destination_currency
       || item.paymentMethodType !== row.payment_method || item.cryptoDetails.destinationWalletAddress !== row.wallet_address
@@ -147,15 +163,28 @@ async function reconcile(database: Database, row: Attempt, environment: Environm
     const received = BigInt(fixedAmount.replace('.', ''));
     const hash = hexWord.safeParse(item.cryptoDetails.blockchainTransactionId);
     const delivered = received > 0n && hash.success
-      && await deliveredOnNetwork(row, hash.data, received, environment, fetchImpl, signal).catch(() => false);
+      ? await deliveredOnNetwork(row, hash.data, received, environment, fetchImpl, signal).catch(() => null) : null;
     if (!delivered) return { ...metadata, state: 'pending' as const, providerStatus: 'SETTLING' as const };
+    if (proofOwner && hash.success) {
+      const grossUsd = usdMinor(item.sourceCurrencyCode === 'USD' ? item.sourceAmount : item.fiatAmountInUsd);
+      const reportedFeeUsd = usdMinor(item.cryptoDetails.totalFeeInUsd, true);
+      const feeUsd = grossUsd !== null && reportedFeeUsd !== null && reportedFeeUsd > grossUsd ? null : reportedFeeUsd;
+      const evidence = sql`${id},${hash.data},${delivered.logIndex}::integer,${delivered.blockNumber.toString()}::bigint,
+        ${delivered.blockHash},${item.updatedAt}::timestamptz,${grossUsd?.toString() ?? null}::bigint,
+        ${feeUsd?.toString() ?? null}::bigint,${received.toString()}::bigint`;
+      const write = 'nativeSessionId' in proofOwner
+        ? sql`SELECT payments.record_app_meld_settlement_v1(${row.subject},${proofOwner.nativeSessionId},${row.id}::uuid,${evidence}) AS recorded`
+        : sql`SELECT payments.record_app_meld_scheduled_settlement_v1(${row.id}::uuid,${proofOwner.leaseId}::uuid,${evidence}) AS recorded`;
+      const stored = await productionOperation(() => database.execute(write), signal);
+      if (stored.length !== 1 || stored[0]?.recorded !== true) throw unavailable();
+    }
     return { ...metadata, state: 'confirmed' as const, receivedAmount: fixedAmount.replace(/\.?0+$/, ''), confirmedAt: item.updatedAt };
   } finally { release(); }
 }
 
 /** Owned App reference reconciled against the production MELD session and its delivery chain. */
 export async function readAppMeldFundingStatus(database: Database, subject: string, reference: string, {
-  environment = process.env, fetchImpl = fetch, signal,
+  nativeSessionId, environment = process.env, fetchImpl = fetch, signal,
 }: Dependencies = {}) {
   const owner = ownerInput.parse(subject), requestId = uuid.parse(reference), scope = productionScope(signal);
   try {
@@ -164,10 +193,37 @@ export async function readAppMeldFundingStatus(database: Database, subject: stri
     if (rows.length !== 1) throw Error('wallet_funding_unavailable');
     const row = ownedAttempt(rows[0], owner);
     if (row.id !== requestId) throw Error('wallet_funding_unavailable');
-    const confirmation = await reconcile(database, row, environment, fetchImpl, scope.signal);
+    const confirmation = await reconcile(database, row, nativeSessionId ? { nativeSessionId } : undefined,
+      environment, fetchImpl, scope.signal);
     return { checkoutReference: row.id, walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
       serviceProvider: row.service_provider, country: row.country_code, requestedAmount: row.requested_amount,
       sourceCurrencyCode: row.source_currency, paymentMethodType: row.payment_method, requestStatus: row.status,
       destination: destination(row), confirmation };
+  } finally { scope.close(); }
+}
+
+/** Private bounded scan of App checkout attempts. The lease also fences every database write. */
+export async function runAppMeldReconciliation(database: Database, {
+  environment = process.env, fetchImpl = fetch, signal,
+}: Dependencies = {}) {
+  if (environment.APP_MELD_PRODUCTION_ENABLED !== 'true') throw Error('wallet_funding_unconfigured');
+  const scope = productionScope(signal);
+  try {
+    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.claim_app_meld_reconciliation_v1()`), scope.signal);
+    const leases = z.array(z.object({ id: uuid, lease_id: uuid })).max(5).parse(rows);
+    if (new Set(leases.map(lease => lease.id)).size !== leases.length) throw unavailable();
+    const handled = await Promise.all(leases.map(async ({ id, lease_id }, index) => {
+      let outcome: 'confirmed' | 'pending' | 'failed' = 'pending';
+      try {
+        const current = attempt.parse(rows[index]);
+        const proof = await reconcile(database, current, { leaseId: lease_id }, environment, fetchImpl, scope.signal);
+        if (proof.state === 'confirmed' || proof.state === 'failed') outcome = proof.state;
+      } catch { /* Transient or invalid evidence is left pending for the leased retry. */ }
+      const finished = await productionOperation(() => database.execute(sql`
+        SELECT payments.finish_app_meld_reconciliation_v1(${id}::uuid,${lease_id}::uuid,${outcome}) AS finished
+      `), scope.signal);
+      return finished.length === 1 && finished[0]?.finished === true;
+    }));
+    return { processed: handled.filter(Boolean).length };
   } finally { scope.close(); }
 }

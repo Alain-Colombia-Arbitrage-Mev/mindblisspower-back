@@ -218,8 +218,10 @@ export function registerWalletFundingRoutes(app: ApiApplication, {
         }
         if (walletKind === 'personal' && appMeld(context.req.header('origin'))) {
           if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'invalid_request' }, 403, noStore);
+          const nativeSessionId = context.get('session')?.session?.id;
+          if (!nativeSessionId) return context.json({ error: 'unauthenticated' }, 401, noStore);
           const status = await readAppMeldFundingStatus(database, subject, query.get('checkoutReference')!,
-            { environment, fetchImpl, signal: context.req.raw.signal });
+            { nativeSessionId, environment, fetchImpl, signal: context.req.raw.signal });
           if (status) return context.json(status, 200, noStore);
         }
         // Existing JS/BFF releases accept only the original unconfirmed shape.

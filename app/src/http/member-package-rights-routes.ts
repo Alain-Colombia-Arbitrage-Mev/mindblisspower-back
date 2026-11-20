@@ -1,8 +1,10 @@
 import type { IdentityDatabase } from '../modules/identity/model';
 import { readMemberPackageRights } from '../modules/packages/member-package-rights';
+import { readAppRechargePackage } from '../modules/packages/app-recharge-package';
 import type { ApiApplication } from './types';
 
-const path = '/api/member/package-rights', origin = 'https://app.mindblisspower.com';
+const path = '/api/member/package-rights', rechargePath = '/api/member/recharge-package';
+const origin = 'https://app.mindblisspower.com';
 const noStore = { 'Cache-Control': 'private, no-store' };
 function viewSubject(value: string | undefined) {
   if (!value || value.length > 1024) return null;
@@ -23,7 +25,8 @@ function failure(error: unknown) {
 export function registerMemberPackageRightsRoutes(app: ApiApplication, { database, environment = process.env }: {
   database: Pick<IdentityDatabase, 'execute'>; environment?: Record<string, string | undefined>;
 }) {
-  app.use(path, async (context, next) => {
+  for (const route of [path, rechargePath]) app.use(route, async (context, next) => {
+    const recharge = route === rechargePath;
     context.header('Cache-Control', 'private, no-store'); const session = context.get('session');
     if (!session?.user.id || !session.session?.id) return context.json({ error: 'unauthenticated' }, 401, noStore);
     const expected = viewSubject(context.req.header('x-mindbliss-profile-subject'));
@@ -32,7 +35,8 @@ export function registerMemberPackageRightsRoutes(app: ApiApplication, { databas
     if (context.req.raw.headers.has('x-vp-act-as')) return context.json({ error: 'impersonation_read_only' }, 403, noStore);
     if (context.req.header('origin') !== origin) return context.json({ error: 'invalid_origin' }, 403, noStore);
     if (new URL(context.req.url).search || context.req.url.endsWith('?')) return context.json({ error: 'member_package_rights_invalid_request' }, 400, noStore);
-    if (environment.MEMBER_PACKAGE_RIGHTS_ENABLED !== 'true') return context.json({ error: 'member_package_rights_unconfigured' }, 503, noStore);
+    if (environment[recharge ? 'APP_MELD_PRODUCTION_ENABLED' : 'MEMBER_PACKAGE_RIGHTS_ENABLED'] !== 'true')
+      return context.json({ error: 'member_package_rights_unconfigured' }, 503, noStore);
     return next();
   });
   app.get(path, async context => {
@@ -40,5 +44,11 @@ export function registerMemberPackageRightsRoutes(app: ApiApplication, { databas
     try { return context.json(await readMemberPackageRights(database, { subject: session.user.id, nativeSessionId: session.session.id },
       { environment, signal: context.req.raw.signal }), 200, noStore); }
     catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
+  });
+  app.get(rechargePath, async context => {
+    const session = context.get('session')!;
+    try { return context.json(await readAppRechargePackage(database, session.user.id, session.session.id,
+      context.req.raw.signal), 200, noStore); }
+    catch { return context.json({ error: 'member_recharge_package_unavailable' }, 503, noStore); }
   });
 }

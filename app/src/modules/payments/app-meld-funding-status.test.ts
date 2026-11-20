@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { IdentityDatabase } from '../identity/model';
-import { readAppMeldFundingHistory, readAppMeldFundingStatus } from './app-meld-funding-status';
+import { readAppMeldFundingHistory, readAppMeldFundingStatus, runAppMeldReconciliation } from './app-meld-funding-status';
 import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, ETHEREUM_USDC_TOKEN, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
@@ -25,17 +25,27 @@ const transaction = { id: 'merchant-transaction', accountId: row.account_id, ses
   cryptoDetails: { destinationWalletAddress: wallet.toUpperCase().replace('0X','0x'), chainId: '137', blockchainTransactionId: txHash } };
 const receipt = { transactionHash: txHash, blockHash, blockNumber: '0x100', status: '0x1', logs: [{ address: LEGACY_POLYGON_TOKEN,
   topics: [COMPANY_PAYMENT_TRANSFER_TOPIC, addressTopic(anotherWallet), addressTopic(wallet)],
-  data: '0x' + (48_706_979).toString(16).padStart(64, '0') }] };
+  logIndex: '0x1', data: '0x' + (48_706_979).toString(16).padStart(64, '0') }] };
 
-function database(rows: unknown[]) {
+function database(rows: unknown[], recorded = true) {
   const queries: { sql: string; params: unknown[] }[] = [];
   return { queries, db: { execute: async query => {
-    queries.push(new PgDialect().sqlToQuery(query as SQL));
+    const parsed = new PgDialect().sqlToQuery(query as SQL);
+    queries.push(parsed);
+    if (parsed.sql.includes('payments.record_app_meld_settlement_v1(')) return [{ recorded }];
     return rows;
   } } as Pick<IdentityDatabase, 'execute'> };
 }
 
-function upstream(detail = transaction, proof: typeof receipt | null = receipt, finalized = '0x104', ids = [{ id: transaction.id }]) {
+type TransactionFixture = Omit<typeof transaction, 'customerId' | 'cryptoDetails'> & {
+  customerId?: string;
+  customer?: { id: string };
+  fiatAmountInUsd?: number;
+  cryptoDetails: typeof transaction.cryptoDetails & { totalFeeInUsd?: number };
+};
+
+function upstream(detail: TransactionFixture = transaction, proof: typeof receipt | null = receipt, finalized = '0x104',
+  ids = [{ id: transaction.id }]) {
   const calls: string[] = [];
   const fetchImpl = (async (target, init) => {
     const url = new URL(String(target));
@@ -94,6 +104,70 @@ test('App confirms only the bound amount of canonical, finalized Polygon USDT', 
     const value = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: probe.fetchImpl });
     expect(value?.confirmation).toEqual({ state: 'pending', source: 'meld_production_api', testMode: false,
       transactionId: transaction.id, providerStatus: 'SETTLING' });
+  }
+});
+
+test('a confirmed App recharge records gross USD and ramp fees from MELD separately from the exact token credit', async () => {
+  for (const fiatAmountInUsd of [50, 50.001, undefined]) {
+    const { db, queries } = database([row]);
+    const { fetchImpl } = upstream({ ...transaction, fiatAmountInUsd,
+      cryptoDetails: { ...transaction.cryptoDetails, totalFeeInUsd: 1.29 } });
+    const value = await readAppMeldFundingStatus(db, row.subject, id, { nativeSessionId: 'current-session', environment, fetchImpl });
+    expect(value?.confirmation.state).toBe('confirmed');
+    expect(queries).toHaveLength(2);
+    expect(queries[1]?.params).toEqual([row.subject, 'current-session', id, transaction.id, txHash, 1, '256', blockHash,
+      now, fiatAmountInUsd === undefined ? null : '5000', '129', '48706979']);
+  }
+});
+
+test('MELD detail may use the documented customer.id, while conflicting references fail before a chain read', async () => {
+  const { db, queries } = database([row]);
+  const nested = { ...transaction, customerId: undefined, customer: { id: row.provider_customer_id } };
+  const verify = upstream(nested);
+  expect((await readAppMeldFundingStatus(db, row.subject, id,
+    { nativeSessionId: 'current-session', environment, fetchImpl: verify.fetchImpl }))?.confirmation.state).toBe('confirmed');
+  expect(queries).toHaveLength(2);
+  const wrong = upstream({ ...nested, customerId: 'different-customer' });
+  await expect(readAppMeldFundingStatus(db, row.subject, id,
+    { nativeSessionId: 'current-session', environment, fetchImpl: wrong.fetchImpl })).rejects.toThrow('wallet_funding_provider_unavailable');
+  expect(wrong.calls).toHaveLength(2);
+});
+
+test('unsettled, ambiguous delivery and failed persistence never produce a recorded confirmation', async () => {
+  for (const probe of [upstream({ ...transaction, status: 'SETTLING' }), upstream(transaction, {
+    ...receipt, logs: [receipt.logs[0]!, { ...receipt.logs[0]!, logIndex: '0x2' }],
+  })]) {
+    const { db, queries } = database([row]);
+    const value = await readAppMeldFundingStatus(db, row.subject, id, { nativeSessionId: 'current-session', environment, fetchImpl: probe.fetchImpl });
+    expect(value?.confirmation.state).toBe('pending');
+    expect(queries).toHaveLength(1);
+  }
+  await expect(readAppMeldFundingStatus(database([row], false).db, row.subject, id,
+    { nativeSessionId: 'current-session', environment, fetchImpl: upstream().fetchImpl }))
+    .rejects.toThrow('wallet_funding_provider_unavailable');
+});
+
+test('background reconciliation uses a leased production attempt and the same finalized proof without a user session', async () => {
+  const leaseId = 'acd415f6-67ce-4d8a-9f1f-f3a05d376d2e';
+  for (const [status, expectedOutcome, records] of [
+    ['SETTLED', 'confirmed', true], ['SETTLING', 'pending', false], ['FAILED', 'failed', false],
+  ] as const) {
+    const { fetchImpl } = upstream({ ...transaction, status, fiatAmountInUsd: 50 });
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const db = { execute: async (query: SQL) => {
+      const next = new PgDialect().sqlToQuery(query);
+      queries.push(next);
+      if (next.sql.includes('claim_app_meld_reconciliation')) return [{ ...row, lease_id: leaseId }];
+      if (next.sql.includes('record_app_meld_scheduled_settlement')) return [{ recorded: true }];
+      if (next.sql.includes('finish_app_meld_reconciliation')) return [{ finished: true }];
+      throw Error('unexpected SQL');
+    } } as Pick<IdentityDatabase, 'execute'>;
+    await expect(runAppMeldReconciliation(db, { environment: { ...environment, APP_MELD_PRODUCTION_ENABLED: 'true' }, fetchImpl }))
+      .resolves.toEqual({ processed: 1 });
+    expect(queries[0]?.params).toEqual([]);
+    expect(queries.at(-1)?.params).toEqual([id, leaseId, expectedOutcome]);
+    expect(queries).toHaveLength(records ? 3 : 2);
+    if (records) expect(queries[1]?.params).toEqual([id, leaseId, transaction.id, txHash, 1, '256', blockHash, now, '5000', null, '48706979']);
   }
 });
 

@@ -1,10 +1,11 @@
 import { Container, ContainerProxy, getContainer } from '@cloudflare/containers';
 import { WorkerEntrypoint } from 'cloudflare:workers';
-import { coreReady, dispatchCore, dispatchContainerOutbound, isGrpcTunnelRequest, TUNNEL_PROTOCOL } from './routing.mjs';
+import { authReady, coreReady, dispatchCore, dispatchContainerOutbound, isGrpcTunnelRequest, TUNNEL_PROTOCOL } from './routing.mjs';
 import { containerEnvironment } from './runtime-env.mjs';
 import { privateReadiness } from './private-probe.mjs';
 import { captureConfiguration } from './capture-configuration.mjs';
 import { runNOWPaymentsScheduled } from './nowpayments-scheduled.mjs';
+import { runAppMeldScheduled } from './app-meld-scheduled.mjs';
 import { privateNOWPaymentsReadiness, privateNOWPaymentsDiagnostics } from './nowpayments-readiness.mjs';
 import { handleOperationalStorage, observationRequest, operationalMonitoringEnabled } from './observability-store.mjs';
 import { privateOperationalSnapshot, runOperationalMonitoring } from './observability-monitor.mjs';
@@ -152,6 +153,7 @@ export default {
   scheduled(controller, env, ctx) {
     if (controller.cron !== '*/5 * * * *') throw new Error('Unknown scheduled operation');
     ctx.waitUntil(runNOWPaymentsScheduled(env, resolveFor(env)));
+    if (authReady(env)) ctx.waitUntil(runAppMeldScheduled(env, resolveFor(env)));
     if (operationalMonitoringEnabled(env)) ctx.waitUntil(runOperationalMonitoring(env, resolveFor(env)));
     if (authTraceEnabled(env)) ctx.waitUntil(prunePrivateAuthTraces(env, resolveFor(env)));
   },

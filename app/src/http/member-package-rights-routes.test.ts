@@ -6,13 +6,16 @@ import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiEnvironment } from './types';
 import { registerMemberPackageRightsRoutes } from './member-package-rights-routes';
 
-const path = '/api/member/package-rights', origin = 'https://app.mindblisspower.com';
+const path = '/api/member/package-rights', rechargePath = '/api/member/recharge-package';
+const origin = 'https://app.mindblisspower.com';
 const subject = 'synthetic-rights-owner', nativeSessionId = 'synthetic-native-session', cookie = 'better-auth.session_token=synthetic';
 const headers = { origin, cookie, 'x-mindbliss-profile-subject': encodeURIComponent(subject) };
 const rights = { rightsOnly: true, economicActivation: false, roiEnabled: false, commissionsEnabled: false,
   policy: 'historical_membership_access_until_revoked_v1', totalCount: 0, activeCount: 0, items: [] };
-function application({ enabled = true, authenticated = true, nativeSession = true, owner = subject, execute = async () => [{ rights }] }: {
-  enabled?: boolean; authenticated?: boolean; nativeSession?: boolean; owner?: string; execute?: (query: SQL) => Promise<unknown[]>;
+function application({ enabled = true, rechargeEnabled = true, authenticated = true, nativeSession = true, owner = subject,
+  execute = async () => [{ rights }] }: {
+  enabled?: boolean; rechargeEnabled?: boolean; authenticated?: boolean; nativeSession?: boolean; owner?: string;
+  execute?: (query: SQL) => Promise<unknown[]>;
 } = {}) {
   const app = new Hono<ApiEnvironment>();
   app.use('*', async (ctx, next) => {
@@ -20,8 +23,31 @@ function application({ enabled = true, authenticated = true, nativeSession = tru
       ...(nativeSession ? { session: { id: nativeSessionId } } : {}) } as never : null); await next();
   });
   registerMemberPackageRightsRoutes(app, { database: { execute } as unknown as Pick<IdentityDatabase, 'execute'>,
-    environment: { MEMBER_PACKAGE_RIGHTS_ENABLED: String(enabled) } }); return app;
+    environment: { MEMBER_PACKAGE_RIGHTS_ENABLED: String(enabled), APP_MELD_PRODUCTION_ENABLED: String(rechargeEnabled) } }); return app;
 }
+
+test('the App recharge package projects the verified cumulative gross and never accepts caller amounts or owners', async () => {
+  const confirmedAt = '2026-11-20T10:00:00.000Z';
+  let calls = 0;
+  const app = application({ enabled: false, execute: async query => {
+    calls++;
+    const sql = new PgDialect().sqlToQuery(query);
+    expect(sql.sql).toContain('payments.read_app_recharge_package_v1');
+    expect(sql.params).toEqual([subject, nativeSessionId]);
+    return [{ level: 2, ceiling_usd_minor: '10000', gross_usd_minor: '5001', confirmed_at: new Date(confirmedAt) }];
+  } });
+  const response = await app.request(rechargePath, { headers });
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(await response.json()).toEqual({ package: { level: 2, ceilingUsdMinor: 10000, grossUsdMinor: 5001, confirmedAt } });
+  expect((await app.request(rechargePath + '?gross=10000', { headers })).status).toBe(400);
+  expect((await app.request(rechargePath, { headers: { ...headers, origin: 'https://wallet.mindblisspower.com' } })).status).toBe(403);
+  expect((await app.request(rechargePath, { headers: { ...headers, 'x-mindbliss-profile-subject': 'other' } })).status).toBe(409);
+  expect((await app.request(rechargePath, { headers, method: 'POST' })).status).toBe(404);
+  expect(calls).toBe(1);
+  const none = await application({ execute: async () => [] }).request(rechargePath, { headers });
+  expect(await none.json()).toEqual({ package: null });
+});
 
 test('native rights GET uses authenticated session authority, private caching and an explicit rights-only response', async () => {
   let calls = 0;

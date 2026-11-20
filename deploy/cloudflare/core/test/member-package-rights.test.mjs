@@ -7,7 +7,7 @@ const path = '/api/member/package-rights';
 const ready = { CORE_ENV: 'production', CORE_SERVICES_ENABLED: 'false', AUTH_SERVICES_ENABLED: 'true', AUTH_CUTOVER_VERIFIED: 'true',
   CORE_DATA_ACCESS_VERIFIED: 'true', MEMBER_PACKAGE_RIGHTS_ENABLED: 'true', CORE_REPORTS_ENABLED: 'true' };
 const headers = { origin: 'https://app.mindblisspower.com', cookie: 'better-auth.session_token=synthetic', 'x-mindbliss-profile-subject': 'synthetic-owner' };
-const request = ({ host = 'auth.core.internal', suffix = '', method = 'GET', extra = {} } = {}) => new Request(`https://${host}${path}${suffix}`, { method, headers: { ...headers, ...extra } });
+const request = ({ host = 'auth.core.internal', route = path, suffix = '', method = 'GET', extra = {} } = {}) => new Request(`https://${host}${route}${suffix}`, { method, headers: { ...headers, ...extra } });
 
 test('Core routes package rights to Native once with its owner fence and cookie, without enabling business writers', async () => {
   let calls = 0;
@@ -44,6 +44,27 @@ test('Core package rights preserves ownership fences and sanitizes upstream data
     assert.equal(result.status, status); assert.equal(calls, 1);
     assert.deepEqual(await result.json(), { error: error.startsWith('member_package_rights_') ? error : 'upstream_unavailable' });
   }
+});
+
+test('Core permits the recharge package read for App MELD only, independent of historical Stripe rights', async () => {
+  const route = '/api/member/recharge-package';
+  const env = { ...ready, MEMBER_PACKAGE_RIGHTS_ENABLED: 'false', APP_MELD_PRODUCTION_ENABLED: 'true' };
+  const result = await dispatchCore(request({ route }), env, service => {
+    assert.equal(service, 'api');
+    return { fetch: async forwarded => {
+      assert.equal(new URL(forwarded.url).pathname, route);
+      assert.equal(forwarded.headers.get('x-mindbliss-profile-subject'), headers['x-mindbliss-profile-subject']);
+      return Response.json({ package: null });
+    } };
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { package: null });
+  const stop = () => assert.fail('invalid recharge package request started a container');
+  for (const options of [{ method: 'POST' }, { suffix: '/activate' }, { suffix: '?gross=100' },
+    { extra: { origin: 'https://wallet.mindblisspower.com' } }, { extra: { 'x-vp-act-as': 'synthetic' } }]) {
+    assert.equal((await dispatchCore(request({ route, ...options }), env, stop)).status, 503);
+  }
+  assert.equal((await dispatchCore(request({ route }), ready, stop)).status, 503);
 });
 
 test('Core package rights feature only changes its Native read flag and never forwards it to Go or enables financial capabilities', () => {

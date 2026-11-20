@@ -11,6 +11,7 @@ import { registerAdministrativeWalletRoutes } from './http/administrative-wallet
 import { registerMeldWebhookRoutes } from './http/meld-webhook-routes';
 import { registerMeldOnrampRoutes } from './http/meld-onramp-routes';
 import { registerWalletFundingRoutes } from './http/wallet-funding-routes';
+import { registerAppMeldReconciliation } from './http/app-meld-reconciliation-routes';
 import { registerAdministrativeOfframpRoutes } from './http/administrative-offramp-routes';
 import { registerAdministrativeWalletSigningRoutes } from './http/administrative-wallet-signing-routes';
 import { registerAdministrativeOfframpSessionRoutes } from './http/administrative-offramp-session-routes';
@@ -21,6 +22,7 @@ import { registerPersonalCompanyPaymentRoutes } from './http/personal-company-pa
 import { registerPersonalPolygonRelayRoutes } from './http/personal-polygon-relay-routes';
 import { authDb } from './db/auth-client';
 import { MELD_WEBHOOK_MAX_BYTES, MELD_WEBHOOK_PATH } from './modules/payments/meld-webhook';
+import { runAppMeldReconciliation } from './modules/payments/app-meld-funding-status';
 import { authProxyContext } from './http/auth-proxy-context';
 import { OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy, registerOtpDiagnosticRoutes, registerOtpTraceReadiness } from './http/otp-diagnostic-routes';
 import type { ApiEnvironment } from './http/types';
@@ -28,6 +30,7 @@ import type { ApiEnvironment } from './http/types';
 const app = new Hono<ApiEnvironment>();
 app.onError(apiErrorHandler);
 registerOtpTraceReadiness(app);
+registerAppMeldReconciliation(app, { database: authDb, reconcile: runAppMeldReconciliation });
 // Include failures returned by the shared session gate in private/no-store.
 app.use(OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy);
 app.use('/api/auth/*', bodyLimit({ maxSize: 32 * 1024,
