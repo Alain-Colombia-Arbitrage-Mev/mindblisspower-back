@@ -3,7 +3,8 @@ import { z } from 'zod';
 import type { IdentityDatabase } from '../identity/model';
 import { readWalletBinding } from '../identity/wallet-link';
 import { checkCompanyPaymentBalance, checkCompanyPaymentSubmission, companyPaymentAtomic, createCompanyPaymentRpc,
-  verifyCompanyPaymentReceipt, ARBITRUM_USDC_CHAIN_ID, ARBITRUM_USDC_TOKEN, createArbitrumUsdcReadRpc, COMPANY_PAYMENT_CHAIN_ID, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT,
+  verifyCompanyPaymentReceipt, ARBITRUM_USDC_CHAIN_ID, ARBITRUM_USDC_TOKEN, createArbitrumUsdcReadRpc, createEthereumUsdcReadRpc,
+  ETHEREUM_USDC_TOKEN, COMPANY_PAYMENT_CHAIN_ID, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT,
   COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS, companyPaymentNetwork, readCompanyPaymentBalances, readPersonalWalletNetworkBalances, LEGACY_POLYGON_TOKEN, POLYGON_USDC_TOKEN } from './personal-company-rpc';
 
 type Database = Pick<IdentityDatabase, 'execute'>;
@@ -86,14 +87,18 @@ export async function readPersonalCompanyPaymentBalances(database: Database, use
   const networks = [{ chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, network: 'ethereum', asset: 'USDT' },
     { chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, network: 'polygon', asset: 'USDT' },
     ...(environment.PERSONAL_POLYGON_USDC_ENABLED === 'true' ? [{ chainId: 137, tokenAddress: POLYGON_USDC_TOKEN, network: 'polygon', asset: 'USDC' } as const] : []),
-    ...(environment.APP_MELD_PRODUCTION_ENABLED === 'true' ? [{ chainId: ARBITRUM_USDC_CHAIN_ID, tokenAddress: ARBITRUM_USDC_TOKEN,
-      network: 'arbitrum', asset: 'USDC' } as const] : [])] as const;
+    ...(environment.APP_MELD_PRODUCTION_ENABLED === 'true' ? [
+      { chainId: ARBITRUM_USDC_CHAIN_ID, tokenAddress: ARBITRUM_USDC_TOKEN, network: 'arbitrum', asset: 'USDC' } as const,
+      { chainId: 1, tokenAddress: ETHEREUM_USDC_TOKEN, network: 'ethereum', asset: 'USDC' } as const,
+    ] : [])] as const;
   const balances = await Promise.all(networks.map(async network => {
     const snapshot = { walletKind: 'personal' as const, walletAddress, ...network, tokenDecimals: COMPANY_PAYMENT_DECIMALS };
-    let rpc: ReturnType<typeof createCompanyPaymentRpc> | ReturnType<typeof createArbitrumUsdcReadRpc> | undefined;
+    let rpc: ReturnType<typeof createCompanyPaymentRpc> | ReturnType<typeof createArbitrumUsdcReadRpc>
+      | ReturnType<typeof createEthereumUsdcReadRpc> | undefined;
     try {
       rpc = network.chainId === ARBITRUM_USDC_CHAIN_ID ? createArbitrumUsdcReadRpc(environment, fetchImpl, signal)
-        : createCompanyPaymentRpc(environment, fetchImpl, signal, network.chainId, network.asset);
+        : network.chainId === 1 && network.asset === 'USDC' ? createEthereumUsdcReadRpc(environment, fetchImpl, signal)
+          : createCompanyPaymentRpc(environment, fetchImpl, signal, network.chainId, network.asset);
       const values = await readPersonalWalletNetworkBalances(rpc, walletAddress);
       active(rpc.signal);
       return { ...snapshot, ...values, observedAt: new Date().toISOString() };

@@ -65,7 +65,7 @@ test('App MELD reads forward the native marker for exact personal options, statu
 
 test('App MELD passes canonical country, currency, provider, amount and Polygon destination to native intent validation', async () => {
   const mexico = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount: 2000,
-    serviceProvider: 'MERCURYO', destinationCurrencyCode: 'USDT_POLYGON' };
+    serviceProvider: 'MERCURYO', destinationCurrencyCode: 'USDC_POLYGON' };
   const us = { ...input, sourceCurrencyCode: 'USD', paymentMethodType: 'LOCAL_BANK_TRANSFER',
     serviceProvider: 'RAMPNOW', destinationCurrencyCode: 'USDC_POLYGON' };
   const co = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 170000, paymentMethodType: 'PSE',
@@ -83,12 +83,12 @@ test('App MELD passes canonical country, currency, provider, amount and Polygon 
   }
 
   const never = () => assert.fail('Unapproved App MELD intent reached the container');
-  for (const change of [{ amount: 930.99 }, { amount: '2000' }, { amount: 2000.001 }, { country: 'US' },
-    { paymentMethodType: 'NETELLER' }, { serviceProvider: 'TOPPER' }, { destinationCurrencyCode: 'USDC_POLYGON' },
+  for (const change of [{ amount: 520.02 }, { amount: '2000' }, { amount: 2000.001 }, { country: 'US' },
+    { paymentMethodType: 'NETELLER' }, { serviceProvider: 'TOPPER' }, { destinationCurrencyCode: 'USDT_POLYGON' },
     { redirectUrl: 'https://example.test' }, { walletAddress: null }, { requestId: [input.requestId] }]) {
     assert.equal((await dispatchCore(request(path, { ...mexico, ...change }, appHeaders), appMeld, never)).status, 503);
   }
-  assert.equal((await dispatchCore(request(path, { ...co, amount: 170000.01 }, appHeaders), appMeld, never)).status, 503);
+  assert.equal((await dispatchCore(request(path, { ...co, amount: 170000.001 }, appHeaders), appMeld, never)).status, 503);
   for (const change of [{ cookie: '' }, { origin: 'https://mindblisspower.com' }, { 'x-vp-act-as': '' },
     { 'content-type': 'text/plain' }, { 'content-encoding': 'gzip' }, { [marker]: 'water' }]) {
     assert.equal((await dispatchCore(request(path, mexico, { ...appHeaders, ...change }), appMeld, never)).status, 503);

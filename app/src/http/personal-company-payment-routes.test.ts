@@ -4,7 +4,8 @@ import { Hono } from 'hono';
 import type { ApiEnvironment } from './types';
 import type { IdentityDatabase } from '../modules/identity/model';
 import { registerPersonalCompanyPaymentRoutes } from './personal-company-payment-routes';
-import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN } from '../modules/payments/personal-company-rpc';
+import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, ETHEREUM_USDC_TOKEN, LEGACY_POLYGON_TOKEN,
+  companyPaymentNetwork } from '../modules/payments/personal-company-rpc';
 const PREFIX = '/api/member/company-payments', id = '11111111-1111-4111-8111-111111111111', secret = 's'.repeat(48);
 const address = `0x${'2'.repeat(40)}`, hash = `0x${'3'.repeat(64)}`;
 const row = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 1,
@@ -208,7 +209,7 @@ test('HTTP new preparation requires explicit Polygon and reports a safe network 
   expect(calls).toBe(0);
 });
 
-test('native USDC on Arbitrum is an App-only balance read and cannot be used to prepare a payment', async () => {
+test('native USDC on Arbitrum and Ethereum is an App-only balance read with no new payment capability', async () => {
   const path = PREFIX + '/balances', seen: string[] = [];
   const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
     person_email: 'synthetic@example.invalid', person_status: 'active', user_id: 'owner', blacklisted: false, access_restricted: false };
@@ -228,16 +229,19 @@ test('native USDC on Arbitrum is an App-only balance read and cannot be used to 
   expect(appBalance.status).toBe(200);
   expect(await appBalance.json()).toMatchObject({ balances: expect.arrayContaining([{ walletKind: 'personal', walletAddress: address,
     chainId: 42161, tokenAddress: ARBITRUM_USDC_TOKEN, asset: 'USDC', network: 'arbitrum', tokenDecimals: 6,
+    balanceAtomic: '1000000', nativeBalanceAtomic: '0', observedAt: expect.any(String) }, { walletKind: 'personal', walletAddress: address,
+    chainId: 1, tokenAddress: ETHEREUM_USDC_TOKEN, asset: 'USDC', network: 'ethereum', tokenDecimals: 6,
     balanceAtomic: '1000000', nativeBalanceAtomic: '0', observedAt: expect.any(String) }]) });
   expect(seen.some(call => call.startsWith('42161:'))).toBeTrue();
   seen.length = 0;
   const apex = await app.request(path, signed(path, 'GET', '', { origin: 'https://mindblisspower.com' }));
   expect(apex.status).toBe(200);
-  const apexBody = await apex.json() as { balances: { chainId: number }[] };
-  expect(apexBody.balances.some(balance => balance.chainId === 42161)).toBeFalse();
+  const apexBody = await apex.json() as { balances: { chainId: number; tokenAddress: string }[] };
+  expect(apexBody.balances.some(balance => balance.chainId === 42161 || balance.tokenAddress === ETHEREUM_USDC_TOKEN)).toBeFalse();
   expect(seen.some(call => call.startsWith('42161:'))).toBeFalse();
   const prepare = PREFIX + '/prepare';
   const raw = JSON.stringify({ requestId: id, amountAtomic: '1000000', chainId: 42161 });
   expect((await app.request(prepare, signed(prepare, 'POST', raw))).status).toBe(400);
+  expect(companyPaymentNetwork(1, ETHEREUM_USDC_TOKEN)).toBeNull();
   expect(reads).toBe(4);
 });

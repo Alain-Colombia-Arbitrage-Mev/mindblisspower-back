@@ -5,7 +5,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { createAdministrativePreflightGate, personalFundingInput } from './wallet-funding';
 import { additionalAppMeldOnrampParameters } from './app-meld-additional-markets';
 import { productionMeldJson, productionOperation, productionScope } from './meld-production-http';
-import { appMeldAsset, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, rampNowPaymentModes,
+import { appMeldAmountFitsPrecision, appMeldAsset, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, appMeldRouteBounds, rampNowPaymentModes,
   type AppMeldAsset, type AppMeldProvider } from './app-meld-funding-policy';
 
 export const APP_MELD_ORIGIN = 'https://app.mindblisspower.com';
@@ -14,9 +14,11 @@ const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const unavailable = () => new Error('wallet_funding_provider_unavailable');
 type Database = Pick<IdentityDatabase, 'execute'>;
 type Dependencies = { environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch; signal?: AbortSignal };
-const appMeldInput = personalFundingInput.extend({ serviceProvider: appMeldProvider.optional(), destinationCurrencyCode: appMeldAsset.optional() });
+const appMeldInput = personalFundingInput.extend({ amount: z.number().finite().min(0.01).max(1_000_000_000),
+  serviceProvider: appMeldProvider.optional(), destinationCurrencyCode: appMeldAsset.optional() });
 type PaymentMethod = { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number; minimumUsd?: number; maximumUsd?: number };
-type FundingRoute = { serviceProvider: AppMeldProvider; paymentMethods: PaymentMethod[] };
+type FundingRoute = { serviceProvider: AppMeldProvider; destinationCurrencyCode: AppMeldAsset; paymentMethods: PaymentMethod[] }
+  & ReturnType<typeof appMeldNetwork>;
 
 function configuration(environment: Record<string, string | undefined>) {
   const key = environment.MELD_PRODUCTION_API_KEYS;
@@ -30,40 +32,50 @@ const routeSchema = z.object({ partner: z.string(), source: z.string(), destinat
 
 export async function readAppMeldOptions(country: string, sourceCurrencyCode: string, {
   environment = process.env, fetchImpl = fetch, signal,
-}: Dependencies = {}) {
-  const market = appMeldMarket(country, sourceCurrencyCode), asset = market?.asset ?? 'USDT_POLYGON';
+}: Dependencies = {}, selectedAsset?: AppMeldAsset) {
+  const market = appMeldMarket(country, sourceCurrencyCode);
+  const asset = selectedAsset ?? market?.asset ?? 'USDT_POLYGON';
   const result = { walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
-    country, sourceCurrencyCode, destinationCurrencyCode: asset, ...appMeldNetwork(asset) };
-  if (!market) return { ...result, paymentMethods: [], routes: [] };
+    country, sourceCurrencyCode, destinationCurrencyCode: asset, ...appMeldNetwork(asset),
+    minorUnits: market?.minorUnits ?? 2 };
+  if (!market) return { ...result, paymentMethods: [], routes: [] as FundingRoute[] };
   const config = configuration(environment), scope = productionScope(signal, 8_000);
-  try {
-    const query = new URLSearchParams({ partners: market.rails.map(route => route.provider).join(','), checkout: 'true' });
-    const response = await productionMeldJson(`/network-partner/supported/routes/CRYPTO_ONRAMP/${country}/${sourceCurrencyCode}/${asset}?${query}`,
-      { ...config, fetchImpl, signal: scope.signal });
-    const parsed = z.array(routeSchema).max(128).safeParse(response.data);
+  async function discover(destinationCurrencyCode: AppMeldAsset): Promise<FundingRoute[]> {
+    const approved = market!.rows.filter(row => row.destinationCurrencyCode === destinationCurrencyCode);
+    const partners = [...new Set(approved.map(row => row.serviceProvider))];
+    if (!partners.length) return [];
+    const query = new URLSearchParams({ partners: partners.join(','), checkout: 'true' });
+    const response = await productionMeldJson('/network-partner/supported/routes/CRYPTO_ONRAMP/' + country + '/'
+      + sourceCurrencyCode + '/' + destinationCurrencyCode + '?' + query, { ...config, fetchImpl, signal: scope.signal });
+    if (!response.ok && [400, 404].includes(response.status)) return [];
+    const parsed = z.array(routeSchema).max(256).safeParse(response.data);
     if (!response.ok || !parsed.success) throw unavailable();
     const options = new Map<string, PaymentMethod>();
     for (const route of parsed.data) {
-      const policy = market.rails.find(rail => rail.provider === route.partner);
-      if (!policy || route.source !== sourceCurrencyCode || route.destination !== asset || route.checkoutSupported === false) continue;
+      if (route.source !== sourceCurrencyCode || route.destination !== destinationCurrencyCode || route.checkoutSupported === false) continue;
       for (const rail of route.paymentMethods) {
-        if (!policy.methods.some(method => method === rail.name) || rail.checkoutSupported === false || rail.limits?.currencyCode !== sourceCurrencyCode) continue;
-        const key = `${policy.provider}:${rail.name}`, prior = options.get(key);
-        const usd = sourceCurrencyCode === 'USD';
-        const minimumAmount = Math.max(rail.limits.min, policy.minimum, prior?.minimumAmount ?? 0);
-        const maximumAmount = Math.min(rail.limits.max, policy.maximum, prior?.maximumAmount ?? Infinity);
-        options.set(key, { method: rail.name, currencyCode: sourceCurrencyCode,
-          minimumAmount: market.minorUnits === 0 ? Math.ceil(minimumAmount) : minimumAmount,
-          maximumAmount: market.minorUnits === 0 ? Math.floor(maximumAmount) : maximumAmount,
-          ...(usd ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) });
+        const approvedRow = approved.find(row => row.serviceProvider === route.partner && row.paymentMethodType === rail.name);
+        if (!approvedRow || rail.checkoutSupported === false || rail.limits?.currencyCode !== sourceCurrencyCode) continue;
+        const key = approvedRow.serviceProvider + ':' + rail.name, prior = options.get(key);
+        const { minimumAmount, maximumAmount } = appMeldRouteBounds(approvedRow,
+          Math.max(rail.limits.min, prior?.minimumAmount ?? 0), Math.min(rail.limits.max, prior?.maximumAmount ?? Infinity));
+        options.set(key, { method: rail.name, currencyCode: sourceCurrencyCode, minimumAmount, maximumAmount,
+          ...(sourceCurrencyCode === 'USD' ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) });
       }
     }
-    const routes: FundingRoute[] = market.rails.map(policy => ({ serviceProvider: policy.provider,
-      paymentMethods: policy.methods.flatMap(method => {
-        const rail = options.get(`${policy.provider}:${method}`);
+    return partners.flatMap(serviceProvider => {
+      const paymentMethods = approved.filter(row => row.serviceProvider === serviceProvider).flatMap(row => {
+        const rail = options.get(row.serviceProvider + ':' + row.paymentMethodType);
         return rail && rail.minimumAmount <= rail.maximumAmount ? [rail] : [];
-      }),
-    })).filter(route => route.paymentMethods.length > 0);
+      });
+      return paymentMethods.length ? [{ serviceProvider, destinationCurrencyCode, ...appMeldNetwork(destinationCurrencyCode), paymentMethods }] : [];
+    });
+  }
+  try {
+    const alternatives = selectedAsset ? [] : [...new Set(market.rows.map(row => row.destinationCurrencyCode))].filter(other => other !== asset);
+    const loaded = await Promise.all([discover(asset), ...alternatives.map(other => discover(other).catch(() => []))]);
+    if (scope.signal.aborted) throw unavailable();
+    const routes = loaded.flat();
     return { ...result, paymentMethods: [...new Set(routes.flatMap(route => route.paymentMethods.map(rail => rail.method)))], routes };
   } finally { scope.close(); }
 }
@@ -73,15 +85,30 @@ const quoteSchema = z.object({ quotes: z.array(z.object({ serviceProvider: appMe
   destinationAmount: z.number().finite().positive(), totalFee: z.number().finite().nonnegative(), transactionType: z.literal('CRYPTO_PURCHASE'),
   walletAddress: z.string().optional(), accountId: identifier.optional() })).length(1) });
 const widget = z.object({ id: identifier, customerId: identifier, externalSessionId: z.string().uuid(), externalCustomerId: z.string().uuid(),
-  serviceProvider: appMeldProvider.optional(), widgetUrl: z.string().max(8192), serviceProviderWidgetUrl: z.string().max(8192) });
+  serviceProvider: appMeldProvider.optional(), widgetUrl: z.string().max(8192).nullish(), serviceProviderWidgetUrl: z.string().max(8192).nullish() });
 const reserved = z.object({ id: z.string().uuid(), wallet_address: address, customer_reference: z.string().uuid(), created: z.boolean(),
   status: z.literal('initiated'), created_at: z.coerce.date() });
 
-function checkoutUrl(value: string) {
-  return /^https:\/\/meldcrypto\.com\/?\?token=[A-Za-z0-9_.~-]{1,7000}$/.test(value) ? new URL(value).href : null;
+function checkoutUrl(value: string | null | undefined) {
+  return value && /^https:\/\/meldcrypto\.com\/?\?token=[A-Za-z0-9_.~-]{1,7000}$/.test(value) ? new URL(value).href : null;
 }
-function matchesWidget(link: string, provider: AppMeldProvider, id: string, wallet: string, asset: AppMeldAsset,
+function banxaCheckoutUrl(value: string | null | undefined) {
+  if (!value || !value.startsWith('https://meldshared.banxa.com/papi/transit/?initId=') || /[\\\u0000-\u0020\u007f#]/.test(value)) return null;
+  try {
+    const url = new URL(value), query = url.searchParams;
+    return url.origin === 'https://meldshared.banxa.com' && url.pathname === '/papi/transit/' && !url.username && !url.password
+      && query.size === 1 && query.getAll('initId').length === 1 && /^[A-Za-z0-9._~+/-]{1,4096}={0,2}$/.test(query.get('initId') ?? '') ? value : null;
+  } catch { return null; }
+}
+function matchesWidget(link: string | null | undefined, provider: AppMeldProvider, id: string, wallet: string, asset: AppMeldAsset,
   { sourceCurrencyCode: fiat, country, amount, paymentMethodType }: z.infer<typeof appMeldInput>, redirectUrl: string) {
+  if (provider === 'BANXA' || provider === 'ONMETA') {
+    // These routes authenticate an opaque MELD or Banxa checkout. The exact
+    // quote, the linked recipient and the locked session parameters bind it.
+    return asset === 'USDT_POLYGON';
+  }
+  if (provider === 'ONRAMPMONEY' && asset === 'USDT_POLYGON' && !link) return true;
+  if (!link) return false;
   if (/[\\\u0000-\u0020\u007f]/.test(link)) return false;
   try {
     const url = new URL(link), query = url.searchParams;
@@ -112,16 +139,18 @@ function matchesWidget(link: string, provider: AppMeldProvider, id: string, wall
     if (provider === 'ONRAMPMONEY') {
       const verified = additionalAppMeldOnrampParameters(country, fiat, paymentMethodType);
       const fiatType = verified?.fiatType ?? ({ MXN: '4', COP: '9', USD: '21' } as Record<string, string>)[fiat];
-      const paymentMethod = verified?.paymentMethod ?? (paymentMethodType === 'LOCAL_BANK_TRANSFER' ? '1' : '2');
-      return Boolean(fiatType) && url.origin === 'https://onramp.money' && url.pathname === '/main/buy/'
-        && matches({ coinCode: token.toLowerCase(), network: 'matic20', walletAddress: wallet, fiatAmount: amount.toFixed(2),
-          fiatType: fiatType!, paymentMethod, redirectUrl });
+      const paymentMethod = verified?.paymentMethod ?? (fiatType ? (paymentMethodType === 'LOCAL_BANK_TRANSFER' ? '1' : '2') : undefined);
+      if (checkoutUrl(link) && asset === 'USDT_POLYGON' && fiatType === undefined) return true;
+      return url.origin === 'https://onramp.money' && url.pathname === '/main/buy/'
+        && matches({ coinCode: token.toLowerCase(), network: 'matic20', walletAddress: wallet, fiatAmount: amount.toFixed(2), redirectUrl })
+        && (fiatType === undefined ? /^\d{1,3}$/.test(query.get('fiatType') ?? '') : query.get('fiatType') === fiatType)
+        && (paymentMethod === undefined ? /^\d{1,3}$/.test(query.get('paymentMethod') ?? '') : query.get('paymentMethod') === paymentMethod);
     }
     if (provider !== 'RAMPNOW') return false;
     const paymentMode = (rampNowPaymentModes as Record<string, string>)[paymentMethodType];
     return Boolean(paymentMode) && url.origin === 'https://app.rampnow.io' && url.pathname === '/order/quote'
       && matches({ orderType: 'buy', srcCurrency: fiat, srcChain: 'fiat', srcAmount: amount.toFixed(2),
-        dstCurrency: token, dstChain: 'polygon', walletAddress: wallet, prefill: 'true', paymentMode: paymentMode!,
+        dstCurrency: token, dstChain: asset === 'USDC_ARBITRUM' ? 'arbitrum-one' : destination.network, walletAddress: wallet, prefill: 'true', paymentMode: paymentMode!,
         returnUrl: redirectUrl, externalOrderId: id })
       && query.get('lockFields')?.split(',').includes('walletAddress') === true;
   } catch { return false; }
@@ -133,9 +162,12 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
 }: Dependencies & { subject: string; nativeSessionId: string; clientIp: string }) {
   const input = appMeldInput.parse(raw);
   const market = appMeldMarket(input.country, input.sourceCurrencyCode);
-  if (!market || (input.destinationCurrencyCode && input.destinationCurrencyCode !== market.asset)) throw Error('wallet_funding_method_unavailable');
-  if (market.minorUnits === 0 && !Number.isInteger(input.amount)) throw Error('wallet_funding_amount_unavailable');
-  const asset = market.asset;
+  const asset = input.destinationCurrencyCode ?? market?.asset;
+  if (!market || !asset || !market.rows.some(row => row.destinationCurrencyCode === asset
+    && row.paymentMethodType === input.paymentMethodType && (!input.serviceProvider || row.serviceProvider === input.serviceProvider))) {
+    throw Error('wallet_funding_method_unavailable');
+  }
+  if (!appMeldAmountFitsPrecision(input.amount, market.minorUnits)) throw Error('wallet_funding_amount_unavailable');
   const config = configuration(environment);
   if (!isIP(clientIp) || !nativeSessionId) throw Error('wallet_funding_unconfigured');
   let limiter = limits.get(database);
@@ -150,7 +182,7 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
     if (rows.length !== 1 || (rows[0] as { finished?: unknown }).finished !== true) throw unavailable();
   };
   try {
-    const options = await readAppMeldOptions(input.country, input.sourceCurrencyCode, { environment, fetchImpl, signal: scope.signal });
+    const options = await readAppMeldOptions(input.country, input.sourceCurrencyCode, { environment, fetchImpl, signal: scope.signal }, asset);
     const candidates = options.routes.filter(item => (!input.serviceProvider || item.serviceProvider === input.serviceProvider)
       && item.paymentMethods.some(rail => rail.method === input.paymentMethodType));
     if (!candidates.length) throw Error('wallet_funding_method_unavailable');
@@ -158,7 +190,7 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
       && input.amount >= rail.minimumAmount && input.amount <= rail.maximumAmount));
     if (!route) throw Error('wallet_funding_amount_unavailable');
     const serviceProvider = route.serviceProvider;
-    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.reserve_app_meld_funding(
+    const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.reserve_app_meld_funding_v3(
       ${subject},${nativeSessionId},${input.requestId}::uuid,${walletAddress},${input.country},${input.sourceCurrencyCode},
       ${input.amount},${input.paymentMethodType},${serviceProvider},${config.account},${asset})`), scope.signal);
     const row = reserved.safeParse(rows.length === 1 ? rows[0] : null);
@@ -177,14 +209,15 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
     const redirectUrl = `${APP_MELD_ORIGIN}/dashboard/wallet-personal?walletCheckoutReference=${journalId}`;
     const session = await productionMeldJson('/crypto/session/widget', { ...config, fetchImpl, signal: scope.signal,
       body: { sessionType: 'BUY', externalSessionId: journalId, externalCustomerId: row.data.customer_reference,
-        sessionData: { serviceProvider, walletAddress, countryCode: country, sourceCurrencyCode, sourceAmount: amount.toFixed(2),
+        sessionData: { serviceProvider, walletAddress, countryCode: country, sourceCurrencyCode, sourceAmount: amount.toFixed(market.minorUnits),
           destinationCurrencyCode: asset, paymentMethodType, clientIpAddress: clientIp, redirectUrl,
           lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } } });
     const parsed = widget.safeParse(session.data);
     if (!session.ok || !parsed.success || parsed.data.externalSessionId !== journalId
       || parsed.data.externalCustomerId !== row.data.customer_reference || (parsed.data.serviceProvider && parsed.data.serviceProvider !== serviceProvider)
       || !matchesWidget(parsed.data.serviceProviderWidgetUrl, serviceProvider, parsed.data.id, walletAddress, asset, input, redirectUrl)) throw unavailable();
-    const url = checkoutUrl(parsed.data.widgetUrl);
+    const url = (serviceProvider === 'BANXA' ? banxaCheckoutUrl(parsed.data.serviceProviderWidgetUrl) : null)
+      ?? checkoutUrl(parsed.data.widgetUrl);
     if (!url) throw unavailable();
     sessionSaved = true;
     await finish('session_created', parsed.data.id, parsed.data.customerId);

@@ -68,7 +68,7 @@ test('App MELD history reads only the owned journal without a merchant request',
   expect(await readAppMeldFundingHistory(db, row.subject)).toEqual([{ checkoutReference: id, provider: 'meld', serviceProvider: 'MERCURYO',
     country: 'MX', requestedAmount: 1000, sourceCurrencyCode: 'MXN', paymentMethodType: 'CREDIT_DEBIT_CARD',
     destination: { address: wallet, asset: 'USDT', network: 'polygon', chainId: 137 }, status: 'session_created', createdAt: now }]);
-  expect(queries[0]).toMatchObject({ sql: 'SELECT * FROM payments.read_app_meld_funding_v2($1,NULL::uuid)', params: [row.subject] });
+  expect(queries[0]).toMatchObject({ sql: 'SELECT * FROM payments.read_app_meld_funding_v3($1,NULL::uuid)', params: [row.subject] });
   await expect(readAppMeldFundingHistory(database([row]).db, 'another-owner')).rejects.toThrow('wallet_funding_unavailable');
 });
 

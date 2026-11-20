@@ -1,6 +1,7 @@
 /** Two approved USDT payment networks. The browser cannot select a token, RPC or destination. */
 export const COMPANY_PAYMENT_CHAIN_ID = 1;
 export const COMPANY_PAYMENT_TOKEN = '0xdac17f958d2ee523a2206206994597c13d831ec7';
+export const ETHEREUM_USDC_TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
 export const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
 export const POLYGON_USDC_TOKEN = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
 export const ARBITRUM_USDC_CHAIN_ID = 42161;
@@ -88,6 +89,11 @@ export function createArbitrumUsdcReadRpc(environment: Environment, fetchImpl: t
   return createWalletReadRpc(environment, fetchImpl, parent, { chainId: ARBITRUM_USDC_CHAIN_ID, tokenAddress: ARBITRUM_USDC_TOKEN } as const);
 }
 
+/** ETH USDC uses a read-only deposit policy. Pagar retains its existing token allowlist. */
+export function createEthereumUsdcReadRpc(environment: Environment, fetchImpl: typeof fetch, parent?: AbortSignal) {
+  return createWalletReadRpc(environment, fetchImpl, parent, { chainId: 1, tokenAddress: ETHEREUM_USDC_TOKEN } as const);
+}
+
 function createWalletReadRpc<Policy extends { chainId: number; tokenAddress: string }>(environment: Environment,
   fetchImpl: typeof fetch, parent: AbortSignal | undefined, policy: Policy) {
   const project = environment.REOWN_PROJECT_ID;
@@ -120,7 +126,7 @@ function createWalletReadRpc<Policy extends { chainId: number; tokenAddress: str
   };
 }
 type Rpc = ReturnType<typeof createCompanyPaymentRpc>;
-type WalletReadRpc = Rpc | ReturnType<typeof createArbitrumUsdcReadRpc>;
+type WalletReadRpc = Rpc | ReturnType<typeof createArbitrumUsdcReadRpc> | ReturnType<typeof createEthereumUsdcReadRpc>;
 export async function checkCompanyPaymentChain(rpc: WalletReadRpc) {
   if (hexQuantity(await rpc.call('eth_chainId', [])) !== BigInt(rpc.policy.chainId)) throw unavailable();
 }
@@ -137,8 +143,9 @@ export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amou
 // Network snapshots remain separate; selecting a payment network never combines their balances.
 export async function readPersonalWalletNetworkBalances(rpc: WalletReadRpc, address: string) {
   const { chainId, tokenAddress } = rpc.policy;
-  const arbitrumUsdc = chainId === ARBITRUM_USDC_CHAIN_ID && tokenAddress === ARBITRUM_USDC_TOKEN;
-  if ((!arbitrumUsdc && !companyPaymentNetwork(chainId, tokenAddress)) || !ADDRESS.test(address)) throw unavailable();
+  const depositUsdc = (chainId === ARBITRUM_USDC_CHAIN_ID && tokenAddress === ARBITRUM_USDC_TOKEN)
+    || (chainId === 1 && tokenAddress === ETHEREUM_USDC_TOKEN);
+  if ((!depositUsdc && !companyPaymentNetwork(chainId, tokenAddress)) || !ADDRESS.test(address)) throw unavailable();
   await checkCompanyPaymentChain(rpc);
   const [decimals, balance, nativeBalance] = await Promise.all([
     rpc.call('eth_call', [{ to: rpc.policy.tokenAddress, data: '0x313ce567' }, 'latest']),

@@ -33,7 +33,7 @@ for (const [country, sourceCurrencyCode, paymentMethodType, amount, minimumAmoun
       calls++;
       if (target.pathname.startsWith('/network-partner/')) {
         expect(target.pathname).toBe('/network-partner/supported/routes/CRYPTO_ONRAMP/' + country + '/' + sourceCurrencyCode + '/' + destinationCurrencyCode);
-        expect(target.searchParams.get('partners')).toBe(serviceProvider);
+        expect(target.searchParams.get('partners')?.split(',')).toContain(serviceProvider);
         return Response.json([
           { partner: serviceProvider, source: sourceCurrencyCode, destination: destinationCurrencyCode,
             paymentMethods: [{ name: paymentMethodType, limits: { currencyCode: sourceCurrencyCode, min: minimumAmount - 1, max: maximumAmount + 1 } },
@@ -51,7 +51,7 @@ for (const [country, sourceCurrencyCode, paymentMethodType, amount, minimumAmoun
       }
       expect(target.pathname).toBe('/crypto/session/widget');
       expect(body).toEqual({ sessionType: 'BUY', externalSessionId: currentRequestId, externalCustomerId: customerReference,
-        sessionData: { serviceProvider, walletAddress, countryCode: country, sourceCurrencyCode, sourceAmount: amount.toFixed(2),
+        sessionData: { serviceProvider, walletAddress, countryCode: country, sourceCurrencyCode, sourceAmount: amount.toFixed(sourceCurrencyCode === 'VND' ? 0 : 2),
           destinationCurrencyCode, paymentMethodType, clientIpAddress: principal.clientIp,
           redirectUrl: query.get('redirectUrl'), lockFields: locked } });
       return Response.json({ id: 'session-a', customerId: 'customer-a', externalSessionId: currentRequestId, externalCustomerId: customerReference,
@@ -59,8 +59,8 @@ for (const [country, sourceCurrencyCode, paymentMethodType, amount, minimumAmoun
     }) as typeof fetch;
 
     const options = await readAppMeldOptions(country, sourceCurrencyCode, { environment, fetchImpl });
-    expect(options.routes).toEqual([{ serviceProvider, paymentMethods: [{ method: paymentMethodType, currencyCode: sourceCurrencyCode,
-      minimumAmount, maximumAmount }] }]);
+    expect(options.routes.find(route => route.serviceProvider === serviceProvider)).toMatchObject({
+      destinationCurrencyCode, paymentMethods: [{ method: paymentMethodType, currencyCode: sourceCurrencyCode, minimumAmount, maximumAmount }] });
     const input = { requestId, walletAddress, country, sourceCurrencyCode, amount, paymentMethodType, serviceProvider, destinationCurrencyCode };
     expect(await createAppMeldFunding(database, input, { ...principal, fetchImpl }))
       .toMatchObject({ checkoutUrl: 'https://meldcrypto.com/?token=synthetic', destination: { address: walletAddress, asset: 'USDT', chainId: 137 } });
