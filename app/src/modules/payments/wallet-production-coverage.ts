@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 const scope = 'wallet-prod-20261119-v1';
 // Only connected providers with a compatible hosted checkout may create new attempts.
-export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'ONMETA', 'ONRAMPMONEY', 'RAMPNOW']);
+export const productionCheckoutProviders = new Set(['ALCHEMYPAY', 'BANXA', 'MERCURYO', 'ONMETA', 'ONRAMPMONEY', 'RAMPNOW']);
 const token = z.string().regex(/^[A-Z0-9_]{2,64}$/);
 const instant = z.string().max(40).datetime({ offset: true });
 const positive = z.number().finite().positive().max(1_000_000_000);
@@ -31,7 +31,7 @@ type CoverageEnvironment = { MELD_PRODUCTION_API_KEYS?: string; MELD_PRODUCTION_
 type Selection = { country: string; sourceCurrencyCode: string; amount: number; paymentMethodType: string; serviceProvider?: string; destinationCurrencyCode?: ProductionAsset };
 export type ProductionRoute = { serviceProvider: string; paymentMethods: { method: string; currencyCode: string; minimumAmount: number; maximumAmount: number; destinationCurrencyCodes?: ProductionAsset[] }[] };
 export const rampNowAssets = ['USDC_POLYGON', 'USDC_ARBITRUM', 'USDC'] as const;
-export const rampNowAsset = z.enum(rampNowAssets);
+export const walletUsdcAsset = z.enum(rampNowAssets);
 export const rampNowPaymentModes = {
   CREDIT_DEBIT_CARD: 'card', APPLE_PAY: 'apple_pay', GOOGLE_PAY: 'google_pay', ACH: 'ach', LOCAL_BANK_TRANSFER: 'wire',
 } as const;
@@ -44,8 +44,12 @@ export function isUsRampNowFunding(country: string, fiat: string, method: string
 export const isUsBankFunding = (country: string, fiat: string, method: string) =>
   country === 'US' && fiat === 'USD' && (method === 'ACH' || method === 'LOCAL_BANK_TRANSFER');
 
+export const isMexicoMercuryoCard = (country: string | undefined, fiat: string, method: string) =>
+  country === 'MX' && (fiat === 'MXN' || fiat === 'USD') && method === 'CREDIT_DEBIT_CARD';
+
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
-  serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && rampNowAsset.safeParse(asset).success
+  serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && walletUsdcAsset.safeParse(asset).success
+  : serviceProvider === 'MERCURYO' ? asset === 'USDC_POLYGON' && isMexicoMercuryoCard(country, fiat, method)
   : asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
     && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')
   || (asset === 'USDC_POLYGON' && serviceProvider === 'ONRAMPMONEY'

@@ -9,9 +9,9 @@ import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-p
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits, coverageMethodsByProvider,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
-  isUsBankFunding, isUsRampNowFunding, rampNowAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
+  isMexicoMercuryoCard, isUsBankFunding, isUsRampNowFunding, walletUsdcAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
   type ProductionAsset, type ProductionRoute } from './wallet-production-coverage';
-import { verifyRampNowDelivery, transactionHash } from './wallet-rampnow-delivery';
+import { verifyWalletUsdcDelivery, transactionHash } from './wallet-usdc-delivery';
 
 const uuid = z.string().uuid().transform(value => value.toLowerCase()), country = z.string().regex(/^[A-Z]{2}$/), currency = z.string().regex(/^[A-Z]{3}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/).refine(value => value !== '.' && value !== '..');
@@ -26,7 +26,7 @@ export const productionWalletOptionsInput = z.object({ country, sourceCurrencyCo
 const recordedFundingInput = z.object({ requestId: uuid, country, sourceCurrencyCode: currency, amount: preciseAmount,
   paymentMethodType: token, serviceProvider: provider }).strict()
   .refine(value => value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000));
-const quoteFields = { country, sourceCurrencyCode: currency, amount: preciseAmount, paymentMethodType: token, destinationCurrencyCode: rampNowAsset.optional() };
+const quoteFields = { country, sourceCurrencyCode: currency, amount: preciseAmount, paymentMethodType: token, destinationCurrencyCode: walletUsdcAsset.optional() };
 const quoteSchema = z.object(quoteFields).strict();
 type FundingSelection = z.infer<typeof quoteSchema>;
 const allowsSelection = (value: FundingSelection) =>
@@ -35,6 +35,7 @@ const allowsSelection = (value: FundingSelection) =>
 export const productionWalletQuoteInput = quoteSchema.refine(allowsSelection);
 export const productionWalletFundingInput = z.object({ ...quoteFields, requestId: uuid, serviceProvider: provider }).strict()
   .refine(value => allowsSelection(value) && productionCheckoutProviders.has(value.serviceProvider)
+    && (value.serviceProvider !== 'MERCURYO' || isMexicoMercuryoCard(value.country, value.sourceCurrencyCode, value.paymentMethodType))
     && (value.serviceProvider === 'RAMPNOW' ? value.destinationCurrencyCode !== undefined
       : value.destinationCurrencyCode === undefined
         || (value.serviceProvider === 'ONRAMPMONEY' && value.destinationCurrencyCode === 'USDC_POLYGON'
@@ -73,6 +74,8 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
       const parsed = z.object({ name: token, checkoutSupported: z.boolean().optional(), limits: z.object({ currencyCode: currency,
         min: z.number().finite().nonnegative(), max: z.number().finite().positive().max(1_000_000_000) }).nullish() }).safeParse(rawMethod);
       if (!parsed.success) throw Error('wallet_production_provider_unavailable'); const method = parsed.data;
+      if (value.partner === 'MERCURYO' && (asset !== 'USDC_POLYGON'
+        || !isMexicoMercuryoCard(countryCode, sourceCurrencyCode, method.name))) continue;
       // New preparations only: the live Banxa MX/MXN/SPEI checkout displayed
       // USD for an MXN request. Historical destinations and proofs stay valid.
       if (countryCode === 'MX' && sourceCurrencyCode === 'MXN' && value.partner === 'BANXA' && method.name === 'SPEI') continue;
@@ -199,6 +202,26 @@ function onrampUsdcPrefill(value: string | null | undefined, input: z.infer<type
   } catch { return false; }
 }
 
+function mercuryoPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>,
+  walletAddress: string, redirectUrl: string, sessionId: string) {
+  if (!value || !/^https:\/\/exchange\.mercuryo\.io\/?\?/.test(value)) return false;
+  try {
+    const url = new URL(value), params = url.searchParams;
+    const expected = {
+      type: 'buy', currency: 'USDC', network: 'POLYGON', fix_currency: 'true',
+      country_code: input.country, fiat_currency: input.sourceCurrencyCode, fiat_amount: input.amount.toFixed(2),
+      fix_fiat_currency: 'true', fix_fiat_amount: 'true', payment_method: 'card',
+      address: walletAddress, redirect_url: redirectUrl, merchant_transaction_id: sessionId,
+    };
+    // Mercuryo verifies the signed destination, the original client IP and the
+    // merchant transaction ID. Never expose this provider URL directly.
+    return url.origin === 'https://exchange.mercuryo.io' && url.pathname === '/' && !url.username && !url.password && !url.hash
+      && [...params.keys()].every(key => params.getAll(key).length === 1)
+      && Object.entries(expected).every(([key, expectedValue]) => params.get(key) === expectedValue)
+      && uuid.safeParse(params.get('widget_id')).success && /^v2:[a-f0-9]{128}$/i.test(params.get('signature') ?? '');
+  } catch { return false; }
+}
+
 function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, redirectUrl: string) {
   if (!value || !productionAssetAllowed('USDC_ARBITRUM', input.country, input.sourceCurrencyCode, input.serviceProvider, input.paymentMethodType)) return false;
   try {
@@ -222,7 +245,7 @@ function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.in
 
 export function rampNowPrefill(value: string | null | undefined, asset: ProductionAsset, amount: number, method: string, walletAddress: string, redirectUrl: string, sessionId: string) {
   const paymentMode = rampNowPaymentMode(method);
-  if (!value || !paymentMode || !rampNowAsset.safeParse(asset).success) return false;
+  if (!value || !paymentMode || !walletUsdcAsset.safeParse(asset).success) return false;
   try {
     const url = new URL(value), params = url.searchParams;
     const expected = { orderType: 'buy', srcCurrency: 'USD', srcChain: 'fiat', srcAmount: amount.toFixed(2),
@@ -244,12 +267,13 @@ function acquire(database: SandboxWalletDatabase, subject: string, id: string) {
 function assertQuote(raw: unknown, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, account: string, asset: ProductionAsset) {
   const parsed = z.object({ quotes: z.array(z.object({ serviceProvider: token, sourceCurrencyCode: currency, sourceAmount: preciseAmount,
     destinationCurrencyCode: z.literal(asset), destinationAmount: z.number().finite().positive(), paymentMethodType: token,
-    totalFee: z.number().finite().nonnegative(), networkFee: z.number().finite().nonnegative(),
+    totalFee: z.number().finite().nonnegative(), networkFee: z.number().finite().nonnegative().nullable(),
     rampIntelligence: z.object({ rampScore: z.number().finite().nullish() }).nullish(),
     transactionType: z.literal('CRYPTO_PURCHASE'), countryCode: country.optional(), accountId: identifier.optional(), walletAddress: z.string().optional() })).length(1) }).safeParse(raw);
   const item = parsed.success ? parsed.data.quotes[0] : null;
   if (!item || item.serviceProvider !== input.serviceProvider || item.sourceCurrencyCode !== input.sourceCurrencyCode || item.sourceAmount !== input.amount
-    || item.paymentMethodType !== input.paymentMethodType || (item.countryCode !== undefined && item.countryCode !== input.country)
+    || item.paymentMethodType !== input.paymentMethodType || (item.networkFee === null && input.serviceProvider !== 'MERCURYO')
+    || (item.countryCode !== undefined && item.countryCode !== input.country)
     || (item.accountId !== undefined && item.accountId !== account) || (item.walletAddress !== undefined && item.walletAddress.toLowerCase() !== walletAddress)) throw Error('wallet_production_provider_unavailable');
   return { serviceProvider: item.serviceProvider, sourceAmount: item.sourceAmount, destinationAmount: item.destinationAmount,
     totalFee: item.totalFee, networkFee: item.networkFee, sourceCurrencyCode: item.sourceCurrencyCode, destinationCurrencyCode: item.destinationCurrencyCode,
@@ -353,6 +377,8 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
       // prefill separately so a mismapped fiat, network or recipient cannot open.
       const checkoutUrl = input.serviceProvider === 'RAMPNOW'
         ? (rampNowPrefill(session.data.serviceProviderWidgetUrl, asset, input.amount, input.paymentMethodType, walletAddress, redirectUrl, session.data.id) ? hosted : null)
+        : input.serviceProvider === 'MERCURYO'
+        ? (mercuryoPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl, session.data.id) ? hosted : null)
         : asset === 'USDC_POLYGON'
         ? (onrampUsdcPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
         : asset === 'USDC_ARBITRUM'
@@ -428,7 +454,7 @@ function transactionOutcome(row: Attempt, proof: z.infer<typeof proofInput> | nu
   return { confirmation: state, ...(row.service_provider === 'RAMPNOW' && proof && state.state === 'confirmed'
     ? { confirmedDestination: destination(row.address, proof.destinationCurrencyCode) } : {}) };
 }
-const rampNowTransferHash = z.object({ transaction: z.object({ cryptoDetails: z.object({ blockchainTransactionId: transactionHash }) }) });
+const usdcTransferHash = z.object({ transaction: z.object({ cryptoDetails: z.object({ blockchainTransactionId: transactionHash }) }) });
 /** The provider GET, not a redirect, is the authority for a payment result. */
 export function validateProductionWalletTransaction(raw: unknown, row: Attempt, transactionId: string) {
   const parsed = z.object({ transaction: z.object({ id: identifier, accountId: identifier, sessionId: identifier,
@@ -470,10 +496,10 @@ async function reconcile(database: SandboxWalletDatabase, row: Attempt, dependen
     }
     const result = await productionMeldJson(`/payments/transactions/${encodeURIComponent(id)}`, { ...config, fetchImpl, signal });
     if (!result.ok) throw Error('wallet_production_provider_unavailable'); const proof = validateProductionWalletTransaction(result.data, row, id);
-    if (row.service_provider === 'RAMPNOW') {
+    if (row.service_provider === 'RAMPNOW' || row.service_provider === 'MERCURYO') {
       if (proof.providerStatus === 'SETTLED') {
-        const hash = rampNowTransferHash.safeParse(result.data);
-        const delivered = hash.success && await verifyRampNowDelivery({ asset: proof.destinationCurrencyCode,
+        const hash = usdcTransferHash.safeParse(result.data);
+        const delivered = hash.success && await verifyWalletUsdcDelivery({ asset: proof.destinationCurrencyCode,
           address: row.address, amount: proof.receivedAmount, hash: hash.data.transaction.cryptoDetails.blockchainTransactionId }, fetchImpl, signal);
         if (!delivered) return transactionOutcome(row, previous?.providerStatus === 'SETTLED'
           ? previous : { ...proof, providerStatus: 'SETTLING' });

@@ -298,6 +298,74 @@ test('RampNow confirms a different compatible network only after final native US
     expect(api.calls.slice(2).every(call => call.url === 'https://arb1.arbitrum.io/rpc' && !call.headers.has('authorization'))).toBe(true);
   }
 });
+test('Mercuryo Mexico card quotes both currencies and validates the signed checkout prefill', async () => {
+  const paymentMethodType = 'CREDIT_DEBIT_CARD', destinationCurrencyCode = 'USDC_POLYGON';
+  for (const [sourceCurrencyCode, amount] of [['MXN', 520.03], ['USD', 50]] as const) {
+    const inputCard = { ...input, sourceCurrencyCode, amount, serviceProvider: 'MERCURYO' };
+    const cardCatalogue = { ...catalogue, rows: [{ ...catalogue.rows[0], country: 'MX', sourceCurrencyCode, serviceProvider: 'MERCURYO',
+      paymentMethodType, minimumAmount: amount, verifiedAmount: amount, destinationCurrencyCode }] };
+    const rail = { partner: 'MERCURYO', source: sourceCurrencyCode, destination: destinationCurrencyCode,
+      paymentMethods: [{ name: paymentMethodType, limits: { currencyCode: sourceCurrencyCode, min: amount, max: 50000 } }] };
+    const price = { quotes: [{ ...quote('MERCURYO').quotes[0], sourceCurrencyCode, sourceAmount: amount, destinationCurrencyCode, networkFee: null }] };
+    const { requestId, serviceProvider, ...selection } = inputCard;
+    const lookup = provider([[rail], price]);
+    expect(await quoteProductionWalletFunding(database([[binding]]).database, selection, { ...options, catalogue: cardCatalogue, fetchImpl: lookup.fetchImpl }))
+      .toMatchObject({ requestedAmount: amount, destination: { chainId: 137, address: wallet },
+        quotes: [{ serviceProvider, sourceCurrencyCode, networkFee: null }] });
+    const expectedParams = new URLSearchParams({ widget_id: customer, type: 'buy', currency: 'USDC', network: 'POLYGON', fix_currency: 'true',
+      country_code: 'MX', fiat_currency: sourceCurrencyCode, fiat_amount: amount.toFixed(2), fix_fiat_currency: 'true',
+      fix_fiat_amount: 'true', payment_method: 'card', address: wallet, signature: 'v2:' + 'a'.repeat(128),
+      merchant_transaction_id: widget.id, redirect_url: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${requestId}` });
+    for (const mutation of [null, ['address', '0x' + '2'.repeat(40)], ['network', 'ETHEREUM'], ['country_code', 'US'],
+      ['fiat_currency', 'EUR'], ['fiat_amount', '101.00'], ['fix_fiat_amount', 'false'], ['fix_fiat_currency', 'false'],
+      ['payment_method', 'apple_pay'], ['merchant_transaction_id', 'unrelated'], ['signature', 'invalid']]) {
+      const params = new URLSearchParams(expectedParams);
+      if (mutation) params.set(mutation[0]!, mutation[1]!);
+      const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+      const root = sourceCurrencyCode === 'USD' ? '' : '/';
+      const fake = provider([[rail], price, { ...widget, serviceProviderWidgetUrl: `https://exchange.mercuryo.io${root}?${params}` }]);
+      const session = createProductionWalletSession(db.database, inputCard, { ...options, catalogue: cardCatalogue, fetchImpl: fake.fetchImpl });
+      if (mutation) {
+        await expect(session).rejects.toThrow('provider_unavailable');
+        expect(db.queries[2]!.params[3]).toBe('unavailable');
+      } else {
+        expect(await session).toMatchObject({ checkoutUrl: widget.widgetUrl, serviceProvider, sourceCurrencyCode, requestedAmount: amount, destinationCurrencyCode });
+        expect(fake.calls[2]!.body.sessionData).toMatchObject({ walletAddress: wallet, paymentMethodType, destinationCurrencyCode, sourceAmount: amount.toFixed(2) });
+      }
+    }
+  }
+});
+
+test('Mercuryo remains pending if finalized Polygon USDC went to a different address', async () => {
+  const attempt: Parameters<typeof validateProductionWalletTransaction>[1] = { ...row, source_currency: 'USD',
+    status: 'session_created', requested_amount: 100, service_provider: 'MERCURYO',
+    payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDC_POLYGON' };
+  const hash = '0x' + 'a'.repeat(64), blockHash = '0x' + 'b'.repeat(64), foreign = '0x' + '2'.repeat(40);
+  const raw = { transaction: { id: 'vendor-transaction', accountId: account, sessionId: widget.id, customerId: widget.customerId,
+    externalSessionId: id, externalCustomerId: customer, serviceProvider: 'MERCURYO', transactionType: 'CRYPTO_PURCHASE',
+    countryCode: 'MX', sourceCurrencyCode: 'USD', sourceAmount: 100, destinationCurrencyCode: 'USDC_POLYGON',
+    destinationAmount: 93.71815, paymentMethodType: 'CREDIT_DEBIT_CARD', status: 'SETTLED', updatedAt: now.toISOString(),
+    cryptoDetails: { destinationWalletAddress: wallet, chainId: 137, blockchainTransactionId: hash } } };
+  expect(() => validateProductionWalletTransaction({ transaction: { ...raw.transaction,
+    cryptoDetails: { ...raw.transaction.cryptoDetails, destinationWalletAddress: foreign } } }, attempt, raw.transaction.id))
+    .toThrow('provider_unavailable');
+  const search = { transactions: [{ id: raw.transaction.id }] };
+  const rpc = (id: number, result: unknown) => ({ jsonrpc: '2.0', id, result });
+  const word = (value: string) => '0x' + value.replace(/^0x/, '').padStart(64, '0');
+  for (const recipient of [foreign, wallet]) {
+    const receipt = { transactionHash: hash, blockHash, blockNumber: '0x100', status: '0x1',
+      logs: [{ address: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', topics: [
+        '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', word('2'), word(recipient)],
+      data: word((93718150).toString(16)) }] };
+    const fake = provider([search, raw, rpc(1, '0x89'), rpc(2, receipt),
+      rpc(3, { hash: blockHash, number: '0x101' }), rpc(4, { hash: blockHash, number: '0x100' })]);
+    const db = database([[attempt]]);
+    const result = await readProductionWalletStatus(db.database, { subject, nativeSessionId, checkoutReference: id }, { environment, fetchImpl: fake.fetchImpl });
+    expect(result.confirmation.state).toBe(recipient === wallet ? 'confirmed' : 'pending');
+    expect(db.queries).toHaveLength(recipient === wallet ? 2 : 1);
+  }
+});
+
 test('production gate never borrows sandbox credentials and disabled flows make no DB/provider call', async () => {
   const db = database([]), api = provider([]);
   for (const env of [{}, { ...environment, WALLET_MELD_PRODUCTION_ENABLED: 'false' }, { MELD_API_SANDBOX: 'sandbox', MELD_ACCOUNT_ID: 'sb' },

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { productionOperation, productionScope, readProductionJson } from './wallet-meld-production-http';
-import { rampNowAsset, type ProductionAsset } from './wallet-production-coverage';
+import { walletUsdcAsset, type ProductionAsset } from './wallet-production-coverage';
 
 const networks = {
   USDC_POLYGON: { chainId: '0x89', rpc: 'https://polygon-bor-rpc.publicnode.com', token: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359' },
@@ -17,9 +17,9 @@ const block = z.object({ hash: transactionHash, number: quantity });
 
 /** MELD authenticates the session and supplies the hash. Verify a finalized
  * transfer of native USDC to the bound wallet, even for batched payouts. */
-export async function verifyRampNowDelivery(input: { asset: ProductionAsset; address: string; amount: string; hash: string },
+export async function verifyWalletUsdcDelivery(input: { asset: ProductionAsset; address: string; amount: string; hash: string },
   fetchImpl: typeof fetch, signal: AbortSignal): Promise<boolean> {
-  const asset = rampNowAsset.safeParse(input.asset);
+  const asset = walletUsdcAsset.safeParse(input.asset);
   if (!asset.success || !/^\d{1,12}(?:\.\d{1,6})?$/.test(input.amount) || !transactionHash.safeParse(input.hash).success
     || !address.safeParse(input.address).success) return false;
   const network = networks[asset.data], scope = productionScope(signal, 7_000);

@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-20T00:47:04.863Z",
+  "verifiedAt": "2026-11-20T01:51:23.125Z",
   "rows": [
     {
       "country": "AD",
@@ -1765,6 +1765,32 @@
       "verifiedAt": "2026-11-20T00:47:04.863Z",
       "evidence": "quote_verified",
       "destinationCurrencyCode": "USDC"
+    },
+    {
+      "country": "MX",
+      "sourceCurrencyCode": "MXN",
+      "serviceProvider": "MERCURYO",
+      "paymentMethodType": "CREDIT_DEBIT_CARD",
+      "minorUnits": 2,
+      "minimumAmount": 520.03,
+      "maximumAmount": 312013.7,
+      "verifiedAmount": 520.03,
+      "verifiedAt": "2026-11-20T01:51:23.125Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
+    },
+    {
+      "country": "MX",
+      "sourceCurrencyCode": "USD",
+      "serviceProvider": "MERCURYO",
+      "paymentMethodType": "CREDIT_DEBIT_CARD",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 16821.71,
+      "verifiedAmount": 50,
+      "verifiedAt": "2026-11-20T01:51:23.125Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_POLYGON"
     }
   ]
 }

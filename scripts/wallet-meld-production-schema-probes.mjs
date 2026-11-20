@@ -350,4 +350,61 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  eq(accessSnapshot,beforeAccess,false);
  eq(oldRows,before.rows,false);
  console.log(JSON.stringify({walletRampNowBankSchema:'passed',methods:rampBankMethods,deliveryNetworks:3,providerCalls:0,actualCharges:0}));
+
+ const mercuryoOwner=users[2];
+ const mercuryoCreate=(changes={},asset='USDC_POLYGON')=>{
+  const input={id:randomUUID(),country:'MX',amount:'100',currency:'USD',method:'CREDIT_DEBIT_CARD',
+   provider:'MERCURYO',session:mercuryoOwner.session,...changes};
+  return row('payments.create_wallet_meld_production_attempt',[mercuryoOwner.subject,input.session,input.id,input.country,
+   input.amount,input.currency,input.method,input.provider,'production-account',asset]);
+ };
+ deny(mercuryoCreate(),'wallet_production_invalid_request');
+ const mercuryoMigration=await readFile(new URL('../_meta/migration/128_wallet_meld_production_mercuryo_mx_card.sql',import.meta.url),'utf8');
+ const beforeMercuryo=value(ledgerDigest,false);
+ const proofDefinition="SELECT pg_get_functiondef('payments.record_wallet_meld_production_proof(text,uuid,jsonb,text)'::regprocedure);";
+ const unchangedProof=value(proofDefinition,false);
+ psql(mercuryoMigration);
+ eq(ledgerDigest,beforeMercuryo,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(legacyCreate,beforeLegacyCreate,false);
+ eq(proofDefinition,unchangedProof,false);
+
+ for(const change of [{country:'US'},{country:'CO'},{currency:'EUR'},{method:'SPEI'},{method:'APPLE_PAY'},{method:'GOOGLE_PAY'}]){
+  deny(mercuryoCreate(change),destinationConstraint);
+ }
+ for(const asset of ['USDT_POLYGON','USDC_ARBITRUM','USDC'])deny(mercuryoCreate({},asset),destinationConstraint);
+ deny(mercuryoCreate({provider:'BINANCECONNECT'}),'wallet_production_invalid_request');
+ deny(mercuryoCreate({session:users[3].session}),'administrative_signing_forbidden');
+ deny(create(2,randomUUID(),{country:'MX',provider:'MERCURYO'}),'wallet_production_invalid_request');
+
+ for(const [currency,amount] of [['MXN','2000.00'],['USD','100.00']]){
+  const id=randomUUID();
+  const createMercuryoAttempt=mercuryoCreate({id,currency,amount});
+  const record=JSON.parse(value(createMercuryoAttempt));
+  assert.equal(record.created,true);
+  assert.equal(record.address,mercuryoOwner.address);
+  assert.equal(record.customer_reference,bindings[2].binding_reference);
+  assert.equal(JSON.parse(value(createMercuryoAttempt)).created,false);
+  deny(mercuryoCreate({id,currency,amount},'USDT_POLYGON'),'wallet_production_request_already_used');
+  deny(invalidChainInsert(id,1),'wallet_meld_production_attempt_chain_id_check',false);
+  eq(finish(id,2),'t');
+  const accepted={...proof,transactionId:'transaction-'+id,sessionId:'session-'+id,externalSessionId:id,
+   externalCustomerId:bindings[2].binding_reference,serviceProvider:'MERCURYO',countryCode:'MX',
+   sourceCurrencyCode:currency,sourceAmount:amount,walletAddress:mercuryoOwner.address,
+   destinationCurrencyCode:'USDC_POLYGON',providerStatus:'SETTLED',receivedAmount:'93.953117',providerUpdatedAt:new Date().toISOString()};
+  for(const change of [{countryCode:'US'},{sourceCurrencyCode:'EUR'},{sourceAmount:'50.00'},{walletAddress:bank.address},
+   {paymentMethodType:'APPLE_PAY'},{destinationCurrencyCode:'USDC_ARBITRUM',chainId:'42161'}]){
+   deny(save({...accepted,...change},mercuryoOwner.subject,id),'wallet_production_proof_context_mismatch');
+  }
+  assert.deepEqual(JSON.parse(value(save(accepted,mercuryoOwner.subject,id))),accepted);
+  const readFor=user=>row('payments.read_wallet_meld_production_attempt_with_asset',[user.subject,user.session,id]);
+  assert.deepEqual(JSON.parse(value(readFor(mercuryoOwner))).proof,accepted);
+  eq(readFor(bank),'');
+ }
+ const beforeMercuryoReapply=value(ledgerDigest,false);
+ psql(mercuryoMigration);
+ eq(ledgerDigest,beforeMercuryoReapply,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(oldRows,before.rows,false);
+ console.log(JSON.stringify({walletMercuryoMxSchema:'passed',fiat:['MXN','USD'],providerCalls:0,actualCharges:0}));
 }
