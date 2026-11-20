@@ -212,7 +212,8 @@ function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.in
       && /^[A-Za-z0-9_-]{1,128}$/.test(params.get('merchantOrderNo') || '')
       && /^\d{13}$/.test(params.get('timestamp') || '')
       && /^[A-Za-z0-9+/]{43}=$/.test(params.get('sign') || '')
-      && (!params.has('payWayCode') || params.get('payWayCode') === '10001');
+      // The hosted Alchemy screen can offer a different method even when MELD quoted card.
+      && params.get('payWayCode') === '10001';
   } catch { return false; }
 }
 

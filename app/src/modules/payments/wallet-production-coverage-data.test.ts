@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { expect, test } from 'bun:test';
 import snapshot from './wallet-production-coverage-data.json';
-import { coverageCountries, resolveProductionCoverage } from './wallet-production-coverage';
+import { coverageCountries, coverageCurrencies, coverageMethodsByProvider, resolveProductionCoverage } from './wallet-production-coverage';
 
 test('shipped production compatibility catalogue contains only scoped quote-verified precision-safe routes', () => {
   const account = 'synthetic-catalogue-check', key = 'synthetic-catalogue-credential';
@@ -10,6 +10,9 @@ test('shipped production compatibility catalogue contains only scoped quote-veri
   const coverage = resolveProductionCoverage(environment, snapshot);
   expect(coverage.rows.length).toBeGreaterThan(0);
   expect(coverageCountries(coverage).has('CR')).toBe(false);
+  expect([...coverageCurrencies(coverage, 'MX')]).toEqual(['MXN']);
+  expect(coverageMethodsByProvider(coverage, 'MX', 'MXN')).toEqual(new Map([['ONRAMPMONEY', new Set(['SPEI'])]]));
+  expect(coverageMethodsByProvider(coverage, 'MX', 'EUR').size).toBe(0);
   expect(coverage.rows.every(row => row.evidence === 'quote_verified')).toBe(true);
   expect(JSON.stringify(snapshot)).not.toMatch(/walletAddress|customerId|apiKey|attestation|accountId|checkoutUrl/);
 });

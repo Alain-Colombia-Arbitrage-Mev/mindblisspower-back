@@ -108,18 +108,19 @@ test('Alchemy Pay card in MX and EUR requires a matching signed Arbitrum prefill
   const prefill = new URLSearchParams({ address: wallet, appId: 'fixture-app', callbackUrl: 'https://api.meld.io/webhooks/alchemypay/fixture',
     country: 'MX', crypto: 'USDC', fiat: 'EUR', fiatAmount: '100.00', merchantOrderNo: 'fixture-order', network: 'ARBITRUM',
     redirectUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}`,
-    showTable: 'buy', timestamp: '1795126019602', sign: `${'a'.repeat(43)}=` });
+    showTable: 'buy', payWayCode: '10001', timestamp: '1795126019602', sign: `${'a'.repeat(43)}=` });
   const { requestId, serviceProvider, ...quoteInput } = card;
   const quoteDb = database([[binding]]), quoteApi = provider([[rail], estimate]);
   const expected = { address: wallet, asset: 'USDC', network: 'arbitrum', chainId: 42161 };
   expect(await quoteProductionWalletFunding(quoteDb.database, quoteInput, { ...options, catalogue: mexico, fetchImpl: quoteApi.fetchImpl }))
     .toMatchObject({ destination: expected, quotes: [{ serviceProvider: 'ALCHEMYPAY', destinationCurrencyCode: 'USDC_ARBITRUM' }] });
 
-  for (const change of [null, ['address', `0x${'2'.repeat(40)}`], ['fiat', 'USD'], ['fiatAmount', '110.00'], ['network', 'POLYGON'],
-    ['payWayCode', '501'], ['sign', ''], ['callbackUrl', 'https://untrusted.invalid/webhooks/alchemypay/fixture']]) {
+  for (const change of [null, ['address', `0x${'2'.repeat(40)}`], ['fiat', null], ['fiat', 'USD'], ['fiatAmount', '110.00'], ['network', 'POLYGON'],
+    ['payWayCode', null], ['payWayCode', '501'], ['sign', ''], ['callbackUrl', 'https://untrusted.invalid/webhooks/alchemypay/fixture']]) {
     const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
     const parameters = new URLSearchParams(prefill);
-    if (change) parameters.set(change[0]!, change[1]!);
+    if (change?.[1] === null) parameters.delete(change[0]!);
+    else if (change) parameters.set(change[0]!, change[1]!);
     const api = provider([[rail], estimate, { ...widget, serviceProviderWidgetUrl: `https://ramp.alchemypay.org/?${parameters}` }]);
     const checkout = createProductionWalletSession(db.database, card, { ...options, catalogue: mexico, fetchImpl: api.fetchImpl });
     if (change) {

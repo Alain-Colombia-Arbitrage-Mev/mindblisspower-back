@@ -1114,19 +1114,6 @@
     },
     {
       "country": "MX",
-      "sourceCurrencyCode": "EUR",
-      "serviceProvider": "ALCHEMYPAY",
-      "paymentMethodType": "CREDIT_DEBIT_CARD",
-      "minorUnits": 2,
-      "minimumAmount": 14,
-      "maximumAmount": 1879,
-      "verifiedAmount": 14,
-      "verifiedAt": "2026-11-19T22:10:01.295Z",
-      "evidence": "quote_verified",
-      "destinationCurrencyCode": "USDC_ARBITRUM"
-    },
-    {
-      "country": "MX",
       "sourceCurrencyCode": "MXN",
       "serviceProvider": "ONRAMPMONEY",
       "paymentMethodType": "SPEI",
