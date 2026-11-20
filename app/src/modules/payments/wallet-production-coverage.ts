@@ -47,8 +47,15 @@ export const isUsBankFunding = (country: string, fiat: string, method: string) =
 export const isMexicoMercuryoCard = (country: string | undefined, fiat: string, method: string) =>
   country === 'MX' && (fiat === 'MXN' || fiat === 'USD') && method === 'CREDIT_DEBIT_CARD';
 
+export const isBrazilPix = (country: string, fiat: string, method: string) =>
+  country === 'BR' && fiat === 'BRL' && method === 'PIX';
+export const isBrazilMercuryoCard = (country: string | undefined, fiat: string, method: string) =>
+  country === 'BR' && fiat === 'BRL' && method === 'CREDIT_DEBIT_CARD';
+
 export const productionAssetAllowed = (asset: ProductionAsset, country: string, fiat: string, serviceProvider: string, method: string) =>
-  serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && walletUsdcAsset.safeParse(asset).success
+  country === 'BR' ? asset === 'USDC_ARBITRUM' && ((serviceProvider === 'ALCHEMYPAY' && isBrazilPix(country, fiat, method))
+    || (serviceProvider === 'MERCURYO' && isBrazilMercuryoCard(country, fiat, method)))
+  : serviceProvider === 'RAMPNOW' ? isUsRampNowFunding(country, fiat, method) && walletUsdcAsset.safeParse(asset).success
   : serviceProvider === 'MERCURYO' ? asset === 'USDC_POLYGON' && isMexicoMercuryoCard(country, fiat, method)
   : asset === 'USDT_POLYGON' || (asset === 'USDC_ARBITRUM' && country === 'MX' && fiat === 'EUR'
     && serviceProvider === 'ALCHEMYPAY' && method === 'CREDIT_DEBIT_CARD')

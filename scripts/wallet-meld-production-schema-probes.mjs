@@ -407,4 +407,37 @@ export async function runWalletMeldProductionProbes({container,docker,psql,value
  eq(accessSnapshot,beforeAccess,false);
  eq(oldRows,before.rows,false);
  console.log(JSON.stringify({walletMercuryoMxSchema:'passed',fiat:['MXN','USD'],providerCalls:0,actualCharges:0}));
+
+ const brazilMigration=await readFile(new URL('../_meta/migration/133_wallet_meld_production_brazil.sql',import.meta.url),'utf8');
+ const beforeBrazil=value(ledgerDigest,false);
+ psql(brazilMigration);
+ eq(ledgerDigest,beforeBrazil,false);
+ eq(accessSnapshot,beforeAccess,false);
+ eq(proofDefinition,unchangedProof,false);
+ for(const [provider,method] of [['ALCHEMYPAY','PIX'],['MERCURYO','CREDIT_DEBIT_CARD']]){
+  const id=randomUUID();
+  const brazil={id,country:'BR',currency:'BRL',amount:'500.00',provider,method};
+  for(const change of [{country:'XX'},{currency:'USD'},{amount:'49.99'},{method:'APPLE_PAY'},{provider:'ONRAMPMONEY'}]){
+   deny(mercuryoCreate({...brazil,...change},'USDC_ARBITRUM'),destinationConstraint);
+  }
+  for(const asset of ['USDT_POLYGON','USDC_POLYGON','USDC'])deny(mercuryoCreate(brazil,asset),destinationConstraint);
+  const record=JSON.parse(value(mercuryoCreate(brazil,'USDC_ARBITRUM')));
+  assert.equal(record.created,true);
+  assert.equal(record.address,mercuryoOwner.address);
+  eq(finish(id,2),'t');
+  const exact={...proof,transactionId:'transaction-'+id,sessionId:'session-'+id,externalSessionId:id,
+   externalCustomerId:bindings[2].binding_reference,serviceProvider:provider,countryCode:'BR',
+   sourceCurrencyCode:'BRL',sourceAmount:'500.00',paymentMethodType:method,walletAddress:mercuryoOwner.address,
+   destinationCurrencyCode:'USDC_ARBITRUM',chainId:'42161',providerStatus:'SETTLED',receivedAmount:'79.76',providerUpdatedAt:new Date().toISOString()};
+  for(const change of [{paymentMethodType:'APPLE_PAY'},{walletAddress:bank.address},{destinationCurrencyCode:'USDC_POLYGON',chainId:'137'}]){
+   deny(save({...exact,...change},mercuryoOwner.subject,id),'wallet_production_proof_context_mismatch');
+  }
+  assert.deepEqual(JSON.parse(value(save(exact,mercuryoOwner.subject,id))),exact);
+  assert.deepEqual(JSON.parse(value(row('payments.read_wallet_meld_production_attempt_with_asset',[mercuryoOwner.subject,mercuryoOwner.session,id]))).proof,exact);
+ }
+ const beforeBrazilReapply=value(ledgerDigest,false);
+ psql(brazilMigration);
+ eq(ledgerDigest,beforeBrazilReapply,false);
+ eq(accessSnapshot,beforeAccess,false);
+ console.log(JSON.stringify({walletBrazilSchema:'passed',fiat:'BRL',network:'arbitrum',providers:['ALCHEMYPAY','MERCURYO'],providerCalls:0,actualCharges:0}));
 }

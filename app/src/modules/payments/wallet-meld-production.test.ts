@@ -135,6 +135,43 @@ test('Alchemy Pay card in MX and EUR requires a matching signed Arbitrum prefill
   }
 });
 
+test('Brazil Pix creates only an opaque checkout bound to BRL and USDC on Arbitrum', async () => {
+  const pix = { ...input, country: 'BR', sourceCurrencyCode: 'BRL', amount: 500, serviceProvider: 'ALCHEMYPAY', paymentMethodType: 'PIX' };
+  const brazil = { ...catalogue, rows: [{ ...catalogue.rows[0], country: 'BR', sourceCurrencyCode: 'BRL', serviceProvider: 'ALCHEMYPAY',
+    paymentMethodType: 'PIX', minimumAmount: 50, maximumAmount: 20000, verifiedAmount: 500, destinationCurrencyCode: 'USDC_ARBITRUM' }] };
+  const rail = { partner: 'ALCHEMYPAY', source: 'BRL', destination: 'USDC_ARBITRUM',
+    paymentMethods: [{ name: 'PIX', limits: { currencyCode: 'BRL', min: 50, max: 20000 } }] };
+  const estimate = { quotes: [{ ...quote('ALCHEMYPAY').quotes[0], countryCode: 'BR', sourceCurrencyCode: 'BRL', sourceAmount: 500,
+    destinationCurrencyCode: 'USDC_ARBITRUM', paymentMethodType: 'PIX' }] };
+  const prefill = new URLSearchParams({ address: wallet, appId: 'fixture-app', callbackUrl: 'https://api.meld.io/webhooks/alchemypay/fixture',
+    country: 'BR', crypto: 'USDC', fiat: 'BRL', fiatAmount: '500.00', merchantOrderNo: widget.id, network: 'ARBITRUM',
+    redirectUrl: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${id}`,
+    showTable: 'buy', timestamp: '1795126019602', sign: `${'a'.repeat(43)}=` });
+  for (const incompatible of [{ serviceProvider: 'BANXA' }, { paymentMethodType: 'CREDIT_DEBIT_CARD' },
+    { sourceCurrencyCode: 'USD' }, { destinationCurrencyCode: 'USDC_POLYGON' }]) {
+    expect(productionWalletFundingInput.safeParse({ ...pix, ...incompatible }).success).toBe(false);
+  }
+  for (const change of [null, ['address', `0x${'2'.repeat(40)}`], ['fiat', 'USD'], ['fiatAmount', '501.00'],
+    ['network', 'POLYGON'], ['payWayCode', '10001'], ['merchantOrderNo', 'other-session']]) {
+    const db = database([[binding], [{ id, address: wallet, customer_reference: customer, created: true, status: 'initiated', created_at: now }], [{ finished: true }]]);
+    const parameters = new URLSearchParams(prefill);
+    if (change) parameters.set(change[0]!, change[1]!);
+    const api = provider([[rail], estimate, { ...widget, serviceProviderWidgetUrl: `https://ramp.alchemypay.org/?${parameters}` }]);
+    const checkout = createProductionWalletSession(db.database, pix, { ...options, catalogue: brazil, fetchImpl: api.fetchImpl });
+    if (change) {
+      await expect(checkout).rejects.toThrow('provider_unavailable');
+      expect(db.queries[2]!.params[3]).toBe('unavailable');
+    } else {
+      expect(await checkout).toMatchObject({ destinationCurrencyCode: 'USDC_ARBITRUM', checkoutUrl: widget.widgetUrl,
+        destination: { address: wallet, asset: 'USDC', network: 'arbitrum', chainId: 42161 } });
+      expect(db.queries[1]!.params.at(-1)).toBe('USDC_ARBITRUM');
+      expect(api.calls[2]!.body.sessionData).toMatchObject({ countryCode: 'BR', sourceCurrencyCode: 'BRL', sourceAmount: '500.00',
+        destinationCurrencyCode: 'USDC_ARBITRUM', paymentMethodType: 'PIX', walletAddress: wallet,
+        lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] });
+    }
+  }
+});
+
 test('an Arbitrum card payment requires provider evidence from Arbitrum and the stored matching destination', () => {
   const attempt = { ...row, service_provider: 'ALCHEMYPAY', source_currency: 'EUR', requested_amount: 100,
     payment_method: 'CREDIT_DEBIT_CARD', destination_currency: 'USDC_ARBITRUM' as const, status: 'session_created' as const };
@@ -146,6 +183,33 @@ test('an Arbitrum card payment requires provider evidence from Arbitrum and the 
   expect(validateProductionWalletTransaction(raw, attempt, 'vendor-transaction')).toMatchObject({ destinationCurrencyCode: 'USDC_ARBITRUM', chainId: '42161', receivedAmount: '105.123456' });
   for (const cryptoDetails of [{ ...raw.transaction.cryptoDetails, chainId: 137 }, { ...raw.transaction.cryptoDetails, destinationWalletAddress: `0x${'2'.repeat(40)}` }]) {
     expect(() => validateProductionWalletTransaction({ transaction: { ...raw.transaction, cryptoDetails } }, attempt, 'vendor-transaction')).toThrow('provider_unavailable');
+  }
+});
+
+test('Brazil Pix stays pending until the exact USDC credit reaches the linked address on Arbitrum', async () => {
+  const attempt: Parameters<typeof validateProductionWalletTransaction>[1] = { ...row, country_code: 'BR', source_currency: 'BRL',
+    status: 'session_created', requested_amount: 500, service_provider: 'ALCHEMYPAY', payment_method: 'PIX', destination_currency: 'USDC_ARBITRUM' };
+  const hash = '0x' + 'a'.repeat(64), blockHash = '0x' + 'b'.repeat(64), wrongAddress = '0x' + '2'.repeat(40);
+  const raw = { transaction: { id: 'pix-transaction', accountId: account, sessionId: widget.id, customerId: widget.customerId,
+    externalSessionId: id, externalCustomerId: customer, serviceProvider: 'ALCHEMYPAY', transactionType: 'CRYPTO_PURCHASE',
+    countryCode: 'BR', sourceCurrencyCode: 'BRL', sourceAmount: 500, destinationCurrencyCode: 'USDC_ARBITRUM',
+    destinationAmount: 77.66, paymentMethodType: 'PIX', status: 'SETTLED', updatedAt: now.toISOString(),
+    cryptoDetails: { destinationWalletAddress: wallet, chainId: 42161, blockchainTransactionId: hash } } };
+  expect(() => validateProductionWalletTransaction({ transaction: { ...raw.transaction, paymentMethodType: 'CREDIT_DEBIT_CARD' } },
+    attempt, raw.transaction.id)).toThrow('provider_unavailable');
+  const word = (value: string) => '0x' + value.replace(/^0x/, '').padStart(64, '0');
+  const rpc = (id: number, result: unknown) => ({ jsonrpc: '2.0', id, result });
+  for (const recipient of [wrongAddress, wallet]) {
+    const receipt = { transactionHash: hash, blockHash, blockNumber: '0x100', status: '0x1',
+      logs: [{ address: '0xaf88d065e77c8cc2239327c5edb3a432268e5831', topics: [
+        '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', word('2'), word(recipient)],
+      data: word((77660000).toString(16)) }] };
+    const fake = provider([{ transactions: [{ id: raw.transaction.id }] }, raw, rpc(1, '0xa4b1'), rpc(2, receipt),
+      rpc(3, { hash: blockHash, number: '0x101' }), rpc(4, { hash: blockHash, number: '0x100' })]);
+    const db = database([[attempt]]);
+    const result = await readProductionWalletStatus(db.database, { subject, nativeSessionId, checkoutReference: id }, { environment, fetchImpl: fake.fetchImpl });
+    expect(result.confirmation.state).toBe(recipient === wallet ? 'confirmed' : 'pending');
+    expect(db.queries).toHaveLength(recipient === wallet ? 2 : 1);
   }
 });
 
@@ -298,11 +362,14 @@ test('RampNow confirms a different compatible network only after final native US
     expect(api.calls.slice(2).every(call => call.url === 'https://arb1.arbitrum.io/rpc' && !call.headers.has('authorization'))).toBe(true);
   }
 });
-test('Mercuryo Mexico card quotes both currencies and validates the signed checkout prefill', async () => {
-  const paymentMethodType = 'CREDIT_DEBIT_CARD', destinationCurrencyCode = 'USDC_POLYGON';
-  for (const [sourceCurrencyCode, amount] of [['MXN', 520.03], ['USD', 50]] as const) {
-    const inputCard = { ...input, sourceCurrencyCode, amount, serviceProvider: 'MERCURYO' };
-    const cardCatalogue = { ...catalogue, rows: [{ ...catalogue.rows[0], country: 'MX', sourceCurrencyCode, serviceProvider: 'MERCURYO',
+test('Mercuryo cards in Mexico and Brazil validate the signed prefill for their exact networks', async () => {
+  const paymentMethodType = 'CREDIT_DEBIT_CARD';
+  for (const [country, sourceCurrencyCode, amount, destinationCurrencyCode, network, chainId] of [
+    ['MX', 'MXN', 520.03, 'USDC_POLYGON', 'POLYGON', 137], ['MX', 'USD', 50, 'USDC_POLYGON', 'POLYGON', 137],
+    ['BR', 'BRL', 500, 'USDC_ARBITRUM', 'ARBITRUM', 42161],
+  ] as const) {
+    const inputCard = { ...input, country, sourceCurrencyCode, amount, serviceProvider: 'MERCURYO' };
+    const cardCatalogue = { ...catalogue, rows: [{ ...catalogue.rows[0], country, sourceCurrencyCode, serviceProvider: 'MERCURYO',
       paymentMethodType, minimumAmount: amount, verifiedAmount: amount, destinationCurrencyCode }] };
     const rail = { partner: 'MERCURYO', source: sourceCurrencyCode, destination: destinationCurrencyCode,
       paymentMethods: [{ name: paymentMethodType, limits: { currencyCode: sourceCurrencyCode, min: amount, max: 50000 } }] };
@@ -310,10 +377,10 @@ test('Mercuryo Mexico card quotes both currencies and validates the signed check
     const { requestId, serviceProvider, ...selection } = inputCard;
     const lookup = provider([[rail], price]);
     expect(await quoteProductionWalletFunding(database([[binding]]).database, selection, { ...options, catalogue: cardCatalogue, fetchImpl: lookup.fetchImpl }))
-      .toMatchObject({ requestedAmount: amount, destination: { chainId: 137, address: wallet },
+      .toMatchObject({ requestedAmount: amount, destination: { chainId, address: wallet },
         quotes: [{ serviceProvider, sourceCurrencyCode, networkFee: null }] });
-    const expectedParams = new URLSearchParams({ widget_id: customer, type: 'buy', currency: 'USDC', network: 'POLYGON', fix_currency: 'true',
-      country_code: 'MX', fiat_currency: sourceCurrencyCode, fiat_amount: amount.toFixed(2), fix_fiat_currency: 'true',
+    const expectedParams = new URLSearchParams({ widget_id: customer, type: 'buy', currency: 'USDC', network, fix_currency: 'true',
+      country_code: country, fiat_currency: sourceCurrencyCode, fiat_amount: amount.toFixed(2), fix_fiat_currency: 'true',
       fix_fiat_amount: 'true', payment_method: 'card', address: wallet, signature: 'v2:' + 'a'.repeat(128),
       merchant_transaction_id: widget.id, redirect_url: `https://wallet.mindblisspower.com/dashboard/wallet-administrative?walletCheckoutReference=${requestId}` });
     for (const mutation of [null, ['address', '0x' + '2'.repeat(40)], ['network', 'ETHEREUM'], ['country_code', 'US'],

@@ -4,7 +4,7 @@
   "environment": "production",
   "asset": "USDT_POLYGON",
   "chainId": 137,
-  "verifiedAt": "2026-11-20T01:51:23.125Z",
+  "verifiedAt": "2026-11-20T03:41:33.204Z",
   "rows": [
     {
       "country": "AD",
@@ -197,6 +197,32 @@
       "verifiedAmount": 10,
       "verifiedAt": "2026-11-19T17:34:26.222Z",
       "evidence": "quote_verified"
+    },
+    {
+      "country": "BR",
+      "sourceCurrencyCode": "BRL",
+      "serviceProvider": "ALCHEMYPAY",
+      "paymentMethodType": "PIX",
+      "minorUnits": 2,
+      "minimumAmount": 50,
+      "maximumAmount": 20000,
+      "verifiedAmount": 500,
+      "verifiedAt": "2026-11-20T03:41:33.204Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
+    },
+    {
+      "country": "BR",
+      "sourceCurrencyCode": "BRL",
+      "serviceProvider": "MERCURYO",
+      "paymentMethodType": "CREDIT_DEBIT_CARD",
+      "minorUnits": 2,
+      "minimumAmount": 155.65,
+      "maximumAmount": 93387.41,
+      "verifiedAmount": 500,
+      "verifiedAt": "2026-11-20T03:41:33.204Z",
+      "evidence": "quote_verified",
+      "destinationCurrencyCode": "USDC_ARBITRUM"
     },
     {
       "country": "BW",

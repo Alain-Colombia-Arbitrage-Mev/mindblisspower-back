@@ -9,7 +9,7 @@ import { recordWalletWidgetDiagnostic, type WalletWidgetStage } from './wallet-p
 import coverageSnapshot from './wallet-production-coverage-data.json';
 import { resolveProductionCoverage, coverageCountries, coverageCurrencies, coverageMinorUnits, coverageMethodsByProvider,
   intersectProductionCoverage, assertProductionCoverageSelection, coverageAsset, productionAsset, productionAssetAllowed,
-  isMexicoMercuryoCard, isUsBankFunding, isUsRampNowFunding, walletUsdcAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
+  isBrazilMercuryoCard, isBrazilPix, isMexicoMercuryoCard, isUsBankFunding, isUsRampNowFunding, walletUsdcAsset, rampNowAssets, rampNowPaymentMode, productionAssetDetails, productionCheckoutProviders,
   type ProductionAsset, type ProductionRoute } from './wallet-production-coverage';
 import { verifyWalletUsdcDelivery, transactionHash } from './wallet-usdc-delivery';
 
@@ -31,11 +31,15 @@ const quoteSchema = z.object(quoteFields).strict();
 type FundingSelection = z.infer<typeof quoteSchema>;
 const allowsSelection = (value: FundingSelection) =>
   (value.sourceCurrencyCode !== 'USD' || (value.amount >= 50 && value.amount <= 25000))
+  && (value.country !== 'BR' || isBrazilPix(value.country, value.sourceCurrencyCode, value.paymentMethodType)
+    || isBrazilMercuryoCard(value.country, value.sourceCurrencyCode, value.paymentMethodType))
   && (value.destinationCurrencyCode === undefined || isUsRampNowFunding(value.country, value.sourceCurrencyCode, value.paymentMethodType));
 export const productionWalletQuoteInput = quoteSchema.refine(allowsSelection);
 export const productionWalletFundingInput = z.object({ ...quoteFields, requestId: uuid, serviceProvider: provider }).strict()
   .refine(value => allowsSelection(value) && productionCheckoutProviders.has(value.serviceProvider)
-    && (value.serviceProvider !== 'MERCURYO' || isMexicoMercuryoCard(value.country, value.sourceCurrencyCode, value.paymentMethodType))
+    && (value.country !== 'BR' || productionAssetAllowed('USDC_ARBITRUM', value.country, value.sourceCurrencyCode, value.serviceProvider, value.paymentMethodType))
+    && (value.serviceProvider !== 'MERCURYO' || isMexicoMercuryoCard(value.country, value.sourceCurrencyCode, value.paymentMethodType)
+      || isBrazilMercuryoCard(value.country, value.sourceCurrencyCode, value.paymentMethodType))
     && (value.serviceProvider === 'RAMPNOW' ? value.destinationCurrencyCode !== undefined
       : value.destinationCurrencyCode === undefined
         || (value.serviceProvider === 'ONRAMPMONEY' && value.destinationCurrencyCode === 'USDC_POLYGON'
@@ -74,8 +78,8 @@ export function normalizeProductionWalletRoutes(raw: unknown, sourceCurrencyCode
       const parsed = z.object({ name: token, checkoutSupported: z.boolean().optional(), limits: z.object({ currencyCode: currency,
         min: z.number().finite().nonnegative(), max: z.number().finite().positive().max(1_000_000_000) }).nullish() }).safeParse(rawMethod);
       if (!parsed.success) throw Error('wallet_production_provider_unavailable'); const method = parsed.data;
-      if (value.partner === 'MERCURYO' && (asset !== 'USDC_POLYGON'
-        || !isMexicoMercuryoCard(countryCode, sourceCurrencyCode, method.name))) continue;
+      if ((countryCode === 'BR' || value.partner === 'MERCURYO')
+        && !productionAssetAllowed(asset, countryCode ?? '', sourceCurrencyCode, value.partner, method.name)) continue;
       // New preparations only: the live Banxa MX/MXN/SPEI checkout displayed
       // USD for an MXN request. Historical destinations and proofs stay valid.
       if (countryCode === 'MX' && sourceCurrencyCode === 'MXN' && value.partner === 'BANXA' && method.name === 'SPEI') continue;
@@ -203,12 +207,12 @@ function onrampUsdcPrefill(value: string | null | undefined, input: z.infer<type
 }
 
 function mercuryoPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>,
-  walletAddress: string, redirectUrl: string, sessionId: string) {
+  asset: ProductionAsset, walletAddress: string, redirectUrl: string, sessionId: string) {
   if (!value || !/^https:\/\/exchange\.mercuryo\.io\/?\?/.test(value)) return false;
   try {
     const url = new URL(value), params = url.searchParams;
     const expected = {
-      type: 'buy', currency: 'USDC', network: 'POLYGON', fix_currency: 'true',
+      type: 'buy', currency: 'USDC', network: asset === 'USDC_ARBITRUM' ? 'ARBITRUM' : 'POLYGON', fix_currency: 'true',
       country_code: input.country, fiat_currency: input.sourceCurrencyCode, fiat_amount: input.amount.toFixed(2),
       fix_fiat_currency: 'true', fix_fiat_amount: 'true', payment_method: 'card',
       address: walletAddress, redirect_url: redirectUrl, merchant_transaction_id: sessionId,
@@ -222,11 +226,12 @@ function mercuryoPrefill(value: string | null | undefined, input: z.infer<typeof
   } catch { return false; }
 }
 
-function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, redirectUrl: string) {
-  if (!value || !productionAssetAllowed('USDC_ARBITRUM', input.country, input.sourceCurrencyCode, input.serviceProvider, input.paymentMethodType)) return false;
+function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.infer<typeof productionWalletFundingInput>, walletAddress: string, redirectUrl: string, sessionId: string) {
+  if (!value || input.serviceProvider !== 'ALCHEMYPAY'
+    || !productionAssetAllowed('USDC_ARBITRUM', input.country, input.sourceCurrencyCode, input.serviceProvider, input.paymentMethodType)) return false;
   try {
     const url = new URL(value), params = url.searchParams;
-    const expected = { address: walletAddress, country: 'MX', fiat: 'EUR', fiatAmount: input.amount.toFixed(2),
+    const expected = { address: walletAddress, country: input.country, fiat: input.sourceCurrencyCode, fiatAmount: input.amount.toFixed(2),
       crypto: 'USDC', network: 'ARBITRUM', showTable: 'buy', redirectUrl };
     const callback = new URL(params.get('callbackUrl') || '');
     return url.origin === 'https://ramp.alchemypay.org' && url.pathname === '/' && !url.username && !url.password && !url.hash
@@ -238,8 +243,10 @@ function alchemyPayArbitrumPrefill(value: string | null | undefined, input: z.in
       && /^[A-Za-z0-9_-]{1,128}$/.test(params.get('merchantOrderNo') || '')
       && /^\d{13}$/.test(params.get('timestamp') || '')
       && /^[A-Za-z0-9+/]{43}=$/.test(params.get('sign') || '')
-      // The hosted Alchemy screen can offer a different method even when MELD quoted card.
-      && params.get('payWayCode') === '10001';
+      // MELD supplies no Pix-specific query field. The exact method is still required in settlement evidence.
+      && (isBrazilPix(input.country, input.sourceCurrencyCode, input.paymentMethodType)
+        ? !params.has('payWayCode') && params.get('merchantOrderNo') === sessionId
+        : params.get('payWayCode') === '10001');
   } catch { return false; }
 }
 
@@ -378,11 +385,11 @@ export async function createProductionWalletSession(database: SandboxWalletDatab
       const checkoutUrl = input.serviceProvider === 'RAMPNOW'
         ? (rampNowPrefill(session.data.serviceProviderWidgetUrl, asset, input.amount, input.paymentMethodType, walletAddress, redirectUrl, session.data.id) ? hosted : null)
         : input.serviceProvider === 'MERCURYO'
-        ? (mercuryoPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl, session.data.id) ? hosted : null)
+        ? (mercuryoPrefill(session.data.serviceProviderWidgetUrl, input, asset, walletAddress, redirectUrl, session.data.id) ? hosted : null)
         : asset === 'USDC_POLYGON'
         ? (onrampUsdcPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
         : asset === 'USDC_ARBITRUM'
-          ? (alchemyPayArbitrumPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl) ? hosted : null)
+          ? (alchemyPayArbitrumPrefill(session.data.serviceProviderWidgetUrl, input, walletAddress, redirectUrl, session.data.id) ? hosted : null)
           : productionWalletCheckoutUrl(session.data.serviceProviderWidgetUrl, input.serviceProvider) ?? hosted;
       if (!checkoutUrl) throw Error('wallet_production_provider_unavailable');
       finishing = true; stage = 'widget_finish'; await finish('session_created', session.data.id, session.data.customerId);
@@ -496,7 +503,8 @@ async function reconcile(database: SandboxWalletDatabase, row: Attempt, dependen
     }
     const result = await productionMeldJson(`/payments/transactions/${encodeURIComponent(id)}`, { ...config, fetchImpl, signal });
     if (!result.ok) throw Error('wallet_production_provider_unavailable'); const proof = validateProductionWalletTransaction(result.data, row, id);
-    if (row.service_provider === 'RAMPNOW' || row.service_provider === 'MERCURYO') {
+    if (row.service_provider === 'RAMPNOW' || row.service_provider === 'MERCURYO'
+      || isBrazilPix(row.country_code, row.source_currency, row.payment_method)) {
       if (proof.providerStatus === 'SETTLED') {
         const hash = usdcTransferHash.safeParse(result.data);
         const delivered = hash.success && await verifyWalletUsdcDelivery({ asset: proof.destinationCurrencyCode,
