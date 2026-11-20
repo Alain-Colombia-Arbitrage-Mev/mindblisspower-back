@@ -3,8 +3,9 @@ import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { IdentityDatabase } from '../identity/model';
 import { createAdministrativePreflightGate, personalFundingInput } from './wallet-funding';
+import { additionalAppMeldOnrampParameters } from './app-meld-additional-markets';
 import { productionMeldJson, productionOperation, productionScope } from './meld-production-http';
-import { appMeldAsset, appMeldDestination, appMeldMarket, appMeldProvider, rampNowPaymentModes,
+import { appMeldAsset, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, rampNowPaymentModes,
   type AppMeldAsset, type AppMeldProvider } from './app-meld-funding-policy';
 
 export const APP_MELD_ORIGIN = 'https://app.mindblisspower.com';
@@ -32,7 +33,7 @@ export async function readAppMeldOptions(country: string, sourceCurrencyCode: st
 }: Dependencies = {}) {
   const market = appMeldMarket(country, sourceCurrencyCode), asset = market?.asset ?? 'USDT_POLYGON';
   const result = { walletKind: 'personal' as const, environment: 'production' as const, provider: 'meld' as const,
-    country, sourceCurrencyCode, destinationCurrencyCode: asset, network: 'polygon' as const, chainId: 137 as const };
+    country, sourceCurrencyCode, destinationCurrencyCode: asset, ...appMeldNetwork(asset) };
   if (!market) return { ...result, paymentMethods: [], routes: [] };
   const config = configuration(environment), scope = productionScope(signal, 8_000);
   try {
@@ -51,7 +52,9 @@ export async function readAppMeldOptions(country: string, sourceCurrencyCode: st
         const usd = sourceCurrencyCode === 'USD';
         const minimumAmount = Math.max(rail.limits.min, policy.minimum, prior?.minimumAmount ?? 0);
         const maximumAmount = Math.min(rail.limits.max, policy.maximum, prior?.maximumAmount ?? Infinity);
-        options.set(key, { method: rail.name, currencyCode: sourceCurrencyCode, minimumAmount, maximumAmount,
+        options.set(key, { method: rail.name, currencyCode: sourceCurrencyCode,
+          minimumAmount: market.minorUnits === 0 ? Math.ceil(minimumAmount) : minimumAmount,
+          maximumAmount: market.minorUnits === 0 ? Math.floor(maximumAmount) : maximumAmount,
           ...(usd ? { minimumUsd: minimumAmount, maximumUsd: maximumAmount } : {}) });
       }
     }
@@ -84,20 +87,37 @@ function matchesWidget(link: string, provider: AppMeldProvider, id: string, wall
     const url = new URL(link), query = url.searchParams;
     if (url.username || url.password || url.hash || ![...query.keys()].every(key => query.getAll(key).length === 1)) return false;
     const matches = (expected: Record<string, string>) => Object.entries(expected).every(([key, value]) => query.get(key) === value);
-    const token = appMeldDestination(asset, wallet).asset;
+    const destination = appMeldDestination(asset, wallet);
+    const token = destination.asset, network = destination.network.toUpperCase();
     if (provider === 'MERCURYO') {
       return url.origin === 'https://exchange.mercuryo.io' && url.pathname === '/'
-        && matches({ type: 'buy', currency: token, network: 'POLYGON', fix_currency: 'true', country_code: country,
+        && matches({ type: 'buy', currency: token, network, fix_currency: 'true', country_code: country,
           fiat_currency: fiat, fiat_amount: amount.toFixed(2), fix_fiat_currency: 'true', fix_fiat_amount: 'true',
           payment_method: 'card', address: wallet, redirect_url: redirectUrl, merchant_transaction_id: id })
         && z.string().uuid().safeParse(query.get('widget_id')).success && /^v2:[a-f0-9]{128}$/i.test(query.get('signature') || '');
     }
+    if (provider === 'ALCHEMYPAY') {
+      const callback = new URL(query.get('callbackUrl') || '');
+      // The MELD request specifies Pix. Verify the signed amount and destination even
+      // when Alchemy Pay's URL does not include an explicit payWayCode.
+      return country === 'BR' && fiat === 'BRL' && asset === 'USDC_ARBITRUM' && paymentMethodType === 'PIX'
+        && url.origin === 'https://ramp.alchemypay.org' && url.pathname === '/' && !query.has('payWayCode')
+        && matches({ address: wallet, country, fiat, fiatAmount: amount.toFixed(2), crypto: token, network,
+          redirectUrl, showTable: 'buy', merchantOrderNo: id })
+        && callback.origin === 'https://api.meld.io' && /^\/webhooks\/alchemypay\/[A-Za-z0-9_-]{1,128}$/.test(callback.pathname)
+        && !callback.username && !callback.password && !callback.search && !callback.hash
+        && identifier.safeParse(query.get('appId')).success
+        && /^\d{13}$/.test(query.get('timestamp') || '') && /^[A-Za-z0-9+/]{43}=$/.test(query.get('sign') || '');
+    }
     if (provider === 'ONRAMPMONEY') {
-      const fiatType = ({ MXN: '4', COP: '9', USD: '21' } as Record<string, string>)[fiat];
+      const verified = additionalAppMeldOnrampParameters(country, fiat, paymentMethodType);
+      const fiatType = verified?.fiatType ?? ({ MXN: '4', COP: '9', USD: '21' } as Record<string, string>)[fiat];
+      const paymentMethod = verified?.paymentMethod ?? (paymentMethodType === 'LOCAL_BANK_TRANSFER' ? '1' : '2');
       return Boolean(fiatType) && url.origin === 'https://onramp.money' && url.pathname === '/main/buy/'
         && matches({ coinCode: token.toLowerCase(), network: 'matic20', walletAddress: wallet, fiatAmount: amount.toFixed(2),
-          fiatType: fiatType!, paymentMethod: paymentMethodType === 'LOCAL_BANK_TRANSFER' ? '1' : '2', redirectUrl });
+          fiatType: fiatType!, paymentMethod, redirectUrl });
     }
+    if (provider !== 'RAMPNOW') return false;
     const paymentMode = (rampNowPaymentModes as Record<string, string>)[paymentMethodType];
     return Boolean(paymentMode) && url.origin === 'https://app.rampnow.io' && url.pathname === '/order/quote'
       && matches({ orderType: 'buy', srcCurrency: fiat, srcChain: 'fiat', srcAmount: amount.toFixed(2),
@@ -114,6 +134,7 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
   const input = appMeldInput.parse(raw);
   const market = appMeldMarket(input.country, input.sourceCurrencyCode);
   if (!market || (input.destinationCurrencyCode && input.destinationCurrencyCode !== market.asset)) throw Error('wallet_funding_method_unavailable');
+  if (market.minorUnits === 0 && !Number.isInteger(input.amount)) throw Error('wallet_funding_amount_unavailable');
   const asset = market.asset;
   const config = configuration(environment);
   if (!isIP(clientIp) || !nativeSessionId) throw Error('wallet_funding_unconfigured');

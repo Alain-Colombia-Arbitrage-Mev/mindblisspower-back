@@ -101,7 +101,7 @@ export function registerPersonalCompanyPaymentRoutes(app: ApiApplication, { data
     if (new URL(context.req.url).search || context.req.header('content-encoding')) return context.json({ error: 'invalid_request' }, 400, noStore);
     context.header('Vary', 'Cookie');
     const balanceEnvironment = context.req.header('origin') === APP_ORIGIN ? environment
-      : { ...environment, PERSONAL_POLYGON_USDC_ENABLED: 'false' };
+      : { ...environment, PERSONAL_POLYGON_USDC_ENABLED: 'false', APP_MELD_PRODUCTION_ENABLED: 'false' };
     try { return context.json(await readPersonalCompanyPaymentBalances(database, context.get('session')!.user.id,
       { environment: balanceEnvironment, fetchImpl, signal: context.req.raw.signal }), 200, noStore); }
     catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }

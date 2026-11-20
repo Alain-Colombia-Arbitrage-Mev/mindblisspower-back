@@ -3,6 +3,8 @@ export const COMPANY_PAYMENT_CHAIN_ID = 1;
 export const COMPANY_PAYMENT_TOKEN = '0xdac17f958d2ee523a2206206994597c13d831ec7';
 export const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
 export const POLYGON_USDC_TOKEN = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
+export const ARBITRUM_USDC_CHAIN_ID = 42161;
+export const ARBITRUM_USDC_TOKEN = '0xaf88d065e77c8cc2239327c5edb3a432268e5831';
 /** Exact chain/token pairs apply to preparations, balance reads and immutable receipt recovery. */
 export function companyPaymentNetwork(chainId: unknown, tokenAddress: unknown) {
   if (chainId === COMPANY_PAYMENT_CHAIN_ID && tokenAddress === COMPANY_PAYMENT_TOKEN) return Object.freeze({ chainId: 1 as const, tokenAddress: COMPANY_PAYMENT_TOKEN });
@@ -78,6 +80,16 @@ export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typ
   chainId: 1 | 137 = COMPANY_PAYMENT_CHAIN_ID, asset: 'USDT' | 'USDC' = 'USDT') {
   const policy = companyPaymentNetwork(chainId, asset === 'USDC' ? POLYGON_USDC_TOKEN : chainId === 137 ? LEGACY_POLYGON_TOKEN : COMPANY_PAYMENT_TOKEN);
   if (!policy) throw new Error('company_payment_unconfigured');
+  return createWalletReadRpc(environment, fetchImpl, parent, policy);
+}
+
+/** Arbitrum is available for deposit reads only. Payment intents keep their own chain allowlist. */
+export function createArbitrumUsdcReadRpc(environment: Environment, fetchImpl: typeof fetch, parent?: AbortSignal) {
+  return createWalletReadRpc(environment, fetchImpl, parent, { chainId: ARBITRUM_USDC_CHAIN_ID, tokenAddress: ARBITRUM_USDC_TOKEN } as const);
+}
+
+function createWalletReadRpc<Policy extends { chainId: number; tokenAddress: string }>(environment: Environment,
+  fetchImpl: typeof fetch, parent: AbortSignal | undefined, policy: Policy) {
   const project = environment.REOWN_PROJECT_ID;
   if (environment.PERSONAL_COMPANY_PAYMENTS_ENABLED !== 'true' || typeof project !== 'string' || !/^[a-f0-9]{32}$/i.test(project)) {
     throw new Error('company_payment_unconfigured');
@@ -108,7 +120,8 @@ export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typ
   };
 }
 type Rpc = ReturnType<typeof createCompanyPaymentRpc>;
-export async function checkCompanyPaymentChain(rpc: Rpc) {
+type WalletReadRpc = Rpc | ReturnType<typeof createArbitrumUsdcReadRpc>;
+export async function checkCompanyPaymentChain(rpc: WalletReadRpc) {
   if (hexQuantity(await rpc.call('eth_chainId', [])) !== BigInt(rpc.policy.chainId)) throw unavailable();
 }
 export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amountAtomic: string) {
@@ -122,7 +135,7 @@ export async function checkCompanyPaymentBalance(rpc: Rpc, address: string, amou
   if (BigInt(balance) < BigInt(amountAtomic)) throw new Error('company_payment_insufficient_balance');
 }
 // Network snapshots remain separate; selecting a payment network never combines their balances.
-export async function readPersonalWalletNetworkBalances(rpc: Rpc, address: string) {
+export async function readPersonalWalletNetworkBalances(rpc: WalletReadRpc, address: string) {
   if (!companyPaymentNetwork(rpc.policy.chainId, rpc.policy.tokenAddress) || !ADDRESS.test(address)) throw unavailable();
   await checkCompanyPaymentChain(rpc);
   const [decimals, balance, nativeBalance] = await Promise.all([

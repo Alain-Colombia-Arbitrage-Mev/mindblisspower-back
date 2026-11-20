@@ -3,7 +3,7 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { IdentityDatabase } from '../identity/model';
 import { readAppMeldFundingHistory, readAppMeldFundingStatus } from './app-meld-funding-status';
-import { COMPANY_PAYMENT_TRANSFER_TOPIC, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
+import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_TRANSFER_TOPIC, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
 
 const id = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
 const customer = 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44';
@@ -53,10 +53,10 @@ function upstream(detail = transaction, proof: typeof receipt | null = receipt, 
       return Response.json({ transaction: detail });
     }
     expect(url.origin).toBe('https://rpc.walletconnect.org');
-    expect(url.searchParams.get('chainId')).toBe('eip155:137');
+    expect(url.searchParams.get('chainId')).toBe('eip155:' + detail.cryptoDetails.chainId);
     expect(new Headers(init?.headers).has('Authorization')).toBeFalse();
     const rpc = JSON.parse(String(init?.body));
-    const result = rpc.method === 'eth_chainId' ? '0x89' : rpc.method === 'eth_getTransactionReceipt' ? proof
+    const result = rpc.method === 'eth_chainId' ? '0x' + Number(detail.cryptoDetails.chainId).toString(16) : rpc.method === 'eth_getTransactionReceipt' ? proof
       : { number: rpc.params[0] === 'finalized' ? finalized : '0x100', hash: blockHash };
     return Response.json({ jsonrpc: '2.0', id: rpc.id, result });
   }) as typeof fetch;
@@ -68,7 +68,7 @@ test('App MELD history reads only the owned journal without a merchant request',
   expect(await readAppMeldFundingHistory(db, row.subject)).toEqual([{ checkoutReference: id, provider: 'meld', serviceProvider: 'MERCURYO',
     country: 'MX', requestedAmount: 1000, sourceCurrencyCode: 'MXN', paymentMethodType: 'CREDIT_DEBIT_CARD',
     destination: { address: wallet, asset: 'USDT', network: 'polygon', chainId: 137 }, status: 'session_created', createdAt: now }]);
-  expect(queries[0]).toMatchObject({ sql: 'SELECT * FROM payments.read_app_meld_funding($1,NULL::uuid)', params: [row.subject] });
+  expect(queries[0]).toMatchObject({ sql: 'SELECT * FROM payments.read_app_meld_funding_v2($1,NULL::uuid)', params: [row.subject] });
   await expect(readAppMeldFundingHistory(database([row]).db, 'another-owner')).rejects.toThrow('wallet_funding_unavailable');
 });
 
@@ -122,4 +122,26 @@ test('App USDC reconciliation requires the registered Polygon asset and its actu
   const proof = { ...receipt, logs: [{ ...receipt.logs[0]!, address: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359' }] };
   const confirmed = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail, proof).fetchImpl });
   expect(confirmed).toMatchObject({ destination: { address: wallet, asset: 'USDC', chainId: 137 }, confirmation: { state: 'confirmed' } });
+});
+
+test('Brazil Pix confirms only native USDC on Arbitrum in the linked wallet', async () => {
+  const brazil = { ...row, country_code: 'BR', source_currency: 'BRL', requested_amount: '500.00',
+    destination_currency: 'USDC_ARBITRUM', chain_id: 42161, service_provider: 'ALCHEMYPAY', payment_method: 'PIX' };
+  const detail = { ...transaction, countryCode: 'BR', sourceCurrencyCode: 'BRL', sourceAmount: 500,
+    destinationCurrencyCode: 'USDC_ARBITRUM', serviceProvider: 'ALCHEMYPAY', paymentMethodType: 'PIX',
+    cryptoDetails: { ...transaction.cryptoDetails, chainId: '42161' } };
+  const proof = { ...receipt, logs: [{ ...receipt.logs[0]!, address: ARBITRUM_USDC_TOKEN }] };
+  const { db } = database([brazil]);
+  const value = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail, proof).fetchImpl });
+  expect(value).toMatchObject({ destination: { address: wallet, network: 'arbitrum', asset: 'USDC', chainId: 42161 },
+    confirmation: { state: 'confirmed', receivedAmount: '48.706979' } });
+  const wrongToken = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail).fetchImpl });
+  expect(wrongToken?.confirmation.state).toBe('pending');
+  for (const wrong of [{ ...detail, cryptoDetails: { ...detail.cryptoDetails, chainId: '137' } },
+    { ...detail, paymentMethodType: 'CREDIT_DEBIT_CARD' }]) {
+    const probe = upstream(wrong, proof);
+    await expect(readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: probe.fetchImpl }))
+      .rejects.toThrow('wallet_funding_provider_unavailable');
+    expect(probe.calls).toHaveLength(2);
+  }
 });

@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 import type { ApiEnvironment } from './types';
 import type { IdentityDatabase } from '../modules/identity/model';
 import { registerPersonalCompanyPaymentRoutes } from './personal-company-payment-routes';
-import { COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN } from '../modules/payments/personal-company-rpc';
+import { ARBITRUM_USDC_TOKEN, COMPANY_PAYMENT_RECIPIENT, COMPANY_PAYMENT_TOKEN, LEGACY_POLYGON_TOKEN } from '../modules/payments/personal-company-rpc';
 const PREFIX = '/api/member/company-payments', id = '11111111-1111-4111-8111-111111111111', secret = 's'.repeat(48);
 const address = `0x${'2'.repeat(40)}`, hash = `0x${'3'.repeat(64)}`;
 const row = { id, wallet_address: address, recipient_address: COMPANY_PAYMENT_RECIPIENT, chain_id: 1,
@@ -19,13 +19,14 @@ function signed(path: string, method = 'GET', body = '', extra: Record<string, s
     'x-vp-auth-client-ip': ip, 'x-vp-auth-timestamp': timestamp, 'x-vp-auth-signature': createHmac('sha256', secret).update(message).digest('hex'), ...extra },
     ...(method === 'POST' ? { body } : {}) };
 }
-function application({ signedIn = true, enabled = true, execute = async () => [], fetchImpl = (async () => { throw Error('unexpected external call'); }) as unknown as typeof fetch }: {
-  signedIn?: boolean; enabled?: boolean; execute?: (input: unknown) => Promise<unknown[]>; fetchImpl?: typeof fetch;
+function application({ signedIn = true, enabled = true, appMeldProduction = false, execute = async () => [], fetchImpl = (async () => { throw Error('unexpected external call'); }) as unknown as typeof fetch }: {
+  signedIn?: boolean; enabled?: boolean; appMeldProduction?: boolean; execute?: (input: unknown) => Promise<unknown[]>; fetchImpl?: typeof fetch;
 } = {}) {
   const app = new Hono<ApiEnvironment>();
   app.use('*', async (context, next) => { context.set('session', signedIn ? { user: { id: 'owner' } } as never : null); await next(); });
   registerPersonalCompanyPaymentRoutes(app, { database: { execute } as Pick<IdentityDatabase, 'execute'>,
-    environment: { PERSONAL_COMPANY_PAYMENTS_ENABLED: String(enabled), AUTH_BFF_SHARED_SECRET: secret, REOWN_PROJECT_ID: 'a'.repeat(32) },
+    environment: { PERSONAL_COMPANY_PAYMENTS_ENABLED: String(enabled), AUTH_BFF_SHARED_SECRET: secret, REOWN_PROJECT_ID: 'a'.repeat(32),
+      APP_MELD_PRODUCTION_ENABLED: String(appMeldProduction) },
     fetchImpl });
   return app;
 }
@@ -205,4 +206,37 @@ test('HTTP new preparation requires explicit Polygon and reports a safe network 
     expect((await blocked.request(path, signed(path, 'POST', body))).status).toBe(400);
   }
   expect(calls).toBe(0);
+});
+
+test('native USDC on Arbitrum is an App-only balance read and cannot be used to prepare a payment', async () => {
+  const path = PREFIX + '/balances', seen: string[] = [];
+  const principal = { subject: 'owner', auth_email: 'synthetic@example.invalid', email_verified: true, person_id: '1', public_id: '1',
+    person_email: 'synthetic@example.invalid', person_status: 'active', user_id: 'owner', blacklisted: false, access_restricted: false };
+  let reads = 0;
+  const app = application({ appMeldProduction: true, execute: async () => {
+    return ++reads % 2 ? [principal] : [{ address, chain_id: 1, verified_at: row.created_at }];
+  }, fetchImpl: (async (target, init) => {
+    const url = new URL(String(target)), chain = url.searchParams.get('chainId')!.split(':').at(-1)!;
+    const rpc = JSON.parse(String(init?.body));
+    seen.push(chain + ':' + rpc.method);
+    if (chain === '42161' && rpc.method === 'eth_call') expect(rpc.params[0].to).toBe(ARBITRUM_USDC_TOKEN);
+    const result = rpc.method === 'eth_chainId' ? '0x' + Number(chain).toString(16) : rpc.method === 'eth_getBalance' ? '0x0'
+      : '0x' + (rpc.params[0].data === '0x313ce567' ? '6' : 'f4240').padStart(64, '0');
+    return Response.json({ jsonrpc: '2.0', id: rpc.id, result });
+  }) as typeof fetch });
+  const appBalance = await app.request(path, signed(path));
+  expect(appBalance.status).toBe(200);
+  expect(await appBalance.json()).toMatchObject({ balances: expect.arrayContaining([{ walletKind: 'personal', walletAddress: address,
+    chainId: 42161, tokenAddress: ARBITRUM_USDC_TOKEN, asset: 'USDC', network: 'arbitrum', tokenDecimals: 6,
+    balanceAtomic: '1000000', nativeBalanceAtomic: '0', observedAt: expect.any(String) }]) });
+  expect(seen.some(call => call.startsWith('42161:'))).toBeTrue();
+  seen.length = 0;
+  const apex = await app.request(path, signed(path, 'GET', '', { origin: 'https://mindblisspower.com' }));
+  expect(apex.status).toBe(200);
+  expect((await apex.json()).balances.some((balance: { chainId: number }) => balance.chainId === 42161)).toBeFalse();
+  expect(seen.some(call => call.startsWith('42161:'))).toBeFalse();
+  const prepare = PREFIX + '/prepare';
+  const raw = JSON.stringify({ requestId: id, amountAtomic: '1000000', chainId: 42161 });
+  expect((await app.request(prepare, signed(prepare, 'POST', raw))).status).toBe(400);
+  expect(reads).toBe(4);
 });

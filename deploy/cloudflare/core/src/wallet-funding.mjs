@@ -16,7 +16,7 @@ const PERSONAL_STATUS = `${WALLET_FUNDING_PREFIX}/personal/status`;
 const HISTORY = `${WALLET_FUNDING_PREFIX}/history`;
 const APP_MELD_FIELDS = new Set(['requestId', 'walletAddress', 'country', 'amount', 'sourceCurrencyCode',
   'paymentMethodType', 'serviceProvider', 'destinationCurrencyCode']);
-const APP_MELD_PROVIDERS = new Set(['MERCURYO', 'ONRAMPMONEY', 'RAMPNOW']);
+const APP_MELD_PROVIDERS = new Set(['MERCURYO', 'ONRAMPMONEY', 'RAMPNOW', 'ALCHEMYPAY']);
 // Core checks request shape. Provider eligibility and exact route bounds live in the API.
 const APP_MELD_MARKETS = new Map([
   ['US:USD', { asset: 'USDC_POLYGON', min: 50, max: 15_000,
@@ -24,6 +24,18 @@ const APP_MELD_MARKETS = new Map([
   ['MX:USD', { asset: 'USDT_POLYGON', min: 50, max: 15_000, methods: ['CREDIT_DEBIT_CARD'] }],
   ['MX:MXN', { asset: 'USDT_POLYGON', min: 931, max: 1_000_000_000, methods: ['CREDIT_DEBIT_CARD', 'SPEI'] }],
   ['CO:COP', { asset: 'USDC_POLYGON', min: 170_000, max: 4_000_000, methods: ['PSE', 'LOCAL_BANK_TRANSFER'] }],
+  ['BR:BRL', { asset: 'USDC_ARBITRUM', min: 50, max: 93_387.41, methods: ['PIX', 'CREDIT_DEBIT_CARD'] }],
+  // Keep the App gateway shape in sync with app-meld-additional-markets.ts.
+  ['PE:PEN', { asset: 'USDT_POLYGON', min: 19, max: 4500000,
+    provider: 'ONRAMPMONEY', methods: ['LOCAL_BANK_TRANSFER'] }],
+  ['AR:ARS', { asset: 'USDT_POLYGON', min: 25000, max: 6600000,
+    provider: 'ONRAMPMONEY', methods: ['LOCAL_BANK_TRANSFER'] }],
+  ['DE:EUR', { asset: 'USDT_POLYGON', min: 10, max: 100000,
+    provider: 'ONRAMPMONEY', methods: ['SEPA'] }],
+  ['KE:KES', { asset: 'USDT_POLYGON', min: 1850, max: 700000,
+    provider: 'ONRAMPMONEY', methods: ['MPESA'] }],
+  ['VN:VND', { asset: 'USDT_POLYGON', min: 55000, max: 450000000,
+    provider: 'ONRAMPMONEY', methods: ['VIETQR'] }],
 ]);
 
 export function walletFundingNamespace(path) {
@@ -71,10 +83,12 @@ function appMeldFundingRequest(request, url, body) {
     return Boolean(market && typeof requestId === 'string' && UUID.test(requestId)
       && typeof walletAddress === 'string' && /^0x[a-f0-9]{40}$/i.test(walletAddress)
       && market.methods.includes(paymentMethodType)
-      && (serviceProvider === undefined || APP_MELD_PROVIDERS.has(serviceProvider))
+      && (serviceProvider === undefined || (market.provider ? serviceProvider === market.provider : country === 'BR'
+        ? serviceProvider === (paymentMethodType === 'PIX' ? 'ALCHEMYPAY' : 'MERCURYO')
+        : APP_MELD_PROVIDERS.has(serviceProvider) && serviceProvider !== 'ALCHEMYPAY'))
       && (destinationCurrencyCode === undefined || destinationCurrencyCode === market.asset)
       && Number.isFinite(amount) && amount >= market.min && amount <= market.max
-      && (sourceCurrencyCode === 'COP' ? Number.isInteger(amount)
+      && (sourceCurrencyCode === 'COP' || sourceCurrencyCode === 'VND' ? Number.isInteger(amount)
         : Math.abs(amount * 100 - Math.round(amount * 100)) <= 0.000001));
   } catch { return false; }
 }
