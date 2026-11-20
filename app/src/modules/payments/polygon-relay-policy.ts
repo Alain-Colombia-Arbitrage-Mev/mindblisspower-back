@@ -18,7 +18,7 @@ export function polygonRelayPolicy(environment: Environment) {
     || BigInt(global) < BigInt(owner) || BigInt(global) > 10n ** 19n) throw new Error('polygon_relay_unconfigured');
   return { maxFeeWei: maximum, ownerDailyCapWei: owner, globalDailyCapWei: global };
 }
-export function polygonRelayCapabilities(environment: Environment) {
+export function polygonRelayCapabilities(environment: Environment, includeUsdc = false) {
   let transferEnabled = false;
   try {
     polygonRelayPolicy(environment);
@@ -29,7 +29,8 @@ export function polygonRelayCapabilities(environment: Environment) {
       && polygonRelayEncryptionReady(environment);
   } catch { /* never advertise sponsorship from malformed configuration */ }
   return { walletKind: 'personal' as const, executionMode: 'polygon_native_meta_aa' as const, chainId: 137 as const, transferEnabled,
-    sponsorship: transferEnabled ? 'mindbliss' as const : 'unavailable' as const, authorizationHasOnchainExpiry: false as const };
+    sponsorship: transferEnabled ? 'mindbliss' as const : 'unavailable' as const, authorizationHasOnchainExpiry: false as const,
+    ...(includeUsdc && transferEnabled && environment.PERSONAL_POLYGON_USDC_ENABLED === 'true' ? { assets: ['USDT', 'USDC'] as const } : {}) };
 }
 export function polygonRelayTypedData(sender: string, amountAtomic: string, nonce: string) {
   if (!ADDRESS.test(sender) || !/^(?:0|[1-9][0-9]{0,77})$/.test(nonce) || BigInt(nonce) >= (1n << 256n)) throw new Error('polygon_relay_unavailable');

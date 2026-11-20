@@ -2,10 +2,12 @@
 export const COMPANY_PAYMENT_CHAIN_ID = 1;
 export const COMPANY_PAYMENT_TOKEN = '0xdac17f958d2ee523a2206206994597c13d831ec7';
 export const LEGACY_POLYGON_TOKEN = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
+export const POLYGON_USDC_TOKEN = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
 /** Exact chain/token pairs apply to preparations, balance reads and immutable receipt recovery. */
 export function companyPaymentNetwork(chainId: unknown, tokenAddress: unknown) {
   if (chainId === COMPANY_PAYMENT_CHAIN_ID && tokenAddress === COMPANY_PAYMENT_TOKEN) return Object.freeze({ chainId: 1 as const, tokenAddress: COMPANY_PAYMENT_TOKEN });
   if (chainId === 137 && tokenAddress === LEGACY_POLYGON_TOKEN) return Object.freeze({ chainId: 137 as const, tokenAddress: LEGACY_POLYGON_TOKEN });
+  if (chainId === 137 && tokenAddress === POLYGON_USDC_TOKEN) return Object.freeze({ chainId: 137 as const, tokenAddress: POLYGON_USDC_TOKEN });
   return null;
 }
 export const COMPANY_PAYMENT_RECIPIENT = '0x0a600b03ef5f8e7f3e182b83440c6d292033db0e';
@@ -72,8 +74,9 @@ async function json(response: Response, signal: AbortSignal): Promise<unknown> {
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } finally { signal.removeEventListener('abort', stop); try { reader.releaseLock(); } catch { /* already cancelled */ } }
 }
-export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typeof fetch = fetch, parent?: AbortSignal, chainId: 1 | 137 = COMPANY_PAYMENT_CHAIN_ID) {
-  const policy = companyPaymentNetwork(chainId, chainId === 137 ? LEGACY_POLYGON_TOKEN : COMPANY_PAYMENT_TOKEN);
+export function createCompanyPaymentRpc(environment: Environment, fetchImpl: typeof fetch = fetch, parent?: AbortSignal,
+  chainId: 1 | 137 = COMPANY_PAYMENT_CHAIN_ID, asset: 'USDT' | 'USDC' = 'USDT') {
+  const policy = companyPaymentNetwork(chainId, asset === 'USDC' ? POLYGON_USDC_TOKEN : chainId === 137 ? LEGACY_POLYGON_TOKEN : COMPANY_PAYMENT_TOKEN);
   if (!policy) throw new Error('company_payment_unconfigured');
   const project = environment.REOWN_PROJECT_ID;
   if (environment.PERSONAL_COMPANY_PAYMENTS_ENABLED !== 'true' || typeof project !== 'string' || !/^[a-f0-9]{32}$/i.test(project)) {

@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
 import { Interface } from 'ethers';
-import { readPolygonRelayProof } from './polygon-relay-proof';
+import { inspectPolygonRelayReceipt, readPolygonRelayProof } from './polygon-relay-proof';
 import { POLYGON_RELAY_ENTRY_POINT, POLYGON_RELAY_ABI } from './polygon-relay-policy';
-import { COMPANY_PAYMENT_RECIPIENT, LEGACY_POLYGON_TOKEN, companyPaymentCalldata } from './personal-company-rpc';
+import { COMPANY_PAYMENT_RECIPIENT, LEGACY_POLYGON_TOKEN, POLYGON_USDC_TOKEN, companyPaymentCalldata } from './personal-company-rpc';
+import { usdcAuthorizationNonce } from './polygon-usdc-authorization';
 const environment = { REOWN_PROJECT_ID: 'a'.repeat(32), PIMLICO_API_KEY: 'synthetic-provider-secret' };
 const sender = `0x${'2'.repeat(40)}`, aa = `0x${'3'.repeat(40)}`, paymaster = `0x${'4'.repeat(40)}`;
 const opHash = `0x${'5'.repeat(64)}`, txHash = `0x${'6'.repeat(64)}`, blockHash = `0x${'7'.repeat(64)}`;
@@ -61,4 +62,21 @@ test('dispatch expiration needs actual absence, Safe validity elapsed and unchan
   expect(await readPolygonRelayProof(environment, context, saved, provider({ receiptMissing: true, timestamp: '0x500' }).fetch)).toEqual({ state: 'pending', confirmations: 0 });
   expect(await readPolygonRelayProof(environment, context, saved, provider({ receiptMissing: true, nonce: '1' }).fetch)).toEqual({ state: 'pending', confirmations: 0 });
   await expect(readPolygonRelayProof(environment, context, saved, provider({ receiptMissing: true, providerError: true }).fetch)).rejects.toThrow();
+});
+
+test('USDC confirmation needs native Circle transfer and the exact ERC-3009 nonce in the same UserOperation', () => {
+  const native = new Interface(['event AuthorizationUsed(address indexed authorizer,bytes32 indexed nonce)']);
+  const snapshot = { ...context, usdcValidBefore: 1200 };
+  const receipt = (logs: unknown[]) => ({ to: POLYGON_RELAY_ENTRY_POINT, status: '0x1', logs: [
+    event(ep, 'BeforeExecution', []), ...logs, event(ep, 'UserOperationEvent', [opHash, aa, paymaster, 0n, true, 1000n, 100n]),
+  ] });
+  const transfer = event(erc, 'Transfer', [sender, COMPANY_PAYMENT_RECIPIENT, '30000000'], POLYGON_USDC_TOKEN);
+  const authorization = event(native, 'AuthorizationUsed', [sender, usdcAuthorizationNonce(context.authorizationNonce)], POLYGON_USDC_TOKEN);
+  expect(inspectPolygonRelayReceipt(receipt([authorization, transfer]), snapshot, paymaster)).toMatchObject({ success: true, matched: true });
+  for (const logs of [[authorization], [transfer], [authorization, { ...transfer, address: LEGACY_POLYGON_TOKEN }],
+    [{ ...authorization, address: LEGACY_POLYGON_TOKEN }, transfer],
+    [event(native, 'AuthorizationUsed', [sender, usdcAuthorizationNonce('8')], POLYGON_USDC_TOKEN), transfer],
+    [authorization, transfer, event(ep, 'UserOperationEvent', [`0x${'f'.repeat(64)}`, aa, paymaster, 1n, true, 1000n, 100n])]]) {
+    expect(inspectPolygonRelayReceipt(receipt(logs), snapshot, paymaster).matched).toBe(false);
+  }
 });

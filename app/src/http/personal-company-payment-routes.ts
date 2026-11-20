@@ -8,6 +8,7 @@ import { authProxyContext } from './auth-proxy-context';
 import { recordPersonalCompanyPaymentEvent, readPersonalCompanyPaymentActivity } from '../modules/payments/personal-company-events';
 
 const PREFIX = '/api/member/company-payments';
+const APP_ORIGIN = 'https://app.mindblisspower.com';
 const ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const noStore = { 'Cache-Control': 'private, no-store' };
 const knownErrors = new Set(['company_payment_forbidden', 'company_payment_wallet_not_linked', 'wallet_identity_unavailable',
@@ -99,8 +100,10 @@ export function registerPersonalCompanyPaymentRoutes(app: ApiApplication, { data
   app.get(`${PREFIX}/balances`, async context => {
     if (new URL(context.req.url).search || context.req.header('content-encoding')) return context.json({ error: 'invalid_request' }, 400, noStore);
     context.header('Vary', 'Cookie');
+    const balanceEnvironment = context.req.header('origin') === APP_ORIGIN ? environment
+      : { ...environment, PERSONAL_POLYGON_USDC_ENABLED: 'false' };
     try { return context.json(await readPersonalCompanyPaymentBalances(database, context.get('session')!.user.id,
-      { environment, fetchImpl, signal: context.req.raw.signal }), 200, noStore); }
+      { environment: balanceEnvironment, fetchImpl, signal: context.req.raw.signal }), 200, noStore); }
     catch (error) { const result = failure(error); return context.json({ error: result.error }, result.status, noStore); }
   });
   app.get(`${PREFIX}/status`, async context => {

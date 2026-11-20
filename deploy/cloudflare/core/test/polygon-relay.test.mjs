@@ -33,6 +33,23 @@ test('Core routes only exact owned relay contracts to the API without granting b
   assert.equal((await dispatchCore(request('../arbitrary-transfer', {}), env, never)).status, 503);
 });
 
+test('Core forwards a supported asset on App prepare only, preserving the existing authorization and recovery shapes', async () => {
+  const enabled = { ...env, PERSONAL_POLYGON_USDC_ENABLED: 'true' };
+  const body = { requestId: id, amountAtomic: '1000000', asset: 'USDC' };
+  const forward = () => ({ fetch: async req => { assert.deepEqual(await req.json(), body); return Response.json({}); } });
+  assert.equal((await dispatchCore(request('prepare', body), enabled, forward)).status, 200);
+  for (const origin of ['https://mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']) {
+    assert.equal((await dispatchCore(request('prepare', body, { origin }), enabled, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(request('prepare', body), env, never)).status, 503);
+  assert.equal((await dispatchCore(request('prepare', body), { ...enabled, CORE_ENV: 'staging' }, never)).status, 503);
+  assert.equal((await dispatchCore(request('prepare', { ...body, asset: 'USDC.e' }), enabled, never)).status, 503);
+  assert.equal((await dispatchCore(request('prepare', { ...body, tokenAddress: 'injected' }), enabled, never)).status, 503);
+  assert.equal((await dispatchCore(request('authorize', { paymentId: id, signature, asset: 'USDC' }), enabled, never)).status, 503);
+  assert.equal(containerEnvironment('api', { ...base(), PERSONAL_POLYGON_USDC_ENABLED: 'true' }).PERSONAL_POLYGON_USDC_ENABLED, 'true');
+  assert.equal(containerEnvironment('api', base()).PERSONAL_POLYGON_USDC_ENABLED, 'false');
+});
+
 test('pausing broadcast blocks new authorization and submission while canonical status and verify recovery remain usable', async () => {
   let calls = 0; const resolve = () => ({ fetch: async () => { calls++; return Response.json({}); } });
   const paused = { ...env, PERSONAL_POLYGON_RELAY_BROADCAST_ENABLED: 'false' };

@@ -11,6 +11,7 @@ import { polygonRelayDispatchCalldata } from './polygon-relay-operation-tag';
 type Environment = Record<string, string | undefined>;
 const ORIGIN = 'https://app.mindblisspower.com';
 const ENTRY_POINT = { address: POLYGON_RELAY_ENTRY_POINT as Address, version: '0.7' as const };
+const MIN_USDC_EXECUTION_WINDOW_SECONDS = 30;
 export type SignedPolygonRelayOperation = { userOperationHash: Hex; rpcOperation: Record<string, unknown>;
   operationValidAfter: number; operationValidUntil: number; maxCostWei: string };
 
@@ -33,14 +34,17 @@ export function polygonRelayClients(environment: Environment, fetchImpl: typeof 
   const pimlicoClient = createPimlicoClient({ chain: polygon, transport: pimlicoTransport, entryPoint: ENTRY_POINT });
   return { publicClient, pimlicoClient, pimlicoTransport };
 }
-export async function createPolygonAaRelayer(environment: Environment, fetchImpl: typeof fetch = fetch, signal?: AbortSignal, now = Date.now()) {
+export async function createPolygonAaRelayer(environment: Environment, fetchImpl: typeof fetch = fetch, signal?: AbortSignal, now = Date.now(), usdcValidBefore?: number) {
   const raw = environment.POLYGON_RELAYER_PRIVATE_KEY;
   if (!/^0x[0-9a-f]{64}$/i.test(raw || '')) throw new Error('polygon_relay_unconfigured');
+  const current = Math.floor(now / 1000), operationValidAfter = Math.max(0, current - 30);
+  const operationValidUntil = usdcValidBefore === undefined ? current + 300 : Math.min(current + 300, usdcValidBefore - 1);
+  if (usdcValidBefore !== undefined && (!Number.isSafeInteger(usdcValidBefore) || operationValidUntil - current < MIN_USDC_EXECUTION_WINDOW_SECONDS))
+    throw new Error('polygon_relay_expired');
   try {
     const clients = polygonRelayClients(environment, fetchImpl, signal);
     if (await clients.publicClient.getChainId() !== 137) throw new Error();
     const owner = privateKeyToAccount(raw as Hex);
-    const operationValidAfter = Math.max(0, Math.floor(now / 1000) - 30), operationValidUntil = Math.floor(now / 1000) + 300;
     const account = await toSafeSmartAccount({ client: clients.publicClient, owners: [owner], version: '1.4.1', entryPoint: ENTRY_POINT,
       saltNonce: 0n, threshold: 1n, useMultiSendForSetup: true, safeProxyFactoryAddress: '0x4e1dcf7ad4e460cfd30791ccc4f9c8a4f820ec67',
       safeSingletonAddress: '0x41675c099f32341bf84bfc5382af534df5c7461a',
@@ -68,10 +72,14 @@ export function polygonOperationMaximumCost(operation: Record<string, unknown>) 
  * owner/account lease and sponsor budget reservation. Never called on import.
  */
 export async function prepareSignedPolygonRelayOperation(relayer: Awaited<ReturnType<typeof createPolygonAaRelayer>>,
-  input: { paymentId: string; attemptId: string; walletAddress: string; amountAtomic: string; authorizationNonce: string; signature: string; entryPointNonce: string; maxFeeWei: string },
+  input: { paymentId: string; attemptId: string; walletAddress: string; amountAtomic: string; authorizationNonce: string; signature: string; entryPointNonce: string; maxFeeWei: string;
+    usdcValidBefore?: number },
   environment: Environment): Promise<SignedPolygonRelayOperation> {
   try {
-    const expectedCallData = polygonRelayDispatchCalldata(input.walletAddress, input.amountAtomic, input.authorizationNonce, input.signature, input.paymentId, input.attemptId);
+    if (input.usdcValidBefore !== undefined && (relayer.operationValidUntil >= input.usdcValidBefore
+      || relayer.operationValidUntil - Math.floor(Date.now() / 1000) < MIN_USDC_EXECUTION_WINDOW_SECONDS))
+      throw new Error('polygon_relay_expired');
+    const expectedCallData = polygonRelayDispatchCalldata(input.walletAddress, input.amountAtomic, input.authorizationNonce, input.signature, input.paymentId, input.attemptId, input.usdcValidBefore);
     // Include the attempt identifier BEFORE sponsorship, estimation and signing.
     // Never mutate a quote or previously signed operation to create a retry.
     const operation = await relayer.client.prepareUserOperation({ callData: expectedCallData, nonce: BigInt(input.entryPointNonce) });
@@ -82,6 +90,8 @@ export async function prepareSignedPolygonRelayOperation(relayer: Awaited<Return
     const maximum = polygonOperationMaximumCost(operation as unknown as Record<string, unknown>);
     if (typeof operation.maxPriorityFeePerGas !== 'bigint' || operation.maxPriorityFeePerGas < 0n || operation.maxPriorityFeePerGas > operation.maxFeePerGas
       || maximum > BigInt(input.maxFeeWei) || maximum > BigInt(polygonRelayPolicy(environment).maxFeeWei)) throw new Error('polygon_relay_fee_unavailable');
+    if (input.usdcValidBefore !== undefined && relayer.operationValidUntil <= Math.floor(Date.now() / 1000))
+      throw new Error('polygon_relay_expired');
     const signature = await relayer.account.signUserOperation(operation);
     if (!/^0x[0-9a-f]{154}$/i.test(signature) || Number(BigInt(`0x${signature.slice(2, 14)}`)) !== relayer.operationValidAfter
       || Number(BigInt(`0x${signature.slice(14, 26)}`)) !== relayer.operationValidUntil) throw new Error();
@@ -90,7 +100,7 @@ export async function prepareSignedPolygonRelayOperation(relayer: Awaited<Return
     return { userOperationHash, rpcOperation: formatUserOperationRequest(signed) as unknown as Record<string, unknown>,
       operationValidAfter: relayer.operationValidAfter, operationValidUntil: relayer.operationValidUntil, maxCostWei: maximum.toString() };
   } catch (error) {
-    if (error instanceof Error && error.message === 'polygon_relay_fee_unavailable') throw error;
+    if (error instanceof Error && ['polygon_relay_fee_unavailable', 'polygon_relay_expired'].includes(error.message)) throw error;
     throw new Error('polygon_relay_sponsorship_rejected');
   }
 }

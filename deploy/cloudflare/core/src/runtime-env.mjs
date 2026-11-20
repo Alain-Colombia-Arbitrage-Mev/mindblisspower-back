@@ -117,6 +117,7 @@ export function containerEnvironment(service, env) {
     values.PERSONAL_COMPANY_PAYMENTS_ENABLED = String(env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true');
     const polygonRelayEnabled = env.PERSONAL_POLYGON_RELAY_ENABLED === 'true';
     values.PERSONAL_POLYGON_RELAY_ENABLED = String(polygonRelayEnabled);
+    values.PERSONAL_POLYGON_USDC_ENABLED = String(polygonRelayEnabled && env.CORE_ENV === 'production' && env.PERSONAL_POLYGON_USDC_ENABLED === 'true');
     values.PERSONAL_POLYGON_RELAY_BROADCAST_ENABLED = String(polygonRelayEnabled && env.PERSONAL_POLYGON_RELAY_BROADCAST_ENABLED === 'true');
     if (env.PERSONAL_COMPANY_PAYMENTS_ENABLED === 'true' || polygonRelayEnabled) {
       if (typeof env.API_REOWN_PROJECT_ID !== 'string' || !/^[a-f0-9]{32}$/i.test(env.API_REOWN_PROJECT_ID)) {

@@ -9,7 +9,8 @@ import { preparePersonalPolygonRelay, authorizePersonalPolygonRelay, submitPerso
   abandonPersonalPolygonRelay, readPersonalPolygonRelay, readPersonalPolygonRelayHistory } from '../modules/payments/polygon-relay-payment';
 
 const PREFIX = '/api/member/polygon-relay';
-const origins = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const APP_ORIGIN = 'https://app.mindblisspower.com';
+const origins = new Set(['https://mindblisspower.com', APP_ORIGIN, 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const noStore = { 'Cache-Control': 'private, no-store', Vary: 'Cookie' };
 const forbidden = new Set(['polygon_relay_forbidden', 'polygon_relay_wallet_not_linked', 'wallet_identity_unavailable', 'company_payment_forbidden', 'company_payment_wallet_not_linked']);
 const conflicts = new Set(['polygon_relay_request_already_used', 'polygon_relay_pending_exists', 'polygon_relay_insufficient_balance',
@@ -56,8 +57,9 @@ export function registerPersonalPolygonRelayRoutes(app: ApiApplication, { databa
   for (const [action, perform] of Object.entries(actions)) app.post(`${PREFIX}/${action}`, async context => {
     if (new URL(context.req.url).search) return context.json({ error: 'invalid_request' }, 400, noStore);
     if (context.req.header('content-encoding') || !/^application\/json(?:\s*;|$)/i.test(context.req.header('content-type') || '')) return context.json({ error: 'json_required' }, 415, noStore);
+    const allowUsdc = context.req.header('origin') === APP_ORIGIN;
     try { return context.json(await perform(database, JSON.parse(await context.req.text()), context.get('session')!.user.id,
-      { environment, fetchImpl, signal: context.req.raw.signal, createRelayer }), action === 'prepare' ? 201 : 200, noStore); }
+      { environment, fetchImpl, signal: context.req.raw.signal, createRelayer, allowUsdc }), action === 'prepare' ? 201 : 200, noStore); }
     catch (error) { const result = polygonRelayFailure(error); return context.json({ error: result.error }, result.status, noStore); }
   });
   for (const action of ['capabilities', 'status', 'history'] as const) app.get(`${PREFIX}/${action}`, async context => {
@@ -66,9 +68,10 @@ export function registerPersonalPolygonRelayRoutes(app: ApiApplication, { databa
       ? !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(paymentId || '') || url.search !== `?paymentId=${paymentId}`
       : url.search !== '')) return context.json({ error: 'invalid_request' }, 400, noStore);
     try {
-      const result = action === 'capabilities' ? polygonRelayCapabilities(environment) : action === 'status'
-        ? await readPersonalPolygonRelay(database, context.get('session')!.user.id, paymentId)
-        : await readPersonalPolygonRelayHistory(database, context.get('session')!.user.id);
+      const allowUsdc = context.req.header('origin') === APP_ORIGIN;
+      const result = action === 'capabilities' ? polygonRelayCapabilities(environment, allowUsdc) : action === 'status'
+        ? await readPersonalPolygonRelay(database, context.get('session')!.user.id, paymentId, allowUsdc)
+        : await readPersonalPolygonRelayHistory(database, context.get('session')!.user.id, allowUsdc, environment.PERSONAL_POLYGON_USDC_ENABLED === 'true');
       return context.json(result, 200, noStore);
     } catch (error) { const result = polygonRelayFailure(error); return context.json({ error: result.error }, result.status, noStore); }
   });

@@ -4,7 +4,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { readWalletBinding } from '../identity/wallet-link';
 import { checkCompanyPaymentBalance, checkCompanyPaymentSubmission, companyPaymentAtomic, createCompanyPaymentRpc,
   verifyCompanyPaymentReceipt, COMPANY_PAYMENT_CHAIN_ID, COMPANY_PAYMENT_TOKEN, COMPANY_PAYMENT_RECIPIENT,
-  COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS, companyPaymentNetwork, readCompanyPaymentBalances, readPersonalWalletNetworkBalances, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
+  COMPANY_PAYMENT_DECIMALS, COMPANY_PAYMENT_CONFIRMATIONS, companyPaymentNetwork, readCompanyPaymentBalances, readPersonalWalletNetworkBalances, LEGACY_POLYGON_TOKEN, POLYGON_USDC_TOKEN } from './personal-company-rpc';
 
 type Database = Pick<IdentityDatabase, 'execute'>;
 type Options = { environment?: Record<string, string | undefined>; fetchImpl?: typeof fetch; signal?: AbortSignal };
@@ -30,7 +30,8 @@ function one(rows: unknown[], paymentId?: string): PaymentRow {
   const parsed = rowSchema.safeParse(rows[0]);
   if (!parsed.success) throw new Error('company_payment_unavailable');
   const row = parsed.data;
-  if (!companyPaymentNetwork(row.chain_id, row.token_address) || (paymentId && row.id !== paymentId) || row.expires_at <= row.created_at || (row.abandoned_at !== null && row.abandoned_at < row.created_at)
+  if (!companyPaymentNetwork(row.chain_id, row.token_address) || row.token_address === POLYGON_USDC_TOKEN
+    || (paymentId && row.id !== paymentId) || row.expires_at <= row.created_at || (row.abandoned_at !== null && row.abandoned_at < row.created_at)
     || (row.status === 'prepared' && (row.transaction_hash !== null || row.block_number !== null || row.block_hash !== null || row.confirmations !== 0 || row.failure_reason !== null))
     || (row.status !== 'prepared' && row.transaction_hash === null)
     || (row.status === 'confirmed' && (row.block_number === null || row.block_hash === null || row.confirmations < COMPANY_PAYMENT_CONFIRMATIONS || row.failure_reason !== null))
@@ -82,13 +83,14 @@ export async function readPersonalCompanyPaymentBalances(database: Database, use
   environment = process.env, fetchImpl = fetch, signal,
 }: Options = {}) {
   const walletAddress = await boundPersonalWalletAddress(database, userId, signal);
-  const networks = [{ chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, network: 'ethereum' },
-    { chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, network: 'polygon' }] as const;
+  const networks = [{ chainId: 1, tokenAddress: COMPANY_PAYMENT_TOKEN, network: 'ethereum', asset: 'USDT' },
+    { chainId: 137, tokenAddress: LEGACY_POLYGON_TOKEN, network: 'polygon', asset: 'USDT' },
+    ...(environment.PERSONAL_POLYGON_USDC_ENABLED === 'true' ? [{ chainId: 137, tokenAddress: POLYGON_USDC_TOKEN, network: 'polygon', asset: 'USDC' } as const] : [])] as const;
   const balances = await Promise.all(networks.map(async network => {
-    const snapshot = { walletKind: 'personal' as const, walletAddress, ...network, tokenDecimals: COMPANY_PAYMENT_DECIMALS, asset: 'USDT' as const };
+    const snapshot = { walletKind: 'personal' as const, walletAddress, ...network, tokenDecimals: COMPANY_PAYMENT_DECIMALS };
     let rpc: ReturnType<typeof createCompanyPaymentRpc> | undefined;
     try {
-      rpc = createCompanyPaymentRpc(environment, fetchImpl, signal, network.chainId);
+      rpc = createCompanyPaymentRpc(environment, fetchImpl, signal, network.chainId, network.asset);
       const values = await readPersonalWalletNetworkBalances(rpc, walletAddress);
       active(rpc.signal);
       return { ...snapshot, ...values, observedAt: new Date().toISOString() };

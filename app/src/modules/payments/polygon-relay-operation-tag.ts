@@ -1,6 +1,7 @@
 import { Interface, keccak256, toUtf8Bytes } from 'ethers';
-import { LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
+import { LEGACY_POLYGON_TOKEN, POLYGON_USDC_TOKEN } from './personal-company-rpc';
 import { verifyPolygonRelayAuthorization } from './polygon-relay-policy';
+import { verifyPolygonUsdcAuthorization } from './polygon-usdc-authorization';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const safe = new Interface(['function executeUserOpWithErrorString(address to,uint256 value,bytes data,uint8 operation)']);
 /** ERC4337 hashes exclude signatures (including Safe validity). Distinguish
@@ -12,8 +13,10 @@ export function polygonRelayOperationTag(paymentId: string, attemptId: string) {
   return keccak256(toUtf8Bytes(`mindbliss:polygon-relay:137:v1:${paymentId}:${attemptId}`));
 }
 export function polygonRelayDispatchCalldata(walletAddress: string, amountAtomic: string, authorizationNonce: string,
-  signature: string, paymentId: string, attemptId: string) {
-  const native = verifyPolygonRelayAuthorization(walletAddress, amountAtomic, authorizationNonce, signature);
-  const base = safe.encodeFunctionData('executeUserOpWithErrorString', [LEGACY_POLYGON_TOKEN, 0n, native.calldata, 0]);
+  signature: string, paymentId: string, attemptId: string, usdcValidBefore?: number) {
+  const usdc = usdcValidBefore !== undefined;
+  const native = usdc ? verifyPolygonUsdcAuthorization(walletAddress, amountAtomic, authorizationNonce, usdcValidBefore, signature)
+    : verifyPolygonRelayAuthorization(walletAddress, amountAtomic, authorizationNonce, signature);
+  const base = safe.encodeFunctionData('executeUserOpWithErrorString', [usdc ? POLYGON_USDC_TOKEN : LEGACY_POLYGON_TOKEN, 0n, native.calldata, 0]);
   return `${base}${polygonRelayOperationTag(paymentId, attemptId).slice(2)}` as `0x${string}`;
 }

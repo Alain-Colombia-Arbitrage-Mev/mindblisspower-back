@@ -4,8 +4,9 @@ import type { Address } from 'viem';
 import { z } from 'zod';
 import { polygonRelayClients, polygonOperationMaximumCost, type SignedPolygonRelayOperation } from './polygon-relay-aa';
 import { POLYGON_RELAY_ABI, POLYGON_RELAY_ENTRY_POINT } from './polygon-relay-policy';
-import { createCompanyPaymentRpc, COMPANY_PAYMENT_RECIPIENT, LEGACY_POLYGON_TOKEN, companyPaymentCalldata } from './personal-company-rpc';
+import { createCompanyPaymentRpc, COMPANY_PAYMENT_RECIPIENT, LEGACY_POLYGON_TOKEN, POLYGON_USDC_TOKEN, companyPaymentCalldata } from './personal-company-rpc';
 import { polygonRelayDispatchCalldata } from './polygon-relay-operation-tag';
+import { readUsdcAuthorizationUsed, usdcAuthorizationNonce } from './polygon-usdc-authorization';
 
 const hash = z.string().regex(/^0x[0-9a-f]{64}$/), address = z.string().regex(/^0x[0-9a-f]{40}$/i);
 const hex = z.string().regex(/^0x(?:[0-9a-f]{2})*$/i).max(32768), quantity = z.string().regex(/^0x(?:0|[1-9a-f][0-9a-f]*)$/i).max(66);
@@ -15,31 +16,43 @@ const operationSchema = z.object({ sender: address, nonce: quantity, callData: h
   paymasterVerificationGasLimit: quantity, paymasterPostOpGasLimit: quantity, signature: hex }).strict();
 export type PolygonRelayProofContext = { paymentId: string; attemptId: string; walletAddress: string; amountAtomic: string; authorizationNonce: string;
   relayerAddress: string; entryPointNonce: string; userOperationHash: string; maxFeeWei: string;
-  operationValidAfter: number; operationValidUntil: number };
+  operationValidAfter: number; operationValidUntil: number; usdcValidBefore?: number };
 const entry = new Interface(['event BeforeExecution()',
   'event UserOperationEvent(bytes32 indexed userOpHash,address indexed sender,address indexed paymaster,uint256 nonce,bool success,uint256 actualGasCost,uint256 actualGasUsed)',
   'function getNonce(address sender,uint192 key) view returns(uint256)']);
 const token = new Interface(['event Transfer(address indexed from,address indexed to,uint256 value)',
-  'event MetaTransactionExecuted(address userAddress,address relayerAddress,bytes functionSignature)']);
+  'event MetaTransactionExecuted(address userAddress,address relayerAddress,bytes functionSignature)',
+  'event AuthorizationUsed(address indexed authorizer,bytes32 indexed nonce)']);
 const indexedMeta = new Interface(['event MetaTransactionExecuted(address indexed userAddress,address indexed relayerAddress,bytes functionSignature)']);
 const fail = () => new Error('polygon_relay_proof_unavailable');
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function q(value: unknown) { const parsed = quantity.safeParse(value); if (!parsed.success) throw fail(); return BigInt(parsed.data); }
 function equal(value: unknown, expected: string) { return typeof value === 'string' && value.toLowerCase() === expected.toLowerCase(); }
 
+async function nativeNonceEvidence(rpc: ReturnType<typeof createCompanyPaymentRpc>, walletAddress: string, block: string, usdcNonce?: string) {
+  if (usdcNonce !== undefined) {
+    // The journal compares equal versus changed. ERC-3009 has an independent
+    // boolean for each nonce instead of a monotonically increasing counter.
+    return await readUsdcAuthorizationUsed(rpc, walletAddress, usdcNonce, block) ? (BigInt(usdcNonce) + 1n).toString() : usdcNonce;
+  }
+  const nonce = await rpc.call('eth_call', [{ to: LEGACY_POLYGON_TOKEN, data: POLYGON_RELAY_ABI.encodeFunctionData('getNonce', [walletAddress]) }, block]);
+  if (!hash.safeParse(nonce).success) throw fail();
+  return BigInt(nonce as string).toString();
+}
+
 /** A finalized-enough nonce change invalidates dispatch authority; it does not
  * prove whether the immutable transfer was executed elsewhere. */
 export async function readCanonicalPolygonNativeNonce(environment: Record<string, string | undefined>, walletAddress: string,
-  fetchImpl: typeof fetch = fetch, signal?: AbortSignal) {
+  fetchImpl: typeof fetch = fetch, signal?: AbortSignal, usdcNonce?: string) {
   const rpc = createCompanyPaymentRpc({ ...environment, PERSONAL_COMPANY_PAYMENTS_ENABLED: 'true' }, fetchImpl, signal, 137);
   try {
     if (q(await rpc.call('eth_chainId', [])) !== 137n) throw fail();
     const head = q(await rpc.call('eth_blockNumber', [])); if (head < 11n) throw fail();
     const at = `0x${(head - 11n).toString(16)}`, block = await rpc.call('eth_getBlockByNumber', [at, false]);
     if (!object(block) || q(block.number) !== head - 11n || !hash.safeParse(block.hash).success) throw fail();
-    const nonce = await rpc.call('eth_call', [{ to: LEGACY_POLYGON_TOKEN, data: POLYGON_RELAY_ABI.encodeFunctionData('getNonce', [walletAddress]) }, at]);
-    if (!hash.safeParse(nonce).success) throw fail();
-    return { observedNativeNonce: BigInt(nonce as string).toString(), blockNumber: (head - 11n).toString(), blockHash: block.hash as string, confirmations: 12 };
+    const observedNativeNonce = await nativeNonceEvidence(rpc, walletAddress, at, usdcNonce);
+    return { observedNativeNonce, blockNumber: (head - 11n).toString(), blockHash: block.hash as string, confirmations: 12,
+      canonicalTimestamp: usdcNonce === undefined ? undefined : q(block.timestamp).toString() };
   } finally { rpc.dispose(); }
 }
 
@@ -50,13 +63,15 @@ export function validateSavedPolygonRelayOperation(raw: unknown, context: Polygo
     const envelope = z.object({ userOperationHash: hash, rpcOperation: operationSchema, operationValidAfter: z.number().int().min(0),
       operationValidUntil: z.number().int().positive(), maxCostWei: z.string().regex(/^[1-9][0-9]*$/) }).strict().parse(raw);
     const rpc = envelope.rpcOperation;
-    const expectedCall = polygonRelayDispatchCalldata(context.walletAddress, context.amountAtomic, context.authorizationNonce, authorizationSignature, context.paymentId, context.attemptId);
+    const expectedCall = polygonRelayDispatchCalldata(context.walletAddress, context.amountAtomic, context.authorizationNonce, authorizationSignature,
+      context.paymentId, context.attemptId, context.usdcValidBefore);
     if (!equal(rpc.sender, context.relayerAddress) || BigInt(rpc.nonce).toString() !== context.entryPointNonce
       || rpc.callData !== expectedCall || !/^0x[0-9a-f]{154}$/i.test(rpc.signature)
       || Number(BigInt(`0x${rpc.signature.slice(2, 14)}`)) !== context.operationValidAfter
       || Number(BigInt(`0x${rpc.signature.slice(14, 26)}`)) !== context.operationValidUntil
       || envelope.operationValidAfter !== context.operationValidAfter || envelope.operationValidUntil !== context.operationValidUntil
       || envelope.operationValidUntil <= envelope.operationValidAfter || envelope.operationValidUntil - envelope.operationValidAfter > 360
+      || (context.usdcValidBefore !== undefined && envelope.operationValidUntil >= context.usdcValidBefore)
       || Boolean(rpc.factory) !== Boolean(rpc.factoryData) || (rpc.factory && !equal(rpc.factory, '0x4e1dcf7ad4e460cfd30791ccc4f9c8a4f820ec67'))
       || BigInt(rpc.maxPriorityFeePerGas) > BigInt(rpc.maxFeePerGas)) throw fail();
     const operation = Object.fromEntries(Object.entries(rpc).map(([key, value]) => [key,
@@ -82,6 +97,9 @@ export function inspectPolygonRelayReceipt(receipt: unknown, context: PolygonRel
   if (!object(receipt) || !equal(receipt.to, POLYGON_RELAY_ENTRY_POINT) || q(receipt.status) !== 1n || !Array.isArray(receipt.logs)
     || receipt.logs.length > 2048) throw fail();
   let segment = -1, found = false, outcome: { success: boolean; actualGasCostWei: string; matched: boolean } | null = null;
+  const usdc = context.usdcValidBefore !== undefined;
+  const expectedToken = usdc ? POLYGON_USDC_TOKEN : LEGACY_POLYGON_TOKEN;
+  const expectedUsdcNonce = usdc ? usdcAuthorizationNonce(context.authorizationNonce) : undefined;
   for (let index = 0; index < receipt.logs.length; index++) {
     const log: unknown = receipt.logs[index];
     if (!object(log) || !address.safeParse(log.address).success || !Array.isArray(log.topics) || log.topics.some(topic => !hash.safeParse(topic).success)
@@ -95,17 +113,19 @@ export function inspectPolygonRelayReceipt(receipt: unknown, context: PolygonRel
         || parsed.args.nonce.toString() !== context.entryPointNonce || parsed.args.actualGasCost <= 0n
         || parsed.args.actualGasCost > BigInt(context.maxFeeWei)) throw fail();
       found = true;
-      let transfers = 0, metas = 0;
+      let transfers = 0, authorizations = 0;
       for (const candidate of receipt.logs.slice(segment + 1, index)) {
-        if (!object(candidate) || !equal(candidate.address, LEGACY_POLYGON_TOKEN)) continue;
+        if (!object(candidate) || !equal(candidate.address, expectedToken)) continue;
         let event; try { event = (candidate.topics as unknown[]).length === 3 && (candidate.topics as string[])[0] === indexedMeta.getEvent('MetaTransactionExecuted')!.topicHash
           ? indexedMeta.parseLog(candidate as { topics: string[]; data: string }) : token.parseLog(candidate as { topics: string[]; data: string }); } catch { continue; }
         if (event?.name === 'Transfer' && equal(event.args.from, context.walletAddress) && equal(event.args.to, COMPANY_PAYMENT_RECIPIENT)
           && event.args.value.toString() === context.amountAtomic) transfers++;
-        if (event?.name === 'MetaTransactionExecuted' && equal(event.args.userAddress, context.walletAddress) && equal(event.args.relayerAddress, context.relayerAddress)
-          && event.args.functionSignature === companyPaymentCalldata(context.amountAtomic)) metas++;
+        if (usdc ? event?.name === 'AuthorizationUsed' && equal(event.args.authorizer, context.walletAddress)
+          && equal(event.args.nonce, expectedUsdcNonce!)
+          : event?.name === 'MetaTransactionExecuted' && equal(event.args.userAddress, context.walletAddress) && equal(event.args.relayerAddress, context.relayerAddress)
+          && event.args.functionSignature === companyPaymentCalldata(context.amountAtomic)) authorizations++;
       }
-      outcome = { success: parsed.args.success, actualGasCostWei: parsed.args.actualGasCost.toString(), matched: transfers === 1 && metas === 1 };
+      outcome = { success: parsed.args.success, actualGasCostWei: parsed.args.actualGasCost.toString(), matched: transfers === 1 && authorizations === 1 };
       // A reverted operation must not borrow a transfer even from its own
       // surrounding scope. Such a contradictory receipt is never terminalized.
       if (!outcome.success && transfers > 0) throw fail();
@@ -121,6 +141,7 @@ export async function readPolygonRelayProof(environment: Record<string, string |
   const rpc = createCompanyPaymentRpc({ ...environment, PERSONAL_COMPANY_PAYMENTS_ENABLED: 'true' }, fetchImpl, signal, 137);
   try {
     if (q(await rpc.call('eth_chainId', [])) !== 137n) throw fail();
+    const usdcNonce = context.usdcValidBefore === undefined ? undefined : context.authorizationNonce;
     const { pimlicoClient } = polygonRelayClients(environment, fetchImpl, signal);
     const response: unknown = await pimlicoClient.request({ method: 'eth_getUserOperationReceipt', params: [context.userOperationHash] } as never);
     if (response === null) {
@@ -132,12 +153,12 @@ export async function readPolygonRelayProof(environment: Record<string, string |
       if (q(block.timestamp) <= BigInt(context.operationValidUntil)) return { state: 'pending', confirmations: 0 };
       const [aa, native] = await Promise.all([
         rpc.call('eth_call', [{ to: POLYGON_RELAY_ENTRY_POINT, data: entry.encodeFunctionData('getNonce', [context.relayerAddress, 0]) }, at]),
-        rpc.call('eth_call', [{ to: LEGACY_POLYGON_TOKEN, data: POLYGON_RELAY_ABI.encodeFunctionData('getNonce', [context.walletAddress]) }, at]),
+        nativeNonceEvidence(rpc, context.walletAddress, at, usdcNonce),
       ]);
-      if (!hash.safeParse(aa).success || !hash.safeParse(native).success) throw fail();
+      if (!hash.safeParse(aa).success) throw fail();
       if (BigInt(aa as string).toString() !== context.entryPointNonce) return { state: 'pending', confirmations: 0 };
       return { state: 'expired', blockNumber: (head - 11n).toString(), blockHash: block.hash as string, canonicalTimestamp: q(block.timestamp).toString(),
-        confirmations: 12, observedEntryPointNonce: BigInt(aa as string).toString(), observedNativeNonce: BigInt(native as string).toString() };
+        confirmations: 12, observedEntryPointNonce: BigInt(aa as string).toString(), observedNativeNonce: native };
     }
     if (!object(response) || !equal(response.userOpHash, context.userOperationHash) || !object(response.receipt)
       || !hash.safeParse(response.receipt.transactionHash).success) throw fail();
@@ -160,10 +181,10 @@ export async function readPolygonRelayProof(environment: Record<string, string |
     // failed payment. Retain the known operation for reconciliation and never
     // open another spend authorization from this uncertain outcome.
     if (outcome.success && !outcome.matched) throw fail();
-    const native = await rpc.call('eth_call', [{ to: LEGACY_POLYGON_TOKEN, data: POLYGON_RELAY_ABI.encodeFunctionData('getNonce', [context.walletAddress]) }, receipt.blockNumber]);
-    if (!hash.safeParse(native).success) throw fail();
+    const native = await nativeNonceEvidence(rpc, context.walletAddress, receipt.blockNumber as string, usdcNonce);
+    if (outcome.success && usdcNonce !== undefined && native === usdcNonce) throw fail();
     const canonical = { transactionHash, blockNumber: number.toString(), blockHash: receipt.blockHash as string, confirmations,
-      actualGasCostWei: outcome.actualGasCostWei, observedNativeNonce: BigInt(native as string).toString() };
+      actualGasCostWei: outcome.actualGasCostWei, observedNativeNonce: native };
     return outcome.success ? { state: 'confirmed', ...canonical }
       : { state: 'failed', reason: 'user_operation_reverted', ...canonical };
   } finally { rpc.dispose(); }
