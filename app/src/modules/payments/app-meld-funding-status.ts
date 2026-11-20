@@ -5,7 +5,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { productionMeldJson, productionOperation, productionScope } from './meld-production-http';
 import { checkCompanyPaymentChain, COMPANY_PAYMENT_TRANSFER_TOPIC, createCompanyPaymentRpc, LEGACY_POLYGON_TOKEN } from './personal-company-rpc';
 import { createAdministrativePreflightGate } from './wallet-funding';
-import { PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD } from './reown-funding-options';
+import { appMeldAsset, appMeldCountry, appMeldCurrency, appMeldDestination, appMeldMarket, appMeldMethod, appMeldProvider } from './app-meld-funding-policy';
 
 type Database = Pick<IdentityDatabase, 'execute'>;
 type Environment = Record<string, string | undefined>;
@@ -19,10 +19,7 @@ const hexWord = z.string().regex(/^0x[0-9a-f]{64}$/i).transform(value => value.t
 const hexQuantity = z.string().regex(/^0x(?:0|[1-9a-f][0-9a-f]{0,63})$/i);
 const amount = z.number().finite().min(0.01).max(1_000_000_000)
   .refine(value => Number(value.toFixed(2)) === value);
-const asset = 'USDT_POLYGON' as const;
-const currency = z.enum(['USD', 'MXN']);
-const provider = z.enum(['MERCURYO', 'ONRAMPMONEY']);
-const method = z.enum(['CREDIT_DEBIT_CARD', 'SPEI']);
+const polygonUsdcToken = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
 const status = z.enum(['initiated', 'session_created', 'unavailable']);
 const providerStatus = z.enum(['PENDING_CREATED', 'PENDING CREATED', 'PENDING', 'PROCESSING', 'AUTHORIZED', 'ACCEPTED',
   'PARTIALLY_SETTLED', 'SETTLING', 'TWO_FA_REQUIRED', 'TWO_FA_PROVIDED', 'ERROR', 'SETTLED', 'FAILED', 'DECLINED',
@@ -31,16 +28,17 @@ const terminalFailures: ReadonlySet<string> = new Set(['FAILED', 'DECLINED', 'CA
 const unavailable = () => Error('wallet_funding_provider_unavailable');
 
 const attempt = z.object({ id: uuid, subject: ownerInput, wallet_address: wallet, customer_reference: uuid,
-  country_code: z.literal('MX'), source_currency: currency, destination_currency: z.literal(asset), chain_id: z.literal(137),
+  country_code: appMeldCountry, source_currency: appMeldCurrency, destination_currency: appMeldAsset, chain_id: z.literal(137),
   requested_amount: z.union([z.number(), z.string().regex(/^\d{1,10}(?:\.\d{1,2})?$/)]).transform(Number).pipe(amount),
-  payment_method: method, service_provider: provider, account_id: identifier, status,
+  payment_method: appMeldMethod, service_provider: appMeldProvider, account_id: identifier, status,
   provider_session_id: identifier.nullable(), provider_customer_id: identifier.nullable(), created_at: z.coerce.date(),
-}).refine(row => (row.status === 'session_created' ? row.provider_session_id && row.provider_customer_id
-  : row.provider_session_id === null && row.provider_customer_id === null)
-  && (row.source_currency === 'USD' ? row.requested_amount >= PERSONAL_FUNDING_MINIMUM_USD && row.requested_amount <= PERSONAL_FUNDING_MAXIMUM_USD
-    : row.requested_amount >= PERSONAL_FUNDING_MINIMUM_MXN)
-  && (row.service_provider === 'MERCURYO' ? row.payment_method === 'CREDIT_DEBIT_CARD'
-    : row.source_currency === 'MXN' && row.payment_method === 'SPEI'));
+}).refine(row => {
+  const market = appMeldMarket(row.country_code, row.source_currency);
+  const rail = market?.rails.find(rail => rail.provider === row.service_provider && rail.methods.includes(row.payment_method));
+  return (row.status === 'session_created' ? row.provider_session_id && row.provider_customer_id
+    : row.provider_session_id === null && row.provider_customer_id === null)
+    && market?.asset === row.destination_currency && rail && row.requested_amount >= rail.minimum && row.requested_amount <= rail.maximum;
+});
 type Attempt = z.infer<typeof attempt>;
 
 function ownedAttempt(value: unknown, owner: string) {
@@ -49,7 +47,7 @@ function ownedAttempt(value: unknown, owner: string) {
   return parsed.data;
 }
 
-const destination = (row: Attempt) => ({ address: row.wallet_address, asset: 'USDT' as const, network: 'polygon' as const, chainId: 137 as const });
+const destination = (row: Attempt) => appMeldDestination(row.destination_currency, row.wallet_address);
 const unconfirmed = () => ({ state: 'unconfirmed' as const, source: 'none' as const, testMode: false as const });
 
 export async function readAppMeldFundingHistory(database: Database, subject: string) {
@@ -69,9 +67,9 @@ export async function readAppMeldFundingHistory(database: Database, subject: str
 const search = z.object({ transactions: z.array(z.object({ id: identifier })).max(1) });
 const result = z.object({ transaction: z.object({
   id: identifier, accountId: identifier, sessionId: identifier, externalSessionId: uuid, customerId: identifier,
-  externalCustomerId: uuid, transactionType: z.literal('CRYPTO_PURCHASE'), serviceProvider: provider, countryCode: z.literal('MX'),
-  sourceCurrencyCode: currency, sourceAmount: amount, destinationCurrencyCode: z.literal(asset),
-  destinationAmount: z.number().finite().nonnegative().max(1_000_000_000), paymentMethodType: method,
+  externalCustomerId: uuid, transactionType: z.literal('CRYPTO_PURCHASE'), serviceProvider: appMeldProvider, countryCode: appMeldCountry,
+  sourceCurrencyCode: appMeldCurrency, sourceAmount: amount, destinationCurrencyCode: appMeldAsset,
+  destinationAmount: z.number().finite().nonnegative().max(1_000_000_000), paymentMethodType: appMeldMethod,
   status: providerStatus, updatedAt: z.string().datetime({ offset: true }),
   cryptoDetails: z.object({ destinationWalletAddress: wallet, chainId: z.union([z.literal('137'), z.literal(137)]),
     blockchainTransactionId: z.unknown().optional() }),
@@ -95,9 +93,10 @@ async function deliveredOnPolygon(row: Attempt, hash: string, amountReceived: bi
     if (!mined.success || !finalized.success || mined.data.transactionHash !== hash
       || BigInt(mined.data.blockNumber) > BigInt(finalized.data.number)) return false;
     const receiver = '0x' + row.wallet_address.slice(2).padStart(64, '0');
+    const token = row.destination_currency === 'USDC_POLYGON' ? polygonUsdcToken : LEGACY_POLYGON_TOKEN;
     const matched = mined.data.logs.some(value => {
       const event = transfer.safeParse(value);
-      return event.success && !event.data.removed && event.data.address === LEGACY_POLYGON_TOKEN
+      return event.success && !event.data.removed && event.data.address === token
         && event.data.topics[0] === COMPANY_PAYMENT_TRANSFER_TOPIC && event.data.topics[2] === receiver
         && BigInt(event.data.data) === amountReceived;
     });
@@ -134,7 +133,7 @@ async function reconcile(database: Database, row: Attempt, environment: Environm
     if (item.id !== id || item.accountId !== row.account_id || item.sessionId !== row.provider_session_id
       || item.externalSessionId !== row.id || item.customerId !== row.provider_customer_id || item.externalCustomerId !== row.customer_reference
       || item.serviceProvider !== row.service_provider || item.countryCode !== row.country_code
-      || item.sourceCurrencyCode !== row.source_currency || item.sourceAmount !== row.requested_amount
+      || item.sourceCurrencyCode !== row.source_currency || item.sourceAmount !== row.requested_amount || item.destinationCurrencyCode !== row.destination_currency
       || item.paymentMethodType !== row.payment_method || item.cryptoDetails.destinationWalletAddress !== row.wallet_address) throw unavailable();
     const fixedAmount = item.destinationAmount.toFixed(6);
     if (Number(fixedAmount) !== item.destinationAmount) throw unavailable();

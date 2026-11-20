@@ -46,7 +46,7 @@ function upstream(detail = transaction, proof: typeof receipt | null = receipt, 
       expect(new Headers(init?.headers).get('Meld-Account-Id')).toBe(row.account_id);
       if (url.pathname === '/payments/transactions') {
         expect(Object.fromEntries(url.searchParams)).toEqual({ externalSessionIds: id, sessionIds: row.provider_session_id,
-          externalCustomerIds: customer, serviceProviders: 'MERCURYO', types: 'CRYPTO_PURCHASE', limit: '2' });
+          externalCustomerIds: customer, serviceProviders: detail.serviceProvider, types: 'CRYPTO_PURCHASE', limit: '2' });
         return Response.json({ transactions: ids });
       }
       expect(url.pathname).toBe('/payments/transactions/' + transaction.id);
@@ -105,4 +105,21 @@ test('App rejects ambiguous merchant results and wrong immutable transaction det
       .rejects.toThrow('wallet_funding_provider_unavailable');
     expect(probe.calls.every(url => url.startsWith('https://api.meld.io/'))).toBeTrue();
   }
+});
+
+test('App USDC reconciliation requires the registered Polygon asset and its actual token transfer', async () => {
+  const usdc = { ...row, destination_currency: 'USDC_POLYGON', source_currency: 'USD', country_code: 'US',
+    requested_amount: '100.00', payment_method: 'GOOGLE_PAY', service_provider: 'RAMPNOW' };
+  const detail = { ...transaction, destinationCurrencyCode: 'USDC_POLYGON', sourceCurrencyCode: 'USD', countryCode: 'US',
+    sourceAmount: 100, paymentMethodType: 'GOOGLE_PAY', serviceProvider: 'RAMPNOW' };
+  const { db } = database([usdc]);
+  const wrongToken = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail).fetchImpl });
+  expect(wrongToken?.confirmation.state).toBe('pending');
+  const wrongAsset = upstream({ ...detail, destinationCurrencyCode: 'USDT_POLYGON' });
+  await expect(readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: wrongAsset.fetchImpl }))
+    .rejects.toThrow('wallet_funding_provider_unavailable');
+  expect(wrongAsset.calls.every(url => url.startsWith('https://api.meld.io/'))).toBeTrue();
+  const proof = { ...receipt, logs: [{ ...receipt.logs[0]!, address: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359' }] };
+  const confirmed = await readAppMeldFundingStatus(db, row.subject, id, { environment, fetchImpl: upstream(detail, proof).fetchImpl });
+  expect(confirmed).toMatchObject({ destination: { address: wallet, asset: 'USDC', chainId: 137 }, confirmation: { state: 'confirmed' } });
 });
