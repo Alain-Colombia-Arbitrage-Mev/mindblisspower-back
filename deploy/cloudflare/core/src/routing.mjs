@@ -462,7 +462,7 @@ export async function dispatchCore(request, env, resolve) {
     headers.delete('host');
     headers.delete('content-length');
     headers.delete('cf-container-target-port');
-    walletFundingContractHeaders(headers, url);
+    walletFundingContractHeaders(headers, url, fundingRequest);
     // No arbitrary target URL, no redirects followed by the gateway, no retries.
     const forwarded = new Request(request.url, {
       method: request.method, headers, body, redirect: 'manual', signal: request.signal,

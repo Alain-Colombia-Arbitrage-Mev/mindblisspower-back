@@ -1,20 +1,38 @@
 export const WALLET_FUNDING_PREFIX = '/api/member/wallet-funding';
 export const WALLET_FUNDING_MAX_BODY = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PERSONAL_ORIGINS = new Set(['https://mindblisspower.com', 'https://app.mindblisspower.com', 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
+const APP_ORIGIN = 'https://app.mindblisspower.com';
+const PERSONAL_ORIGINS = new Set(['https://mindblisspower.com', APP_ORIGIN, 'https://mindbliss-portal-rewon.devfidubit.workers.dev']);
 const ADMINISTRATIVE_ORIGIN = 'https://wallet.mindblisspower.com';
 const PERSONAL_COUNTRIES = new Set(['US', 'MX', 'CO']);
 const PROHIBITED_PERSONAL_METHODS = new Set(['NETELLER', 'PAYSAFECARD', 'PAYSAFE_CARD', 'SKRILL', 'SKIRLL']);
 // Temporary integration gate, separate from the user's permanently prohibited methods.
 const UNAVAILABLE_PERSONAL_METHODS = new Set(['ASTROPAY']);
 const MELD_CHECKOUT_PATH = `${WALLET_FUNDING_PREFIX}/administrative/checkout`;
+const APP_MELD_HEADER = 'x-mindbliss-funding-provider';
+const PERSONAL_INTENT = `${WALLET_FUNDING_PREFIX}/personal/intent`;
+const PERSONAL_OPTIONS = `${WALLET_FUNDING_PREFIX}/personal/options`;
+const PERSONAL_STATUS = `${WALLET_FUNDING_PREFIX}/personal/status`;
+const HISTORY = `${WALLET_FUNDING_PREFIX}/history`;
+const APP_MELD_FIELDS = new Set(['requestId', 'walletAddress', 'country', 'amount', 'sourceCurrencyCode',
+  'paymentMethodType', 'serviceProvider', 'destinationCurrencyCode']);
+const APP_MELD_PROVIDERS = new Set(['MERCURYO', 'ONRAMPMONEY', 'RAMPNOW']);
+// Core checks request shape. Provider eligibility and exact route bounds live in the API.
+const APP_MELD_MARKETS = new Map([
+  ['US:USD', { asset: 'USDC_POLYGON', min: 50, max: 15_000,
+    methods: ['CREDIT_DEBIT_CARD', 'APPLE_PAY', 'GOOGLE_PAY', 'ACH', 'LOCAL_BANK_TRANSFER'] }],
+  ['MX:USD', { asset: 'USDT_POLYGON', min: 50, max: 15_000, methods: ['CREDIT_DEBIT_CARD'] }],
+  ['MX:MXN', { asset: 'USDT_POLYGON', min: 931, max: 1_000_000_000, methods: ['CREDIT_DEBIT_CARD', 'SPEI'] }],
+  ['CO:COP', { asset: 'USDC_POLYGON', min: 170_000, max: 4_000_000, methods: ['PSE', 'LOCAL_BANK_TRANSFER'] }],
+]);
 
 export function walletFundingNamespace(path) {
   return path === WALLET_FUNDING_PREFIX || path.startsWith(`${WALLET_FUNDING_PREFIX}/`);
 }
 
 /** This is a response-format capability, never an ownership or payment grant. */
-export function walletFundingContractHeaders(headers, url) {
+export function walletFundingContractHeaders(headers, url, fundingValidated) {
+  if (!fundingValidated || headers.get(APP_MELD_HEADER) !== 'meld') headers.delete(APP_MELD_HEADER);
   const name = 'x-mindbliss-sandbox-contract';
   const administrative = [`${WALLET_FUNDING_PREFIX}/administrative/session`, `${WALLET_FUNDING_PREFIX}/administrative/status`,
     `${WALLET_FUNDING_PREFIX}/administrative/options`].includes(url.pathname)
@@ -22,11 +40,54 @@ export function walletFundingContractHeaders(headers, url) {
   if (!administrative || headers.get(name) !== 'v2') headers.delete(name);
 }
 
+function appMeldFundingPath(url) {
+  return [PERSONAL_OPTIONS, PERSONAL_STATUS, PERSONAL_INTENT].includes(url.pathname)
+    || (url.pathname === HISTORY && url.search === '?walletKind=personal');
+}
+
+function appMeldFundingRequest(request, url, body) {
+  if (request.method === 'GET') {
+    if (url.pathname === PERSONAL_OPTIONS) {
+      const country = url.searchParams.get('country'), currency = url.searchParams.get('sourceCurrencyCode');
+      return APP_MELD_MARKETS.has(`${country}:${currency}`) && url.search === `?country=${country}&sourceCurrencyCode=${currency}`;
+    }
+    if (url.pathname === PERSONAL_STATUS) {
+      const reference = url.searchParams.get('checkoutReference');
+      return UUID.test(reference || '') && url.search === `?checkoutReference=${reference}`;
+    }
+    return url.pathname === HISTORY && url.search === '?walletKind=personal';
+  }
+  if (request.method !== 'POST' || url.pathname !== PERSONAL_INTENT || url.search
+    || request.headers.has('content-encoding') || !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')
+    || !body?.length || body.length > WALLET_FUNDING_MAX_BODY) return false;
+  try {
+    const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Object.keys(input).some(key => !APP_MELD_FIELDS.has(key))) return false;
+    const { requestId, walletAddress, country, sourceCurrencyCode = 'USD', amount,
+      paymentMethodType, serviceProvider, destinationCurrencyCode } = input;
+    if (typeof country !== 'string' || typeof sourceCurrencyCode !== 'string') return false;
+    const market = APP_MELD_MARKETS.get(`${country}:${sourceCurrencyCode}`);
+    return Boolean(market && typeof requestId === 'string' && UUID.test(requestId)
+      && typeof walletAddress === 'string' && /^0x[a-f0-9]{40}$/i.test(walletAddress)
+      && market.methods.includes(paymentMethodType)
+      && (serviceProvider === undefined || APP_MELD_PROVIDERS.has(serviceProvider))
+      && (destinationCurrencyCode === undefined || destinationCurrencyCode === market.asset)
+      && Number.isFinite(amount) && amount >= market.min && amount <= market.max
+      && (sourceCurrencyCode === 'COP' ? Number.isInteger(amount)
+        : Math.abs(amount * 100 - Math.round(amount * 100)) <= 0.000001));
+  } catch { return false; }
+}
+
 /** A separate capability for recording requested funding, never financial settlement. */
 export function walletFundingRequest(request, url, body, env, ready) {
   if (!ready || env.WALLET_FUNDING_ENABLED !== 'true' || url.protocol !== 'https:'
     || url.host !== 'auth.core.internal' || request.headers.has('x-vp-act-as')
     || !/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=[^;\s,]+(?:;|$)/.test(request.headers.get('cookie') || '')) return false;
+  const appMeld = env.CORE_ENV === 'production' && env.APP_MELD_PRODUCTION_ENABLED === 'true'
+    && request.headers.get('origin') === APP_ORIGIN && appMeldFundingPath(url);
+  if (appMeld || request.headers.has(APP_MELD_HEADER))
+    return appMeld && request.headers.get(APP_MELD_HEADER) === 'meld' && appMeldFundingRequest(request, url, body);
   if (request.method === 'GET') {
     if (url.pathname === `${MELD_CHECKOUT_PATH}/capabilities`) return request.headers.get('origin') === ADMINISTRATIVE_ORIGIN && !url.search;
     if (url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/offramp/options`) {
@@ -43,8 +104,8 @@ export function walletFundingRequest(request, url, body, env, ready) {
         && request.headers.get('origin') === ADMINISTRATIVE_ORIGIN
         && UUID.test(reference || '') && url.search === `?checkoutReference=${reference}`;
     }
-    if (url.pathname === `${WALLET_FUNDING_PREFIX}/history`) return ['?walletKind=personal', '?walletKind=administrative'].includes(url.search);
-    if ([`${WALLET_FUNDING_PREFIX}/personal/status`, `${WALLET_FUNDING_PREFIX}/administrative/status`].includes(url.pathname)) {
+    if (url.pathname === HISTORY) return ['?walletKind=personal', '?walletKind=administrative'].includes(url.search);
+    if ([PERSONAL_STATUS, `${WALLET_FUNDING_PREFIX}/administrative/status`].includes(url.pathname)) {
       const reference = url.searchParams.get('checkoutReference');
       return UUID.test(reference || '') && url.search === `?checkoutReference=${reference}`;
     }
@@ -52,7 +113,7 @@ export function walletFundingRequest(request, url, body, env, ready) {
     const sourceCurrencyCode = url.searchParams.get('sourceCurrencyCode');
     if (sourceCurrencyCode !== null && !/^[A-Z]{3}$/.test(sourceCurrencyCode)) return false;
     const currencyQuery = sourceCurrencyCode === null ? '' : `&sourceCurrencyCode=${sourceCurrencyCode}`;
-    if (url.pathname === `${WALLET_FUNDING_PREFIX}/personal/options`) return PERSONAL_COUNTRIES.has(country)
+    if (url.pathname === PERSONAL_OPTIONS) return PERSONAL_COUNTRIES.has(country)
       && (sourceCurrencyCode === null || sourceCurrencyCode === 'USD' || (country === 'MX' && sourceCurrencyCode === 'MXN'))
       && url.search === `?country=${country}${currencyQuery}`;
     const provider = url.searchParams.get('serviceProvider');
@@ -77,7 +138,7 @@ export function walletFundingRequest(request, url, body, env, ready) {
       return true;
     } catch { return false; }
   }
-  const personal = url.pathname === `${WALLET_FUNDING_PREFIX}/personal/intent`;
+  const personal = url.pathname === PERSONAL_INTENT;
   const administrative = url.pathname === `${WALLET_FUNDING_PREFIX}/administrative/session`;
   if (request.method !== 'POST' || (!personal && !administrative) || url.search
     || request.headers.has('content-encoding')

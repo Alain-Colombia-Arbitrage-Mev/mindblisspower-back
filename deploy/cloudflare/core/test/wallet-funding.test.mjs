@@ -15,6 +15,99 @@ function request(route = path, body = input, extra = {}) {
     'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
 }
 
+const appMeld = { ...env, APP_MELD_PRODUCTION_ENABLED: 'true' };
+const marker = 'x-mindbliss-funding-provider';
+const appHeaders = { origin: 'https://app.mindblisspower.com', [marker]: 'meld' };
+const personal = '/api/member/wallet-funding/personal';
+function appRead(route, headers = {}) {
+  return new Request('https://auth.core.internal' + route, { headers: {
+    cookie: 'better-auth.session_token=synthetic', ...appHeaders, ...headers,
+  } });
+}
+
+test('App MELD reads forward the native marker for exact personal options, status and history', async () => {
+  const read = (route, headers) => appRead(route, headers);
+  const history = '/api/member/wallet-funding/history?walletKind=personal';
+  const status = personal + '/status?checkoutReference=' + input.requestId;
+  const mexico = personal + '/options?country=MX&sourceCurrencyCode=MXN';
+  const resolve = (service, instance) => {
+    assert.deepEqual([service, instance], ['api', 'singleton']);
+    return { fetch: async forwarded => {
+      assert.equal(forwarded.headers.get(marker), 'meld');
+      assert.equal(forwarded.headers.get('origin'), appHeaders.origin);
+      assert.equal(forwarded.headers.get('cookie'), 'better-auth.session_token=synthetic');
+      return Response.json({});
+    } };
+  };
+  for (const route of [mexico, personal + '/options?country=MX&sourceCurrencyCode=USD',
+    personal + '/options?country=US&sourceCurrencyCode=USD', personal + '/options?country=CO&sourceCurrencyCode=COP',
+    history, status]) {
+    assert.equal((await dispatchCore(read(route), appMeld, resolve)).status, 200);
+  }
+  const never = () => assert.fail('Unapproved App MELD read reached the container');
+  for (const route of [mexico + '&country=MX', mexico + '&subject=other', mexico.replace('MXN', 'EUR'),
+    mexico.replace('country=MX', 'country=US'), mexico.replace('/options', '/%6fptions'),
+    history.replace('personal', 'administrative'), history + '&walletKind=personal', status + '&checkoutReference=' + input.requestId]) {
+    assert.equal((await dispatchCore(read(route), appMeld, never)).status, 503);
+  }
+  for (const headers of [{ cookie: '' }, { 'x-vp-act-as': 'other' }, { [marker]: '' }, { [marker]: 'meld, meld' },
+    { origin: '' }, { origin: 'https://mindblisspower.com' }, { origin: 'https://wallet.mindblisspower.com' },
+    { origin: 'https://app.mindblisspower.com.evil.test' }]) {
+    assert.equal((await dispatchCore(read(mexico, headers), appMeld, never)).status, 503);
+  }
+  for (const disabled of [env, { ...appMeld, CORE_ENV: 'staging' }, { ...appMeld, WALLET_FUNDING_ENABLED: 'false' }]) {
+    assert.equal((await dispatchCore(read(mexico), disabled, never)).status, 503);
+  }
+  const unmarked = read(mexico);
+  unmarked.headers.delete(marker);
+  assert.equal((await dispatchCore(unmarked, appMeld, never)).status, 503);
+});
+
+test('App MELD passes canonical country, currency, provider, amount and Polygon destination to native intent validation', async () => {
+  const mexico = { ...input, country: 'MX', sourceCurrencyCode: 'MXN', amount: 2000,
+    serviceProvider: 'MERCURYO', destinationCurrencyCode: 'USDT_POLYGON' };
+  const us = { ...input, sourceCurrencyCode: 'USD', paymentMethodType: 'LOCAL_BANK_TRANSFER',
+    serviceProvider: 'RAMPNOW', destinationCurrencyCode: 'USDC_POLYGON' };
+  const co = { ...input, country: 'CO', sourceCurrencyCode: 'COP', amount: 170000, paymentMethodType: 'PSE',
+    serviceProvider: 'ONRAMPMONEY', destinationCurrencyCode: 'USDC_POLYGON' };
+  for (const data of [mexico, { ...mexico, sourceCurrencyCode: 'USD', amount: 100 }, us, co,
+    { ...mexico, serviceProvider: undefined, destinationCurrencyCode: undefined }]) {
+    const incoming = request(path, data, appHeaders);
+    const result = await dispatchCore(incoming, appMeld, () => ({ fetch: async forwarded => {
+      assert.equal(forwarded.headers.get(marker), 'meld');
+      assert.equal(forwarded.headers.get('cookie'), incoming.headers.get('cookie'));
+      assert.deepEqual(await forwarded.json(), JSON.parse(JSON.stringify(data)));
+      return Response.json({ status: 'session_created' }, { status: 201 });
+    } }));
+    assert.equal(result.status, 201);
+  }
+
+  const never = () => assert.fail('Unapproved App MELD intent reached the container');
+  for (const change of [{ amount: 930.99 }, { amount: '2000' }, { amount: 2000.001 }, { country: 'US' },
+    { paymentMethodType: 'NETELLER' }, { serviceProvider: 'TOPPER' }, { destinationCurrencyCode: 'USDC_POLYGON' },
+    { redirectUrl: 'https://example.test' }, { walletAddress: null }, { requestId: [input.requestId] }]) {
+    assert.equal((await dispatchCore(request(path, { ...mexico, ...change }, appHeaders), appMeld, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(request(path, { ...co, amount: 170000.01 }, appHeaders), appMeld, never)).status, 503);
+  for (const change of [{ cookie: '' }, { origin: 'https://mindblisspower.com' }, { 'x-vp-act-as': '' },
+    { 'content-type': 'text/plain' }, { 'content-encoding': 'gzip' }, { [marker]: 'water' }]) {
+    assert.equal((await dispatchCore(request(path, mexico, { ...appHeaders, ...change }), appMeld, never)).status, 503);
+  }
+  assert.equal((await dispatchCore(request(path + '?x=1', mexico, appHeaders), appMeld, never)).status, 503);
+  assert.equal((await dispatchCore(request(path, mexico), appMeld, never)).status, 503);
+});
+
+test('App MELD capability keeps the legacy apex and Wallet requests independent and strips its marker on other routes', async () => {
+  const resolve = () => ({ fetch: async forwarded => {
+    assert.equal(forwarded.headers.get(marker), null);
+    return Response.json({});
+  } });
+  assert.equal((await dispatchCore(request(path, input, { origin: 'https://mindblisspower.com' }), appMeld, resolve)).status, 200);
+  const admin = '/api/member/wallet-funding/administrative/session';
+  assert.equal((await dispatchCore(request(admin, { ...input, serviceProvider: 'BANXA' }), appMeld, resolve)).status, 200);
+  assert.equal((await dispatchCore(appRead('/api/auth/get-session'), appMeld, resolve)).status, 200);
+});
+
 test('general Meld checkout is an exact separate native capability, disabled by default except private configuration metadata', async () => {
   const checkout = '/api/member/wallet-funding/administrative/checkout';
   const data = { requestId: input.requestId, country: 'US', amount: 100, sourceCurrencyCode: 'USD' };
