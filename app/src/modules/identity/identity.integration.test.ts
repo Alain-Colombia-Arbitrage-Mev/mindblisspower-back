@@ -243,6 +243,10 @@ integration('normalized email ambiguity, unavailable people and competing subjec
     ('Ambiguous','One','ambiguous@example.test','0','active',false),('Ambiguous','Two',' ambiguous@example.test ','0','active',false),
     ('Blocked','Legacy','blocked-auto@example.test','0','active',true),('Competing','Legacy','competing@example.test','0','pending',false)`;
   expect((await provisionAuthPerson(database, { userId: 'ambiguous-user' })).status).toBe('quarantined');
+  await connection`UPDATE mlm.person SET email='corrected-legacy-contact@example.test'
+    WHERE email::text=' ambiguous@example.test '`;
+  expect((await provisionAuthPerson(database, { userId: 'ambiguous-user' })).status).toBe('quarantined');
+  expect((await connection`SELECT user_id FROM mlm.person WHERE email::text='ambiguous@example.test'`)[0]!.user_id).toBeNull();
   expect((await provisionAuthPerson(database, { userId: 'blocked-auto-user' })).status).toBe('quarantined');
   expect((await connection`SELECT count(*)::int AS n FROM identity.auth_binding WHERE subject IN ('ambiguous-user','blocked-auto-user')`)[0]!.n).toBe(0);
   const results = await Promise.all(['competing-one','competing-two'].map(userId => provisionAuthPerson(database, { userId })));

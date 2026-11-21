@@ -28,6 +28,12 @@ export async function provisionAuthPerson(database: IdentityDatabase, input: { u
     // Serializes normalized email variants across auth subjects. Existing
     // bindings remain authoritative; no email, person data or node is replaced.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'person-email:' + normalizedEmail(auth.auth_email)},0))`);
+    // Removing one email match does not establish ownership of the remaining
+    // profile. Keep a previously ambiguous subject on the reviewed claim path.
+    const ambiguous = await tx.execute(sql`SELECT 1 FROM identity.link_conflict
+      WHERE subject=${userId} AND resolved_at IS NULL AND reason='identity_collision'
+        AND candidate_person_id IS NULL LIMIT 1`);
+    if (ambiguous.length) return { status: 'quarantined' };
     const candidates = await tx.execute<{ id: string; user_id: string | null; status: string; blacklisted: boolean; is_admin: boolean; access_restricted: boolean }>(sql`
       SELECT p.id::text,p.user_id,p.status::text,p.blacklisted,p.is_admin,${personAccessRestricted} AS access_restricted FROM mlm.person p
       WHERE lower(btrim(p.email::text))=${normalizedEmail(auth.auth_email)} ORDER BY p.id FOR UPDATE OF p`);
