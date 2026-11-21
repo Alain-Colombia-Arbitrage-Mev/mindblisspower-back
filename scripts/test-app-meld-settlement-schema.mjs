@@ -479,6 +479,55 @@ try {
   assert.equal(query(pagarAccounting(firstDeferred, [oldCheckout], { subject: 'dave' }), runtime), 't');
   assert.equal(query("SELECT count(*) FROM payments.app_pagar_allocation WHERE attempt_id=" + literal(oldCheckout) + ';'), '1');
   assert.equal(query("SELECT gross_usd_minor FROM payments.app_pagar_accounting_receipt WHERE subject='dave';"), '10000');
+
+  // Known outstanding lots must all fit before signing. An older draft with
+  // only the first whole lot frozen cannot post a partial package after 150.
+  const knownSecond = createAttempt({ subject: 'dave', amount: 50 });
+  assert.equal(query(record(knownSecond, { ...newProof, transaction: 'dave-second-known', tx: hash('d'), log: 51,
+    gross: 5000, fee: 100, received: 49000000 }), runtime), 't');
+  const oldPartial = randomUUID();
+  assert.equal(query(pagarPrepare(oldPartial, { subject: 'dave', amount: 95000000 }), runtime), 't');
+  assert.deepEqual(JSON.parse(query(pagarCandidates(oldPartial, 'dave'), runtime)).map(row => row.attempt_id), [newCheckout]);
+  query("UPDATE payments.personal_polygon_relay SET status='expired' WHERE id=" + literal(oldPartial) + ';');
+  query(await readFile(new URL('../_meta/migration/150_app_pagar_full_payment.sql', import.meta.url), 'utf8'));
+
+  const short = randomUUID(), otherToken = randomUUID(), exact = randomUUID();
+  reject(pagarPrepare(short, { subject: 'dave', amount: 143999999 }), /polygon_relay_full_payment_required/);
+  assert.equal(query('SELECT count(*) FROM payments.personal_polygon_relay WHERE id=' + literal(short) + ';'), '0');
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_intent WHERE payment_id=' + literal(short) + ';'), '0');
+  assert.equal(query(pagarPrepare(otherToken, { subject: 'dave', amount: 1, asset: usdt }), runtime), 't');
+  assert.equal(query(pagarCandidates(otherToken, 'dave'), runtime), '[]');
+
+  pagarConfirm(oldPartial);
+  reject(pagarAccounting(oldPartial, [newCheckout], { subject: 'dave' }), /polygon_relay_full_payment_required/);
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_allocation WHERE payment_id=' + literal(oldPartial) + ';'), '0');
+  assert.equal(query('SELECT count(*) FROM payments.app_pagar_accounting_receipt WHERE payment_id=' + literal(oldPartial) + ';'), '0');
+  assert.equal(query(pagarAccounting(firstDeferred, [oldCheckout], { subject: 'dave' }), runtime), 't');
+
+  // Simulate expiring the old reservation before a new full payment can be
+  // prepared. Its previously posted unrelated accounting receipt still stands.
+  query("UPDATE payments.personal_polygon_relay SET status='expired' WHERE id=" + literal(oldPartial) + ';');
+  assert.equal(query(pagarPrepare(exact, { subject: 'dave', amount: 144000000 }), runtime), 't');
+  assert.deepEqual(new Set(JSON.parse(query(pagarCandidates(exact, 'dave'), runtime)).map(row => row.attempt_id)),
+    new Set([newCheckout, knownSecond]));
+  pagarConfirm(exact);
+  assert.equal(query(pagarAccounting(exact, [newCheckout, knownSecond], { subject: 'dave' }), runtime), 't');
+  assert.equal(query(pagarAccounting(exact, [knownSecond, newCheckout], { subject: 'dave' }), runtime), 't');
+  assert.equal(query('SELECT concat_ws(\'|\',gross_usd_minor,treasury_received_atomic,allocated_received_atomic) ' +
+    'FROM payments.app_pagar_accounting_receipt WHERE payment_id=' + literal(exact) + ';'), '15000|144000000|144000000');
+
+  const extraLot = createAttempt({ subject: 'dave', amount: 50 });
+  assert.equal(query(record(extraLot, { ...newProof, transaction: 'dave-after-full', tx: hash('e'), log: 52,
+    gross: 5000, fee: 100, received: 49000000 }), runtime), 't');
+  const excess = randomUUID();
+  assert.equal(query(pagarPrepare(excess, { subject: 'dave', amount: 60000000 }), runtime), 't');
+  pagarConfirm(excess);
+  assert.equal(query(pagarAccounting(excess, [extraLot], { subject: 'dave' }), runtime), 't');
+  assert.equal(query('SELECT concat_ws(\'|\',gross_usd_minor,treasury_received_atomic,allocated_received_atomic) ' +
+    'FROM payments.app_pagar_accounting_receipt WHERE payment_id=' + literal(excess) + ';'), '5000|60000000|49000000');
+  const privateLots = 'SELECT * FROM payments.read_app_pagar_required_lots_v1(\'dave\',' + literal(excess) + ');';
+  reject(privateLots, /permission denied/, runtime);
+  reject(privateLots, /permission denied/, observer);
   console.log('App MELD settlement, package, scheduled reconciliation, Pagar allocation and accounting SQL passed (isolated PostgreSQL, no provider or chain calls).');
 } finally {
   const inspected = docker(['inspect', '--format', '{{ index .Config.Labels "mindbliss.synthetic" }} {{.HostConfig.NetworkMode}}', container]);
