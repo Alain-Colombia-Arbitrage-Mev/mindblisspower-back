@@ -67,6 +67,38 @@ test('Core permits the recharge package read for App MELD only, independent of h
   assert.equal((await dispatchCore(request({ route }), ready, stop)).status, 503);
 });
 
+test('Core admits bounded native Pagar commission history only from the exact App origin', async () => {
+  const route = '/api/member/pagar-commissions';
+  const env = { ...ready, MEMBER_PACKAGE_RIGHTS_ENABLED: 'false', APP_MELD_PRODUCTION_ENABLED: 'true', APP_PAGAR_CLOSE_ENABLED: 'true' };
+  const suffix = '?before=2026-11-16';
+  let calls = 0;
+  const result = await dispatchCore(request({ route, suffix }), env, (service, instance) => ({
+    fetch: async forwarded => {
+      calls++; assert.equal(service, 'api'); assert.equal(instance, 'singleton');
+      assert.equal(new URL(forwarded.url).pathname + new URL(forwarded.url).search, route + suffix);
+      assert.equal(forwarded.headers.get('cookie'), headers.cookie);
+      assert.equal(forwarded.headers.get('x-mindbliss-profile-subject'), headers['x-mindbliss-profile-subject']);
+      return Response.json({ virtualBalanceUsdMinor: 100, periods: [], nextBefore: null });
+    },
+  }));
+  assert.equal(result.status, 200); assert.equal(result.headers.get('cache-control'), 'private, no-store'); assert.equal(calls, 1);
+  const broad = { ...env, CORE_SERVICES_ENABLED: 'true', CORE_NETWORK_VERIFIED: 'true' };
+  const stop = () => assert.fail('invalid commissions request started a container');
+  for (const options of [
+    ...['POST', 'HEAD', 'DELETE'].map(method => ({ method })),
+    ...['?', '?owner=other', '?before=2026-11-17', '?before=2026-02-30', '?before=0000-01-03', '?before=2026-11-16&',
+      '?%62efore=2026-11-16', '?before=2026-11-%31%36', '?before=2026-11-16&before=2026-11-09',
+      '/export', '/pay', '/'].map(suffix => ({ suffix })),
+    { host: 'core.internal' }, { host: 'payments.core.internal' }, { route: '/api/member/pagar%2dcommissions' },
+    ...[{ origin: 'https://wallet.mindblisspower.com' }, { origin: 'https://mindblisspower.com' }, { cookie: '' },
+      { 'x-vp-act-as': '' }, { 'x-mindbliss-profile-subject': '' }].map(extra => ({ extra })),
+  ]) assert.equal((await dispatchCore(request({ route, ...options }), broad, stop)).status, 503);
+  for (const key of ['APP_PAGAR_CLOSE_ENABLED', 'APP_MELD_PRODUCTION_ENABLED', 'AUTH_SERVICES_ENABLED']) {
+    assert.equal((await dispatchCore(request({ route }), { ...broad, [key]: 'false' }, stop)).status, 503);
+  }
+  assert.equal((await dispatchCore(request({ route }), { ...broad, CORE_ENV: 'staging' }, stop)).status, 503);
+});
+
 test('Core package rights feature only changes its Native read flag and never forwards it to Go or enables financial capabilities', () => {
   const base = { CORE_ENV: 'production', AUTH_CUTOVER_VERIFIED: 'false',
     API_DATABASE_URL: 'postgres://reader.branch:synthetic@db.example.invalid/app?sslmode=verify-full',

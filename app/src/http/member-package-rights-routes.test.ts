@@ -4,7 +4,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { IdentityDatabase } from '../modules/identity/model';
 import type { ApiEnvironment } from './types';
-import { registerMemberPackageRightsRoutes } from './member-package-rights-routes';
+import { PAGAR_COMMISSIONS_PATH, registerMemberPackageRightsRoutes } from './member-package-rights-routes';
 
 const path = '/api/member/package-rights', rechargePath = '/api/member/recharge-package';
 const origin = 'https://app.mindblisspower.com';
@@ -12,9 +12,11 @@ const subject = 'synthetic-rights-owner', nativeSessionId = 'synthetic-native-se
 const headers = { origin, cookie, 'x-mindbliss-profile-subject': encodeURIComponent(subject) };
 const rights = { rightsOnly: true, economicActivation: false, roiEnabled: false, commissionsEnabled: false,
   policy: 'historical_membership_access_until_revoked_v1', totalCount: 0, activeCount: 0, items: [] };
-function application({ enabled = true, rechargeEnabled = true, authenticated = true, nativeSession = true, owner = subject,
+function application({ enabled = true, rechargeEnabled = true, closeEnabled = true, stage = 'production',
+  authenticated = true, nativeSession = true, owner = subject,
   execute = async () => [{ rights }] }: {
   enabled?: boolean; rechargeEnabled?: boolean; authenticated?: boolean; nativeSession?: boolean; owner?: string;
+  closeEnabled?: boolean; stage?: string;
   execute?: (query: SQL) => Promise<unknown[]>;
 } = {}) {
   const app = new Hono<ApiEnvironment>();
@@ -23,13 +25,14 @@ function application({ enabled = true, rechargeEnabled = true, authenticated = t
       ...(nativeSession ? { session: { id: nativeSessionId } } : {}) } as never : null); await next();
   });
   registerMemberPackageRightsRoutes(app, { database: { execute } as unknown as Pick<IdentityDatabase, 'execute'>,
-    environment: { MEMBER_PACKAGE_RIGHTS_ENABLED: String(enabled), APP_MELD_PRODUCTION_ENABLED: String(rechargeEnabled) } }); return app;
+    environment: { ENV: stage, MEMBER_PACKAGE_RIGHTS_ENABLED: String(enabled), APP_MELD_PRODUCTION_ENABLED: String(rechargeEnabled),
+      APP_PAGAR_CLOSE_ENABLED: String(closeEnabled) } }); return app;
 }
 
 test('the App recharge package projects the verified cumulative gross and never accepts caller amounts or owners', async () => {
   const confirmedAt = '2026-11-20T10:00:00.000Z';
   let calls = 0;
-  const app = application({ enabled: false, execute: async query => {
+  const app = application({ enabled: false, closeEnabled: false, execute: async query => {
     calls++;
     const sql = new PgDialect().sqlToQuery(query);
     expect(sql.sql).toContain('payments.read_app_recharge_package_v1');
@@ -57,6 +60,53 @@ test('native rights GET uses authenticated session authority, private caching an
   } });
   const response = await app.request(path, { headers }); expect(response.status).toBe(200);
   expect(await response.json()).toEqual(rights); expect(response.headers.get('cache-control')).toBe('private, no-store'); expect(calls).toBe(1);
+});
+
+test('Pagar commissions project the current owner and strict weekly cursor as a private display-only response', async () => {
+  const before = '2026-11-16';
+  const app = application({ enabled: false, execute: async query => {
+    const statement = new PgDialect().sqlToQuery(query);
+    expect(statement.sql).toContain('payments.read_app_pagar_commissions_v1');
+    expect(statement.params).toEqual([subject, nativeSessionId, before]);
+    return [{ virtual_balance_usd_minor: '2710', periods: [
+      { week_end: '2026-11-09', binary_usd_minor: '1400', rank_usd_minor: '310' },
+    ], next_before: null }];
+  } });
+  const response = await app.request(PAGAR_COMMISSIONS_PATH + '?before=' + before, { headers });
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(await response.json()).toEqual({ virtualBalanceUsdMinor: 2710, periods: [
+    { weekEnd: '2026-11-09', binaryUsdMinor: 1400, rankUsdMinor: 310 },
+  ], nextBefore: null });
+});
+
+test('Pagar commissions admit no alternate owner, wallet origins, mutations or ambiguous cursor', async () => {
+  const execute = async () => { throw Error('unexpected_sql'); };
+  const app = application({ execute });
+  for (const suffix of ['?', '?subject=other', '?before=2026-11-17', '?before=2026-02-30',
+    '?before=0000-01-03', '?before=2026-11-16&before=2026-11-16', '?before=2026-11-16&',
+    '?%62efore=2026-11-16', '?before=2026-11-%31%36']) {
+    expect((await app.request(PAGAR_COMMISSIONS_PATH + suffix, { headers })).status).toBe(400);
+  }
+  expect((await app.request(PAGAR_COMMISSIONS_PATH, { headers: { ...headers, origin: 'https://wallet.mindblisspower.com' } })).status).toBe(403);
+  expect((await app.request(PAGAR_COMMISSIONS_PATH, { headers: { ...headers, 'x-vp-act-as': 'synthetic' } })).status).toBe(403);
+  expect((await app.request(PAGAR_COMMISSIONS_PATH, { headers: { ...headers, 'x-mindbliss-profile-subject': 'other' } })).status).toBe(409);
+  for (const method of ['POST', 'HEAD', 'DELETE']) expect((await app.request(PAGAR_COMMISSIONS_PATH, { method, headers })).status).toBe(404);
+  expect((await application({ authenticated: false, execute }).request(PAGAR_COMMISSIONS_PATH, { headers })).status).toBe(401);
+  for (const options of [{ rechargeEnabled: false }, { closeEnabled: false }, { stage: 'staging' }]) {
+    expect((await application({ ...options, execute }).request(PAGAR_COMMISSIONS_PATH, { headers })).status).toBe(503);
+  }
+});
+
+test('Pagar commission projection rejects malformed totals and history without exposing SQL diagnostics', async () => {
+  const result = { virtual_balance_usd_minor: '200', periods: [], next_before: null };
+  for (const invalid of [{ ...result, virtual_balance_usd_minor: '9007199254740992' },
+    { ...result, next_before: '2026-11-16' }, { ...result, wallet: 'synthetic' },
+    { ...result, periods: [{ week_end: '2026-11-16', binary_usd_minor: '1', rank_usd_minor: '1', recipient: 'other' }] }]) {
+    const response = await application({ execute: async () => [invalid] }).request(PAGAR_COMMISSIONS_PATH, { headers });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: 'member_pagar_commissions_unavailable' });
+  }
 });
 
 test('feature disabled, missing cookie/session and foreign origins cannot reach SQL', async () => {

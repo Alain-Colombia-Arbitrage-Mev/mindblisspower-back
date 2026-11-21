@@ -17,7 +17,7 @@ import { registerAdministrativeWalletSigningRoutes } from './http/administrative
 import { registerAdministrativeOfframpSessionRoutes } from './http/administrative-offramp-session-routes';
 import { registerMemberProfileRoutes } from './http/member-profile-routes';
 import { registerMemberReferralRoutes } from './http/member-referral-routes';
-import { registerMemberPackageRightsRoutes } from './http/member-package-rights-routes';
+import { PAGAR_COMMISSIONS_PATH, registerMemberPackageRightsRoutes } from './http/member-package-rights-routes';
 import { registerPersonalCompanyPaymentRoutes } from './http/personal-company-payment-routes';
 import { registerPersonalPolygonRelayRoutes } from './http/personal-polygon-relay-routes';
 import { authDb } from './db/auth-client';
@@ -45,6 +45,10 @@ registerAppMeldReconciliation(app, { database: authDb, async reconcile(database,
 } });
 // Include failures returned by the shared session gate in private/no-store.
 app.use(OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy);
+app.use(PAGAR_COMMISSIONS_PATH, async (c, next) => {
+  c.header('Cache-Control', 'private, no-store');
+  await next();
+});
 app.use('/api/auth/*', bodyLimit({ maxSize: 32 * 1024,
   onError: c => c.json({ error: 'request_too_large' }, 413) }));
 app.use('/api/auth/*', authProxyContext(process.env.AUTH_BFF_SHARED_SECRET));

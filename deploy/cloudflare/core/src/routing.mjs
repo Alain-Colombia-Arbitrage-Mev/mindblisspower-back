@@ -39,7 +39,7 @@ const ADMINISTRATIVE_ACTION_SERVICE_ERRORS = new Set(['administrative_signing_un
 const MEMBER_PROFILE_SERVICE_ERRORS = new Set(['member_profile_unconfigured', 'member_profile_unavailable', 'member_profile_outcome_unconfirmed']);
 const MEMBER_REFERRAL_SERVICE_ERRORS = new Set(['member_referral_unconfigured', 'member_referral_unavailable']);
 const MEMBER_PACKAGE_RIGHTS_SERVICE_ERRORS = new Set(['member_package_rights_unconfigured', 'member_package_rights_unavailable',
-  'member_recharge_package_unavailable']);
+  'member_recharge_package_unavailable', 'member_pagar_commissions_unconfigured', 'member_pagar_commissions_unavailable']);
 const COMPANY_PAYMENT_SERVICE_ERRORS = new Set(['company_payment_unconfigured', 'company_payment_rpc_unavailable', 'company_payment_unavailable']);
 const POLYGON_RELAY_SERVICE_ERRORS = new Set(['polygon_relay_unconfigured', 'polygon_relay_unavailable',
   'polygon_relay_provider_unavailable', 'polygon_relay_sponsorship_rejected', 'polygon_relay_budget_unavailable',
