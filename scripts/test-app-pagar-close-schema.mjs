@@ -65,6 +65,7 @@ try {
     CREATE SCHEMA payments;
     CREATE SCHEMA mlm;
     CREATE SCHEMA identity;
+    CREATE SCHEMA auth;
     GRANT USAGE ON SCHEMA payments TO ${runtime},${owner},${observer};
     GRANT USAGE ON SCHEMA mlm,identity TO ${owner};
     CREATE TABLE mlm.affiliate(id bigint PRIMARY KEY,parent_id bigint,status text,person_id bigint);
@@ -115,7 +116,28 @@ try {
     REVOKE EXECUTE ON FUNCTION payments.hold_app_pagar_economic_receipt_v1(text,uuid) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION payments.hold_app_pagar_economic_receipt_v1(text,uuid) TO ${owner};
     CREATE FUNCTION identity.administrative_wallet_person(p_subject text)
-    RETURNS bigint LANGUAGE sql STABLE AS $$SELECT CASE WHEN p_subject='source-owner' THEN 2 ELSE 3 END::bigint$$;
+    RETURNS bigint LANGUAGE sql STABLE AS $$
+      SELECT CASE p_subject WHEN 'source-owner' THEN 2 WHEN 'held-owner' THEN 3 WHEN 'no-recharge' THEN 4 ELSE 99 END::bigint
+    $$;
+    CREATE TABLE auth.session(id text PRIMARY KEY,user_id text,expires_at timestamptz);
+    INSERT INTO auth.session
+    SELECT 'native-'||subject,subject,clock_timestamp()+interval '1 hour'
+    FROM (VALUES('source-owner'),('held-owner'),('no-recharge'),('no-affiliate')) AS members(subject);
+    INSERT INTO auth.session VALUES('expired-native','source-owner',clock_timestamp()-interval '1 hour');
+    CREATE FUNCTION identity.require_administrative_native_session(p_subject text,p_session text)
+    RETURNS timestamptz LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+      DECLARE v_expires timestamptz;
+      BEGIN
+        SELECT expires_at INTO v_expires FROM auth.session
+        WHERE id=p_session AND user_id=p_subject AND expires_at>clock_timestamp() FOR SHARE;
+        IF v_expires IS NULL THEN RAISE EXCEPTION 'native_session_required' USING ERRCODE='28000'; END IF;
+        RETURN v_expires;
+      END;
+    $$;
+    REVOKE EXECUTE ON FUNCTION identity.require_administrative_native_session(text,text),
+      identity.administrative_wallet_person(text) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION identity.require_administrative_native_session(text,text),
+      identity.administrative_wallet_person(text) TO ${owner};
     CREATE FUNCTION payments.read_app_pagar_points_v1(p_subject text,p_native_session text)
     RETURNS TABLE(own_pv text) LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
       BEGIN
@@ -235,7 +257,63 @@ try {
   rejects(benefits.replace('native-source-owner','native-held-owner'), runtime, /native_session_required/);
   assert.equal(query(recordReview('source-owner', payment, attempt, 'failed'), runtime), 't');
   assert.equal(query(benefits, runtime), '0|0|0|916', 'holds do not erase previously posted credits');
-  console.log('Pagar weekly close passed (isolated PostgreSQL, no provider or chain calls).');
+
+  query(await readFile(new URL('../_meta/migration/149_app_pagar_commissions.sql', import.meta.url), 'utf8'));
+  const commissions = (subject, session, cursor = 'NULL') =>
+    `SELECT row_to_json(r) FROM payments.read_app_pagar_commissions_v1('${subject}','${session}',${cursor}) r;`;
+  const readSource = commissions('source-owner', 'native-source-owner');
+  const source = JSON.parse(query(readSource, runtime));
+  assert.equal(source.virtual_balance_usd_minor, '916');
+  assert.deepEqual(source.periods.map(({ binary_usd_minor,rank_usd_minor }) => [binary_usd_minor,rank_usd_minor]), [['226','0']]);
+  assert.equal(source.next_before, null);
+  assert.deepEqual(JSON.parse(query(commissions('held-owner', 'native-held-owner'), runtime)),
+    { virtual_balance_usd_minor: '1610', periods: [], next_before: null }, 'royalty affects only its recipient total');
+  assert.deepEqual(JSON.parse(query(commissions('no-affiliate', 'native-no-affiliate'), runtime)),
+    { virtual_balance_usd_minor: '0', periods: [], next_before: null });
+  rejects(commissions('source-owner', 'native-held-owner'), runtime, /native_session_required/);
+  rejects(commissions('source-owner', 'expired-native'), runtime, /native_session_required/);
+  rejects(commissions('source-owner', 'native-source-owner', "'infinity'::date"), runtime, /invalid_cursor/);
+  rejects(commissions('source-owner', 'native-source-owner', "'2026-11-17'::date"), runtime, /invalid_cursor/);
+  rejects(readSource, observer, /permission denied/);
+  rejects('SELECT * FROM payments.app_pagar_bonus_credit;', runtime, /permission denied/);
+  rejects('SELECT * FROM payments.app_pagar_bonus_obligation;', runtime, /permission denied/);
+  query(`
+    INSERT INTO payments.app_pagar_bonus_period(week_end,treasury_token_atomic,treasury_cap_usd_minor,
+      roi_reserved_usd_minor,previous_bonus_usd_minor,eligible_usd_minor,credited_usd_minor)
+    SELECT (${horizon})-(7*(i+4)),100000000,7000,0,0,1000,1000 FROM generate_series(0,14) AS series(i);
+    INSERT INTO payments.app_pagar_bonus_obligation(kind,reference,recipient_affiliate_id,gross_usd_minor,cap_payment_id,
+      matched_pv,source_payment_id,identified_week)
+    VALUES('binary','commission-history-binary',2,500,'${payment}',100,'${payment}',(${horizon})-126),
+      ('rank','commission-history-rank',2,500,NULL,0,'${payment}',(${horizon})-126),
+      ('rank','commission-history-other-rank',4,600,NULL,0,'${payment}',(${horizon})-126),
+      ('direct','commission-history-direct-only',2,800,NULL,0,'${payment}',(${horizon})-126);
+    INSERT INTO payments.app_pagar_bonus_credit(week_end,kind,reference,credited_usd_minor)
+    SELECT (${horizon})-(7*(i+4)),kind,reference,value
+    FROM generate_series(0,13) AS series(i)
+    CROSS JOIN (VALUES('binary','commission-history-binary',10),('rank','commission-history-rank',20)) AS partial(kind,reference,value);
+    INSERT INTO payments.app_pagar_bonus_credit VALUES((${horizon})-126,'direct','commission-history-direct-only',30),
+      ((${horizon})-126,'rank','commission-history-other-rank',60);
+  `);
+  const firstPage = JSON.parse(query(readSource, runtime));
+  assert.equal(firstPage.virtual_balance_usd_minor, '1366');
+  assert.equal(firstPage.periods.length, 12);
+  assert.equal(firstPage.next_before, firstPage.periods[11].week_end);
+  assert.deepEqual(firstPage.periods[0], source.periods[0], 'prior credits are projected without data rewrites');
+  assert.deepEqual(firstPage.periods.slice(1).map(({ binary_usd_minor,rank_usd_minor }) => [binary_usd_minor,rank_usd_minor]),
+    new Array(11).fill(['10','20']));
+  const secondPage = JSON.parse(query(commissions('source-owner', 'native-source-owner', `'${firstPage.next_before}'::date`), runtime));
+  assert.equal(secondPage.virtual_balance_usd_minor, firstPage.virtual_balance_usd_minor);
+  assert.deepEqual(secondPage.periods.map(({ binary_usd_minor,rank_usd_minor }) => [binary_usd_minor,rank_usd_minor]),
+    new Array(3).fill(['10','20']));
+  assert.equal(secondPage.next_before, null);
+  assert.ok(secondPage.periods.every(({ week_end }) => week_end < firstPage.next_before));
+  const noRecharge = JSON.parse(query(commissions('no-recharge', 'native-no-recharge'), runtime));
+  assert.equal(noRecharge.virtual_balance_usd_minor, '60');
+  assert.deepEqual(noRecharge.periods.map(({ binary_usd_minor,rank_usd_minor }) => [binary_usd_minor,rank_usd_minor]), [['0','60']]);
+  assert.equal(noRecharge.next_before, null);
+  assert.equal(query("SELECT (SELECT amount FROM mlm.wallet_movement)||'|'||(SELECT amount FROM payments.nowpayments_engine_payment);"),
+    '567890|123456');
+  console.log('Pagar weekly close and owner-only commission history passed (isolated PostgreSQL, no provider or chain calls).');
 } finally {
   docker(['stop','-t','1',container]);
 }
