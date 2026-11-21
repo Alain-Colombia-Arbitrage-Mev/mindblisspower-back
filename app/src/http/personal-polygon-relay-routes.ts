@@ -14,6 +14,7 @@ const origins = new Set(['https://mindblisspower.com', APP_ORIGIN, 'https://mind
 const noStore = { 'Cache-Control': 'private, no-store', Vary: 'Cookie' };
 const forbidden = new Set(['polygon_relay_forbidden', 'polygon_relay_wallet_not_linked', 'wallet_identity_unavailable', 'company_payment_forbidden', 'company_payment_wallet_not_linked']);
 const conflicts = new Set(['polygon_relay_request_already_used', 'polygon_relay_pending_exists', 'polygon_relay_insufficient_balance',
+  'polygon_relay_full_payment_required',
   'polygon_relay_authorization_conflict', 'polygon_relay_expired', 'polygon_relay_signature_invalid', 'polygon_relay_authorization_nonce_changed',
   'polygon_relay_nonce_reserved', 'polygon_relay_attempt_conflict', 'polygon_relay_account_busy', 'polygon_relay_operation_locked',
   'polygon_relay_invalid_transition', 'polygon_relay_lease_expired', 'polygon_relay_budget_exceeded', 'polygon_relay_operation_conflict',

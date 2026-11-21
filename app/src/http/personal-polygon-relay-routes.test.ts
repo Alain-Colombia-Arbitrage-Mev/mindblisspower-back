@@ -85,7 +85,9 @@ test('relay status/history queries cannot select another owner or parse duplicat
   expect(calls).toBe(0);
   const path = `${PREFIX}/history`, response = await app.request(path, signed(path)); expect(await response.json()).toEqual({ walletKind: 'personal', payments: [] });
   for (const [message, code, status] of [['polygon_relay_rate_limited', 'polygon_relay_rate_limited', 429], ['polygon_relay_queue_busy', 'polygon_relay_queue_busy', 409],
-    ['polygon_relay_not_found', 'polygon_relay_not_found', 404], ['private SQL password RPC key signature', 'polygon_relay_unavailable', 503]] as const) {
+    ['polygon_relay_not_found', 'polygon_relay_not_found', 404],
+    ['polygon_relay_full_payment_required', 'polygon_relay_full_payment_required', 409],
+    ['private SQL password RPC key signature', 'polygon_relay_unavailable', 503]] as const) {
     const result = await application({ execute: async () => { throw Error(message); } }).request(path, signed(path)); expect(result.status).toBe(status); expect(await result.json()).toEqual({ error: code });
   }
 });
