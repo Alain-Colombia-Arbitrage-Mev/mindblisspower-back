@@ -48,7 +48,7 @@ export function registerMemberPackageRightsRoutes(app: ApiApplication, { databas
   app.get(rechargePath, async context => {
     const session = context.get('session')!;
     try { return context.json(await readAppRechargePackage(database, session.user.id, session.session.id,
-      context.req.raw.signal), 200, noStore); }
+      context.req.raw.signal, environment.APP_PAGAR_CLOSE_ENABLED === 'true'), 200, noStore); }
     catch { return context.json({ error: 'member_recharge_package_unavailable' }, 503, noStore); }
   });
 }

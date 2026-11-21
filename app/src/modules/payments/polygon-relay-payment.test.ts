@@ -12,7 +12,7 @@ import { preparePersonalPolygonRelay, submitPersonalPolygonRelay, verifyPersonal
 import { inspectPolygonRelayReceipt } from './polygon-relay-proof';
 import { createPolygonAaRelayer, prepareSignedPolygonRelayOperation } from './polygon-relay-aa';
 import { POLYGON_USDC_DOMAIN, POLYGON_USDC_IMPLEMENTATION, polygonUsdcTypedData } from './polygon-usdc-authorization';
-import { runAppPagarAccounting, runAppPagarInvestment } from './app-pagar-accounting';
+import { runAppPagarAccounting, runAppPagarClose, runAppPagarInvestment } from './app-pagar-accounting';
 
 export const id = '11111111-1111-4111-8111-111111111111', attempt = '22222222-2222-4222-8222-222222222222';
 const lease = '33333333-3333-4333-8333-333333333333', wallet = new Wallet(`0x${'2'.repeat(64)}`);
@@ -182,6 +182,30 @@ test('the Pagar investment job only reaches its own writer under both explicit p
   expect(db.queries).toHaveLength(0);
   await expect(runAppPagarInvestment(db.database, { environment: flag })).resolves.toEqual({ activated: 1, accrued_days: 0 });
   expect(db.queries).toHaveLength(1);
+});
+
+test('the App-only close checks lot reviews before writing and discards unavailable provider evidence', async () => {
+  const db = databaseFor(({ sql, params }) => {
+    if (sql.includes('read_app_pagar_lot_reviews_v1')) return [{ subject: 'owner', payment_id: id, attempt_id: attempt,
+      gross_usd_minor: '3000', received_atomic: amount, blockchain_tx_hash: blockHash,
+      meld_transaction_id: 'fixture-meld', block_number: '200', block_hash: blockHash, transfer_log_index: 0 }];
+    if (sql.includes('read_app_pagar_review_context_v1')) return [];
+    if (sql.includes('record_app_pagar_lot_review_v1')) {
+      expect(params).toEqual(['owner', id, attempt, 'pending']);
+      return [{ recorded: true }];
+    }
+    expect(sql).toContain('payments.run_app_pagar_close_v1()');
+    return [{ closed_weeks: 0, credited_rows: 0, credited_usd_minor: '0' }];
+  });
+  const environment = { ENV: 'production', APP_PAGAR_ACCOUNTING_ENABLED: 'true',
+    APP_PAGAR_INVESTMENT_ENABLED: 'true', APP_PAGAR_CLOSE_ENABLED: 'true' };
+  const empty = { closed_weeks: 0, credited_rows: 0, credited_usd_minor: '0' };
+  expect(await runAppPagarClose(db.database, { environment: { ...environment, ENV: 'staging' }, fetchImpl: noFetch })).toEqual(empty);
+  expect(db.queries).toHaveLength(0);
+  expect(await runAppPagarClose(db.database, { environment, fetchImpl: noFetch })).toEqual(empty);
+  expect(db.queries.map(query => query.sql.match(/payments\.([a-z0-9_]+)\(/)?.[1])).toEqual([
+    'read_app_pagar_lot_reviews_v1', 'read_app_pagar_review_context_v1', 'record_app_pagar_lot_review_v1', 'run_app_pagar_close_v1',
+  ]);
 });
 
 test('no signed operation or sponsorship occurs without first SQL lease; persisted replay cannot trigger a send', async () => {

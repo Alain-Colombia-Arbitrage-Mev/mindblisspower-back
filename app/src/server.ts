@@ -23,7 +23,7 @@ import { registerPersonalPolygonRelayRoutes } from './http/personal-polygon-rela
 import { authDb } from './db/auth-client';
 import { MELD_WEBHOOK_MAX_BYTES, MELD_WEBHOOK_PATH } from './modules/payments/meld-webhook';
 import { runAppMeldReconciliation } from './modules/payments/app-meld-funding-status';
-import { runAppPagarAccounting, runAppPagarInvestment } from './modules/payments/app-pagar-accounting';
+import { runAppPagarAccounting, runAppPagarClose, runAppPagarInvestment } from './modules/payments/app-pagar-accounting';
 import { authProxyContext } from './http/auth-proxy-context';
 import { OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy, registerOtpDiagnosticRoutes, registerOtpTraceReadiness } from './http/otp-diagnostic-routes';
 import type { ApiEnvironment } from './http/types';
@@ -32,10 +32,16 @@ const app = new Hono<ApiEnvironment>();
 app.onError(apiErrorHandler);
 registerOtpTraceReadiness(app);
 registerAppMeldReconciliation(app, { database: authDb, async reconcile(database, options) {
-  const [funding] = await Promise.all([
-    runAppMeldReconciliation(database, options), runAppPagarAccounting(database, options), runAppPagarInvestment(database, options),
+  const [funding, accounting, investment, close] = await Promise.allSettled([
+    runAppMeldReconciliation(database, options), runAppPagarAccounting(database, options),
+    runAppPagarInvestment(database, options), runAppPagarClose(database, options),
   ]);
-  return funding;
+  if (accounting.status === 'rejected' || investment.status === 'rejected' || close.status === 'rejected') {
+    console.warn(JSON.stringify({ event: 'app_pagar_job_unavailable',
+      accounting: accounting.status, investment: investment.status, close: close.status }));
+  }
+  if (funding.status === 'rejected') throw funding.reason;
+  return funding.value;
 } });
 // Include failures returned by the shared session gate in private/no-store.
 app.use(OTP_DIAGNOSTIC_PATH, otpDiagnosticPrivacy);

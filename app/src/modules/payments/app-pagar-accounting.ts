@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { IdentityDatabase } from '../identity/model';
-import { verifyAppMeldAccountingLot } from './app-meld-funding-status';
+import { observeAppMeldAccountingLot, verifyAppMeldAccountingLot } from './app-meld-funding-status';
 import { productionOperation, productionScope } from './meld-production-http';
 import { checkCompanyPaymentChain, createCompanyPaymentRpc } from './personal-company-rpc';
 import { readPersonalPolygonRelay, verifyPersonalPolygonRelay } from './polygon-relay-payment';
@@ -16,7 +16,7 @@ const block = z.object({ number: quantity, hash });
 const integer = z.union([z.string(), z.number().int().positive().max(Number.MAX_SAFE_INTEGER), z.bigint()])
   .transform(String).pipe(z.string().regex(/^[1-9][0-9]{0,18}$/));
 const pending = z.array(z.object({ subject: z.string().min(1).max(255), payment_id: uuid })).max(5);
-const lots = z.array(z.object({
+const lotProof = z.object({
   attempt_id: uuid,
   meld_transaction_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   gross_usd_minor: integer,
@@ -25,8 +25,18 @@ const lots = z.array(z.object({
   block_number: integer,
   block_hash: hash,
   transfer_log_index: z.number().int().nonnegative().max(2_147_483_647),
-})).max(20).refine(items => new Set(items.map(item => item.attempt_id)).size === items.length);
+});
+const lots = z.array(lotProof).max(20).refine(items => new Set(items.map(item => item.attempt_id)).size === items.length);
+const reviewQueue = z.array(lotProof.extend({ subject: z.string().min(1).max(255), payment_id: uuid })).max(8);
 const roiRun = z.object({ activated: z.number().int().nonnegative(), accrued_days: z.number().int().nonnegative() });
+const closeRun = z.object({ closed_weeks: z.number().int().nonnegative(), credited_rows: z.number().int().nonnegative(),
+  credited_usd_minor: z.string().regex(/^(?:0|[1-9][0-9]{0,37})$/) }).strict();
+
+function lotEvidence(lot: z.infer<typeof lotProof>) {
+  return { transactionId: lot.meld_transaction_id, transactionHash: lot.blockchain_tx_hash,
+    grossUsdMinor: lot.gross_usd_minor, receivedAtomic: lot.received_atomic,
+    blockNumber: lot.block_number, blockHash: lot.block_hash, logIndex: lot.transfer_log_index };
+}
 
 async function finalizedHeight(paymentBlock: bigint, paymentHash: string, environment: Environment,
   fetchImpl: typeof fetch, signal: AbortSignal) {
@@ -69,11 +79,8 @@ export async function runAppPagarAccounting(database: Database, {
         const verified: string[] = [];
         for (let offset = 0; offset < selected.length; offset += 4) {
           const batch = selected.slice(offset, offset + 4);
-          const checks = await Promise.allSettled(batch.map(lot => verifyAppMeldAccountingLot(database, subject, lot.attempt_id, {
-            transactionId: lot.meld_transaction_id, transactionHash: lot.blockchain_tx_hash,
-            grossUsdMinor: lot.gross_usd_minor, receivedAtomic: lot.received_atomic,
-            blockNumber: lot.block_number, blockHash: lot.block_hash, logIndex: lot.transfer_log_index,
-          }, environment, fetchImpl, scope.signal)));
+          const checks = await Promise.allSettled(batch.map(lot => verifyAppMeldAccountingLot(database, subject, lot.attempt_id,
+            lotEvidence(lot), environment, fetchImpl, scope.signal)));
           if (checks.some(result => result.status !== 'fulfilled' || !result.value)) break;
           verified.push(...batch.map(lot => lot.attempt_id));
         }
@@ -100,6 +107,40 @@ export async function runAppPagarInvestment(database: Database, {
   try {
     const [result] = z.array(roiRun).length(1).parse(await productionOperation(() => database.execute(sql`
       SELECT * FROM payments.run_app_pagar_roi_v1()
+    `), scope.signal));
+    return result!;
+  } finally { scope.close(); }
+}
+
+/** Only the signed production schedule can review a source or run the Pagar close. */
+export async function runAppPagarClose(database: Database, {
+  environment = process.env, fetchImpl = fetch, signal,
+}: Dependencies = {}) {
+  if (environment.ENV !== 'production' || environment.APP_PAGAR_ACCOUNTING_ENABLED !== 'true'
+    || environment.APP_PAGAR_INVESTMENT_ENABLED !== 'true' || environment.APP_PAGAR_CLOSE_ENABLED !== 'true') {
+    return { closed_weeks: 0, credited_rows: 0, credited_usd_minor: '0' };
+  }
+  const scope = productionScope(signal);
+  try {
+    const queue = reviewQueue.parse(await productionOperation(() => database.execute(sql`
+      SELECT * FROM payments.read_app_pagar_lot_reviews_v1()
+    `), scope.signal));
+    for (let offset = 0; offset < queue.length; offset += 4) {
+      const batch = queue.slice(offset, offset + 4);
+      const checks = await Promise.allSettled(batch.map(lot => observeAppMeldAccountingLot(database, lot.subject, lot.attempt_id,
+        lotEvidence(lot), environment, fetchImpl, scope.signal, true)));
+      for (const [index, result] of checks.entries()) {
+        const lot = batch[index]!;
+        const state = result.status === 'fulfilled' ? result.value : 'pending';
+        const ack = await productionOperation(() => database.execute(sql`
+          SELECT payments.record_app_pagar_lot_review_v1(${lot.subject},${lot.payment_id}::uuid,
+            ${lot.attempt_id}::uuid,${state}) AS recorded
+        `), scope.signal);
+        if (ack.length !== 1 || ack[0]?.recorded !== true) throw Error('app_pagar_close_unavailable');
+      }
+    }
+    const [result] = z.array(closeRun).length(1).parse(await productionOperation(() => database.execute(sql`
+      SELECT * FROM payments.run_app_pagar_close_v1()
     `), scope.signal));
     return result!;
   } finally { scope.close(); }

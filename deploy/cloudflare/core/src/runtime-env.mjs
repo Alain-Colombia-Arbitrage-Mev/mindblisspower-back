@@ -173,7 +173,10 @@ export function containerEnvironment(service, env) {
       values.APP_MELD_PRODUCTION_ENABLED = 'true';
       if (polygonRelayEnabled && env.APP_PAGAR_ACCOUNTING_ENABLED === 'true') {
         values.APP_PAGAR_ACCOUNTING_ENABLED = 'true';
-        if (env.APP_PAGAR_INVESTMENT_ENABLED === 'true') values.APP_PAGAR_INVESTMENT_ENABLED = 'true';
+        if (env.APP_PAGAR_INVESTMENT_ENABLED === 'true') {
+          values.APP_PAGAR_INVESTMENT_ENABLED = 'true';
+          if (env.APP_PAGAR_CLOSE_ENABLED === 'true') values.APP_PAGAR_CLOSE_ENABLED = 'true';
+        }
       }
       if (/^[\x21-\x7e]{1,2048}$/.test(env.MELD_PRODUCTION_API_KEYS || '') && /^[A-Za-z0-9_-]{1,128}$/.test(env.MELD_PRODUCTION_ACCOUNT_ID || '')) {
         values.MELD_PRODUCTION_API_KEYS = env.MELD_PRODUCTION_API_KEYS;

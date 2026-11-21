@@ -126,7 +126,8 @@ async function deliveredOnNetwork(row: Attempt, hash: string, amountReceived: bi
 
 const reconcileGates = new WeakMap<Database, ReturnType<typeof createAdministrativePreflightGate>>();
 async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwner | undefined,
-  environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal, expected?: ExpectedAccountingSettlement) {
+  environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal, expected?: ExpectedAccountingSettlement,
+  includeRelated = false) {
   if (row.status !== 'session_created' || row.provider_session_id === null || row.provider_customer_id === null) return unconfirmed();
   const key = environment.MELD_PRODUCTION_API_KEYS;
   const account = identifier.safeParse(environment.MELD_PRODUCTION_ACCOUNT_ID);
@@ -143,12 +144,16 @@ async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwne
   }
   try {
     const query = new URLSearchParams({ externalSessionIds: row.id, sessionIds: row.provider_session_id,
-      externalCustomerIds: row.customer_reference, serviceProviders: row.service_provider, types: 'CRYPTO_PURCHASE', limit: '2' });
+      externalCustomerIds: row.customer_reference, serviceProviders: row.service_provider, limit: '2' });
+    // Before a close, a second transaction in the same checkout makes the
+    // evidence ambiguous. Do not screen refunds out of the search.
+    if (!includeRelated) query.set('types', 'CRYPTO_PURCHASE');
     const searched = await productionMeldJson(`/payments/transactions?${query}`, transport);
     const found = search.safeParse(searched.data);
     if (!searched.ok || !found.success) throw unavailable();
     const id = found.data.transactions[0]?.id;
     if (!id) return unconfirmed();
+    if (expected && id !== expected.transactionId) throw unavailable();
     const fetched = await productionMeldJson(`/payments/transactions/${encodeURIComponent(id)}`, transport);
     const parsed = result.safeParse(fetched.data);
     if (!fetched.ok || !parsed.success) throw unavailable();
@@ -196,13 +201,22 @@ async function reconcile(database: Database, row: Attempt, proofOwner: ProofOwne
 /** A financial lot must still agree with fresh provider detail and its finalized chain credit. */
 export async function verifyAppMeldAccountingLot(database: Database, subject: string, reference: string,
   expected: ExpectedAccountingSettlement, environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal) {
+  return await observeAppMeldAccountingLot(database, subject, reference, expected, environment, fetchImpl, signal) === 'confirmed';
+}
+
+export async function observeAppMeldAccountingLot(database: Database, subject: string, reference: string,
+  expected: ExpectedAccountingSettlement, environment: Environment, fetchImpl: typeof fetch, signal: AbortSignal,
+  includeRelated = false) {
   const owner = ownerInput.parse(subject), requestId = uuid.parse(reference);
-  const rows = await productionOperation(() => database.execute(sql`SELECT * FROM payments.read_app_meld_funding_v3(${owner},${requestId}::uuid)`), signal);
-  if (rows.length !== 1) return false;
+  const lookup = includeRelated
+    ? sql`SELECT * FROM payments.read_app_pagar_review_context_v1(${owner},${requestId}::uuid)`
+    : sql`SELECT * FROM payments.read_app_meld_funding_v3(${owner},${requestId}::uuid)`;
+  const rows = await productionOperation(() => database.execute(lookup), signal);
+  if (rows.length !== 1) return 'pending' as const;
   const row = ownedAttempt(rows[0], owner);
-  if (row.id !== requestId) return false;
-  const proof = await reconcile(database, row, undefined, environment, fetchImpl, signal, expected);
-  return proof.state === 'confirmed';
+  if (row.id !== requestId) return 'pending' as const;
+  const proof = await reconcile(database, row, undefined, environment, fetchImpl, signal, expected, includeRelated);
+  return proof.state === 'unconfirmed' ? 'pending' as const : proof.state;
 }
 
 /** Owned App reference reconciled against the production MELD session and its delivery chain. */
