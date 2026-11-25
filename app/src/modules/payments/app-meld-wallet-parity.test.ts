@@ -53,9 +53,59 @@ test('App exposes every Wallet catalog rail on its exact network with independen
     count += actual.length;
   }
   expect(pairs.size).toBe(74);
-  expect(count).toBe(143);
-  expect(walletCoverage.rows.some(row => row.serviceProvider === 'RAMPNOW')).toBe(false);
-  expect(calls.size).toBe(76);
+  expect(count).toBe(149);
+  expect(walletCoverage.rows.filter(row => row.serviceProvider === 'RAMPNOW')
+    .map(row => [row.country, row.sourceCurrencyCode, row.paymentMethodType, row.destinationCurrencyCode]))
+    .toEqual([['DE', 'EUR', 'SEPA', 'USDC_POLYGON']]);
+  expect(calls.size).toBe(81);
+});
+
+test('local checkout keeps the exact bank rail, wallet and fiat precision through the provider handoff', async () => {
+  const requestId = '6d492c47-80be-4e14-bc5f-54afaa56fc23';
+  const customer = 'aa0ecbcc-54d8-4a6e-a0ac-4a662ac8ed44';
+  const walletAddress = '0x' + '3'.repeat(40);
+  const sessionId = 'provider-session';
+  for (const row of walletCoverage.rows.slice(-6)) {
+    const { country, sourceCurrencyCode: fiat, destinationCurrencyCode: asset, paymentMethodType: method,
+      serviceProvider: provider, verifiedAmount: amount, minorUnits, minimumAmount, maximumAmount } = row;
+    const database = { execute: async () => [{ id: requestId, wallet_address: walletAddress, customer_reference: customer,
+      created: true, status: 'initiated', created_at: new Date(), finished: true }] } as unknown as Pick<IdentityDatabase, 'execute'>;
+    const fetchImpl = (async (target, init) => {
+      const path = new URL(String(target)).pathname;
+      if (path.includes('/supported/routes/')) return Response.json([{ partner: provider, source: fiat, destination: asset,
+        paymentMethods: [{ name: method, limits: { currencyCode: fiat, min: minimumAmount, max: maximumAmount } }] }]);
+      const body = JSON.parse(String(init?.body));
+      const selection = { countryCode: country, sourceCurrencyCode: fiat, destinationCurrencyCode: asset, walletAddress, paymentMethodType: method };
+      if (path === '/payments/crypto/quote') {
+        expect(body).toMatchObject({ ...selection, sourceAmount: amount, serviceProviders: [provider] });
+        return Response.json({ quotes: [{ ...selection, sourceAmount: amount, serviceProvider: provider,
+          transactionType: 'CRYPTO_PURCHASE', totalFee: 1, destinationAmount: 50 }] });
+      }
+      const amountText = amount.toFixed(minorUnits);
+      expect(body.sessionData).toMatchObject({ ...selection, serviceProvider: provider, sourceAmount: amountText,
+        lockFields: expect.arrayContaining(['walletAddress', 'sourceCurrencyCode', 'sourceAmount', 'destinationCurrencyCode', 'paymentMethodType']) });
+      const redirectUrl = body.sessionData.redirectUrl;
+      const widgetUrl = 'https://meldcrypto.com/?token=fixture';
+      const banxa = 'https://meldshared.banxa.com/papi/transit/?initId=fixture';
+      const rampNow = new URL('https://app.rampnow.io/order/quote');
+      rampNow.search = new URLSearchParams({ orderType: 'buy', srcCurrency: fiat, srcChain: 'fiat', dstCurrency: 'USDC', dstChain: 'polygon',
+        srcAmount: amountText, walletAddress, lockFields: 'walletAddress', paymentMode: 'sepa', prefill: 'true',
+        externalOrderId: sessionId, returnUrl: redirectUrl }).toString();
+      const alchemy = new URL('https://ramp.alchemypay.org/');
+      alchemy.search = new URLSearchParams({ address: walletAddress, country, fiat, fiatAmount: amountText, crypto: 'USDC', network: 'ARBITRUM',
+        redirectUrl, showTable: 'buy', merchantOrderNo: sessionId, appId: 'fixture', timestamp: '1795616000000', sign: 'a'.repeat(43) + '=',
+        callbackUrl: 'https://api.meld.io/webhooks/alchemypay/fixture' }).toString();
+      return Response.json({ id: sessionId, customerId: 'provider-customer', externalSessionId: requestId,
+        externalCustomerId: customer, serviceProvider: provider, widgetUrl,
+        serviceProviderWidgetUrl: { BANXA: banxa, RAMPNOW: rampNow.href, ALCHEMYPAY: alchemy.href }[provider] });
+    }) as typeof fetch;
+    await expect(createAppMeldFunding(database, { requestId, country, sourceCurrencyCode: fiat, amount,
+      paymentMethodType: method, destinationCurrencyCode: asset, serviceProvider: provider, walletAddress },
+    { subject: 'member', nativeSessionId: 'fixture-session', clientIp: '192.0.2.1', environment, fetchImpl })).resolves.toMatchObject({
+      serviceProvider: provider, paymentMethodType: method, sourceCurrencyCode: fiat, requestedAmount: amount,
+      destinationCurrencyCode: asset, destination: { address: walletAddress }, status: 'session_created',
+    });
+  }
 });
 
 test('App accepts only an issuer-bound Banxa transit or an opaque Meld session for the linked wallet', async () => {

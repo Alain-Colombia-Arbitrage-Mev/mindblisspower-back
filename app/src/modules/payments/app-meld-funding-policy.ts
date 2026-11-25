@@ -6,8 +6,7 @@ import { PERSONAL_FUNDING_MAXIMUM_COP, PERSONAL_FUNDING_MAXIMUM_USD, PERSONAL_FU
   PERSONAL_FUNDING_MINIMUM_MXN, PERSONAL_FUNDING_MINIMUM_USD } from './reown-funding-options';
 
 export const appMeldAsset = z.enum(['USDT_POLYGON', 'USDC_POLYGON', 'USDC_ARBITRUM', 'USDC']);
-export const appMeldCheckoutProvider = z.enum(['MERCURYO', 'ONRAMPMONEY', 'ALCHEMYPAY', 'BANXA', 'ONMETA']);
-export const appMeldProvider = appMeldCheckoutProvider.or(z.literal('RAMPNOW'));
+export const appMeldProvider = z.enum(['MERCURYO', 'ONRAMPMONEY', 'ALCHEMYPAY', 'BANXA', 'ONMETA', 'RAMPNOW']);
 export const appMeldCountry = z.string().regex(/^[A-Z]{2}$/);
 export const appMeldCurrency = z.string().regex(/^[A-Z]{3}$/);
 export const appMeldMethod = z.string().regex(/^[A-Z0-9_]{2,40}$/);
@@ -52,7 +51,7 @@ const historicalMarkets: readonly HistoricalMarket[] = [
 ];
 
 const coverageRow = z.object({
-  country: appMeldCountry, sourceCurrencyCode: appMeldCurrency, serviceProvider: appMeldCheckoutProvider,
+  country: appMeldCountry, sourceCurrencyCode: appMeldCurrency, serviceProvider: appMeldProvider,
   paymentMethodType: appMeldMethod, minorUnits: z.union([z.literal(0), z.literal(2)]),
   minimumAmount: z.number().finite().nonnegative(), maximumAmount: z.number().finite().positive().max(1_000_000_000),
   destinationCurrencyCode: appMeldAsset.default('USDT_POLYGON'),
@@ -98,7 +97,7 @@ export function appMeldMarket(country: string, currency: string) {
 }
 
 export function appMeldRecordedRoute(country: string, currency: string, provider: string, method: string, asset: AppMeldAsset, amount: number) {
-  if (provider === 'RAMPNOW') return country === 'US' && currency === 'USD' && asset !== 'USDT_POLYGON'
+  if (provider === 'RAMPNOW' && country === 'US' && currency === 'USD') return asset !== 'USDT_POLYGON'
     && historicalRampNowMethods.has(method) && appMeldAmountFitsPrecision(amount, 2) && amount >= 50 && amount <= 10_000;
   const market = appMeldMarket(country, currency);
   if (market && appMeldAmountFitsPrecision(amount, market.minorUnits) && market.rows.some(row => {

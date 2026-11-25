@@ -5,7 +5,7 @@ import type { IdentityDatabase } from '../identity/model';
 import { createAdministrativePreflightGate, personalFundingInput } from './wallet-funding';
 import { additionalAppMeldOnrampParameters } from './app-meld-additional-markets';
 import { productionMeldJson, productionOperation, productionScope } from './meld-production-http';
-import { appMeldAmountFitsPrecision, appMeldAsset, appMeldCheckoutProvider, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, appMeldRouteBounds,
+import { appMeldAmountFitsPrecision, appMeldAsset, appMeldDestination, appMeldMarket, appMeldNetwork, appMeldProvider, appMeldRouteBounds,
   type AppMeldAsset, type AppMeldProvider } from './app-meld-funding-policy';
 
 export const APP_MELD_ORIGIN = 'https://app.mindblisspower.com';
@@ -80,12 +80,12 @@ export async function readAppMeldOptions(country: string, sourceCurrencyCode: st
   } finally { scope.close(); }
 }
 
-const quoteSchema = z.object({ quotes: z.array(z.object({ serviceProvider: appMeldCheckoutProvider, countryCode: z.string().optional(),
+const quoteSchema = z.object({ quotes: z.array(z.object({ serviceProvider: appMeldProvider, countryCode: z.string().optional(),
   sourceCurrencyCode: z.string(), sourceAmount: z.number(), paymentMethodType: z.string(), destinationCurrencyCode: appMeldAsset,
   destinationAmount: z.number().finite().positive(), totalFee: z.number().finite().nonnegative(), transactionType: z.literal('CRYPTO_PURCHASE'),
   walletAddress: z.string().optional(), accountId: identifier.optional() })).length(1) });
 const widget = z.object({ id: identifier, customerId: identifier, externalSessionId: z.string().uuid(), externalCustomerId: z.string().uuid(),
-  serviceProvider: appMeldCheckoutProvider.optional(), widgetUrl: z.string().max(8192).nullish(), serviceProviderWidgetUrl: z.string().max(8192).nullish() });
+  serviceProvider: appMeldProvider.optional(), widgetUrl: z.string().max(8192).nullish(), serviceProviderWidgetUrl: z.string().max(8192).nullish() });
 const reserved = z.object({ id: z.string().uuid(), wallet_address: address, customer_reference: z.string().uuid(), created: z.boolean(),
   status: z.literal('initiated'), created_at: z.coerce.date() });
 const mercuryoWidgetMethods = new Map([['CREDIT_DEBIT_CARD', 'card'], ['APPLE_PAY', 'apple'], ['GOOGLE_PAY', 'google']]);
@@ -102,11 +102,12 @@ function banxaCheckoutUrl(value: string | null | undefined) {
   } catch { return null; }
 }
 function matchesWidget(link: string | null | undefined, provider: AppMeldProvider, id: string, wallet: string, asset: AppMeldAsset,
-  { sourceCurrencyCode: fiat, country, amount, paymentMethodType }: z.infer<typeof appMeldInput>, redirectUrl: string) {
+  { sourceCurrencyCode: fiat, country, amount, paymentMethodType }: z.infer<typeof appMeldInput>, amountText: string, redirectUrl: string) {
   if (provider === 'BANXA' || provider === 'ONMETA') {
     // These routes authenticate an opaque MELD or Banxa checkout. The exact
     // quote, the linked recipient and the locked session parameters bind it.
-    return asset === 'USDT_POLYGON';
+    return asset === 'USDT_POLYGON' || (provider === 'BANXA' && country === 'MX' && fiat === 'MXN'
+      && paymentMethodType === 'SPEI' && asset === 'USDC_POLYGON' && Boolean(banxaCheckoutUrl(link)));
   }
   if (provider === 'ONRAMPMONEY' && asset === 'USDT_POLYGON' && !link) return true;
   if (!link) return false;
@@ -129,16 +130,23 @@ function matchesWidget(link: string | null | undefined, provider: AppMeldProvide
     }
     if (provider === 'ALCHEMYPAY') {
       const callback = new URL(query.get('callbackUrl') || '');
-      // The MELD request specifies Pix. Verify the signed amount and destination even
-      // when Alchemy Pay's URL does not include an explicit payWayCode.
-      return country === 'BR' && fiat === 'BRL' && asset === 'USDC_ARBITRUM' && paymentMethodType === 'PIX'
+      // The approved rail is bound in the MELD session. Alchemy's signed
+      // handoff contains the country, fiat, amount, asset and recipient.
+      return asset === 'USDC_ARBITRUM'
         && url.origin === 'https://ramp.alchemypay.org' && url.pathname === '/' && !query.has('payWayCode')
-        && matches({ address: wallet, country, fiat, fiatAmount: amount.toFixed(2), crypto: token, network,
+        && matches({ address: wallet, country, fiat, fiatAmount: amountText, crypto: token, network,
           redirectUrl, showTable: 'buy', merchantOrderNo: id })
         && callback.origin === 'https://api.meld.io' && /^\/webhooks\/alchemypay\/[A-Za-z0-9_-]{1,128}$/.test(callback.pathname)
         && !callback.username && !callback.password && !callback.search && !callback.hash
         && identifier.safeParse(query.get('appId')).success
         && /^\d{13}$/.test(query.get('timestamp') || '') && /^[A-Za-z0-9+/]{43}=$/.test(query.get('sign') || '');
+    }
+    if (provider === 'RAMPNOW') {
+      return country === 'DE' && fiat === 'EUR' && paymentMethodType === 'SEPA' && asset === 'USDC_POLYGON'
+        && url.origin === 'https://app.rampnow.io' && url.pathname === '/order/quote'
+        && matches({ orderType: 'buy', srcCurrency: fiat, srcChain: 'fiat', dstCurrency: token, dstChain: destination.network,
+          srcAmount: amountText, walletAddress: wallet, lockFields: 'walletAddress', paymentMode: 'sepa', prefill: 'true',
+          externalOrderId: id, returnUrl: redirectUrl });
     }
     if (provider === 'ONRAMPMONEY') {
       const verified = additionalAppMeldOnrampParameters(country, fiat, paymentMethodType);
@@ -207,15 +215,16 @@ export async function createAppMeldFunding(database: Database, raw: unknown, {
       || (estimate.walletAddress && estimate.walletAddress.toLowerCase() !== walletAddress) || (estimate.accountId && estimate.accountId !== config.account)) throw unavailable();
 
     const redirectUrl = `${APP_MELD_ORIGIN}/dashboard/wallet-personal?walletCheckoutReference=${journalId}`;
+    const amountText = amount.toFixed(market.minorUnits);
     const session = await productionMeldJson('/crypto/session/widget', { ...config, fetchImpl, signal: scope.signal,
       body: { sessionType: 'BUY', externalSessionId: journalId, externalCustomerId: row.data.customer_reference,
-        sessionData: { serviceProvider, walletAddress, countryCode: country, sourceCurrencyCode, sourceAmount: amount.toFixed(market.minorUnits),
+        sessionData: { serviceProvider, walletAddress, countryCode: country, sourceCurrencyCode, sourceAmount: amountText,
           destinationCurrencyCode: asset, paymentMethodType, clientIpAddress: clientIp, redirectUrl,
           lockFields: ['walletAddress', 'destinationCurrencyCode', 'sourceCurrencyCode', 'sourceAmount', 'paymentMethodType'] } } });
     const parsed = widget.safeParse(session.data);
     if (!session.ok || !parsed.success || parsed.data.externalSessionId !== journalId
       || parsed.data.externalCustomerId !== row.data.customer_reference || (parsed.data.serviceProvider && parsed.data.serviceProvider !== serviceProvider)
-      || !matchesWidget(parsed.data.serviceProviderWidgetUrl, serviceProvider, parsed.data.id, walletAddress, asset, input, redirectUrl)) throw unavailable();
+      || !matchesWidget(parsed.data.serviceProviderWidgetUrl, serviceProvider, parsed.data.id, walletAddress, asset, input, amountText, redirectUrl)) throw unavailable();
     const url = (serviceProvider === 'BANXA' ? banxaCheckoutUrl(parsed.data.serviceProviderWidgetUrl) : null)
       ?? checkoutUrl(parsed.data.widgetUrl);
     if (!url) throw unavailable();

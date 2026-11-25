@@ -528,7 +528,22 @@ try {
   const privateLots = 'SELECT * FROM payments.read_app_pagar_required_lots_v1(\'dave\',' + literal(excess) + ');';
   reject(privateLots, /permission denied/, runtime);
   reject(privateLots, /permission denied/, observer);
-  console.log('App MELD settlement, package, scheduled reconciliation, Pagar allocation and accounting SQL passed (isolated PostgreSQL, no provider or chain calls).');
+  query(await readFile(new URL('../_meta/migration/151_app_meld_local_payment_routes.sql', import.meta.url), 'utf8'));
+  const localRoutes = JSON.parse(await readFile(new URL('../app/src/modules/payments/app-meld-wallet-coverage.json', import.meta.url), 'utf8')).rows.slice(-6);
+  function reserveLocal(route, patch = {}) {
+    const { country, sourceCurrencyCode, minimumAmount, paymentMethodType, serviceProvider, destinationCurrencyCode } = { ...route, ...patch };
+    const args = ['bob', 'bob-new', randomUUID(), wallet('bob'), country, sourceCurrencyCode,
+      minimumAmount, paymentMethodType, serviceProvider, 'merchant-test', destinationCurrencyCode];
+    return 'SELECT created FROM payments.reserve_app_meld_funding_v3(' + args.map(literal).join(',') + ');';
+  }
+  for (const route of localRoutes) {
+    assert.equal(query('BEGIN;' + reserveLocal(route) + 'ROLLBACK;', runtime), 't');
+    reject(reserveLocal(route, { minimumAmount: route.minimumAmount - 1 }), /wallet_funding_invalid_request/);
+    reject(reserveLocal(route, { paymentMethodType: 'CREDIT_DEBIT_CARD' }), /wallet_funding_invalid_request/);
+  }
+  const sepa = localRoutes.at(-1);
+  reject(reserveLocal(sepa, { country: 'US', sourceCurrencyCode: 'USD', minimumAmount: 100, paymentMethodType: 'ACH' }), /wallet_funding_invalid_request/);
+  console.log('App MELD settlement, local routes, packages, reconciliation and Pagar accounting SQL passed (isolated PostgreSQL, no provider or chain calls).');
 } finally {
   const inspected = docker(['inspect', '--format', '{{ index .Config.Labels "mindbliss.synthetic" }} {{.HostConfig.NetworkMode}}', container]);
   if (inspected.status === 0 && inspected.stdout.trim() === label + ' none') {
