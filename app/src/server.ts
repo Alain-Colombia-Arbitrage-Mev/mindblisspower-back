@@ -52,6 +52,10 @@ app.use(PAGAR_COMMISSIONS_PATH, async (c, next) => {
 app.use('/api/auth/*', bodyLimit({ maxSize: 32 * 1024,
   onError: c => c.json({ error: 'request_too_large' }, 413) }));
 app.use('/api/auth/*', authProxyContext(process.env.AUTH_BFF_SHARED_SECRET));
+app.use('/api/auth/token', (c, next) => {
+  c.header('x-mbp-auth-runtime', 'rotation-compatible');
+  return next();
+});
 app.use(MELD_WEBHOOK_PATH, bodyLimit({ maxSize: MELD_WEBHOOK_MAX_BYTES,
   onError: c => c.json({ error: 'request_too_large' }, 413) }));
 registerMeldWebhookRoutes(app);

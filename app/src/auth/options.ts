@@ -26,6 +26,7 @@ export type AuthIdentity = {
 };
 const messagePaths = new Set(['/sign-up/email', '/send-verification-email', '/request-password-reset',
   '/email-otp/send-verification-otp', '/email-otp/request-password-reset', '/forget-password/email-otp']);
+const signingAlgorithm = 'RS256';
 const recoveryEmail = z.string().trim().toLowerCase().max(254).pipe(z.email());
 const recoveryRequest = z.strictObject({ email: recoveryEmail });
 const recoveryReset = z.strictObject({ email: recoveryEmail, otp: z.string().regex(/^[0-9]{6}$/),
@@ -83,11 +84,29 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     enabled: phoneEnabled && smsDeliveryConfigured(env), schemaReady: env.BETTER_AUTH_SMS_OPT_IN_SCHEMA_READY === 'true',
   }));
   if (jwtEnabled) plugins.push(jwt({ disableSettingJwtHeader: true,
-    jwks: { keyPairConfig: { alg: 'RS256', modulusLength: 2048 }, rotationInterval: 86400 * 30 },
+    jwks: { keyPairConfig: { alg: signingAlgorithm, modulusLength: 2048 }, rotationInterval: 86400 * 30 },
+    adapter: { async createJwk(key, ctx) {
+      // Better Auth now supplies alg/crv on creation. Our PostgreSQL keyring
+      // uses the configured RS256 default for rows without those columns.
+      if (key.alg !== signingAlgorithm || key.crv !== undefined) {
+        throw new Error('Unexpected JWT signing key algorithm');
+      }
+      const { publicKey, privateKey, createdAt, expiresAt } = key;
+      const adapter = await getCurrentAdapter(ctx.context.adapter);
+      try {
+        return await adapter.create({ model: 'jwks', data: { publicKey, privateKey, createdAt, expiresAt } });
+      } catch {
+        throw new APIError('SERVICE_UNAVAILABLE', { code: 'AUTH_SIGNING_KEY_UNAVAILABLE' },
+          { 'x-mbp-auth-fault': 'signing_key_storage' });
+      }
+    } },
     jwt: { issuer: env.BETTER_AUTH_JWT_ISSUER!, audience: env.BETTER_AUTH_JWT_AUDIENCE!, expirationTime: '5m',
       definePayload: async ({ user }) => {
         if (user.emailVerified !== true) throw new APIError('FORBIDDEN', { message: 'Verified identity required' });
-        const bound = await identity.binding(user.id);
+        const bound = await identity.binding(user.id).catch(() => {
+          throw new APIError('SERVICE_UNAVAILABLE', { code: 'AUTH_ACCESS_LOOKUP_UNAVAILABLE' },
+            { 'x-mbp-auth-fault': 'identity_lookup' });
+        });
         if (!['created', 'existing'].includes(bound.status) || !bound.publicId || !bound.email
           || bound.email.trim().toLowerCase() !== user.email.trim().toLowerCase()) throw new APIError('FORBIDDEN', {
             code: 'AUTH_IDENTITY_REVIEW_REQUIRED', message: 'Identity review required' });
@@ -106,7 +125,7 @@ export function createAuthOptions(env: AuthEnvironment, database: BetterAuthOpti
     // them; SQL parameters may contain destinations or verification secrets.
     onAPIError: { onError(error) {
       if (error instanceof APIError && error.statusCode === 503
-        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', 'AUTH_SIGN_OUT_UNAVAILABLE', 'PASSWORD_RECOVERY_BUDGET_UNAVAILABLE'].includes(error.body?.code || '')) return;
+        && ['REGISTRATION_PRECHECK_UNAVAILABLE', 'SMS_OPT_IN_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_UNAVAILABLE', 'AUTH_MESSAGE_BUDGET_UNAVAILABLE', 'AUTH_ACCESS_LOOKUP_UNAVAILABLE', 'AUTH_SIGN_OUT_UNAVAILABLE', 'PASSWORD_RECOVERY_BUDGET_UNAVAILABLE', 'AUTH_SIGNING_KEY_UNAVAILABLE'].includes(error.body?.code || '')) return;
       if (!(error instanceof APIError) || error.statusCode >= 500) {
         throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Authentication temporarily unavailable' });
       }

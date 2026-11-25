@@ -7,7 +7,7 @@ import { createLocalJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { createAuthOptions, type BoundIdentity } from './options';
 import { principalResult, type Principal } from '../modules/identity/model';
 
-// Native Better Auth 1.6.22, JOSE and the real canonical identity reducer.
+// Native Better Auth, JOSE and the real canonical identity reducer.
 // Password fixtures avoid generating OTPs; all data and storage are synthetic.
 const email = 'synthetic-jwt-member@example.test';
 const subject = 'synthetic-jwt-member';
@@ -53,6 +53,14 @@ async function fixture(overrides: Partial<Principal> = {}, bindingOverride?: Bou
   const adapter = (configuration: Parameters<typeof factory>[0]): DBAdapter => {
     const base = factory(configuration);
     return { ...base,
+      create: async <T extends Record<string, any>, R = T>(input: {
+        model: string; data: Omit<T, 'id'>; select?: string[]; forceAllowId?: boolean;
+      }): Promise<R> => {
+        if (input.model === 'jwks' && ('alg' in input.data || 'crv' in input.data)) {
+          throw new Error('The PostgreSQL keyring has no alg or crv columns');
+        }
+        return base.create<T, R>(input);
+      },
       findOne: async <T>(input: Parameters<DBAdapter['findOne']>[0]): Promise<T | null> => {
         if (input.model === 'session') {
           controls.sessionReads++;
@@ -101,6 +109,22 @@ async function fixture(overrides: Partial<Principal> = {}, bindingOverride?: Bou
   };
   return { store, principal, controls, request, login, verify, bound, options };
 }
+
+test('an expired PostgreSQL-format signing key rotates and preserves the native session', async () => {
+  const app = await fixture();
+  const cookie = await app.login();
+  await app.verify(await app.request('/token', cookie));
+  const priorKey = app.store.jwks![0]!;
+  priorKey.expiresAt = new Date(Date.now() - 1000);
+  const originalSession = app.store.session![0]!.id;
+  const result = await app.verify(await app.request('/token', cookie));
+  expect(result.sub).toBe(subject);
+  expect(app.store.jwks).toHaveLength(2);
+  expect(app.store.jwks![0]!.id).toBe(priorKey.id);
+  expect(app.store.jwks![1]!.id).not.toBe(priorKey.id);
+  expect(app.store.session![0]!.id).toBe(originalSession);
+  expect(app.controls.providerCalls).toBe(0);
+});
 
 test('canonical legacy email whitespace is normalized only in the signed JWT, preserving native session and portal proof requirements', async () => {
   const app = await fixture({ person_email: ` \t${email.toUpperCase()} \n` });

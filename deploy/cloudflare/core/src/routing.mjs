@@ -464,6 +464,7 @@ export async function dispatchCore(request, env, resolve) {
     && (url.pathname.startsWith('/api/auth/') || url.pathname === '/api/member/identity/claim' || walletLink || meldWebhook);
   if (!read && !authWrite && !captureRequest && !meldWebhook && !operationalCheckout && !purchaseRequest && !referralRequest && !diagnosticRequest && !fundingRequest && !companyRequest && !relayRequest && !administrativeAction && !profileRequest && !permanentReferralRequest) return failure('financial_review_required', 503);
   if (authWrite && env.AUTH_CUTOVER_VERIFIED !== 'true') return failure('authentication_not_ready', 503);
+  const tokenRequest = request.method === 'GET' && url.hostname === 'auth.core.internal' && url.pathname === '/api/auth/token';
   try {
     body = read ? undefined : body ?? await boundedBody(request);
     const headers = new Headers(request.headers);
@@ -478,6 +479,12 @@ export async function dispatchCore(request, env, resolve) {
     const container = resolve(service, 'singleton');
     const response = await fetchWithDeadline(forwarded, input => container.fetch(input));
     if (response.status >= 500) {
+      if (tokenRequest) {
+        const fault = response.headers.get('x-mbp-auth-fault');
+        console.warn(JSON.stringify({ event: 'auth_token_upstream', status: response.status,
+          rotationCompatible: response.headers.get('x-mbp-auth-runtime') === 'rotation-compatible',
+          stage: fault === 'signing_key_storage' || fault === 'identity_lookup' ? fault : 'application' }));
+      }
       if (profileRequest) return reviewedUpstreamFailure(response, MEMBER_PROFILE_SERVICE_ERRORS);
       if (permanentReferralRequest) return reviewedUpstreamFailure(response, MEMBER_REFERRAL_SERVICE_ERRORS);
       if (packageRightsRequest) return reviewedUpstreamFailure(response, MEMBER_PACKAGE_RIGHTS_SERVICE_ERRORS);
@@ -492,9 +499,12 @@ export async function dispatchCore(request, env, resolve) {
       return failure('upstream_unavailable', 503);
     }
     const safeHeaders = new Headers(response.headers);
+    safeHeaders.delete('x-mbp-auth-fault');
+    safeHeaders.delete('x-mbp-auth-runtime');
     safeHeaders.set('Cache-Control', 'private, no-store');
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: safeHeaders });
   } catch (error) {
+    if (tokenRequest) console.warn(JSON.stringify({ event: 'auth_token_upstream', stage: 'container_transport' }));
     return failure(error?.message === 'body_limit' ? 'request_too_large' : 'upstream_unavailable', error?.message === 'body_limit' ? 413 : 503);
   }
 }
