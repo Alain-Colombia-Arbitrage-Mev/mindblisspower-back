@@ -88,7 +88,8 @@ for (const row of z.array(coverageRow).min(1).max(10_000).parse(walletCoverage.r
   rowsByPair.set(key, rows);
 }
 for (const [key, rows] of rowsByPair) {
-  const preferred = rows.find(row => row.destinationCurrencyCode === 'USDC_POLYGON') ?? rows[0]!;
+  // Keep the existing first rail as the default when adding a different asset.
+  const preferred = rows[0]!;
   markets.set(key, { minorUnits: preferred.minorUnits, asset: preferred.destinationCurrencyCode, rows: Object.freeze(rows) });
 }
 

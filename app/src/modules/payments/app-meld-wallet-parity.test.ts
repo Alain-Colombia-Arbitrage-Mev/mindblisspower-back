@@ -37,6 +37,7 @@ test('App exposes every Wallet catalog rail on its exact network with independen
     const options = await readAppMeldOptions(country, fiat, { environment, fetchImpl });
     const expected = walletCoverage.rows.filter(row => row.country === country && row.sourceCurrencyCode === fiat);
     expect<number>(options.minorUnits).toBe(expected[0]!.minorUnits);
+    expect(options.destinationCurrencyCode).toBe(expected[0]!.destinationCurrencyCode ?? walletCoverage.asset);
     const actual = options.routes.flatMap(route => route.paymentMethods.map(method => ({
       provider: route.serviceProvider, asset: route.destinationCurrencyCode, method: method.method, currency: method.currencyCode,
       minimum: method.minimumAmount, maximum: method.maximumAmount, network: route.network, chainId: route.chainId,
