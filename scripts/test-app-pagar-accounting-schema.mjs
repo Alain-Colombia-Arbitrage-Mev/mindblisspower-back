@@ -300,6 +300,10 @@ try {
     CREATE UNIQUE INDEX affiliate_parent_position_unique ON mlm.affiliate(parent_id,position) WHERE parent_id IS NOT NULL;
     ALTER TABLE mlm.affiliate OWNER TO ${owner};
     ALTER TABLE mlm.affiliate_closure OWNER TO ${owner};
+    ALTER TABLE mlm.person ADD COLUMN status text NOT NULL DEFAULT 'pending',
+      ADD COLUMN updated_at timestamptz NOT NULL DEFAULT clock_timestamp();
+    UPDATE mlm.person SET status='active' WHERE id BETWEEN 100 AND 103;
+    GRANT SELECT(status) ON mlm.person TO ${owner};
     GRANT UPDATE ON mlm.person TO ${owner};
     CREATE TABLE identity.member_registration_sponsor(
       subject text PRIMARY KEY,person_id bigint UNIQUE NOT NULL,sponsor_person_id bigint NOT NULL,
@@ -333,6 +337,7 @@ try {
 
   query(await readFile(new URL('../_meta/migration/150_app_pagar_full_payment.sql', import.meta.url), 'utf8'));
   query(await readFile(new URL('../_meta/migration/152_app_pagar_first_placement.sql', import.meta.url), 'utf8'));
+  query(await readFile(new URL('../_meta/migration/153_app_pagar_activate_placed_member.sql', import.meta.url), 'utf8'));
   assert.equal(query('SELECT count(*) FROM payments.app_pagar_first_placement;'), '0');
   rejects('SELECT * FROM payments.app_pagar_first_placement;', runtime, /permission denied/);
   rejects('SELECT * FROM payments.app_pagar_first_placement;', observer, /permission denied/);
@@ -400,12 +405,14 @@ try {
   const partial = preparedPagar('referred', { omitted: 49_000_000 });
   rejects(partial.record, runtime, /polygon_relay_full_payment_required/);
   assert.equal(query(allocation('referred')), '');
+  assert.equal(query("SELECT status FROM mlm.person WHERE user_id='referred';"), 'pending');
   assert.equal(query('SELECT count(*) FROM payments.app_pagar_first_placement;'), '0');
   query(`DELETE FROM payments.app_meld_funding_attempt WHERE subject='referred'
     AND id NOT IN (SELECT attempt_id FROM payments.app_pagar_allocation WHERE payment_id=${quote(partial.id)});`);
 
   runReceipt(partial);
   assert.equal(query(allocation('referred')), '3|1|L|10.L_1.R_3.L_1001|3');
+  assert.equal(query("SELECT status FROM mlm.person WHERE user_id='referred';"), 'active');
   assert.equal(query(`SELECT left_count||'|'||right_count||'|'||left_pv_current||'|'||right_pv_current
     FROM mlm.affiliate WHERE id=1;`), '1|3|50|0');
   runReceipt(partial);
@@ -426,15 +433,18 @@ try {
   runReceipt(preparedPagar('suspended'));
   assert.equal(query(`SELECT count(*) FROM payments.app_pagar_accounting_receipt WHERE payment_id=${quote(waiting.id)};`), '1');
   assert.equal(query(allocation('waiting')), '');
+  assert.equal(query("SELECT status FROM mlm.person WHERE user_id='waiting';"), 'pending');
   assert.equal(query(allocation('unattributed')), '');
   query(`UPDATE payments.app_pagar_first_placement SET next_attempt_at='-infinity' WHERE subject IN('waiting','unattributed','suspended');`);
   query(runROI, runtime);
   assert.equal(query("SELECT count(*) FROM payments.app_pagar_investment WHERE subject IN('waiting','unattributed','suspended');"), '0');
   assert.equal(query("SELECT status FROM mlm.affiliate WHERE person_id=208;"), 'suspended');
+  assert.equal(query("SELECT status FROM mlm.person WHERE user_id='unattributed';"), 'pending');
 
   runReceipt(preparedPagar('future-sponsor'));
   query(`UPDATE payments.app_pagar_first_placement SET next_attempt_at='-infinity' WHERE subject='waiting';`);
   query(runROI, runtime);
+  assert.equal(query("SELECT status FROM mlm.person WHERE user_id='waiting';"), 'active');
   assert.equal(query(`SELECT count(*) FROM payments.app_pagar_investment i
     JOIN mlm.affiliate a ON a.id=i.affiliate_id JOIN mlm.affiliate s ON s.id=a.sponsor_id
     JOIN payments.app_pagar_pv_source pv ON pv.payment_id=i.payment_id
